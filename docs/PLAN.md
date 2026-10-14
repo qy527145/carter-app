@@ -174,10 +174,11 @@ apilot(后置)    ─┘        ^
 | M2 carter 接入 | ✅ 完成 2026-10-14 | genai 移除；消息模型 IR 化；会话 v2 + 只读迁移；226 测试通过 |
 | M3 carter-app 最小闭环 | ✅ 完成 2026-10-15 | Tauri 事件桥 + 会话运行器 + React 聊天界面 |
 | M4 原生远程工具 | ✅ 完成 2026-10-15 | 渠道级声明 + 不支持时明确上报 |
-| M5 原始报文检视 | 🔄 后端完成，界面进行中 | 捕获层 + 关联标签已就位 |
+| M5 原始报文检视 | ✅ 完成 2026-10-15 | 捕获层 + 三态检视界面 |
 | M6 能力上提 | ⏸ 建议不做 | 纯重构、零用户可见收益，却要动持久化与多模态链路 |
 | M7 harness 管理页 | ✅ 只读版完成 2026-10-15 | 渠道/工具/技能/MCP/会话；改配置待定 |
-| M8 双向能力 + apilot 迁入 | 🔄 入站 codec 进行中 | apilot 本体迁移仍在计划外 |
+| M8 双向能力 | ✅ llm_adapt 侧完成 2026-10-15 | 入站 codec + 九方向 + 损耗清单转测试 |
+| M8 附带的 apilot 本体迁移 | ⏸ 未做 | 那是 apilot 自己的一次大改，值得单独立项 |
 
 ### M0 — llm_adapt 地基重构
 
@@ -423,3 +424,44 @@ apilot(后置)    ─┘        ^
 | 数据分家 | `~/.carter` 与 CLI 共享 + `~/.carter-app` 存 App 独有数据（D8） | 2026-10-14 |
 
 **已排除**：把 wire 层另建为独立的 `llm-wire` crate（改为直接做进 llm_adapt）。
+
+---
+
+## 八、收尾时发现的 IR 缺口（M8 记录，未修）
+
+M8 的移植过程中逐条比对了两版 IR 的表达力。llm_adapt 的 IR 总体**更**强
+（结构化的 `ImageSource` 取代了 apilot 的 `url:` 字符串 hack、每块的 `cache` 标记、
+`ToolKind::{Freeform,Namespace,ServerTool}`、`FinishReason::StopSequence` 都是 apilot 没有的），
+但有四处确实表达不了：
+
+1. **没有上游 usage 原样快照，也没有显式的 `total_tokens`**。apilot 的 `UnifiedUsage`
+   保留 `raw` 与上游自报的总量；llm_adapt 自己重算，无法原样回写上游给的总数。
+   影响：对账时只能看自己算的，看不到上游说的。
+2. **流式 usage 是一个完整的 `Usage` 用 `merge_non_zero` 合并，而不是增量**，
+   于是「字段缺席」与「字段为 0」不可区分。apilot 的 `UsageDelta` 用 `Option` 解决了这个。
+   影响：流式的用量保真度有上限。要修得动 IR。
+3. **`WireResponse.extra` 解码进来但没有任何 `encode_response` 写回去** ——
+   跨协议重编码时，未知的**响应**顶层字段会丢。同协议直通不受影响（那是字节直通）。
+   apilot 有同样的缺口。这条最值得修，三个 `encode_response` 各加十几行即可。
+4. **`StreamChunk::Error` 是一个裸 `String`**，没有厂商错误码；apilot 的是 `{code, message}`。
+   影响很小。
+
+另外记录两条 M8 从 apilot 原样继承、**没有**改掉的行为（都属于入站编码方向）：
+
+- Anthropic 流式编码里 `message_start` 的 usage 是 `{input_tokens: 0}`，
+  真实输入量在 `message_delta` 才给。原因是编码时还不知道用量（它要等上游），
+  这与 apilot 一致。客户端读到的流式输入 token 因此是 0。
+- 非流式 Responses 的 `encode_response` 现在总会带 `encrypted_content`（未知时给 null），
+  与流式的硬契约一致；apilot 的非流式路径会省略它。
+
+## 九、最终状态
+
+| 仓库 | 测试 | 提交 |
+|---|---|---|
+| llm_adapt | 154 通过，零警告 | 协议层重建 / 三协议 / 双向能力 / 注释统一 |
+| carter | 226 通过，零警告 | lib 化 / 接入 llm_adapt / 消息模型 IR 化 / 会话 v2 |
+| carter-app | 10 通过（core）+ tsc/build 通过 | 客户端闭环 / 报文检视 / 只读管理页 |
+
+**尚未验证的事**：三个里程碑的协议正确性全部来自单元测试与「与重构前逐字节比对」，
+**一次真实 API 调用都没跑过**（手上没有可用的 key）。这是当前最大的未知数 ——
+尤其是流式路径与三家厂商的实际 SSE 形状。
