@@ -1,0 +1,23 @@
+[package]
+name = "carter-app"
+version.workspace = true
+edition.workspace = true
+description = "carter-app —— Tauri 桌面 agent 客户端"
+
+[lib]
+# `_lib` 后缀看似多余，但它是必要的：不加的话 lib 名与 bin 名冲突（Windows 上必现）。
+# 见 https://github.com/rust-lang/cargo/issues/8519
+name = "carter_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+carter-app-core = { path = "../crates/carter-app-core" }
+carter = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }

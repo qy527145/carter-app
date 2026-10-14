@@ -1,0 +1,31 @@
+[workspace]
+resolver = "2"
+members = ["crates/carter-app-core", "src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+# 底层 harness：agent 循环、工具、会话、技能、MCP。
+carter = { path = "../carter" }
+# 线协议底座：三协议编解码、SSE、内容块装配。经由 carter 传递进来，但视图层
+# 要直接用 IR 类型，所以显式依赖一次。
+llm_adapt_core = { path = "../llm_adapt/crates/llm_adapt_core" }
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+# 读多写少的配置用 ArcSwap：热重载时读方永远拿得到一致快照、不阻塞。
+arc-swap = "1"
+dashmap = "6"
+futures = "0.3"
+
+# 见 https://tauri.app/concept/size/#cargo-configuration
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true

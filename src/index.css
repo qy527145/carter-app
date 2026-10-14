@@ -1,0 +1,155 @@
+/* Tailwind v4 入口。v4 用这一行取代旧版的 @tailwind base/components/utilities 三条。 */
+@import "tailwindcss";
+
+/* 递归应用在 <html> 上：整体暗色，避免滚动条/表单控件回落到系统亮色。 */
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: Inter, "Segoe UI", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* 细滚动条，别让细长的对话区被一条粗滚动条占掉视觉。 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(71 85 105) transparent; /* slate-600 */
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgb(71 85 105);
+  border-radius: 4px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 流式生成时尾部那个闪烁光标。 */
+@keyframes carter-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+.carter-cursor {
+  display: inline-block;
+  width: 0.5em;
+  margin-left: 1px;
+  animation: carter-blink 1s step-end infinite;
+  color: rgb(148 163 184); /* slate-400 */
+}
+
+/* --- markdown 正文 --- */
+/* 手写而不是靠 typography 插件：只需要覆盖助手气泡这一处的标签，量很小。 */
+.carter-md {
+  line-height: 1.7;
+  word-break: break-word;
+}
+.carter-md > :first-child {
+  margin-top: 0;
+}
+.carter-md > :last-child {
+  margin-bottom: 0;
+}
+.carter-md p {
+  margin: 0.6em 0;
+}
+.carter-md h1,
+.carter-md h2,
+.carter-md h3,
+.carter-md h4 {
+  margin: 1em 0 0.5em;
+  font-weight: 600;
+  line-height: 1.3;
+}
+.carter-md h1 {
+  font-size: 1.35em;
+}
+.carter-md h2 {
+  font-size: 1.2em;
+}
+.carter-md h3 {
+  font-size: 1.08em;
+}
+.carter-md ul,
+.carter-md ol {
+  margin: 0.6em 0;
+  padding-left: 1.5em;
+}
+.carter-md ul {
+  list-style: disc;
+}
+.carter-md ol {
+  list-style: decimal;
+}
+.carter-md li {
+  margin: 0.2em 0;
+}
+.carter-md a {
+  color: rgb(96 165 250); /* blue-400 */
+  text-decoration: underline;
+}
+.carter-md blockquote {
+  margin: 0.6em 0;
+  padding-left: 0.9em;
+  border-left: 3px solid rgb(71 85 105);
+  color: rgb(148 163 184);
+}
+.carter-md hr {
+  margin: 1em 0;
+  border: 0;
+  border-top: 1px solid rgb(51 65 85);
+}
+/* 行内代码 */
+.carter-md code {
+  font-family: "JetBrains Mono", "Cascadia Code", Consolas, "Courier New", monospace;
+  font-size: 0.88em;
+  background: rgb(30 41 59); /* slate-800 */
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+}
+/* 代码块：外层 pre 承担背景与滚动，内层 code 去掉行内样式。 */
+.carter-md pre {
+  margin: 0.7em 0;
+  padding: 0.8em 0.9em;
+  overflow-x: auto;
+  border-radius: 8px;
+  background: rgb(15 23 42); /* slate-900 */
+  border: 1px solid rgb(51 65 85);
+}
+.carter-md pre code {
+  background: transparent;
+  padding: 0;
+  font-size: 0.85em;
+  line-height: 1.55;
+}
+.carter-md table {
+  margin: 0.7em 0;
+  border-collapse: collapse;
+  display: block;
+  overflow-x: auto;
+}
+.carter-md th,
+.carter-md td {
+  border: 1px solid rgb(51 65 85);
+  padding: 0.35em 0.6em;
+  text-align: left;
+}
+.carter-md th {
+  background: rgb(30 41 59);
+}

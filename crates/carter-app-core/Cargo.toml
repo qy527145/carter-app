@@ -1,0 +1,16 @@
+[package]
+name = "carter-app-core"
+version.workspace = true
+edition.workspace = true
+description = "carter-app 的应用核心：会话编排、事件桥、状态根。刻意不依赖 Tauri。"
+
+[dependencies]
+carter = { workspace = true }
+llm_adapt_core = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+arc-swap = { workspace = true }
+dashmap = { workspace = true }
+futures = { workspace = true }
