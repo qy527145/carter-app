@@ -42,7 +42,9 @@ export type Item =
 
 export type Turn =
   | { role: "user"; text: string }
-  | { role: "assistant"; items: Item[] };
+  // `turn` 来自 `turn_started`，是「这条回答对应哪一轮请求」的钥匙 —— 报文面板
+  // 靠它把助手消息筛到那次 API 调用。历史消息没有这个数（事件不回放），为 undefined。
+  | { role: "assistant"; turn?: number; items: Item[] };
 
 export type PendingAsk = { id: number; question: string; options: string[] };
 
@@ -59,9 +61,14 @@ type Store = {
   todos: TodoView[];
   pendingAsk: PendingAsk | null;
   notice: string | null;
+  // 报文面板：open 控制显示，turn 是「只看这一轮」的筛选（null = 全部）。
+  inspectorOpen: boolean;
+  inspectorTurn: number | null;
   // 侧栏 / 底栏用
   sessions: SessionSummary[];
   appVersion: string;
+  /** 主区显示哪个视图。默认对话。 */
+  view: "chat" | "settings";
 
   setAppInfo: (i: AppInfo) => void;
   setSessions: (s: SessionSummary[]) => void;
@@ -71,6 +78,10 @@ type Store = {
   applyEvent: (e: SessionEvent) => void;
   setNotice: (m: string | null) => void;
   clearPendingAsk: () => void;
+  openInspector: (turn?: number | null) => void;
+  closeInspector: () => void;
+  setInspectorTurn: (turn: number | null) => void;
+  setView: (v: "chat" | "settings") => void;
 };
 
 // ---------------------------------------------------------------------------
@@ -81,7 +92,8 @@ type Store = {
 function withAssistant(turns: Turn[], fn: (items: Item[]) => Item[]): Turn[] {
   const last = turns[turns.length - 1];
   if (last && last.role === "assistant") {
-    return [...turns.slice(0, -1), { role: "assistant", items: fn(last.items) }];
+    // 带上 turn，否则每次增量都会把「这条回答属于哪一轮」丢掉。
+    return [...turns.slice(0, -1), { role: "assistant", turn: last.turn, items: fn(last.items) }];
   }
   return [...turns, { role: "assistant", items: fn([]) }];
 }
@@ -133,7 +145,7 @@ function fillToolResult(
       const tool = items[j] as Extract<Item, { kind: "tool" }>;
       items[j] = { ...tool, result };
       const next = turns.slice();
-      next[i] = { role: "assistant", items };
+      next[i] = { role: "assistant", turn: t.turn, items };
       return next;
     }
   }
@@ -224,6 +236,9 @@ const emptyConversation = {
   todos: [] as TodoView[],
   pendingAsk: null as PendingAsk | null,
   notice: null as string | null,
+  // 换会话时把报文面板一起收起来 —— 否则会显示上一个会话的请求。
+  inspectorOpen: false,
+  inspectorTurn: null as number | null,
 };
 
 export const useStore = create<Store>((set) => ({
@@ -233,6 +248,7 @@ export const useStore = create<Store>((set) => ({
   ...emptyConversation,
   sessions: [],
   appVersion: "",
+  view: "chat",
 
   setAppInfo: (i) => set({ appVersion: i.version }),
 
@@ -256,21 +272,29 @@ export const useStore = create<Store>((set) => ({
 
   clearPendingAsk: () => set({ pendingAsk: null }),
 
+  openInspector: (turn = null) => set({ inspectorOpen: true, inspectorTurn: turn }),
+  closeInspector: () => set({ inspectorOpen: false }),
+  setInspectorTurn: (turn) => set({ inspectorTurn: turn }),
+  setView: (view) => set({ view }),
+
   applyEvent: (e) =>
     set((s) => {
       switch (e.type) {
         case "ready":
           return { model: e.model, cwd: e.cwd };
-        case "turn_started":
-          return {
-            streaming: true,
-            // 末尾已经是空的助手轮就复用，否则新开一个 —— 不能复用带内容的助手轮，
-            // 那会把上一轮的回答抹掉。
-            turns:
-              s.turns[s.turns.length - 1]?.role === "user"
-                ? [...s.turns, { role: "assistant", items: [] }]
-                : s.turns,
-          };
+        case "turn_started": {
+          const last = s.turns[s.turns.length - 1];
+          // 末尾已经是助手轮就复用（只更新 turn、不动 items），否则新开一个 ——
+          // 不能拿空 items 覆盖带内容的助手轮。
+          const turns: Turn[] =
+            !last || last.role === "user"
+              ? [...s.turns, { role: "assistant", turn: e.turn, items: [] }]
+              : [
+                  ...s.turns.slice(0, -1),
+                  { role: "assistant", turn: e.turn, items: last.items },
+                ];
+          return { streaming: true, turns };
+        }
         case "text_delta":
           return { turns: withAssistant(s.turns, (items) => appendText(items, e.text)) };
         case "thinking_delta":

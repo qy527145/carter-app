@@ -69,6 +69,9 @@ impl SessionHandle {
 pub struct AppShell {
     /// 热重载的配置快照。读方永远拿到一致的一份，不会被写方撕裂。
     pub config: ArcSwap<Config>,
+    /// 原始报文仓库。放在这里而不是会话里：抓包是按会话分文件的，
+    /// 但存储本身与哪个会话无关，界面要能独立地查它。
+    pub capture: Arc<crate::capture::CaptureStore>,
     pub sessions: DashMap<String, Arc<SessionHandle>>,
     events: broadcast::Sender<AppEvent>,
 }
@@ -79,6 +82,9 @@ impl AppShell {
         let (events, _) = broadcast::channel(1024);
         Arc::new(Self {
             config: ArcSwap::from_pointee(config),
+            capture: Arc::new(crate::capture::CaptureStore::open(
+                crate::capture::CaptureStore::default_root(),
+            )),
             sessions: DashMap::new(),
             events,
         })
@@ -131,5 +137,75 @@ impl AppShell {
         let mut ids: Vec<String> = self.sessions.iter().map(|e| e.key().clone()).collect();
         ids.sort();
         ids
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::SessionEvent;
+
+    fn shell() -> Arc<AppShell> {
+        AppShell::new(Config::default())
+    }
+
+    #[tokio::test]
+    async fn events_reach_subscribers() {
+        let shell = shell();
+        let mut rx = shell.subscribe();
+        shell.emit(AppEvent::Session {
+            session_id: "s1".into(),
+            event: SessionEvent::Idle,
+        });
+        match rx.recv().await.unwrap() {
+            AppEvent::Session { session_id, event } => {
+                assert_eq!(session_id, "s1");
+                assert!(matches!(event, SessionEvent::Idle));
+            }
+            other => panic!("期望 Session，得到 {other:?}"),
+        }
+    }
+
+    /// 没有订阅者时 emit 不该 panic —— 窗口还没建好就会走到这条路径。
+    #[test]
+    fn emitting_without_subscribers_is_harmless() {
+        shell().emit(AppEvent::Error {
+            message: "x".into(),
+        });
+    }
+
+    #[tokio::test]
+    async fn answering_an_unknown_question_is_false_not_an_error() {
+        // 会话结束、或用户重复点击时会走到这条路径 —— 它不是错误。
+        let shell = shell();
+        assert!(!shell.answer_ask("s1", 42, "x".into()));
+    }
+
+    #[tokio::test]
+    async fn ask_registry_routes_the_answer_to_the_question_asker() {
+        let asks = AskRegistry::default();
+        let (tx, rx) = oneshot::channel();
+        asks.insert(7, tx);
+        assert!(asks.answer(7, "答案".into()));
+        assert_eq!(rx.await.unwrap(), "答案");
+        // 只能答一次。
+        assert!(!asks.answer(7, "又答一次".into()));
+    }
+
+    /// 会话结束时未作答的问题要立刻失效，让工具那侧拿到 Err 返回 ——
+    /// 否则它会永远卡在 await 上。
+    #[tokio::test]
+    async fn clearing_pending_questions_drops_the_senders() {
+        let asks = AskRegistry::default();
+        let (tx, rx) = oneshot::channel();
+        asks.insert(1, tx);
+        asks.clear();
+        assert!(rx.await.is_err(), "发送端被丢弃时接收端应立刻得到 Err");
+        assert!(!asks.answer(1, "太晚了".into()));
+    }
+
+    #[test]
+    fn closing_an_unknown_session_is_false_not_an_error() {
+        assert!(!shell().close_session("nope"));
     }
 }

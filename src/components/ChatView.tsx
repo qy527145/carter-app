@@ -14,10 +14,12 @@ import {
   ChevronRight,
   CircleCheck,
   CircleX,
+  FileSearch,
   FileText,
   Globe,
   Info,
   LoaderCircle,
+  ScanSearch,
   Send,
   Square,
   TriangleAlert,
@@ -170,7 +172,7 @@ function ItemView({ item, showCursor }: { item: Item; showCursor: boolean }) {
 // ---------------------------------------------------------------------------
 
 function AssistantTurn({
-  turn,
+  turn: t,
   isLast,
   streaming,
 }: {
@@ -178,7 +180,8 @@ function AssistantTurn({
   isLast: boolean;
   streaming: boolean;
 }) {
-  const items = turn.items;
+  const openInspector = useStore((s) => s.openInspector);
+  const items = t.items;
   return (
     <div className="flex gap-3">
       <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-slate-700 text-slate-300">
@@ -198,6 +201,18 @@ function AssistantTurn({
             showCursor={streaming && isLast && i === items.length - 1 && item.kind === "text"}
           />
         ))}
+        {/* 把这条回答对回产生它的那次 API 请求。历史消息没有轮次号（事件不回放），
+            所以只有本轮之后的消息才拿得到这个入口。 */}
+        {t.turn !== undefined && items.length > 0 && (
+          <button
+            onClick={() => openInspector(t.turn ?? null)}
+            title={`查看第 ${t.turn} 轮发出的请求`}
+            className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-slate-500 transition-colors hover:bg-slate-800 hover:text-slate-300"
+          >
+            <ScanSearch size={12} />
+            查看报文
+          </button>
+        )}
       </div>
     </div>
   );
@@ -428,7 +443,11 @@ function Composer() {
           }}
           disabled={disabled}
           placeholder={
-            !connected ? "正在连接会话…" : pendingAsk ? "请先回答上面的问题" : "输入消息，Enter 发送，Shift+Enter 换行"
+            !connected
+              ? "会话未就绪 —— 点「新建会话」开始"
+              : pendingAsk
+                ? "请先回答上面的问题"
+                : "输入消息，Enter 发送，Shift+Enter 换行"
           }
           className="flex-1 resize-none rounded-lg border border-slate-700 bg-slate-950/60 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 outline-none focus:border-sky-600 disabled:opacity-50"
         />
@@ -448,9 +467,34 @@ function Composer() {
   );
 }
 
+/** 顶部条：当前会话标题 + 打开报文面板的入口。 */
+function ChatHeader() {
+  const sessionId = useStore((s) => s.sessionId);
+  const sessions = useStore((s) => s.sessions);
+  const openInspector = useStore((s) => s.openInspector);
+  const title = sessions.find((s) => s.id === sessionId)?.title;
+
+  return (
+    <div className="flex items-center gap-2 border-b border-slate-800 px-4 py-2">
+      <span className="truncate text-sm text-slate-300">{title || "新会话"}</span>
+      <Button
+        variant="ghost"
+        className="ml-auto"
+        disabled={!sessionId}
+        onClick={() => openInspector(null)}
+        title="查看本次会话抓到的 HTTP 报文"
+      >
+        <FileSearch size={14} />
+        报文
+      </Button>
+    </div>
+  );
+}
+
 export function ChatView() {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
+      <ChatHeader />
       <NoticeBanner />
       <MessageList />
       <TodoPanel />

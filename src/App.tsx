@@ -6,6 +6,8 @@
 import { useCallback, useEffect } from "react";
 
 import { ChatView } from "./components/ChatView";
+import { Inspector } from "./components/Inspector";
+import { Settings } from "./components/Settings";
 import { Sidebar } from "./components/Sidebar";
 import { StatusBar } from "./components/StatusBar";
 import { appInfo, closeSession, createSession, listSessions } from "./lib/api";
@@ -70,22 +72,35 @@ export default function App() {
     [],
   );
 
-  const newSession = useCallback(
-    () => void replaceSession({ resume: false }),
-    [replaceSession],
-  );
+  // 新建 / 打开会话都是「对话」这个视图里的动作，顺手切回去。
+  const newSession = useCallback(() => {
+    useStore.getState().setView("chat");
+    void replaceSession({ resume: false });
+  }, [replaceSession]);
   const openSession = useCallback(
-    (id: string) => void replaceSession({ resume: false, resumeId: id }),
+    (id: string) => {
+      useStore.getState().setView("chat");
+      void replaceSession({ resume: false, resumeId: id });
+    },
     [replaceSession],
   );
+
+  const view = useStore((s) => s.view);
 
   return (
     <div className="flex h-full bg-slate-950 text-slate-100">
       <Sidebar onNew={newSession} onOpen={openSession} />
       <main className="flex min-w-0 flex-1 flex-col">
-        <ChatView />
-        <StatusBar />
+        {view === "chat" ? (
+          <>
+            <ChatView />
+            <StatusBar />
+          </>
+        ) : (
+          <Settings />
+        )}
       </main>
+      <Inspector />
     </div>
   );
 }

@@ -133,3 +133,161 @@ export function closeSession(sessionId: string): Promise<void> {
 export function listSessions(cwd?: string | null): Promise<SessionSummary[]> {
   return invoke<SessionSummary[]>("list_sessions", { cwd: cwd ?? null });
 }
+
+// ---------------------------------------------------------------------------
+// 报文检视（需求 4）：抓到的原始 HTTP 交换
+// ---------------------------------------------------------------------------
+
+/** 这次模型调用是干什么用的。 */
+export type RequestPurpose = "main_turn" | "compaction" | "title" | "subagent";
+
+/**
+ * 列表项 —— 只给概览。完整记录里带着几 MB 的 SSE 帧，列表里全带上会让界面一开就卡。
+ *
+ * ⚠️ 后端 `ExchangeSummary.purpose` 是 `format!("{:?}")` 出来的，**是 PascalCase**
+ * （`MainTurn`），而 `ExchangeRecord.meta.purpose` 走 serde 是 snake_case
+ * （`main_turn`）—— 两边对不上。所以这里不信任字面值，统一用 [`purposeOf`] 归一。
+ */
+export type ExchangeSummary = {
+  id: string;
+  ts: number;
+  turn: number | null;
+  round: number | null;
+  purpose: RequestPurpose | null;
+  method: string;
+  url: string;
+  status: number | null;
+  ttfb_ms: number | null;
+  total_ms: number | null;
+  frame_count: number;
+};
+
+export type ExchangeRecord = {
+  id: string;
+  ts: number;
+  meta: {
+    session_id: string | null;
+    turn: number;
+    round: number;
+    purpose: RequestPurpose;
+  } | null;
+  method: string;
+  url: string;
+  /** 敏感头已在后端脱敏（authorization / x-api-key → ***），前端不要再动。 */
+  request_headers: [string, string][];
+  request_body: string; // 原始请求体（最终字节）
+  status: number | null;
+  response_headers: [string, string][];
+  response_body: string; // 非流式的响应正文
+  stream_frames: string[]; // 流式响应收到的原始字节块，按到达顺序
+  stream_error: string | null;
+  ttfb_ms: number | null;
+  total_ms: number | null;
+};
+
+/**
+ * 把两种拼写（`MainTurn` / `main_turn`）都归一成小写蛇形。
+ *
+ * 见 `ExchangeSummary` 上的说明：列表与详情两条路的序列化方式不同，界面不能只认
+ * 一种。认不出来的值原样返回，让界面至少能把原文显示出来而不是显示 `undefined`。
+ */
+export function purposeOf(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const key = raw.replace(/_/g, "").toLowerCase();
+  switch (key) {
+    case "mainturn":
+      return "main_turn";
+    case "compaction":
+      return "compaction";
+    case "title":
+      return "title";
+    case "subagent":
+      return "subagent";
+    default:
+      return raw;
+  }
+}
+
+/** 用途的中文标签；主对话不显示标签（默认情形，标出来只是噪声）。 */
+export function purposeLabel(raw: string | null | undefined): string | null {
+  switch (purposeOf(raw)) {
+    case "compaction":
+      return "压缩";
+    case "title":
+      return "标题";
+    case "subagent":
+      return "子 agent";
+    case "main_turn":
+      return null;
+    default:
+      return raw ?? null;
+  }
+}
+
+export function listExchanges(sessionId: string): Promise<ExchangeSummary[]> {
+  return invoke<ExchangeSummary[]>("list_exchanges", { sessionId });
+}
+
+export function getExchange(
+  sessionId: string,
+  exchangeId: string,
+): Promise<ExchangeRecord | null> {
+  return invoke<ExchangeRecord | null>("get_exchange", { sessionId, exchangeId });
+}
+
+// ---------------------------------------------------------------------------
+// 管理 / 检视（M7，只读）
+// ---------------------------------------------------------------------------
+
+/** 一个已发现的技能（`~/.carter/skills/<name>/SKILL.md`）。 */
+export type SkillRow = {
+  name: string;
+  description: string;
+  allowed_tools: string[];
+};
+
+export type McpServerRow = {
+  name: string;
+  transport: string;
+  /** stdio 给 command，http 给 url。 */
+  target: string;
+  enabled: boolean;
+};
+
+export type ChannelRow = {
+  name: string;
+  /** 配置里写的 kind，可能是别名或兼容写法。 */
+  kind: string;
+  /** 实际走的线协议 —— 与 kind 不同时说明走了别名映射。 */
+  protocol: string;
+  base_url: string;
+  has_api_key: boolean;
+  /** 该渠道声明了、但其协议不认的服务端工具（会被静默忽略）。 */
+  unsupported_server_tools: string[];
+  models: string[];
+  is_default: boolean;
+};
+
+/** 本地会执行的工具。服务端工具（web_search 等）在渠道里，不在这儿。 */
+export type ToolRow = { name: string; description: string; parameters: unknown };
+
+export function listSkills(): Promise<SkillRow[]> {
+  return invoke<SkillRow[]>("list_skills");
+}
+
+export function listMcpServers(): Promise<McpServerRow[]> {
+  return invoke<McpServerRow[]>("list_mcp_servers");
+}
+
+export function listChannels(): Promise<ChannelRow[]> {
+  return invoke<ChannelRow[]>("list_channels");
+}
+
+export function listTools(): Promise<ToolRow[]> {
+  return invoke<ToolRow[]>("list_tools");
+}
+
+/** 删除一个会话文件。不可恢复 —— 调用方必须先确认。 */
+export function deleteSession(sessionId: string, cwd?: string | null): Promise<void> {
+  return invoke<void>("delete_session", { cwd: cwd ?? null, sessionId });
+}

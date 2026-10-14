@@ -10,6 +10,14 @@
 
 use serde::{Deserialize, Serialize};
 
+/// epoch 毫秒。不引入日期库 —— 这里只需要一个单调可比的数。
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// 前端 → 后端。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

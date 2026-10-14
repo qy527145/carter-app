@@ -8,7 +8,7 @@
 //!
 //! ## 事件怎么走到界面
 //!
-//! ```
+//! ```text
 //! run_turn ──UiSink──▶ ui_tx ──▶ 转发任务 ──▶ broadcast ──▶ Tauri emit ──▶ 前端
 //! ```
 //!
@@ -64,7 +64,15 @@ pub fn start_session(
         .model
         .clone()
         .unwrap_or_else(|| config.agent.model.clone());
-    let resolved = carter::provider::resolve_provider(&config, &cache_json, &model_ref)?;
+    // 抓包钩子挂在 provider 上，写进 shell 里那个按会话分文件的仓库。
+    let capture_store = shell.capture.clone();
+    let capture_hook = Arc::new(crate::capture::CaptureHook::new(capture_store.clone()));
+    let resolved = carter::provider::resolve_provider(
+        &config,
+        &cache_json,
+        &model_ref,
+        vec![capture_hook],
+    )?;
     let (model, provider) = (resolved.model, resolved.provider);
     let unsupported_server_tools = resolved.unsupported_server_tools;
 
@@ -106,6 +114,7 @@ pub fn start_session(
         resumed,
         cwd: opts.cwd,
         unsupported_server_tools,
+        capture: capture_store,
     };
     tokio::spawn(runner(ctx, thread, meta, cmd_rx));
     Ok(StartedSession { handle, history })
@@ -122,6 +131,8 @@ struct SessionCtx {
     cwd: PathBuf,
     /// 渠道声明不出去的服务端工具（该协议没有对应物、或名字不认识）。
     unsupported_server_tools: Vec<String>,
+    /// 抓包存储。换模型时要重挂钩子，所以得留着。
+    capture: Arc<crate::capture::CaptureStore>,
 }
 
 async fn runner(
@@ -251,13 +262,18 @@ async fn runner(
                         model: ctx.model.clone(),
                     }),
                     hooks: hooks.clone(),
+                    // 单会话里只有主对话这一种请求（压缩与子 agent 也会发，
+                    // 但它们的 purpose 由各自那条路径设置）。
+                    purpose: carter::provider::RequestPurpose::MainTurn,
                 };
 
                 thread.append_user(text);
                 emit(
                     &ctx.shell,
                     &session_id,
-                    SessionEvent::TurnStarted { turn: thread.turns },
+                    SessionEvent::TurnStarted {
+                    turn: thread.user_turns,
+                },
                 );
 
                 let mut sink = TxSink(ui_tx.clone());
@@ -324,7 +340,9 @@ fn switch_model(
     model_ref: &str,
 ) -> carter::Result<carter::provider::resolve::ResolvedProvider> {
     let cache_json = fetch::read_cache()?;
-    carter::provider::resolve_provider(&ctx.config, &cache_json, model_ref)
+    // 换模型时也保留抓包 —— 否则一切换就静默停止记录了。
+    let capture_hook = Arc::new(crate::capture::CaptureHook::new(ctx.capture.clone()));
+    carter::provider::resolve_provider(&ctx.config, &cache_json, model_ref, vec![capture_hook])
 }
 
 fn emit(shell: &AppShell, session_id: &str, event: SessionEvent) {

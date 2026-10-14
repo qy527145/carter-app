@@ -8,8 +8,9 @@ import { MessageSquare, Plus } from "lucide-react";
 import { useStore } from "../store";
 import { Button } from "./ui/Button";
 
-function relTime(seconds: number): string {
-  const d = new Date(seconds * 1000);
+// created_at 是**毫秒**（后端 `now_ms()`），不是秒 —— 别再乘 1000。
+function relTime(ms: number): string {
+  const d = new Date(ms);
   if (Number.isNaN(d.getTime())) return "";
   return d.toLocaleString("zh-CN", {
     month: "2-digit",
@@ -18,6 +19,11 @@ function relTime(seconds: number): string {
     minute: "2-digit",
   });
 }
+
+const VIEW_OPTIONS = [
+  { id: "chat", label: "对话" },
+  { id: "settings", label: "设置" },
+] as const;
 
 export function Sidebar({
   onNew,
@@ -29,6 +35,8 @@ export function Sidebar({
   const sessions = useStore((s) => s.sessions);
   const sessionId = useStore((s) => s.sessionId);
   const appVersion = useStore((s) => s.appVersion);
+  const view = useStore((s) => s.view);
+  const setView = useStore((s) => s.setView);
 
   return (
     <aside className="flex w-60 shrink-0 flex-col border-r border-slate-800 bg-slate-900/40">
@@ -40,6 +48,20 @@ export function Sidebar({
           <div className="truncate text-sm font-semibold text-slate-100">Carter</div>
           {appVersion && <div className="text-[11px] text-slate-500">v{appVersion}</div>}
         </div>
+      </div>
+
+      <div className="mx-3 mb-2 flex rounded-md border border-slate-700 bg-slate-900/60 p-0.5 text-xs">
+        {VIEW_OPTIONS.map((o) => (
+          <button
+            key={o.id}
+            onClick={() => setView(o.id)}
+            className={`flex-1 rounded px-2 py-1 transition-colors ${
+              view === o.id ? "bg-slate-700 text-slate-100" : "text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            {o.label}
+          </button>
+        ))}
       </div>
 
       <div className="px-3 pb-2">
