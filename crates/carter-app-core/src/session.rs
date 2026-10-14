@@ -34,7 +34,6 @@ use carter::session::{self, SessionOpts};
 use crate::protocol::{AppEvent, Command, SessionEvent, TodoView, UsageView};
 use crate::shell::{AppShell, AskRegistry, SessionHandle};
 
-/// 新建 / 续接一个会话。返回的句柄立即可以投递命令。
 pub struct SessionOptions {
     pub cwd: PathBuf,
     /// `provider/model`；`None` = 用配置里的 `agent.model`。
@@ -54,10 +53,19 @@ pub struct StartedSession {
     pub history: Vec<crate::view::MessageView>,
 }
 
+/// 新建 / 续接一个会话。返回的句柄立即可以投递命令。
+///
+/// **必须在 tokio runtime 上下文里调用** —— 它要 spawn 会话任务。同步的 Tauri 命令
+/// 跑在主线程上、没有 runtime，会在这里拿到一个明确的错误而不是一个看不懂的 panic。
 pub fn start_session(
     shell: Arc<AppShell>,
     opts: SessionOptions,
 ) -> carter::Result<StartedSession> {
+    if tokio::runtime::Handle::try_current().is_err() {
+        return Err(carter::CarterError::Config(
+            "start_session 必须在 tokio runtime 内调用（Tauri 命令要写成 async fn）".into(),
+        ));
+    }
     let config = shell.config.load_full();
     let cache_json = fetch::read_cache()?;
     let model_ref = opts
@@ -443,5 +451,38 @@ impl UiSink for TxSink {
     fn emit(&mut self, ev: UiEvent) {
         // 接收端没了说明会话正在退出，丢弃即可。
         let _ = self.0.send(ev);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 同步上下文里调用 `start_session` 必须拿到一句能读懂的错，而不是 panic。
+    ///
+    /// 这条守的是一个真实踩过的坑：Tauri 的**同步**命令跑在主线程上、没有 tokio
+    /// runtime，而 `start_session` 要 spawn 会话任务。当时的表现是窗口一亮就闪退，
+    /// panic 信息是 "there is no reactor running" —— 从现象完全看不出是命令该写成
+    /// async。加这道检查后，同样的错误会自己说清楚。
+    ///
+    /// 用普通 `#[test]` 而不是 `#[tokio::test]`：前者没有 runtime 上下文，正是要测的场景。
+    #[test]
+    fn start_session_without_a_runtime_says_so_instead_of_panicking() {
+        let shell = AppShell::new(carter::config::Config::default());
+        let opts = SessionOptions {
+            cwd: std::path::PathBuf::from("."),
+            model: None,
+            resume_latest: false,
+            resume_id: None,
+        };
+        // 不用 `expect_err`：`StartedSession` 没实现 Debug，而且这里关心的是「返回 Err」。
+        let msg = match start_session(shell, opts) {
+            Ok(_) => panic!("没有 runtime 时应当报错而不是成功"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            msg.contains("tokio runtime"),
+            "错误信息要指明根因，实际是：{msg}"
+        );
     }
 }

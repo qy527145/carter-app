@@ -66,8 +66,12 @@ fn app_info(shell: State<'_, Arc<AppShell>>) -> AppInfo {
 }
 
 /// 新建或续接一个会话，并把已有历史一并带回。
+///
+/// **必须是 `async fn`。** 它内部要 spawn 会话任务（`tokio::spawn`），而后者要求
+/// 在 tokio runtime 上下文里调用 —— 同步的 Tauri 命令跑在主线程上、没有 runtime，
+/// 会直接 panic。写成 async 后 Tauri 会把它放进自己的 tokio runtime 执行。
 #[tauri::command]
-fn create_session(
+async fn create_session(
     shell: State<'_, Arc<AppShell>>,
     cwd: Option<String>,
     model: Option<String>,
