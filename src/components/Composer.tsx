@@ -537,7 +537,10 @@ function ModelPicker({ model }: { model: string }) {
   }, [models]);
 
   return (
-    <>
+    // `relative` 是菜单的定位基准。之前菜单挂在一个 `fixed inset-0` 的遮罩里面，
+    // 于是 `left-4` 是**离窗口左边 4px**、`bottom-[5.5rem]` 是离窗口底部 ——
+    // 菜单就从窗口左下角弹出来了，跟按钮没有任何位置关系。
+    <div className="relative">
       <button
         onClick={() => setOpen((o) => !o)}
         title={model ? `当前模型 ${model}，点击切换` : "选择模型"}
@@ -547,11 +550,14 @@ function ModelPicker({ model }: { model: string }) {
       </button>
 
       {open && (
-        <div className="fixed inset-0 z-40" onClick={() => setOpen(false)}>
+        <>
+          {/* 只负责「点别处关掉」的全屏遮罩，不参与定位。它在 DOM 上先于菜单，
+              所以菜单（z-50 > z-40）盖在它上面，点击仍然落得到菜单项。 */}
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
           <ModelMenu groups={groups} current={model} onPick={pick} />
-        </div>
+        </>
       )}
-    </>
+    </div>
   );
 }
 
@@ -569,7 +575,7 @@ function ModelMenu({
     <div
       ref={ref}
       onClick={(e) => e.stopPropagation()}
-      className="absolute bottom-[5.5rem] left-4 z-50 max-h-80 w-72 overflow-y-auto rounded-lg border border-edge bg-card py-1 shadow-lift"
+      className="absolute bottom-full left-0 z-50 mb-2 max-h-80 w-72 overflow-y-auto rounded-lg border border-edge bg-card py-1 shadow-lift"
     >
       {groups.length === 0 && (
         <div className="px-3 py-2 text-xs text-dim">没有可用的模型，先去「设置 → 渠道」配一个。</div>
@@ -630,11 +636,24 @@ function CwdPicker({ cwd }: { cwd: string }) {
   );
 }
 
-/** 路径太长时只留尾两段 —— 完整路径放在 title 里。 */
+/**
+ * 路径过长时只留尾两段，但**保留盘符**。
+ *
+ * 之前是 `…/Users/xuqiao`，把 `C:\Users\xuqiao` 的盘符抹掉了 —— 看着像个 Unix
+ * 路径，于是和 bash 里 `pwd` 的输出（`/c/Users/xuqiao`）对不上，让人以为两处用的
+ * 不是同一个目录。显示成 `C:\…\xuqiao` 就没有这个歧义了。
+ *
+ * 完整路径始终在 `title` 里。
+ */
 function shortenPath(p: string): string {
+  // 短路径直接全显示 —— 这最常见，也最没有歧义。
+  if (p.length <= 30) return p;
+  const win = /^[A-Za-z]:[\\/]/.test(p);
+  const sep = win ? "\\" : "/";
   const parts = p.split(/[\\/]/).filter(Boolean);
-  if (parts.length <= 2) return p;
-  return `…/${parts.slice(-2).join("/")}`;
+  if (parts.length <= 3) return p;
+  const tail = parts.slice(-2).join(sep);
+  return win ? `${parts[0]}${sep}…${sep}${tail}` : `…${sep}${tail}`;
 }
 
 // ---------------------------------------------------------------------------
