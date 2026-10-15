@@ -1,7 +1,7 @@
 // 底部状态栏：用量（缓存单列）与成本。
 //
 // 模型与工作目录**不在这里** —— 它们已经挪到输入框下方。同一个东西出现在两处时，
-// 用户不知道该看哪个、也不知道哪一处能点。
+// 用户不知道该看哪个、也不知道哪一处能点（输入框下面那个还能点开切换）。
 //
 // 缓存读写刻意与普通输入并列显示 —— prompt cache 命中是这个客户端要让人一眼看到
 // 的指标（命中与否直接决定成本），藏进 tooltip 就失去意义了。
@@ -20,7 +20,6 @@ function Stat({ label, value }: { label: string; value: number }) {
 export function StatusBar() {
   const usage = useStore((s) => s.usage);
   const cost = useStore((s) => s.cost);
-  const model = useStore((s) => s.model);
 
   return (
     <div className="flex h-7 shrink-0 items-center gap-3 overflow-hidden border-t border-edge bg-sidebar px-4 text-[11px]">
@@ -47,10 +46,6 @@ export function StatusBar() {
 
       <span className="shrink-0 tabular-nums text-ink" title="本轮累计成本（USD）">
         ${cost.toFixed(4)}
-      </span>
-
-      <span className="mono ml-auto min-w-0 truncate text-dim" title={model}>
-        {model || "—"}
       </span>
     </div>
   );
