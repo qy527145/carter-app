@@ -21,3 +21,4 @@ carter = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
+tauri-plugin-dialog = "2.8.3"

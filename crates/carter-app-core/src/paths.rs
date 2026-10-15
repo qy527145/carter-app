@@ -6,6 +6,14 @@
 
 use std::path::PathBuf;
 
+/// 改环境变量的测试共用的一把锁。
+///
+/// `CARTER_HOME` / `CARTER_APP_HOME` 是**进程级**的，而 cargo 并行跑测试 ——
+/// 两个测试各用各的 `Mutex` 等于没锁，会互相把对方的临时目录顶掉（表现为
+/// 「配置读出来是默认值」这种莫名其妙的失败）。所以必须是**同一把**。
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// `$CARTER_APP_HOME`，否则 `~/.carter-app`。
 pub fn app_home() -> PathBuf {
     if let Some(v) = std::env::var_os("CARTER_APP_HOME") {

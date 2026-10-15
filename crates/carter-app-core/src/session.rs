@@ -282,6 +282,32 @@ async fn runner(
                 let system = ctx.system(meta.git.as_ref());
                 let hooks = Arc::new(HookRegistry::from_configs(ctx.config.hooks.clone()));
 
+                // 输入框里的 `/命令`、`@文件`、`@图片` 在这里展开。
+                //
+                // 放在后端而不是前端：展开后的文本（几百行文件内容）不该出现在输入框
+                // 里让用户看着它发出去。放在这里还有一个好处 —— 与 CLI 走的是同一套
+                // 规则（自定义命令用 carter 的 `commands::expand`，图片用 carter 的
+                // `media::inline_user_attachments`），两边行为对得上。
+                let text = match expand_input(&ctx.cwd, &text) {
+                    Ok((expanded, note)) => {
+                        if let Some(note) = note {
+                            emit(&ctx.shell, &session_id, SessionEvent::Notice { message: note });
+                        }
+                        expanded
+                    }
+                    Err(e) => {
+                        // 展开失败不吞掉这条消息：把原文发出去，但要说清发生了什么。
+                        emit(
+                            &ctx.shell,
+                            &session_id,
+                            SessionEvent::Notice {
+                                message: format!("{e}（已按原文发送）"),
+                            },
+                        );
+                        text
+                    }
+                };
+
                 let tools = build_tools(
                     ToolBuildArgs {
                         provider: ctx.provider.clone(),
@@ -366,6 +392,54 @@ async fn runner(
     drop(ui_tx);
     let _ = forwarder.await;
     ctx.shell.sessions.remove(&session_id);
+}
+
+/// 展开输入框里的 `/命令` 与 `@文件`。
+///
+/// 返回 `(展开后的文本, 给用户看的说明)`。说明只在真的发生了展开时才给 ——
+/// 普通消息不该多出一条提示。
+///
+/// 三步，顺序不能换：
+/// 1. **自定义命令**：`/name args` 且 `name` 是 `~/.carter/commands/` 或
+///    `.carter/commands/` 里的命令时，用 carter 的 `commands::expand` 展开成 prompt
+///    （它自己会注入正文里的 `@文件` 与 `!shell`）。
+/// 2. **`@文件`**：展开成 `--- path ---` 包裹的上下文块。
+/// 3. **`@图片`**：转成 `[img:...]` 引用，发请求时由 provider 层取字节。
+///
+/// 第 2 步对图片路径返回 None（不注入），正好把图片留给第 3 步。
+fn expand_input(cwd: &std::path::Path, raw: &str) -> Result<(String, Option<String>), String> {
+    let mut text = raw.to_string();
+    let mut note = None;
+
+    // 先把（可能存在的）命令名与参数取成自有字符串，再动 `text` ——
+    // 否则 `strip_prefix` 借出去的那一段会一直活到赋值处。
+    let command = text.strip_prefix('/').map(|rest| {
+        let (name, args) = match rest.split_once(char::is_whitespace) {
+            Some((n, a)) => (n.to_string(), a.trim().to_string()),
+            None => (rest.to_string(), String::new()),
+        };
+        (name, args)
+    });
+
+    if let Some((name, args)) = command {
+        // 只认真的存在的自定义命令。`/usr/bin/env` 这种路径不能当命令处理。
+        if !name.is_empty() && carter::commands::discover(cwd).iter().any(|c| c.name == name) {
+            text = crate::input::expand_custom(cwd, &name, &args)?;
+            note = Some(format!("已展开自定义命令 /{name}"));
+        }
+    }
+
+    let before = text.clone();
+    text = crate::input::expand_file_refs(&text, cwd);
+    text = carter::media::inline_user_attachments(&text, cwd);
+
+    if note.is_none() && text != before {
+        let files = crate::input::count_file_refs(&before, cwd);
+        if files > 0 {
+            note = Some(format!("已把 {files} 个文件的内容附进这条消息"));
+        }
+    }
+    Ok((text, note))
 }
 
 /// 在某个目录的会话列表里按 id 找。

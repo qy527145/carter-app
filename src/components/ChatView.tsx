@@ -23,8 +23,6 @@ import {
   Info,
   LoaderCircle,
   ScanSearch,
-  Send,
-  Square,
   TriangleAlert,
   Wrench,
 } from "lucide-react";
@@ -32,6 +30,7 @@ import {
 import { sendCommand } from "../lib/api";
 import { useStore, type Item, type Turn } from "../store";
 import { Button, IconButton } from "./ui/Button";
+import { Composer, MessageImages } from "./Composer";
 import { Input } from "./ui/Input";
 import { Banner } from "./ui/Panel";
 
@@ -251,8 +250,10 @@ function AssistantTurn({
 function UserTurn({ turn }: { turn: Extract<Turn, { role: "user" }> }) {
   return (
     <div className="flex justify-end">
-      <div className="max-w-[75%] whitespace-pre-wrap break-words rounded-2xl bg-bubble px-3.5 py-2 text-sm leading-relaxed text-ink">
-        {turn.text}
+      {/* 粘贴的图片在会话里存的是 `[img:...]` 引用 token，回看时要渲染回图。
+          纯文本消息走 MessageImages 的文本分支，行为与直接输出一致。 */}
+      <div className="max-w-[75%] break-words rounded-2xl bg-bubble px-3.5 py-2 text-sm leading-relaxed text-ink">
+        <MessageImages text={turn.text} />
       </div>
     </div>
   );
@@ -428,102 +429,6 @@ function AskPanel() {
           <Button variant="primary" disabled={!free.trim()} onClick={() => answer(free.trim())}>
             回答
           </Button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function Composer() {
-  const [text, setText] = useState("");
-  const streaming = useStore((s) => s.streaming);
-  const connected = useStore((s) => s.sessionId !== null);
-  const pendingAsk = useStore((s) => s.pendingAsk);
-  const model = useStore((s) => s.model);
-  const addUserTurn = useStore((s) => s.addUserTurn);
-  const setNotice = useStore((s) => s.setNotice);
-  const taRef = useRef<HTMLTextAreaElement>(null);
-
-  useEffect(() => {
-    taRef.current?.focus();
-  }, []);
-
-  const send = () => {
-    const t = text.trim();
-    const sid = useStore.getState().sessionId;
-    if (!t || !sid || streaming) return;
-    // 用户消息事件不存在，本地先落一条，后端随后发 turn_started 打开助手轮。
-    addUserTurn(t);
-    setText("");
-    const el = taRef.current;
-    if (el) el.style.height = "auto";
-    sendCommand(sid, { type: "send_prompt", text: t }).catch((e) => setNotice(String(e)));
-  };
-
-  const cancel = () => {
-    const sid = useStore.getState().sessionId;
-    if (sid) sendCommand(sid, { type: "cancel" }).catch((e) => setNotice(String(e)));
-  };
-
-  const disabled = !connected || pendingAsk !== null;
-
-  return (
-    <div className="shrink-0 px-4 pb-4 pt-1">
-      <div className="mx-auto max-w-3xl">
-        <div className="rounded-2xl border border-edge bg-elevated shadow-soft transition-shadow focus-within:shadow-lift">
-          <textarea
-            ref={taRef}
-            rows={1}
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            onInput={(e) => {
-              const el = e.currentTarget;
-              el.style.height = "auto";
-              el.style.height = Math.min(el.scrollHeight, 200) + "px";
-            }}
-            onKeyDown={(e) => {
-              // Enter 发送，Shift+Enter 换行。
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                send();
-              }
-            }}
-            disabled={disabled}
-            placeholder={
-              !connected
-                ? "会话未就绪 —— 点「新对话」开始"
-                : pendingAsk
-                  ? "请先回答上面的问题"
-                  : "输入消息，Enter 发送，Shift+Enter 换行"
-            }
-            className="max-h-48 min-h-14 w-full resize-none bg-transparent px-4 pb-1 pt-3.5 text-[15px] leading-relaxed text-ink outline-none placeholder:text-dim disabled:opacity-50"
-          />
-          <div className="flex items-center gap-2 px-2.5 pb-2">
-            {/* 模型名放在输入框里而不是顶栏：它跟着「这条消息发给谁」走，
-                和发送按钮属于同一组信息。 */}
-            <span className="mono min-w-0 flex-1 truncate px-1.5 text-[11px] text-dim">
-              {model || "—"}
-            </span>
-            {streaming ? (
-              <button
-                onClick={cancel}
-                title="中断这一轮"
-                className="inline-flex items-center gap-1.5 rounded-full border border-edge px-3 py-1.5 text-xs text-dim transition-colors hover:text-[var(--danger)]"
-              >
-                <Square size={11} />
-                停止
-              </button>
-            ) : (
-              <button
-                onClick={send}
-                disabled={disabled || !text.trim()}
-                title="发送"
-                className="rounded-full bg-accent p-2 text-[var(--accent-contrast)] transition-opacity hover:opacity-90 disabled:opacity-30"
-              >
-                <Send size={14} />
-              </button>
-            )}
-          </div>
         </div>
       </div>
     </div>

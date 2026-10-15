@@ -796,14 +796,14 @@ whatever = true
     // 落盘路径
     //
     // 下面两条会改 `CARTER_HOME` —— 那是**进程级**的，而 cargo 并行跑测试。
-    // 用一把锁把这类测试串起来；本模块里只有这两条动环境变量。
+    // 用**全 crate 共用**的那把锁（见 `paths::ENV_LOCK`）把这类测试串起来。
     // -----------------------------------------------------------------------
-
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// 在临时 `CARTER_HOME` 下跑一段涉及真实配置文件的操作。
     fn with_temp_home<T>(tag: &str, f: impl FnOnce() -> T) -> T {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::paths::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("carter-app-cfg-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         // SAFETY: 只有本模块的顺序化测试会改这两个变量。

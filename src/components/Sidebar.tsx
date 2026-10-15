@@ -21,11 +21,6 @@ import { Button } from "./ui/Button";
 import { Input } from "./ui/Input";
 import { useStore } from "../store";
 
-const NAV = [
-  { id: "chat", label: "对话", icon: MessageSquare },
-  { id: "settings", label: "设置", icon: SettingsIcon },
-] as const;
-
 const THEMES: { id: ThemePref; label: string; icon: typeof Sun }[] = [
   { id: "system", label: "跟随系统", icon: Monitor },
   { id: "light", label: "浅色", icon: Sun },
@@ -142,23 +137,7 @@ export function Sidebar() {
           </div>
         </div>
 
-        {/* 视图切换 */}
-        <nav className="flex flex-col gap-0.5 px-2 pb-2">
-          {NAV.map((n) => (
-            <button
-              key={n.id}
-              onClick={() => setView(n.id)}
-              className={`flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors ${
-                view === n.id ? "bg-card font-medium text-ink" : "text-dim hover:bg-card"
-              }`}
-            >
-              <n.icon size={14} />
-              {n.label}
-            </button>
-          ))}
-        </nav>
-
-        <div className="px-3 pb-2">
+        <div className="px-3 pb-3 pt-1">
           <Button variant="primary" onClick={newSession} className="w-full">
             <Plus size={14} />
             新对话
@@ -192,7 +171,18 @@ export function Sidebar() {
           <SessionList sessions={shown} activeId={sessionId} dense />
         </div>
 
-        <div className="border-t border-edge p-2">
+        {/* 底部：设置 + 主题。设置放在这里而不是顶部导航里 —— 它是「偶尔去一次」
+            的地方，占着顶部第一屏的位置不值当；而左下角是这类入口的常规位置。 */}
+        <div className="space-y-1 border-t border-edge p-2">
+          <button
+            onClick={() => setView("settings")}
+            className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors ${
+              view === "settings" ? "bg-card font-medium text-ink" : "text-dim hover:bg-card"
+            }`}
+          >
+            <SettingsIcon size={14} />
+            设置
+          </button>
           <ThemeToggle />
         </div>
       </aside>

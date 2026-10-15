@@ -468,6 +468,52 @@ export function deleteMcpServer(name: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// 输入框：斜杠命令、@ 文件、图片
+// ---------------------------------------------------------------------------
+
+/**
+ * 一条能出现在 `/` 菜单里的命令。
+ *
+ * `builtin` 由本应用执行；`custom` 是 `~/.carter/commands/*.md` 里的命令，
+ * 按回车后**不立即发送**，而是把它的展开交给后端（见下）——
+ * 展开后的正文（含注入的文件内容）不该出现在输入框里。
+ */
+export type CommandRow = {
+  name: string;
+  description: string;
+  argument_hint: string | null;
+  kind: "builtin" | "custom";
+};
+
+export function listCommands(cwd?: string | null): Promise<CommandRow[]> {
+  return invoke<CommandRow[]>("list_commands", { cwd: cwd ?? null });
+}
+
+/** `@` 菜单的文件列表：相对工作目录的路径。 */
+export function listFiles(
+  cwd: string | null,
+  query: string,
+  limit = 50,
+): Promise<string[]> {
+  return invoke<string[]>("list_files", { cwd, query, limit });
+}
+
+/**
+ * 把粘贴进来的图片存进 carter 的图片库，返回可插进消息文本的 `[img:hash.ext]` 引用。
+ *
+ * `data` 是裸 base64 或 data URL 都行。服务端按 sha256 内容寻址去重，
+ * 并在入库前把长边压到 1568px。
+ */
+export function saveImage(data: string, ext?: string | null): Promise<string> {
+  return invoke<string>("save_image", { data, ext: ext ?? null });
+}
+
+/** 把一条图片引用（`[img:hash.ext]` 或裸 `hash.ext`）读成 data URL；读不到返回 null。 */
+export function readImage(token: string): Promise<string | null> {
+  return invoke<string | null>("read_image", { token });
+}
+
+// ---------------------------------------------------------------------------
 // 报文检视（需求 4）：抓到的原始 HTTP 交换
 // ---------------------------------------------------------------------------
 

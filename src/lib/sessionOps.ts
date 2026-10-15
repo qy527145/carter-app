@@ -121,3 +121,39 @@ export async function export_(id: string, format: "markdown" | "json"): Promise<
     toastError(e);
   }
 }
+
+/**
+ * 在指定目录里新开一个会话。
+ *
+ * 换工作目录必然是**新会话**，不是就地切换：carter 的会话按 `projects/<cwd 的键>/`
+ * 分文件存，换目录在磁盘上就是另一条对话。把这件事说清楚，别让用户以为只是换了个标签。
+ */
+export async function startInDirectory(cwd: string): Promise<void> {
+  const store = useStore.getState();
+  const prev = store.sessionId;
+  try {
+    const created = await api.createSession({ cwd, resume: false });
+    // 新会话建好之后再关旧的：万一新建失败，用户手上还留着原来那条对话。
+    if (prev) {
+      try {
+        await api.closeSession(prev);
+      } catch {
+        /* 已经自己结束了 */
+      }
+    }
+    store.beginSession(created);
+    await refreshSessions();
+    toastOk(`已在 ${cwd} 新开会话`);
+  } catch (e) {
+    toastError(e);
+  }
+}
+
+/** 往会话投递一条命令。发消息的路径只有这一处，方便统一处理「会话已死」。 */
+export async function send(sessionId: string, text: string): Promise<void> {
+  await api.sendCommand(sessionId, { type: "send_prompt", text });
+}
+
+export async function cancel(sessionId: string): Promise<void> {
+  await api.sendCommand(sessionId, { type: "cancel" });
+}

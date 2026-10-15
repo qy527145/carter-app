@@ -565,6 +565,38 @@ fn delete_mcp_server(shell: State<'_, Arc<AppShell>>, name: String) -> Result<()
 }
 
 // ---------------------------------------------------------------------------
+// 输入框：斜杠命令、@ 文件、图片
+// ---------------------------------------------------------------------------
+
+/// `/` 菜单的命令列表：本应用真能执行的内置命令 + 用户自定义命令。
+#[tauri::command]
+fn list_commands(cwd: Option<String>) -> Vec<carter_app_core::CommandRow> {
+    carter_app_core::input::list(&cwd.map(PathBuf::from).unwrap_or_else(default_cwd))
+}
+
+/// `@` 菜单的文件列表（相对工作目录的路径）。
+#[tauri::command]
+fn list_files(cwd: Option<String>, query: String, limit: Option<usize>) -> Vec<String> {
+    carter_app_core::input::list_files(
+        &cwd.map(PathBuf::from).unwrap_or_else(default_cwd),
+        &query,
+        limit.unwrap_or(50),
+    )
+}
+
+/// 把粘贴进来的图片存进 carter 的图片库，返回可插进消息文本的 `[img:...]` 引用。
+#[tauri::command]
+fn save_image(data: String, ext: Option<String>) -> Result<String, String> {
+    carter_app_core::images::save_image(&data, ext.as_deref())
+}
+
+/// 把一条图片引用读成 data URL 供界面显示。读不到返回 null（文件被清理过等）。
+#[tauri::command]
+fn read_image(token: String) -> Option<String> {
+    carter_app_core::images::read_image(&token)
+}
+
+// ---------------------------------------------------------------------------
 // 报文检视
 // ---------------------------------------------------------------------------
 
@@ -639,6 +671,8 @@ fn get_exchange(
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        // 选工作目录 / 选文件用。原生选择器比自己拿 list_files 拼一个强得多。
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // 配置在启动时读一次。之后每次界面写回都会热重载（`apply_config`）。
             let config = carter::config::Config::load()?;
@@ -708,6 +742,11 @@ pub fn run() {
             list_mcp_servers,
             save_mcp_server,
             delete_mcp_server,
+            // 输入框
+            list_commands,
+            list_files,
+            save_image,
+            read_image,
             // 报文检视
             list_exchanges,
             get_exchange,

@@ -1,9 +1,10 @@
-// 底部状态栏：模型、用量（缓存单列）、成本、工作目录。
+// 底部状态栏：用量（缓存单列）与成本。
+//
+// 模型与工作目录**不在这里** —— 它们已经挪到输入框下方。同一个东西出现在两处时，
+// 用户不知道该看哪个、也不知道哪一处能点。
 //
 // 缓存读写刻意与普通输入并列显示 —— prompt cache 命中是这个客户端要让人一眼看到
 // 的指标（命中与否直接决定成本），藏进 tooltip 就失去意义了。
-
-import { Folder } from "lucide-react";
 
 import { useStore } from "../store";
 
@@ -19,7 +20,7 @@ function Stat({ label, value }: { label: string; value: number }) {
 export function StatusBar() {
   const usage = useStore((s) => s.usage);
   const cost = useStore((s) => s.cost);
-  const cwd = useStore((s) => s.cwd);
+  const model = useStore((s) => s.model);
 
   return (
     <div className="flex h-7 shrink-0 items-center gap-3 overflow-hidden border-t border-edge bg-sidebar px-4 text-[11px]">
@@ -48,11 +49,8 @@ export function StatusBar() {
         ${cost.toFixed(4)}
       </span>
 
-      <span className="ml-auto flex min-w-0 items-center gap-1.5 text-dim">
-        <Folder size={11} className="shrink-0" />
-        <span className="mono truncate" title={cwd}>
-          {cwd || "—"}
-        </span>
+      <span className="mono ml-auto min-w-0 truncate text-dim" title={model}>
+        {model || "—"}
       </span>
     </div>
   );

@@ -13,11 +13,15 @@
 //! * [`tools`] —— 在 carter 的装配结果之上套一层工具开关。
 //! * [`skills`] —— 技能：列举 / 查看 / 启停 / 新建 / 删除。
 //! * [`catalog`] —— 全部模型引用摊平成一张带元数据的表。
+//! * [`input`] —— 输入框里的斜杠命令与 `@文件` 引用。
+//! * [`images`] —— 粘贴进来的图片（复用 carter 的内容寻址图片库）。
 
 pub mod app_settings;
 pub mod capture;
 pub mod catalog;
 pub mod config_edit;
+pub mod images;
+pub mod input;
 pub mod paths;
 pub mod protocol;
 pub mod session;
@@ -31,6 +35,7 @@ pub use app_settings::AppSettings;
 pub use capture::{CaptureHook, CaptureStore, ExchangeRecord};
 pub use catalog::ModelRow;
 pub use config_edit::{McpDraft, ModelDraft, ProviderDetail, ProviderDraft};
+pub use input::{CommandRow, FileKind};
 pub use protocol::{AppEvent, Command, SessionEvent, TodoView, UsageView};
 pub use session::{start_session, SessionOptions, StartedSession};
 pub use sessions::{SearchHit, SessionRow};

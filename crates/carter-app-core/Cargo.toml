@@ -18,3 +18,5 @@ futures = { workspace = true }
 # 不能用 serde 反序列化再序列化回去 —— 那条路会把环境变量引用烤成明文密钥，
 # 详见 src/config_edit.rs 顶部的说明。
 toml_edit = { workspace = true }
+# 粘贴进来的图片走 JSON 传字节；顺带把图读回成 data URL 给界面显示。
+base64 = "0.22"
