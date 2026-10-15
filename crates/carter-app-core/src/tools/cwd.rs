@@ -79,24 +79,12 @@ pub fn resolve(cwd: &Path, raw: &str) -> PathBuf {
     }
 }
 
-/// 展开开头的 `~`。只认 `~` 与 `~/…`、`~\…`，不做用户名展开（`~bob` 原样留着）。
+/// 展开开头的 `~`。
+///
+/// 实现在 [`crate::paths`] —— 技能页加扫描路径时也要用同一份展开规则，
+/// 抄第二份就是两份会漂的代码（尤其 Windows 上分隔符那段）。
 fn expand_tilde(raw: &str) -> String {
-    let rest = match raw.strip_prefix('~') {
-        Some(r) if r.is_empty() => return home(),
-        Some(r) if r.starts_with('/') || r.starts_with('\\') => r,
-        _ => return raw.to_string(),
-    };
-    let home = home();
-    if home.is_empty() {
-        return raw.to_string();
-    }
-    format!("{}{}", home.trim_end_matches(['/', '\\']), rest.replace('/', std::path::MAIN_SEPARATOR_STR))
-}
-
-fn home() -> String {
-    std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .unwrap_or_default()
+    crate::paths::expand_tilde(raw)
 }
 
 #[async_trait::async_trait]

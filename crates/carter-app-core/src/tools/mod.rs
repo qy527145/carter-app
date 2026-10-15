@@ -27,6 +27,10 @@
 //! * **`ask_user_question`** —— carter 那个一次只能问一个问题、选项只有标签没有说明。
 //!   界面里「问三件事」要来回三轮，而每轮都是一次完整的模型请求。换成
 //!   [`ask_user::AskUserTool`]：一次问一组、支持多选。
+//! * **`skill`** —— carter 那个只认单根（构造期写死的 `~/.carter/skills`）。技能页能加
+//!   额外的扫描路径，换成 [`multi_skill::MultiRootSkill`] 之后那些根里的技能才加载得到。
+//!   刻意走「换实现」而不是「再 push 一个」：工具池里两个同名工具会让 `specs()` 下发
+//!   两条，上游直接 400。
 //!
 //! ## 路径解析
 //!
@@ -50,8 +54,10 @@ pub mod ask_user;
 pub mod bash;
 pub mod cwd;
 pub mod goal_update;
+pub mod multi_skill;
 pub mod record;
 
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64};
 
@@ -65,10 +71,12 @@ use tokio::sync::mpsc;
 
 use crate::app_settings::AppSettings;
 use crate::goal::GoalSignal;
+use crate::skills::Scan;
 use ask_user::{AskRequest, AskUserTool};
 use bash::PlatformBash;
 use cwd::{CwdScoped, ProjectMemoryGuard};
 use goal_update::GoalUpdateTool;
+use multi_skill::MultiRootSkill;
 use record::{Recorded, ToolEvent};
 
 /// 装配工具池需要的一整套东西。
@@ -109,6 +117,27 @@ pub fn filter_tools(full: &ToolRegistry, settings: &AppSettings) -> Vec<Arc<dyn 
         .filter(|t| t.name() != "task" && settings.tool_enabled(t.name()))
         .cloned()
         .collect()
+}
+
+/// 按名字把 carter 的实现换成本应用自己的那一份。
+///
+/// 抽成函数是为了让**两处共用同一份判断**：真正装配工具池的 [`build_tools`]，与设置页
+/// 那份只用来展示的 registry（`src-tauri` 的 `list_tools`）。后者此前手抄了一遍 `bash`
+/// 的构造，而设置页显示一份与真实行为对不上的说明，比不显示更坏。
+pub fn substitute(t: Arc<dyn Tool>, settings: &AppSettings, cwd: &Path) -> Arc<dyn Tool> {
+    match t.name() {
+        // `bash` 换成跨平台实现。
+        "bash" => Arc::new(PlatformBash::new(cwd.to_path_buf())),
+        // 文件工具：相对路径按会话的 cwd 解析。原实现（行号、图片、截断…）全部保留，
+        // 只是在执行前把 `path` 改写成绝对路径。
+        name if CwdScoped::applies_to(name) => Arc::new(CwdScoped::new(t, cwd.to_path_buf())),
+        // save_memory 没有 path 参数可改写，目标路径是内部按 scope 算的 —— 项目级作用域
+        // 在桌面应用里必然是错的，明确拒绝掉。
+        "save_memory" => Arc::new(ProjectMemoryGuard::new(t)),
+        // `skill` 换成多根实现：技能页加的扫描路径就在这里生效。
+        "skill" => Arc::new(MultiRootSkill::new(Scan::from_settings(settings))),
+        _ => t,
+    }
 }
 
 /// 装配工具池。
@@ -159,21 +188,7 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
     };
 
     for t in filter_tools(&full, settings) {
-        let t: Arc<dyn Tool> = if t.name() == "bash" {
-            // `bash` 换成跨平台实现。
-            Arc::new(PlatformBash::new(cwd.clone()))
-        } else if CwdScoped::applies_to(t.name()) {
-            // 文件工具：相对路径按会话的 cwd 解析。原实现（行号、图片、截断…）全部保留，
-            // 只是在执行前把 `path` 改写成绝对路径。
-            Arc::new(CwdScoped::new(t, cwd.clone()))
-        } else if t.name() == "save_memory" {
-            // 它没有 path 参数可改写，目标路径是内部按 scope 算的 —— 项目级作用域
-            // 在桌面应用里必然是错的，明确拒绝掉。
-            Arc::new(ProjectMemoryGuard::new(t))
-        } else {
-            t
-        };
-        push(t, &mut tools);
+        push(substitute(t, settings, &cwd), &mut tools);
     }
 
     // 我们自己那个一次问一组问题的 ask_user。
@@ -265,5 +280,30 @@ mod tests {
         let kept = names(&filter_tools(&full, &AppSettings::default()));
         assert!(!kept.contains(&"task".to_string()));
         assert!(kept.contains(&"ask_user_question".to_string()));
+    }
+
+    /// `skill` 是**就地换实现**，不是再多挂一个：池子里两个同名工具会让 `specs()`
+    /// 下发两条，上游直接 400。名字也必须原样保留 —— 并发安全名单按名字判。
+    #[test]
+    fn the_skill_tool_is_replaced_in_place_and_keeps_its_name() {
+        let mut full = ToolRegistry::builtin();
+        full.push(std::sync::Arc::new(carter::skills::SkillTool::new(
+            std::path::PathBuf::from("/tmp/skills"),
+        )));
+        let settings = AppSettings::default();
+
+        let swapped: Vec<_> = filter_tools(&full, &settings)
+            .into_iter()
+            .map(|t| substitute(t, &settings, std::path::Path::new("/tmp")))
+            .collect();
+        let skills: Vec<_> = swapped.iter().filter(|t| t.name() == "skill").collect();
+        assert_eq!(skills.len(), 1, "必须恰好一个");
+        // 给模型看的文档不变 —— 换的是实现，不是契约。
+        assert!(skills[0].description().contains("Skill"), "{}", skills[0].description());
+        assert_eq!(
+            skills[0].parameters()["required"][0],
+            serde_json::json!("name"),
+            "参数 schema 不变"
+        );
     }
 }

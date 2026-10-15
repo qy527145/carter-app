@@ -34,6 +34,7 @@ use carter::provider::WireMessage;
 use carter::registry::{fetch, ModelInfo};
 use llm_adapt_core::{Block, Role};
 
+use crate::app_settings::AppSettings;
 use crate::session::{start_side, SideWiring};
 use crate::shell::{AppShell, SessionHandle};
 use crate::view::MessageView;
@@ -102,7 +103,8 @@ pub fn start_side_session(shell: Arc<AppShell>, parent_id: &str) -> Result<Start
 
     let id = side_id();
     let thread = seed_thread(&id, &seeded);
-    let system = side_system(&config, &cwd, &model);
+    // 系统提示在这里算一次就固定了（见 [`side_system`] 的注释）。
+    let system = side_system(&config, &AppSettings::load(), &cwd, &model);
 
     let handle = start_side(
         SideWiring {
@@ -192,9 +194,19 @@ fn truncate_to_clean(messages: &[WireMessage]) -> Vec<WireMessage> {
 /// 侧边会话的系统提示：父会话那一套（人设 + 技能 + 记忆 + 运行环境）+ 侧边说明。
 ///
 /// 刻意**不带长任务目标**：目标是主对话的事，侧边会话被它牵着走就跑偏了。
-fn side_system(config: &Config, cwd: &std::path::Path, model: &ModelInfo) -> Vec<String> {
+///
+/// 注意这份提示是**创建时算一次并固定**的（`SideWiring.system` → `Runner::fixed_system`），
+/// 所以开着侧边聊天时去技能页改扫描路径，对**这一条**侧边会话不生效，关掉重开才行。
+/// 主会话每轮重算，不受影响。这个行为本来就有（技能目录一改就是如此），但界面能改路径
+/// 之后它第一次变得可见，所以写在这里。
+fn side_system(
+    config: &Config,
+    settings: &AppSettings,
+    cwd: &std::path::Path,
+    model: &ModelInfo,
+) -> Vec<String> {
     let skill_metas = if config.skills.enabled {
-        carter::skills::discover(&carter::config::paths::skills_dir())
+        crate::skills::union_metas(&crate::skills::Scan::from_settings(settings))
     } else {
         Vec::new()
     };

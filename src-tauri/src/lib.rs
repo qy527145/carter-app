@@ -14,7 +14,7 @@ use carter_app_core::app_settings::AppSettings;
 use carter_app_core::catalog;
 use carter_app_core::config_edit::{self, McpDraft, ProviderDraft};
 use carter_app_core::sessions::{self, ExportFormat};
-use carter_app_core::skills::{self, SkillDraft};
+use carter_app_core::skills::{self, Scan, SkillDraft};
 use carter_app_core::{
     AppEvent, AppShell, Command, MessageView, ProviderDetail, SessionRow, SessionOptions,
 };
@@ -444,34 +444,34 @@ fn list_tools(shell: State<'_, Arc<AppShell>>) -> Vec<ToolRow> {
         )));
     }
 
-    // 这两个在真的会话里被换成了本应用的实现（跨平台 bash、一次问一组问题的
-    // ask_user）。设置页要显示**实际生效的**说明与 schema，不能用 carter 的 ——
-    // 那会让用户看到一份和真实行为对不上的文档。
+    // 每个工具都过一遍 `carter_app_core::tools::substitute` —— 真正装配工具池时用的是
+    // **同一个函数**。此前这里手抄了一遍 `bash` 与 `skill` 的构造，两处的说明迟早会漂，
+    // 而设置页显示一份与真实行为对不上的文档，比不显示更坏（这是本文件自己的注释里
+    // 早已写下的理由，现在才真正落实）。
+    //
+    // 这里不需要真的能跑：`substitute` 只读构造期参数，不碰 provider、不碰会话。
+    let cwd = carter::config::paths::carter_home();
     let mut rows: Vec<ToolRow> = Vec::new();
-    for spec in registry.specs() {
-        if spec.name == "bash" {
-            let b = carter_app_core::tools::bash::PlatformBash::new(
-                carter::config::paths::carter_home(),
-            );
-            use carter::tools::Tool as _;
-            rows.push(ToolRow {
-                enabled: settings.tool_enabled("bash"),
-                toggleable: true,
-                note: Some(carter_app_core::platform::os_label().to_string()),
-                name: b.name().to_string(),
-                description: b.description().to_string(),
-                parameters: b.parameters(),
-            });
-            continue;
-        }
-        let enabled = settings.tool_enabled(&spec.name);
+    for t in registry.tools() {
+        let t = carter_app_core::tools::substitute(t.clone(), &settings, &cwd);
+        let name = t.name().to_string();
+        let note = match name.as_str() {
+            "bash" => Some(carter_app_core::platform::os_label().to_string()),
+            // `note` 就是为「这个工具从哪来」准备的 —— 技能多了附加扫描路径之后，
+            // 「它到底扫哪几个目录」是用户会问的第一个问题。
+            "skill" => Some(match settings.skill_roots.len() {
+                0 => "只扫 ~/.carter/skills".to_string(),
+                n => format!("~/.carter/skills 与 {n} 条附加扫描路径"),
+            }),
+            _ => None,
+        };
         rows.push(ToolRow {
-            enabled,
+            enabled: settings.tool_enabled(&name),
             toggleable: true,
-            note: None,
-            name: spec.name,
-            description: spec.description.unwrap_or_default(),
-            parameters: spec.input_schema,
+            note,
+            description: t.description().to_string(),
+            parameters: t.parameters(),
+            name,
         });
     }
 
@@ -518,40 +518,71 @@ struct SkillListing {
     skills: Vec<carter_app_core::SkillRow>,
     /// 全局开关（`[skills].enabled`）。关掉时整个技能目录都不加载。
     globally_enabled: bool,
+    /// 扫描根一览：本地目录排第一，然后是附加路径（顺序 = 优先级）。
+    roots: Vec<skills::SkillRootRow>,
+    /// Claude Code / Codex 这类默认位置的快捷选项。
+    presets: Vec<skills::SkillPreset>,
+    /// 被按名字忽略的外部技能。
+    ///
+    /// 单独回传是因为：一个被忽略的名字可能**再也没有对应的行**（它被同名技能遮蔽，
+    /// 或者它所在的那条扫描路径被移除了）。那时候这是用户撤销它的唯一入口。
+    ignored_skills: Vec<String>,
 }
 
 #[tauri::command]
 fn list_skills(shell: State<'_, Arc<AppShell>>) -> SkillListing {
+    let settings = AppSettings::load();
+    let scan = Scan::from_settings(&settings);
     SkillListing {
-        skills: skills::list(),
+        skills: skills::list(&scan),
         globally_enabled: shell.config.load().skills.enabled,
+        roots: skills::roots(&scan),
+        presets: skills::presets(&scan),
+        ignored_skills: settings.ignored_skills.clone(),
     }
 }
 
 #[tauri::command]
 fn read_skill(name: String) -> Result<String, String> {
-    skills::read(&name)
+    skills::read(&Scan::from_settings(&AppSettings::load()), &name)
 }
 
 #[tauri::command]
 fn save_skill(shell: State<'_, Arc<AppShell>>, draft: SkillDraft) -> Result<(), String> {
-    skills::save(&draft)?;
+    skills::save(&Scan::from_settings(&AppSettings::load()), &draft)?;
     // 技能目录会进系统提示，所以要让跑着的会话下一轮重算 —— 发个事件叫前端刷新，
     // 会话侧本来每轮都会重读技能目录。
     shell.emit(AppEvent::ConfigChanged);
     Ok(())
 }
 
+/// 启停单个技能。本地的搬目录、外部的改忽略名单（分派在 `skills::set_enabled` 里）。
+///
+/// 回传新的设置：外部技能的开关写的是 `ignored_skills`，而前端 store 里那份设置是
+/// 旧的。不回传的话，下一次改主题（`set_app_settings` 是**整体覆盖写入**）会把刚关掉
+/// 的外部技能又打开。
+/// `external` 是**点的是哪一行**（界面上那个 `readonly`）：本地技能停用后，外部的同名
+/// 技能会顶上来，那时两行同名，能区分它们的只有来源 —— 按名字猜会让「点外部那一行」
+/// 变成点了没反应（本地目录此刻正好不在启用侧，搬目录那条路会直接返回 Ok）。
 #[tauri::command]
-fn toggle_skill(shell: State<'_, Arc<AppShell>>, name: String, enabled: bool) -> Result<(), String> {
-    skills::set_enabled(&name, enabled)?;
+fn toggle_skill(
+    shell: State<'_, Arc<AppShell>>,
+    name: String,
+    enabled: bool,
+    external: bool,
+) -> Result<AppSettings, String> {
+    let mut settings = AppSettings::load();
+    let scan = Scan::from_settings(&settings);
+    if skills::set_enabled(&mut settings, &scan, &name, enabled, external)? {
+        settings.save()?;
+    }
     shell.emit(AppEvent::ConfigChanged);
-    Ok(())
+    Ok(settings)
 }
 
 #[tauri::command]
 fn delete_skill(shell: State<'_, Arc<AppShell>>, name: String) -> Result<(), String> {
-    skills::delete(&name)?;
+    skills::delete(&Scan::from_settings(&AppSettings::load()), &name)?;
     shell.emit(AppEvent::ConfigChanged);
     Ok(())
 }
@@ -559,6 +590,30 @@ fn delete_skill(shell: State<'_, Arc<AppShell>>, name: String) -> Result<(), Str
 #[tauri::command]
 fn set_skills_enabled(shell: State<'_, Arc<AppShell>>, enabled: bool) -> Result<(), String> {
     config_edit::set_skills_enabled_reload(shell.inner(), enabled)
+}
+
+/// 加一条技能扫描路径（Claude Code / Codex 的默认位置，或任意自定义父目录）。
+///
+/// 存进 `~/.carter-app/settings.json` 而不是 `~/.carter/config.toml`：carter 0.1.4 的
+/// `[skills]` 只有一个 `enabled`，写个 CLI 不认的 `paths` 进去等于让配置文件说谎。
+///
+/// 回传新的设置，理由同 [`toggle_skill`]。
+#[tauri::command]
+fn add_skill_root(shell: State<'_, Arc<AppShell>>, path: String) -> Result<AppSettings, String> {
+    let mut settings = AppSettings::load();
+    skills::add_root(&mut settings, &path)?;
+    settings.save()?;
+    shell.emit(AppEvent::ConfigChanged);
+    Ok(settings)
+}
+
+#[tauri::command]
+fn remove_skill_root(shell: State<'_, Arc<AppShell>>, path: String) -> Result<AppSettings, String> {
+    let mut settings = AppSettings::load();
+    skills::remove_root(&mut settings, &path)?;
+    settings.save()?;
+    shell.emit(AppEvent::ConfigChanged);
+    Ok(settings)
 }
 
 // ---------------------------------------------------------------------------
@@ -798,6 +853,8 @@ pub fn run() {
             toggle_skill,
             delete_skill,
             set_skills_enabled,
+            add_skill_root,
+            remove_skill_root,
             // MCP
             list_mcp_servers,
             save_mcp_server,

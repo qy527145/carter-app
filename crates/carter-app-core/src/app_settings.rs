@@ -23,6 +23,26 @@ pub struct AppSettings {
     pub disabled_tools: Vec<String>,
     /// 侧栏宽度（像素）。
     pub sidebar_width: u32,
+    /// 额外的技能扫描**父目录**（规范化后的绝对路径）。
+    ///
+    /// 技能从 `~/.carter/skills` 与这些目录**取并集**，本地优先。加进来的典型是
+    /// Claude Code（`~/.claude/skills`）与 Codex（`~/.codex/skills`）的默认位置。
+    ///
+    /// 存**绝对路径**而不是 `~` 原文：展开发生在「加入」那一刻，之后这个字符串
+    /// 就是纯粹的数据，不需要在读的每一处都记得展开一次（漏一处就是「路径明明对、
+    /// 技能却不见了」）。
+    pub skill_roots: Vec<String>,
+    /// 按名字忽略的技能。**只作用于外部扫描路径**。
+    ///
+    /// 为什么不能拿它管本地技能：本地技能已经有自己的开关机制（目录在
+    /// `skills/` 与 `skills.disabled/` 之间搬，文件管理器里看得见）。两套机制混在
+    /// 一起，就会出现「文件明明在 `~/.carter/skills/pdf/`、技能却不加载」这种隐形
+    /// 状态 —— 那正是 `skills.rs` 模块头一直在骂的那类错误。
+    ///
+    /// 为什么需要它：外部技能目录属于别的工具（改不得、也删不得），而并集会把那边
+    /// 的技能一次性全塞进每一轮请求的系统提示。想挑几个用，就只有「按名字忽略」
+    /// 这一条路可走。
+    pub ignored_skills: Vec<String>,
 }
 
 impl Default for AppSettings {
@@ -31,6 +51,8 @@ impl Default for AppSettings {
             theme: "dark".into(),
             disabled_tools: Vec::new(),
             sidebar_width: 260,
+            skill_roots: Vec::new(),
+            ignored_skills: Vec::new(),
         }
     }
 }
@@ -71,6 +93,35 @@ impl AppSettings {
     pub fn tool_enabled(&self, name: &str) -> bool {
         !self.disabled_tools.iter().any(|d| d == name)
     }
+
+    /// 额外的技能扫描根，按加入顺序（= 优先级）。
+    pub fn skill_root_paths(&self) -> Vec<PathBuf> {
+        self.skill_roots.iter().map(PathBuf::from).collect()
+    }
+
+    /// 这个（外部）技能名是否被忽略。
+    ///
+    /// 大小写敏感：技能名来自 SKILL.md 的 frontmatter，是作者写定的标识，不是路径。
+    pub fn skill_ignored(&self, name: &str) -> bool {
+        self.ignored_skills.iter().any(|n| n == name)
+    }
+
+    /// 记下 / 撤销「忽略这个外部技能名」。返回是否真的改动了。
+    ///
+    /// 用 `retain` + `push` 而不是 toggle：调用方传来的是**目标状态**，重复调用
+    /// （界面重复点、并发写）必须是幂等的。
+    pub fn set_skill_ignored(&mut self, name: &str, ignored: bool) -> bool {
+        let had = self.skill_ignored(name);
+        if ignored == had {
+            return false;
+        }
+        if ignored {
+            self.ignored_skills.push(name.to_string());
+        } else {
+            self.ignored_skills.retain(|n| n != name);
+        }
+        true
+    }
 }
 
 #[cfg(test)]
@@ -95,6 +146,37 @@ mod tests {
         assert_eq!(s.theme, "light");
         assert_eq!(s.sidebar_width, 260, "没写的字段取默认值");
         assert!(s.disabled_tools.is_empty());
+        assert!(s.skill_roots.is_empty(), "新增的扫描路径字段要能缺省");
+        assert!(s.ignored_skills.is_empty());
+    }
+
+    /// 忽略名单按**目标状态**写，重复调用幂等 —— 界面重复点、或者别的页面
+    /// 并发写的时候，不能把同一个名字塞进去两次。
+    #[test]
+    fn ignoring_a_skill_is_idempotent_and_reversible() {
+        let mut s = AppSettings::default();
+        assert!(s.set_skill_ignored("pdf", true));
+        assert!(!s.set_skill_ignored("pdf", true), "第二次不该算改动");
+        assert_eq!(s.ignored_skills, vec!["pdf".to_string()]);
+        assert!(s.skill_ignored("pdf"));
+
+        assert!(s.set_skill_ignored("pdf", false));
+        assert!(!s.set_skill_ignored("pdf", false));
+        assert!(!s.skill_ignored("pdf"));
+        assert!(s.ignored_skills.is_empty());
+    }
+
+    #[test]
+    fn skill_root_paths_keeps_the_configured_order() {
+        let s = AppSettings {
+            skill_roots: vec!["C:\\a".into(), "C:\\b".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            s.skill_root_paths(),
+            vec![PathBuf::from("C:\\a"), PathBuf::from("C:\\b")],
+            "顺序就是优先级，不能被重排"
+        );
     }
 
     #[test]
@@ -115,6 +197,8 @@ mod tests {
             theme: "light".into(),
             disabled_tools: vec!["bash".into()],
             sidebar_width: 300,
+            skill_roots: vec!["C:\\scans\\claude".into()],
+            ignored_skills: vec!["pdf".into()],
         };
         s.save_to(&path).unwrap();
 
@@ -122,6 +206,8 @@ mod tests {
         assert_eq!(back.theme, "light");
         assert_eq!(back.disabled_tools, vec!["bash".to_string()]);
         assert_eq!(back.sidebar_width, 300);
+        assert_eq!(back.skill_roots, vec!["C:\\scans\\claude".to_string()]);
+        assert!(back.skill_ignored("pdf"));
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }

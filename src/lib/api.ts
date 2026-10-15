@@ -146,6 +146,14 @@ export type AppSettings = {
   /** 不注册给模型的本地工具名。 */
   disabled_tools: string[];
   sidebar_width: number;
+  /**
+   * 额外的技能扫描父目录（规范化后的绝对路径）。技能从 `~/.carter/skills` 与这些目录
+   * **取并集**，本地优先。改动请走 `addSkillRoot` / `removeSkillRoot` ——
+   * `setAppSettings` 是整体覆盖写入，拿旧值写回会把这些路径抹掉。
+   */
+  skill_roots: string[];
+  /** 按名字忽略的技能。**只作用于外部扫描路径**（本地技能靠搬目录启停）。 */
+  ignored_skills: string[];
 };
 
 export type AppInfo = {
@@ -457,14 +465,59 @@ export type SkillRow = {
   name: string;
   description: string;
   allowed_tools: string[];
+  /** 界面上那个开关的状态：本地技能看目录在哪一侧，外部技能看忽略名单。 */
   enabled: boolean;
+  /** 这一份 `SKILL.md` 的绝对路径。 */
   path: string;
+  /** 这一行来自哪个扫描根（绝对路径）。列表按它分组。 */
+  source: string;
+  /** 外部路径 → `true`：不能编辑、不能删除，开关也只能改忽略名单。 */
+  readonly: boolean;
+  /** 有没有进**并集** —— 也就是模型到底用不用得到它。 */
+  effective: boolean;
+  /** 被同名技能挡住时，指向挡住它的那一份 `SKILL.md`。 */
+  shadowed_by: string | null;
+};
+
+/** 一条扫描路径，附带「为什么它扫到的技能没全生效」的几个计数。 */
+export type SkillRoot = {
+  path: string;
+  /** `local` = 本应用自己的技能目录（不可移除）；`external` = 用户加进来的。 */
+  source: string;
+  exists: boolean;
+  /** 直接子目录数。 */
+  subdirs: number;
+  /** 解析出 `SKILL.md` 的技能数。 */
+  found: number;
+  /** 进了并集的数量。 */
+  effective: number;
+  /** 因为同名被前面的根挡住的数量。 */
+  shadowed: number;
+  /** 因为忽略名单被排掉的数量。 */
+  ignored: number;
+};
+
+/** 快捷选项：别的工具放技能的默认位置。 */
+export type SkillPreset = {
+  id: string;
+  label: string;
+  /** 这个预设包含的全部路径（Codex 是两条，见 `hint`）。 */
+  paths: string[];
+  /** 其中**还没加**的那些 —— 点一下只加这些，于是重复点也不会撞上「已经在列表里」。 */
+  missing: string[];
+  exists: boolean;
+  hint: string;
 };
 
 export type SkillListing = {
   skills: SkillRow[];
   /** 全局开关（`[skills].enabled`）。关掉时整个技能目录都不加载。 */
   globally_enabled: boolean;
+  /** 扫描根一览：本地目录排第一，然后是附加路径（顺序 = 优先级）。 */
+  roots: SkillRoot[];
+  presets: SkillPreset[];
+  /** 被按名字忽略的外部技能。有些名字可能已经没有对应的行了，靠它撤销。 */
+  ignored_skills: string[];
 };
 
 export type SkillDraft = {
@@ -486,9 +539,18 @@ export function saveSkill(draft: SkillDraft): Promise<void> {
   return invoke<void>("save_skill", { draft });
 }
 
-/** 启停单个技能。实现上是把目录在 `skills/` 与 `skills.disabled/` 之间搬。 */
-export function toggleSkill(name: string, enabled: boolean): Promise<void> {
-  return invoke<void>("toggle_skill", { name, enabled });
+/**
+ * 启停单个技能：本地的把目录在 `skills/` 与 `skills.disabled/` 之间搬，
+ * 外部路径的（Claude Code / Codex 那边）只记进忽略名单 —— 本应用不碰别人的目录。
+ *
+ * `external` 必须传**点的是哪一行**（行上的 `readonly`）。本地技能停用后外部的同名技能会
+ * 顶上来，那时两行同名，能区分它们的只有来源。
+ *
+ * 回传新的 `AppSettings`，调用方要 `setSettings` 对齐，否则下一次「改主题」会用
+ * 旧值整体覆盖，把忽略名单清掉。
+ */
+export function toggleSkill(name: string, enabled: boolean, external: boolean): Promise<AppSettings> {
+  return invoke<AppSettings>("toggle_skill", { name, enabled, external });
 }
 
 export function deleteSkill(name: string): Promise<void> {
@@ -497,6 +559,15 @@ export function deleteSkill(name: string): Promise<void> {
 
 export function setSkillsEnabled(enabled: boolean): Promise<void> {
   return invoke<void>("set_skills_enabled", { enabled });
+}
+
+/** 加一条技能扫描路径。回传新的 `AppSettings`（理由同 `toggleSkill`）。 */
+export function addSkillRoot(path: string): Promise<AppSettings> {
+  return invoke<AppSettings>("add_skill_root", { path });
+}
+
+export function removeSkillRoot(path: string): Promise<AppSettings> {
+  return invoke<AppSettings>("remove_skill_root", { path });
 }
 
 // ---------------------------------------------------------------------------

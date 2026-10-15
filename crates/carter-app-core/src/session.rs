@@ -306,10 +306,13 @@ impl SessionCtx {
         self.settings = AppSettings::load();
     }
 
-    /// 当前的系统提示（含技能目录）。技能开关会变，所以每轮重算。
+    /// 当前的系统提示（含技能目录）。技能开关与扫描路径都会变，所以每轮重算。
+    ///
+    /// 技能读的是 `self.settings`（每轮 [`SessionCtx::refresh`] 重读一遍）—— 用户在技能页
+    /// 加了扫描路径，**下一轮就生效**，不需要重开会话。
     fn system(&self, git: Option<&carter::session::GitInfo>) -> Vec<String> {
         let skill_metas = if self.config.skills.enabled {
-            carter::skills::discover(&carter::config::paths::skills_dir())
+            crate::skills::union_metas(&crate::skills::Scan::from_settings(&self.settings))
         } else {
             Vec::new()
         };

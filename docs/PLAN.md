@@ -354,7 +354,7 @@ apilot(后置)    ─┘        ^
 |---|---|---|
 | 渠道管理 | 客户端 SQLite | endpoint + 声明协议 + 模型映射 + `auth_style` + `extra_headers` + 连通性测试。**API key 用系统凭据库**（keyring），不重蹈 apilot 明文落库 |
 | 模型注册表 | `catalog.rs` | models.dev 刷新、别名解析、定价、context window、能力开关 |
-| 技能管理 | `carter::skills::discover` | 列表/编辑/启用/新建，展示 frontmatter 与 `allowed-tools` |
+| 技能管理 | `skills::discover_at` / `union_metas`（多根并集） | 列表/编辑/启用/新建，展示 frontmatter 与 `allowed-tools`；额外的扫描路径（Claude Code / Codex 预设或自定义）取并集，外部路径只读 + 按名忽略 |
 | MCP 管理 | `carter::mcp::McpManager` | server 增删改、连接状态、工具列表与调用测试 |
 | 会话管理 | `~/.carter/projects/*/*.jsonl` + SQLite 索引 | 列表/续聊/fork/重命名/全文搜索/导出 |
 | 工具面板 | `ToolRegistry` | 8 个内置工具开关 + 自定义工具注册（`ToolRegistry::push`，表单编辑 JSON Schema） |
@@ -473,7 +473,7 @@ M8 的移植过程中逐条比对了两版 IR 的表达力。llm_adapt 的 IR �
 | 渠道 | `config_edit` 增删改 `[providers.*]` |
 | 模型 | `catalog` 解出全部 `渠道/模型` 的 models.dev 元数据；增删改 + 设默认 |
 | 工具 | `app_settings` 的工具开关；`tools` 在 carter 装配之后过滤 |
-| 技能 | `skills` 读 / 建 / 改 / 启停（搬目录）/ 删 |
+| 技能 | `skills` 读 / 建 / 改 / 启停（本地的搬目录、外部的记忽略名单）/ 删；扫描路径（多根并集）在 `app_settings` |
 | MCP | `config_edit` 增删改 `[mcp.servers.*]` |
 | 会话 | `sessions` 重命名 / fork / 删除 / 全文搜索 / 导出 |
 
