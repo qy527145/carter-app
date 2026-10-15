@@ -7,6 +7,7 @@ import { useEffect } from "react";
 
 import { ChatView } from "./components/ChatView";
 import { Inspector } from "./components/Inspector";
+import { SidePanel } from "./components/SidePanel";
 import { Sidebar } from "./components/Sidebar";
 import { StatusBar } from "./components/StatusBar";
 import { ToastContainer } from "./components/ui/Toast";
@@ -76,6 +77,7 @@ export default function App() {
           <SettingsPage />
         )}
       </main>
+      <SidePanel />
       <Inspector />
       <ToastContainer />
     </div>

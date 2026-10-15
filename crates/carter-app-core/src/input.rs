@@ -46,11 +46,15 @@ pub struct CommandRow {
 /// `/compact` `/context` `/cost` `/rewind` `/skills` `/mcp` `/resume` 这些要么需要
 /// carter 的内部状态、要么在 GUI 里已经有等价入口（用量在底栏、技能与 MCP 在设置页），
 /// 这里就不列了 —— 列了却按不动，用户会以为坏了。
+///
+/// 表里的每一项在前端 `Composer.tsx::runBuiltin` 都必须有落点（那边是真正执行的地方）。
 const GUI_BUILTINS: &[(&str, &str)] = &[
     ("new", "开启新对话"),
     ("model", "切换模型"),
     ("cwd", "切换工作目录（会新开一个会话）"),
     ("fork", "从当前会话派生一个新会话"),
+    ("btw", "开一个不影响主对话的侧边聊天"),
+    ("goal", "设定/查看长任务目标，模型会自己接着干"),
     ("export", "把当前会话导出到下载目录"),
     ("settings", "打开设置"),
     ("help", "显示可用命令"),
@@ -404,7 +408,7 @@ mod tests {
             assert!(!names.contains(&absent), "`/{absent}` 不该出现在菜单里：{names:?}");
         }
         // 真的能执行的要在。
-        for present in ["new", "model", "cwd", "help"] {
+        for present in ["new", "model", "cwd", "help", "goal", "btw"] {
             assert!(names.contains(&present), "`/{present}` 应当在菜单里：{names:?}");
         }
         assert!(rows.iter().all(|r| r.kind == "builtin"));

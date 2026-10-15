@@ -20,6 +20,7 @@ import {
   FileText,
   LoaderCircle,
   ScanSearch,
+  Target,
   TriangleAlert,
   X,
 } from "lucide-react";
@@ -27,6 +28,7 @@ import {
 import { useStore, type Item, type Turn } from "../store";
 import { AskForm } from "./AskForm";
 import { Composer, MessageImages } from "./Composer";
+import { GoalBar } from "./GoalBar";
 import { Glyph, ServerCard, ToolCard } from "./toolcards/ToolCard";
 import { IconButton } from "./ui/Button";
 import { Banner } from "./ui/Panel";
@@ -137,6 +139,18 @@ function AssistantTurn({
   const items = t.items;
   return (
     <div className="group/msg min-w-0 space-y-2">
+      {/* 自动继续的轮次：用户没说话，是长任务目标推起来的。画一条分隔说明来历 ——
+          不标的话，界面上会看起来像模型自己莫名其妙又说了很长一段。 */}
+      {t.auto && (
+        <div className="flex items-center gap-2 text-[11px] text-dim">
+          <span className="h-px flex-1 bg-edge" />
+          <span className="inline-flex items-center gap-1">
+            <Target size={11} />
+            自动继续
+          </span>
+          <span className="h-px flex-1 bg-edge" />
+        </div>
+      )}
       {items.length === 0 && streaming && (
         <div className="flex items-center gap-2 text-sm text-dim">
           <span className="carter-dots">
@@ -196,6 +210,20 @@ function TurnView({
   return <AssistantTurn turn={turn} isLast={isLast} streaming={streaming} />;
 }
 
+/**
+ * 一段对话的正文。**纯展示**（turns 从参数来，不读 store）—— 主对话与侧边聊天
+ * 共用这一份：两边的事件词汇、item 形状完全相同，各画一遍必然会走样。
+ */
+export function TurnList({ turns, streaming }: { turns: Turn[]; streaming: boolean }) {
+  return (
+    <div className="flex flex-col gap-6">
+      {turns.map((t, i) => (
+        <TurnView key={i} turn={t} isLast={i === turns.length - 1} streaming={streaming} />
+      ))}
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // 列表 + 贴底滚动
 // ---------------------------------------------------------------------------
@@ -220,11 +248,8 @@ function MessageList() {
 
   return (
     <div ref={scrollRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto px-4 py-6">
-      <div className="mx-auto flex max-w-3xl flex-col gap-6">
-        {turns.length === 0 && <EmptyState />}
-        {turns.map((t, i) => (
-          <TurnView key={i} turn={t} isLast={i === turns.length - 1} streaming={streaming} />
-        ))}
+      <div className="mx-auto max-w-3xl">
+        {turns.length === 0 ? <EmptyState /> : <TurnList turns={turns} streaming={streaming} />}
       </div>
     </div>
   );
@@ -368,6 +393,8 @@ export function ChatView() {
       <MessageList />
       <TodoPanel />
       <AskForm />
+      {/* 目标条贴着输入框：它和「我要它干什么」是一件事，读起来是一句话。 */}
+      <GoalBar />
       <Composer />
     </div>
   );

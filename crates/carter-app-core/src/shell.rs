@@ -11,7 +11,9 @@ use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
+use carter::agent::CancelToken;
 use carter::config::Config;
+use carter::provider::WireMessage;
 use carter::registry::ModelInfo;
 
 use crate::protocol::{AppEvent, Command};
@@ -55,14 +57,54 @@ pub struct SessionHandle {
     /// 当前模型。`/model` 切换后会变，界面要能立刻反映。
     pub model: ArcSwap<ModelInfo>,
     pub asks: Arc<AskRegistry>,
+    /// 父会话 id。只有侧边聊天（`/btw`）有 —— 它继承父会话的上下文，
+    /// 父会话一关就该跟着走，否则抽屉里那条对话会孤悬着。
+    pub parent_id: Option<String>,
+    /// 这一份对话**到目前为止**的消息快照，由会话任务在每轮结束时刷新。
+    ///
+    /// 侧边聊天靠它拿父会话的上下文。两条路都走不通所以只能这样：`session::load`
+    /// 会给父会话文件挂上 `Recorder`（侧边的 append 会写进父文件里），而会话文件
+    /// 是惰性建的 —— 一条还没发过消息的新会话根本没有文件。
+    pub history: ArcSwap<Vec<WireMessage>>,
+    /// 中断当前轮。会话任务用它来响应 `Command::Cancel`。
+    pub cancel: CancelToken,
+    /// 关闭整个会话（任务退出、MCP 回收）。与 `cancel` 分开是必须的：
+    /// `cancel` 用完会 `reset()`（见 carter 的 `CancelToken`），拿它兼作关闭信号，
+    /// 用户点一次「停止」就会把会话关掉。
+    pub close: CancelToken,
     /// 只有 crate 内能构造 —— 命令通道的持有者是会话运行器，不该由外部塞进来。
     pub(crate) cmd_tx: mpsc::UnboundedSender<Command>,
 }
 
 impl SessionHandle {
+    pub(crate) fn new(
+        id: String,
+        cwd: PathBuf,
+        model: ModelInfo,
+        parent_id: Option<String>,
+        cmd_tx: mpsc::UnboundedSender<Command>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            id,
+            cwd,
+            model: ArcSwap::from_pointee(model),
+            asks: Arc::new(AskRegistry::default()),
+            parent_id,
+            history: ArcSwap::from_pointee(Vec::<WireMessage>::new()),
+            cancel: CancelToken::new(),
+            close: CancelToken::new(),
+            cmd_tx,
+        })
+    }
+
     /// 投递一条命令。返回 `false` 表示会话任务已经结束。
     pub fn send(&self, cmd: Command) -> bool {
         self.cmd_tx.send(cmd).is_ok()
+    }
+
+    /// 刷新历史快照（只有会话任务会调）。
+    pub fn publish_history(&self, messages: &[WireMessage]) {
+        self.history.store(Arc::new(messages.to_vec()));
     }
 }
 
@@ -120,12 +162,31 @@ impl AppShell {
         }
     }
 
-    /// 关闭某个会话：丢掉待答问题、移出注册表。
+    /// 关闭某个会话：通知它退出、丢掉待答问题、移出注册表。
     ///
-    /// 命令通道随之 drop，会话任务会读到 `None` 自然退出。
+    /// **光从注册表里移除是不够的。** 会话任务自己攥着一个 `Arc<SessionHandle>`
+    /// （它要往里面读 `model`、写 `asks`），那个 `Arc` 又持有 `cmd_tx` 的发送端 ——
+    /// 于是 `cmd_rx.recv()` 永远不会返回 `None`，任务永远等在那儿，`mcp_mgr.shutdown()`
+    /// 也就永远走不到。表现是「关掉的会话其实还在后台活着」。所以这里显式 `close.set()`
+    /// （任务的主循环在等它），再 `cancel.set()` 让正在跑的那一轮立刻断流。
+    ///
+    /// 侧边聊天（`/btw`）是挂在主会话上的，一起关掉。
     pub fn close_session(&self, id: &str) -> bool {
+        // 先收集再关：`iter()` 期间握着分片锁，直接在里面 remove 是自找麻烦。
+        let children: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|e| e.value().parent_id.as_deref() == Some(id))
+            .map(|e| e.key().clone())
+            .collect();
+        for child in children {
+            self.close_session(&child);
+        }
+
         match self.sessions.remove(id) {
             Some((_, handle)) => {
+                handle.close.set();
+                handle.cancel.set();
                 handle.asks.clear();
                 true
             }
@@ -210,5 +271,63 @@ mod tests {
     #[test]
     fn closing_an_unknown_session_is_false_not_an_error() {
         assert!(!shell().close_session("nope"));
+    }
+
+    /// 拿不到 provider 的小测试用模型。`ModelInfo` 只实现了 `Deserialize`，
+    /// 所以从 JSON 造一份最省。
+    fn model() -> ModelInfo {
+        serde_json::from_str(
+            r#"{"provider":"p","api_name":"m","context_window":1000,
+                "max_output_tokens":100,"tokenizer":"t",
+                "pricing":{"input":0.0,"output":0.0}}"#,
+        )
+        .unwrap()
+    }
+
+    fn add(shell: &Arc<AppShell>, id: &str, parent: Option<&str>) -> Arc<SessionHandle> {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let h = SessionHandle::new(
+            id.to_string(),
+            PathBuf::from("."),
+            model(),
+            parent.map(str::to_string),
+            tx,
+        );
+        shell.sessions.insert(id.to_string(), h.clone());
+        h
+    }
+
+    /// 关闭必须是**显式通知**，不能只从注册表里拿掉。
+    ///
+    /// 这条守的是一个真实存在的死结：会话任务自己攥着一个 `Arc<SessionHandle>`，
+    /// 而它持有命令通道的发送端 —— 只 remove 的话 `cmd_rx.recv()` 永远不返回 `None`，
+    /// 任务（连同 MCP 子进程）永远不退出。`/btw` 的「关掉即丢」正是靠这里成立。
+    #[test]
+    fn closing_a_session_signals_its_task_instead_of_just_forgetting_it() {
+        let shell = shell();
+        let h = add(&shell, "m1", None);
+        assert!(!h.close.is_cancelled(), "刚建好时是活的");
+
+        assert!(shell.close_session("m1"));
+        assert!(h.close.is_cancelled(), "任务得知道要退出");
+        assert!(h.cancel.is_cancelled(), "正在跑的那一轮要立刻断流");
+    }
+
+    /// 侧边聊天继承的是主会话的上下文，主会话都没了，它留着没有意义。
+    #[test]
+    fn closing_a_session_takes_its_side_conversations_with_it() {
+        let shell = shell();
+        let main = add(&shell, "m1", None);
+        let side = add(&shell, "side-1", Some("m1"));
+        let other = add(&shell, "m2", None);
+
+        shell.close_session("m1");
+
+        assert!(side.close.is_cancelled(), "侧边要跟着关");
+        assert!(main.close.is_cancelled(), "主会话自己当然也要关");
+        assert!(shell.session("side-1").is_none());
+        assert!(shell.session("m1").is_none());
+        assert!(!other.close.is_cancelled(), "别人的会话不能被误伤");
+        assert!(shell.session("m2").is_some());
     }
 }

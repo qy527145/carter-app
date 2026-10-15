@@ -322,10 +322,17 @@ export function Composer() {
       if (item.insert.startsWith("/")) {
         // 内置命令就地执行，不进文本 —— 它不是给模型看的内容。
         const name = item.insert.slice(1).trim();
-        const builtin = runBuiltin(name, { setNotice, addUserTurn });
-        if (builtin) {
+        const result = runBuiltin(name, "", { setNotice, addUserTurn });
+        if (result === "done") {
           setText("");
           setFileQuery(null);
+          return;
+        }
+        if (result === "needs-args") {
+          // 点击菜单里的 `/goal` 与手打一样：把命令名摆好等用户补目标正文。
+          setText(`/${name} `);
+          setFileQuery(null);
+          focusEnd(taRef.current, name.length + 2);
           return;
         }
         // 自定义命令：把 `/名字 ` 留在输入框里让用户补参数，
@@ -373,6 +380,28 @@ export function Composer() {
 
   const send = () => {
     const t = text.trim();
+    // 打在输入框里的内置命令：**本地执行**，不进对话文本、也不发给模型。
+    //
+    // 之前只有从菜单里**点**才会执行内置命令，手打 `/help` 再回车是把字面量
+    // `/help` 当消息发给模型 —— 模型只能一头雾水地问你想干什么。
+    // 这条检查放在最前面，也是为了 `/goal pause` 这类命令在**生成中**照样能生效
+    // （会话那边对 cancel / 作答 / goal 是即时处理的），否则目标模式跑起来就停不下了。
+    const cmd = builtinOf(t);
+    if (cmd) {
+      const result = runBuiltin(cmd.name, cmd.args, { setNotice, addUserTurn });
+      if (result === "done") {
+        clearInput();
+        return;
+      }
+      if (result === "needs-args") {
+        // 命令想让你把话说完（`/goal` 后面接目标正文）。把命令名摆好、光标放末尾，
+        // 而不是把用户已经打的那几个字发出去。
+        setText(`/${cmd.name} `);
+        setFileQuery(null);
+        focusEnd(taRef.current, cmd.name.length + 2);
+        return;
+      }
+    }
     if ((!t && attachments.length === 0) || !sessionId || streaming || disabled) return;
     // 图片引用拼在文本末尾：carter 在消息文本里认 `[img:...]` 这个形态。
     const payload = [t, ...attachments].filter(Boolean).join("\n");
@@ -384,6 +413,14 @@ export function Composer() {
     const el = taRef.current;
     if (el) el.style.height = "auto";
     ops.send(sessionId, payload).catch((e) => setNotice(String(e)));
+  };
+
+  const clearInput = () => {
+    setText("");
+    setAttachments([]);
+    setFileQuery(null);
+    const el = taRef.current;
+    if (el) el.style.height = "auto";
   };
 
   const cancel = () => {
@@ -661,55 +698,166 @@ function shortenPath(p: string): string {
 // ---------------------------------------------------------------------------
 
 /**
- * 执行一个内置命令。返回 `true` 表示「这个命令我处理了」。
+ * 本应用真能执行的内置命令名。
+ *
+ * 与后端 `crates/carter-app-core/src/input.rs::GUI_BUILTINS` 是同一份名单 ——
+ * 那边决定菜单里显示什么，这边决定打出来能不能执行。多一个少一个都会让
+ * 「菜单里有、打了没用」或反过来。
+ */
+const BUILTIN_NAMES = new Set([
+  "new",
+  "model",
+  "cwd",
+  "fork",
+  "btw",
+  "side",
+  "goal",
+  "export",
+  "settings",
+  "help",
+]);
+
+/**
+ * 把 `/name args` 拆出来，`name` 不是内置命令就返回 null。
+ *
+ * 只认第一个词，且必须是名单里的名字：`/usr/bin/env` 这种路径、以及用户放在
+ * `~/.carter/commands/` 里的自定义命令名都不该在这里被拦下来（它们要么该发给模型，
+ * 要么该由后端展开）。
+ */
+function builtinOf(text: string): { name: string; args: string } | null {
+  if (!text.startsWith("/")) return null;
+  const rest = text.slice(1);
+  const cut = rest.search(/\s/);
+  const name = (cut < 0 ? rest : rest.slice(0, cut)).toLowerCase();
+  if (!BUILTIN_NAMES.has(name)) return null;
+  return { name, args: cut < 0 ? "" : rest.slice(cut + 1).trim() };
+}
+
+/** 执行一个内置命令要用到的几件事（都是 Composer 里的局部函数）。 */
+type BuiltinCtx = {
+  setNotice: (m: string | null) => void;
+  addUserTurn: (t: string) => void;
+};
+
+/**
+ * 内置命令的执行结果。三态而不是 `boolean`：`/goal` 不带参数时要把命令名摆回
+ * 输入框让用户接着打目标正文，那既不是「执行完了」也不是「不认识这条命令」。
+ */
+type BuiltinResult = "done" | "needs-args" | "unhandled";
+
+/**
+ * 执行一个内置命令。
  *
  * 这些命令**不进对话文本** —— 它们不是给模型看的内容。名字与说明来自后端的
  * `GUI_BUILTINS`，那边只列本应用真做得到的，所以这里必须每一项都有着落。
  */
-function runBuiltin(
-  name: string,
-  ctx: { setNotice: (m: string | null) => void; addUserTurn: (t: string) => void },
-): boolean {
+function runBuiltin(name: string, args: string, ctx: BuiltinCtx): BuiltinResult {
   switch (name) {
     case "new":
       ops.newSession();
-      return true;
+      return "done";
     case "fork": {
       const id = useStore.getState().sessionId;
       if (id) void ops.fork(id);
-      return true;
+      return "done";
     }
     case "export": {
       const id = useStore.getState().sessionId;
       if (id) void ops.export_(id, "markdown");
-      return true;
+      return "done";
     }
     case "settings":
       useStore.getState().setView("settings");
-      return true;
+      return "done";
     case "model":
       ctx.setNotice("点输入框下方的模型名即可切换");
-      return true;
+      return "done";
     case "cwd":
       ctx.setNotice("点输入框下方的工作目录即可切换（会新开一个会话）");
-      return true;
+      return "done";
+    case "btw":
+    case "side":
+      // 带上参数的话，那几句话就是侧边聊天的第一问。
+      void ops.openSideChat(args);
+      return "done";
+    case "goal":
+      return runGoal(args, ctx);
     case "help":
       ctx.addUserTurn(HELP_TEXT);
-      return true;
+      return "done";
     default:
-      return false;
+      return "unhandled";
   }
+}
+
+/**
+ * `/goal` 的几种形态。
+ *
+ * **命令不进对话文本**：目标由会话任务处理（改状态、落盘、决定要不要自动继续），
+ * 它不是给模型看的一句话。假发一条用户气泡会让人以为「我说了这句」，而历史里并没有。
+ */
+function runGoal(args: string, ctx: BuiltinCtx): BuiltinResult {
+  const id = useStore.getState().sessionId;
+  if (!id) {
+    ctx.setNotice("会话还没就绪");
+    return "done";
+  }
+  const a = args.trim();
+  if (!a) {
+    // 无参数 = 查看。已有目标时目标条就在输入框上方，这里只需说清怎么改；
+    // 还没有的话把输入框切回 `/goal `，让用户接着打目标正文。
+    if (useStore.getState().goal) {
+      ctx.setNotice("目标在上方那条里。用 `/goal <新的目标>` 改写正文，或点目标条上的按钮。");
+      return "done";
+    }
+    return "needs-args";
+  }
+
+  switch (a.toLowerCase()) {
+    case "clear":
+    case "cancel":
+      ops.goal(id, { type: "clear" });
+      return "done";
+    case "pause":
+      ops.goal(id, { type: "pause" });
+      return "done";
+    case "resume":
+    case "continue":
+      ops.goal(id, { type: "resume" });
+      return "done";
+    case "done":
+    case "complete":
+      ops.goal(id, { type: "complete" });
+      return "done";
+    default:
+      // 其余一律当目标正文。想设一个正文恰好叫 `pause` 的目标？点目标条上的
+      // 编辑按钮 —— 留一个例外比在这里猜「用户是不是想暂停」划算。
+      ops.goal(id, { type: "set", objective: a });
+      return "done";
+  }
+}
+
+/** 把光标放到末尾（插完一段文字之后用）。 */
+function focusEnd(ta: HTMLTextAreaElement | null, pos: number) {
+  if (!ta) return;
+  requestAnimationFrame(() => {
+    ta.focus();
+    ta.setSelectionRange(pos, pos);
+  });
 }
 
 const HELP_TEXT = [
   "可用命令：",
-  "/new      开启新对话",
-  "/model    切换模型（也可以点输入框下方的模型名）",
-  "/cwd      切换工作目录（也可以点输入框下方路径）",
-  "/fork     从当前会话派生新会话",
-  "/export   导出当前会话到下载目录",
-  "/settings 打开设置",
-  "/help     显示这段说明",
+  "/new       开启新对话",
+  "/model     切换模型（也可以点输入框下方的模型名）",
+  "/cwd       切换工作目录（也可以点输入框下方路径）",
+  "/fork      从当前会话派生新会话",
+  "/btw       开一个不影响主对话的侧边聊天（可带上第一句：/btw 这个函数干嘛的）",
+  "/goal      长任务目标：模型停下而目标没做完时会自动继续",
+  "           /goal <目标> 设定    /goal pause | resume | done | clear",
+  "/export    导出当前会话到下载目录",
+  "/settings  打开设置",
+  "/help      显示这段说明",
   "",
   "输入 / 开头会弹出命令菜单，@ 开头会弹出文件引用菜单，图片可以直接粘贴。",
   "另外 ~/.carter/commands/ 里的自定义命令（Markdown）也会出现在菜单里。",

@@ -34,3 +34,11 @@ pub fn settings_path() -> PathBuf {
 pub fn captures_dir() -> PathBuf {
     app_home().join("captures")
 }
+
+/// 长任务目标（`/goal`）的存放目录：一个会话一个文件。
+///
+/// 与 `captures/` 同样的形状，理由也一样：会话 id 本身就是索引键，而且主会话与
+/// 侧边会话可能同时活着 —— 共用一个 `goals.json` 就得处理「读改写」的互相覆盖。
+pub fn goals_dir() -> PathBuf {
+    app_home().join("goals")
+}

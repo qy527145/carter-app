@@ -5,6 +5,7 @@
 // 不需要订阅。`useStore.getState()` 在任何地方都拿得到同一份状态。
 
 import * as api from "./api";
+import type { GoalCommand } from "./api";
 import { useStore } from "../store";
 import { toastError, toastOk } from "./toast";
 
@@ -146,6 +147,77 @@ export async function startInDirectory(cwd: string): Promise<void> {
     toastOk(`已在 ${cwd} 新开会话`);
   } catch (e) {
     toastError(e);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 长任务目标（/goal）
+// ---------------------------------------------------------------------------
+
+/**
+ * 投递一个 `/goal` 动作。
+ *
+ * **不走 `send`**：目标不是发给模型的内容，它由会话任务自己处理（改状态、落盘、
+ * 再决定要不要自动继续）。走 `send` 的话它会变成一条用户消息进历史。
+ */
+export function goal(sessionId: string, action: GoalCommand): void {
+  api.sendCommand(sessionId, { type: "goal", action }).catch((e) => {
+    // 会话已经结束这类失败要说出来 —— 静默失败会让用户以为目标设上了。
+    toastError(e);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// 侧边聊天（/btw）
+// ---------------------------------------------------------------------------
+
+/**
+ * 开一个侧边聊天，可选地立刻问第一句。
+ *
+ * 后端起的是一条**不落盘**的会话（继承当前对话的历史作为参考，关掉即丢），
+ * 事件按 `session_id` 分到 `side` 上（见 `lib/events.ts`）。
+ *
+ * 已经开着的话就把话发给它 —— 抽屉只有一个，重开一个会把手上那条对话丢掉。
+ */
+export async function openSideChat(text?: string): Promise<void> {
+  const store = useStore.getState();
+  const parent = store.sessionId;
+  if (!parent) {
+    toastError("会话还没就绪 —— 点「新对话」开一条再试");
+    return;
+  }
+  const ask = text?.trim();
+  const existing = store.side;
+  if (existing) {
+    if (ask) {
+      useStore.getState().addSideUserTurn(ask);
+      await send(existing.sessionId, ask);
+    }
+    return;
+  }
+  try {
+    const side = await api.createSideSession(parent);
+    // 先落地再发消息：事件按 session_id 路由，`side` 还是 null 的话，
+    // 这一轮的增量会被当成「别人的会话」丢掉。
+    useStore.getState().beginSide(side);
+    if (ask) {
+      useStore.getState().addSideUserTurn(ask);
+      await send(side.session_id, ask);
+    }
+  } catch (e) {
+    toastError(e);
+  }
+}
+
+/** 关掉侧边聊天。后端那条会话不落盘，关掉之后连痕迹都不该留。 */
+export async function closeSideChat(): Promise<void> {
+  const side = useStore.getState().side;
+  useStore.getState().closeSide();
+  if (!side) return;
+  try {
+    await api.closeSession(side.sessionId);
+  } catch {
+    /* 已经自己结束了 */
   }
 }
 

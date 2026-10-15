@@ -92,6 +92,8 @@ struct CreatedSession {
     model: String,
     cwd: String,
     history: Vec<MessageView>,
+    /// 这条会话现有的长任务目标（`/goal`）。续接时从盘上读回来。
+    goal: Option<carter_app_core::GoalView>,
 }
 
 /// 新建或续接一个会话，并把已有历史一并带回。
@@ -121,6 +123,35 @@ async fn create_session(
         model: handle.model.load().api_name.clone(),
         cwd: handle.cwd.to_string_lossy().to_string(),
         history: started.history,
+        goal: started.goal,
+    })
+}
+
+#[derive(Serialize)]
+struct CreatedSide {
+    session_id: String,
+    model: String,
+    cwd: String,
+    /// 继承下来的历史（已截到干净边界）。界面把它折叠在顶部，让用户知道
+    /// 「这条会话看得见主对话说到哪了」。
+    inherited: Vec<MessageView>,
+}
+
+/// 开一个侧边聊天（`/btw`）：继承主会话上下文、不落盘、关掉即丢。
+///
+/// **也必须是 `async fn`**：理由同 `create_session`。
+#[tauri::command]
+async fn create_side_session(
+    shell: State<'_, Arc<AppShell>>,
+    parent_session_id: String,
+) -> Result<CreatedSide, String> {
+    let started =
+        carter_app_core::start_side_session(shell.inner().clone(), &parent_session_id)?;
+    Ok(CreatedSide {
+        session_id: started.handle.id.clone(),
+        model: started.model,
+        cwd: started.cwd.to_string_lossy().to_string(),
+        inherited: started.inherited,
     })
 }
 
@@ -171,6 +202,8 @@ fn delete_session(shell: State<'_, Arc<AppShell>>, session_id: String) -> Result
     // 先关会话再删文件。会话任务持有同一份会话文件的 Recorder，不先关掉的话
     // 它下一轮 append 会把文件重新写出来 —— 表现为「删了又回来了」。
     shell.close_session(&session_id);
+    // 目标也一并清掉：那个目录是按会话 id 分文件的，不删就会跟着历史会话一直长。
+    carter_app_core::goal::remove(&session_id);
     sessions::delete(&session_id)
 }
 
@@ -736,6 +769,7 @@ pub fn run() {
             set_app_settings,
             // 会话
             create_session,
+            create_side_session,
             send_command,
             close_session,
             list_sessions,

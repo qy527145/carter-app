@@ -23,7 +23,7 @@
 //! 路径实际上到不了；真到了再补。
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Instant;
 
 use serde_json::Value;
@@ -57,6 +57,13 @@ pub struct Recorded {
     inner: Arc<dyn Tool>,
     tx: mpsc::UnboundedSender<ToolEvent>,
     seq: Arc<AtomicU64>,
+    /// 会话级的调用计数。runner 在一轮前后各读一次，用来判断「这一轮模型到底
+    /// 动没动手」—— 长任务目标下的空转检测靠它（见 `goal.rs::decide_after_turn`）。
+    ///
+    /// 放在这里而不是让 runner 去数事件：三条事件通道都被 `forward_events` 任务
+    /// 占着，runner 自己看不到工具事件；而这里是**每个**工具（含 MCP、
+    /// 含 `goal_update`）的必经之路。
+    activity: Arc<AtomicU32>,
 }
 
 impl Recorded {
@@ -64,8 +71,14 @@ impl Recorded {
         inner: Arc<dyn Tool>,
         tx: mpsc::UnboundedSender<ToolEvent>,
         seq: Arc<AtomicU64>,
+        activity: Arc<AtomicU32>,
     ) -> Self {
-        Self { inner, tx, seq }
+        Self {
+            inner,
+            tx,
+            seq,
+            activity,
+        }
     }
 }
 
@@ -99,6 +112,7 @@ impl Tool for Recorded {
     async fn execute(&self, args: Value) -> ToolResult {
         let call_id = format!("t{}", self.seq.fetch_add(1, Ordering::Relaxed));
         let started = Instant::now();
+        self.activity.fetch_add(1, Ordering::Relaxed);
 
         // 先发「开始」再执行：长时间跑的命令（构建、测试）应当立刻在界面上出现。
         let _ = self.tx.send(ToolEvent::Started {
@@ -143,12 +157,18 @@ mod tests {
         }
     }
 
+    /// 每个测试各用一份计数，免得并行跑时互相看见对方的数字。
+    fn activity() -> Arc<AtomicU32> {
+        Arc::new(AtomicU32::new(0))
+    }
+
     fn recorded(name: &'static str) -> (Arc<dyn Tool>, mpsc::UnboundedReceiver<ToolEvent>) {
         let (tx, rx) = mpsc::unbounded_channel();
         let t: Arc<dyn Tool> = Arc::new(Recorded::new(
             Arc::new(Echo(name)),
             tx,
             Arc::new(AtomicU64::new(0)),
+            activity(),
         ));
         (t, rx)
     }
@@ -212,6 +232,7 @@ mod tests {
             Arc::new(Big),
             tx,
             Arc::new(AtomicU64::new(0)),
+            activity(),
         ));
         let _ = t.execute(json!({})).await;
         let _ = rx.recv().await;
@@ -230,13 +251,20 @@ mod tests {
     async fn concurrent_calls_get_distinct_ids() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let seq = Arc::new(AtomicU64::new(0));
+        let act = activity();
         let mk = |name: &'static str| -> Arc<dyn Tool> {
-            Arc::new(Recorded::new(Arc::new(Echo(name)), tx.clone(), seq.clone()))
+            Arc::new(Recorded::new(
+                Arc::new(Echo(name)),
+                tx.clone(),
+                seq.clone(),
+                act.clone(),
+            ))
         };
         let a = mk("grep");
         let b = mk("glob");
         let (ra, rb) = tokio::join!(a.execute(json!({})), b.execute(json!({})));
         assert!(ra.ok && rb.ok);
+        assert_eq!(act.load(Ordering::Relaxed), 2, "两次调用都要被计到");
 
         let mut ids = Vec::new();
         while let Ok(ev) = rx.try_recv() {

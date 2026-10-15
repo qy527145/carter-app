@@ -49,10 +49,11 @@
 pub mod ask_user;
 pub mod bash;
 pub mod cwd;
+pub mod goal_update;
 pub mod record;
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU32, AtomicU64};
 
 use carter::agent::bootstrap::build_tools as carter_build_tools;
 use carter::agent::{CancelToken, TaskTool, ToolFactory};
@@ -63,15 +64,17 @@ use carter::tools::{Tool, ToolRegistry};
 use tokio::sync::mpsc;
 
 use crate::app_settings::AppSettings;
+use crate::goal::GoalSignal;
 use ask_user::{AskRequest, AskUserTool};
 use bash::PlatformBash;
 use cwd::{CwdScoped, ProjectMemoryGuard};
+use goal_update::GoalUpdateTool;
 use record::{Recorded, ToolEvent};
 
 /// 装配工具池需要的一整套东西。
 ///
-/// 打包成结构体是因为裸参数有九个，而其中四个在重建 `task` 时要各用两次 ——
-/// 九个位置参数摆在那里，早晚会有人传错顺序。
+/// 打包成结构体是因为裸参数有十几个，而其中四个在重建 `task` 时要各用两次 ——
+/// 那点位置参数摆在那里，早晚会有人传错顺序。
 pub struct ToolBuildArgs {
     pub provider: Arc<dyn LlmProvider>,
     pub model: ModelInfo,
@@ -86,6 +89,12 @@ pub struct ToolBuildArgs {
     pub tool_tx: mpsc::UnboundedSender<ToolEvent>,
     /// 提问请求的出口。`None` = 不给这个会话注册 `ask_user_question`。
     pub ask_tx: Option<mpsc::UnboundedSender<AskRequest>>,
+    /// 是否挂上 `task`（派生子 agent 的入口）。侧边聊天不挂。
+    pub include_task: bool,
+    /// 长任务目标的信号格子。恒常传 —— `goal_update` 是恒常注册的，见 `goal_update.rs`。
+    pub goal_signal: Arc<GoalSignal>,
+    /// 工具调用计数。runner 靠它判断「这一轮到底动没动手」（自动继续的空转检测）。
+    pub activity: Arc<AtomicU32>,
 }
 
 /// 按设置挑出要保留的工具（不含 `task`、不含 `ask_user_question`）。
@@ -119,6 +128,9 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
         skills_enabled,
         tool_tx,
         ask_tx,
+        include_task,
+        goal_signal,
+        activity,
     } = args;
 
     // ui_tx 传 None：carter 的 ask_user 会一并注册进来，而我们用自己的那个
@@ -138,7 +150,12 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
     let mut tools = ToolRegistry::empty();
 
     let push = |t: Arc<dyn Tool>, tools: &mut ToolRegistry| {
-        tools.push(Arc::new(Recorded::new(t, tool_tx.clone(), seq.clone())));
+        tools.push(Arc::new(Recorded::new(
+            t,
+            tool_tx.clone(),
+            seq.clone(),
+            activity.clone(),
+        )));
     };
 
     for t in filter_tools(&full, settings) {
@@ -166,18 +183,25 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
         }
     }
 
-    // 子 agent 工厂：产出「主 registry 中的所有工具（去掉 task）」。
+    // 子 agent 工厂：产出「主 registry 中的所有工具（去掉 task）」。这个快照必须在
+    // 挂 `goal_update` **之前**取，否则子 agent 也拿到 goal_update，一次
+    // status = completed 就能把父会话的目标标完成 —— 而这种错不会报错，只会让
+    // 长任务悄悄停下。
     let snapshot: Vec<Arc<dyn Tool>> = tools.tools().to_vec();
-    let factory: ToolFactory = Arc::new(move || snapshot.clone());
-    tools.push(Arc::new(TaskTool::new(
-        provider,
-        model,
-        agent_cfg,
-        base_system,
-        cancel,
-        factory,
-        0, // 主 agent depth = 0
-    )));
+    if include_task {
+        let factory: ToolFactory = Arc::new(move || snapshot.clone());
+        tools.push(Arc::new(TaskTool::new(
+            provider,
+            model,
+            agent_cfg,
+            base_system,
+            cancel,
+            factory,
+            0, // 主 agent depth = 0
+        )));
+    }
+
+    push(Arc::new(GoalUpdateTool::new(goal_signal)), &mut tools);
 
     tools
 }

@@ -73,6 +73,25 @@ pub enum Command {
     /// `answers` 与问题一一对应，每项是该问题选中的标签（或自由输入）。
     /// 空数组 = 这一问被跳过。
     AnswerForm { id: u64, answers: Vec<Vec<String>> },
+    /// 长任务目标（`/goal`）的操作。状态转移规则见 `goal.rs::apply_action`。
+    Goal { action: GoalCommand },
+}
+
+/// `/goal` 的具体动作。
+///
+/// 名字与 CLI 风格一致（`/goal pause` 之类），但这里刻意做成结构化枚举而不是
+/// 「把用户打的字符串传下去自己解析」—— 解析在输入框那一侧做一次就够，
+/// 后端不该认识「pause」这种拼写。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum GoalCommand {
+    /// 设定 / 改写目标正文。
+    Set { objective: String },
+    Clear,
+    Pause,
+    Resume,
+    /// 标记完成（用户在目标条上点「完成」）。
+    Complete,
 }
 
 // ---------------------------------------------------------------------------
@@ -136,6 +155,11 @@ pub enum SessionEvent {
     },
     /// todo 列表整表更新。用于底栏那条进度提示。
     TodoUpdated { todos: Vec<TodoView> },
+    /// 长任务目标变了（设定 / 暂停 / 恢复 / 完成 / 清除）。`None` = 已经没有目标。
+    ///
+    /// 会话刚建好时也会发一次：界面据此画出目标条，否则重启后目标要等下一次变化
+    /// 才冒出来。
+    Goal { goal: Option<GoalView> },
     /// 模型在等用户回答问题。前端渲染成表单，用 `answer_form` 回。
     AskForm { id: u64, questions: Vec<AskQuestion> },
     /// 一轮的用量与成本。
@@ -158,6 +182,21 @@ pub struct TodoView {
     pub active_form: String,
     /// `pending` | `in_progress` | `completed`
     pub status: String,
+}
+
+/// 长任务目标的界面视图。
+///
+/// `status` 是机器用的（`active` / `paused` / `completed` / `blocked`），
+/// `status_label` 是给人看的 —— 中文标签由后端给，免得前端再维护一份映射。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GoalView {
+    pub objective: String,
+    pub status: String,
+    pub status_label: String,
+    /// 已经自动继续了多少轮。
+    pub auto_continues: u32,
+    /// 模型在 `goal_update` 里写的说明（被卡住 / 需要拍板时界面要显出来）。
+    pub note: Option<String>,
 }
 
 /// 用量视图。

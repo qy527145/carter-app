@@ -44,6 +44,8 @@ export type SessionEvent =
       elapsed_ms: number;
     }
   | { type: "todo_updated"; todos: TodoView[] }
+  /** 长任务目标变了（设定 / 暂停 / 恢复 / 完成 / 清除）。`null` = 已经没有目标。 */
+  | { type: "goal"; goal: GoalView | null }
   | { type: "ask_form"; id: number; questions: AskQuestion[] }
   | { type: "turn_usage"; usage: UsageView; cost: number; model: string }
   | { type: "notice"; message: string }
@@ -109,7 +111,28 @@ export type Command =
    * `answers` 与问题一一对应，每项是该问题选中的标签（含自由输入）。
    * 空数组 = 这一问被跳过。
    */
-  | { type: "answer_form"; id: number; answers: string[][] };
+  | { type: "answer_form"; id: number; answers: string[][] }
+  /** 长任务目标（`/goal`）的操作。 */
+  | { type: "goal"; action: GoalCommand };
+
+/** `/goal` 的动作。拼写由输入框那一侧解析一次，后端只认结构化枚举。 */
+export type GoalCommand =
+  | { type: "set"; objective: string }
+  | { type: "clear" }
+  | { type: "pause" }
+  | { type: "resume" }
+  | { type: "complete" };
+
+/** 长任务目标的界面视图。`status_label` 是后端给的中文标签，前端不再维护一份映射。 */
+export type GoalView = {
+  objective: string;
+  status: "active" | "paused" | "completed" | "blocked";
+  status_label: string;
+  /** 已经自动继续了多少轮。 */
+  auto_continues: number;
+  /** 模型在 `goal_update` 里写的说明（被卡住 / 需要拍板时界面要显出来）。 */
+  note: string | null;
+};
 
 // ---------------------------------------------------------------------------
 // 应用信息与设置
@@ -154,6 +177,17 @@ export type CreatedSession = {
   model: string;
   cwd: string;
   history: MessageView[];
+  /** 这条会话现有的长任务目标。 */
+  goal: GoalView | null;
+};
+
+/** 侧边聊天（`/btw`）：继承主会话上下文、不落盘、关掉即丢。 */
+export type CreatedSide = {
+  session_id: string;
+  model: string;
+  cwd: string;
+  /** 继承下来的历史（已截到干净边界）。 */
+  inherited: MessageView[];
 };
 
 export type SessionRow = {
@@ -209,6 +243,16 @@ export function sendCommand(sessionId: string, command: Command): Promise<void> 
 
 export function closeSession(sessionId: string): Promise<void> {
   return invoke<void>("close_session", { sessionId });
+}
+
+/**
+ * 开一个侧边聊天（`/btw`）。
+ *
+ * 后端起一条**不落盘**的会话：继承主会话的历史作为参考，关掉就没了。
+ * 一个主会话同时只允许一个，重复调用会 reject 一句说明。
+ */
+export function createSideSession(parentSessionId: string): Promise<CreatedSide> {
+  return invoke<CreatedSide>("create_side_session", { parentSessionId });
 }
 
 export function listSessions(all = false): Promise<SessionRow[]> {

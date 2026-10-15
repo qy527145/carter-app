@@ -1,8 +1,8 @@
 //! 把 Tauri 的事件总线接进 store。
 //!
-//! 后端把所有会话的事件都广播到同一条通道上，所以这里要按 `session_id` 过滤：
-//! 只处理属于当前会话的事件，别的会话（同时跑着的另一个对话）的事件直接丢掉，
-//! 否则两个对话的增量会混进同一个气泡。
+//! 后端把所有会话的事件都广播到同一条通道上，所以这里要按 `session_id` 分流：
+//! 属于主对话的走 `applyEvent`，属于侧边聊天（`/btw`）的走 `applySideEvent`，
+//! 其余的（同时跑着的别的对话）直接丢掉 —— 混进同一个气泡是最难查的一类 bug。
 
 import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
@@ -26,12 +26,16 @@ export function useAppEvents() {
         return;
       }
       if (payload.type === "session") {
-        // 还没连上会话、或事件属于别的会话 —— 都不是当前界面该关心的。
-        if (state.sessionId === null || payload.session_id !== state.sessionId) return;
-        state.applyEvent(payload.event);
-      } else {
-        state.setNotice(payload.message);
+        if (state.sessionId !== null && payload.session_id === state.sessionId) {
+          state.applyEvent(payload.event);
+        } else if (state.side !== null && payload.session_id === state.side.sessionId) {
+          state.applySideEvent(payload.event);
+        }
+        // 两者都不是：别的会话的事件。还没连上会话、或事件属于已关闭的对话时
+        // 都会走到这里，静默丢掉即可。
+        return;
       }
+      state.setNotice(payload.message);
     }).then((fn) => {
       if (cancelled) fn();
       else unlisten = fn;

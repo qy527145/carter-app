@@ -15,24 +15,32 @@
 //! 中间那层转发任务做三件界面关心的事：给工具调用补 id（carter 的 `UiEvent` 不带 id，
 //! 但并行工具调用必须能配对）、把 `ask_user` 的 oneshot 发送端取出来存住、
 //! 把 carter 的事件词汇翻译成 IPC 词汇。
+//!
+//! ## 长任务目标（`/goal`）住在哪
+//!
+//! 目标的**判定**在 `goal.rs`（纯函数），**执行**在这里：一轮跑完后问
+//! `decide_after_turn`，要继续就再追加一条「继续」消息接着跑。所以「跑一轮」被抽成了
+//! [`Runner::run_one_turn`]，用户发消息与自动继续走的是同一条路 —— 两条路各写一遍的话，
+//! 自动继续迟早会漏掉某一轮里新加的东西（工具开关、热重载、抓包…）。
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
-use arc_swap::ArcSwap;
 use tokio::sync::mpsc;
 
-use carter::agent::{
-    run_turn, CancelToken, CompactModel, RunOptions, Thread, UiEvent, UiSink,
-};
+use carter::agent::{run_turn, CompactModel, RunOptions, Thread, UiEvent, UiSink};
 use carter::config::Config;
 use carter::hooks::HookRegistry;
 use carter::registry::{fetch, ModelInfo};
 use carter::session::{self, SessionOpts};
+use carter::tools::Tool;
 
 use crate::app_settings::AppSettings;
-use crate::protocol::{AppEvent, Command, SessionEvent, TodoView, UsageView};
+use crate::goal::{self, Goal, GoalSignal, GoalStatus, TurnOutcome};
+use crate::protocol::{AppEvent, Command, GoalCommand, GoalView, SessionEvent, TodoView, UsageView};
 use crate::shell::{AppShell, AskRegistry, SessionHandle};
 use crate::tools::ask_user::AskRequest;
 use crate::tools::build_tools;
@@ -56,6 +64,11 @@ pub struct SessionOptions {
 pub struct StartedSession {
     pub handle: Arc<SessionHandle>,
     pub history: Vec<crate::view::MessageView>,
+    /// 这条会话现有的长任务目标（续接时从盘上读回来）。
+    ///
+    /// 目标变化本来靠事件推，但 `ready` / `goal` 事件可能在界面挂上监听之前就发出去了
+    /// （`create_session` 是 await 的，事件比 `beginSession` 先到）—— 返回值是那条路的兜底。
+    pub goal: Option<GoalView>,
 }
 
 /// 新建 / 续接一个会话。返回的句柄立即可以投递命令。
@@ -108,15 +121,31 @@ pub fn start_session(
     };
 
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-    let handle = Arc::new(SessionHandle {
-        id: meta.id.clone(),
-        cwd: opts.cwd.clone(),
-        model: ArcSwap::from_pointee(model.clone()),
-        asks: Arc::new(AskRegistry::default()),
+    let handle = SessionHandle::new(
+        meta.id.clone(),
+        opts.cwd.clone(),
+        model.clone(),
+        None,
         cmd_tx,
-    });
+    );
+    // 侧边聊天要靠这份快照拿父会话的上下文，所以一开始就得有值。
+    handle.publish_history(&thread.messages);
     shell.sessions.insert(meta.id.clone(), handle.clone());
     let history = crate::view::to_views(&thread.messages);
+
+    // 盘上的目标是 `active` 的话，降级成 `paused`：用户关掉应用时它还在跑，
+    // 原样恢复就等于人不在的时候模型自己开工。
+    let (goal, downgraded) = match goal::load(&meta.id) {
+        Some(g) => {
+            let (g, downgraded) = goal::on_session_start(g);
+            if downgraded {
+                let _ = goal::save(&meta.id, &g);
+            }
+            (Some(g), downgraded)
+        }
+        None => (None, false),
+    };
+    let goal_view = goal.as_ref().map(goal::view);
 
     let ctx = SessionCtx {
         shell: shell.clone(),
@@ -128,13 +157,119 @@ pub fn start_session(
         resumed,
         cwd: opts.cwd,
         unsupported_server_tools,
-        capture: capture_store,
+        capture: Some(capture_store),
+        include_task: true,
     };
-    tokio::spawn(runner(ctx, thread, meta, cmd_rx));
-    Ok(StartedSession { handle, history })
+    let runner = Runner {
+        ctx,
+        thread,
+        meta,
+        cmd_rx,
+        ui_tx: None,
+        tool_tx: None,
+        ask_tx: None,
+        mcp_tools: Vec::new(),
+        activity: Arc::new(AtomicU32::new(0)),
+        goal_signal: Arc::new(GoalSignal::default()),
+        goal,
+        downgraded_goal: downgraded,
+        queued: VecDeque::new(),
+        // 主会话的系统提示每轮现算（技能会变、目标会变），见 `run_one_turn`。
+        fixed_system: None,
+    };
+    tokio::spawn(runner.run());
+    Ok(StartedSession {
+        handle,
+        history,
+        goal: goal_view,
+    })
 }
 
-/// 会话任务需要的一整套东西。打包成一个结构体是为了 `runner` 的签名不至于十来个参数。
+/// 侧边聊天（`/btw`）要一个精简版会话，见 [`crate::side`]。
+///
+/// 这里把 `start_session` 里那些侧边不需要的东西摊开成显式开关，而不是让 `side.rs`
+/// 复制一遍装配流程 —— 会话的装配细节（provider 解析、抓包钩子、MCP）以后还会变，
+/// 复制一份就意味着以后要改两处。
+pub(crate) struct SideWiring {
+    pub shell: Arc<AppShell>,
+    pub cwd: PathBuf,
+    pub model: ModelInfo,
+    pub provider: Arc<dyn carter::provider::LlmProvider>,
+    pub config: Arc<Config>,
+    pub unsupported_server_tools: Vec<String>,
+    /// 已经种好历史、**没有挂 recorder** 的 `Thread`（见 `side.rs::seed_thread`）。
+    pub thread: Thread,
+    /// 系统提示（父会话的 + 侧边那一段说明）。每轮复用同一份 —— 侧边会话没有
+    /// 会变的东西（技能开关、目标状态都不影响它）。
+    pub system: Vec<String>,
+}
+
+/// 起一个不落盘的侧边会话。返回的句柄照常可以投递命令。
+pub(crate) fn start_side(w: SideWiring, id: String, parent_id: String) -> Arc<SessionHandle> {
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    let handle = SessionHandle::new(
+        id.clone(),
+        w.cwd.clone(),
+        w.model.clone(),
+        Some(parent_id),
+        cmd_tx,
+    );
+    handle.publish_history(&w.thread.messages);
+    w.shell.sessions.insert(id.clone(), handle.clone());
+
+    let ctx = SessionCtx {
+        shell: w.shell,
+        handle: handle.clone(),
+        model: w.model,
+        provider: w.provider,
+        config: w.config,
+        settings: AppSettings::load(),
+        resumed: false,
+        cwd: w.cwd,
+        unsupported_server_tools: w.unsupported_server_tools,
+        // 侧边会话：不派生子 agent、不连 MCP、不抓包。见 `side.rs` 的模块头。
+        include_task: false,
+        capture: None,
+    };
+    let runner = Runner {
+        meta: side_meta(&handle),
+        ctx,
+        thread: w.thread,
+        cmd_rx,
+        ui_tx: None,
+        tool_tx: None,
+        ask_tx: None,
+        mcp_tools: Vec::new(),
+        activity: Arc::new(AtomicU32::new(0)),
+        goal_signal: Arc::new(GoalSignal::default()),
+        // 侧边会话不推目标：它是「临时问一句」，不该被一个长任务目标牵着走。
+        goal: None,
+        downgraded_goal: false,
+        queued: VecDeque::new(),
+        fixed_system: Some(w.system),
+    };
+    tokio::spawn(runner.run());
+    handle
+}
+
+/// 侧边会话没有会话文件，但 `SessionMeta` 在几处被读（git 快照、模型名）。
+/// 这里只求填得合理 —— 它永远不会被写进磁盘。
+fn side_meta(handle: &SessionHandle) -> session::SessionMeta {
+    session::SessionMeta {
+        id: handle.id.clone(),
+        format_version: session::CURRENT_FORMAT_VERSION,
+        parent_id: handle.parent_id.clone(),
+        forked_from: None,
+        cwd: handle.cwd.to_string_lossy().to_string(),
+        git: None,
+        title: Some("侧边聊天".to_string()),
+        carter_version: env!("CARGO_PKG_VERSION").to_string(),
+        model: handle.model.load().key.clone(),
+        created_at: crate::protocol::now_ms(),
+    }
+}
+
+/// 会话任务需要的一整套东西。打包成一个结构体是为了 `Runner` 的构造不至于十来个参数。
 struct SessionCtx {
     shell: Arc<AppShell>,
     handle: Arc<SessionHandle>,
@@ -150,7 +285,11 @@ struct SessionCtx {
     /// 渠道声明不出去的服务端工具（该协议没有对应物、或名字不认识）。
     unsupported_server_tools: Vec<String>,
     /// 抓包存储。换模型时要重挂钩子，所以得留着。
-    capture: Arc<crate::capture::CaptureStore>,
+    ///
+    /// `None` = 这条会话不抓包（侧边聊天，见 `side.rs`）。
+    capture: Option<Arc<crate::capture::CaptureStore>>,
+    /// 是否挂 `task`（派生子 agent）。侧边聊天不挂。
+    include_task: bool,
 }
 
 impl SessionCtx {
@@ -185,228 +324,578 @@ impl SessionCtx {
     }
 }
 
-async fn runner(
-    mut ctx: SessionCtx,
-    mut thread: Thread,
+// ---------------------------------------------------------------------------
+// 运行器
+// ---------------------------------------------------------------------------
+
+/// 一轮跑完之后的账。自动继续的判定全看这几个数（见 `goal.rs::decide_after_turn`）。
+struct TurnResult {
+    /// 这一轮以错误收场（上游报错、或撞上 `max_turns`）。
+    failed: bool,
+    /// 这一轮调用过工具。
+    used_tools: bool,
+    /// 用户在这一轮里点过「停止」。
+    user_cancelled: bool,
+}
+
+struct Runner {
+    ctx: SessionCtx,
+    thread: Thread,
     meta: session::SessionMeta,
-    mut cmd_rx: mpsc::UnboundedReceiver<Command>,
-) {
-    let session_id = ctx.handle.id.clone();
-    let cancel = CancelToken::new();
+    cmd_rx: mpsc::UnboundedReceiver<Command>,
+    /// 三条事件通道的发送端。接收端在 `forward_events` 任务手里，所以这里存 `None`
+    /// 就表示「还没建」—— 见 [`Runner::run`]。
+    ui_tx: Option<mpsc::UnboundedSender<UiEvent>>,
+    tool_tx: Option<mpsc::UnboundedSender<ToolEvent>>,
+    ask_tx: Option<mpsc::UnboundedSender<AskRequest>>,
+    mcp_tools: Vec<Arc<dyn Tool>>,
+    activity: Arc<AtomicU32>,
+    goal_signal: Arc<GoalSignal>,
+    goal: Option<Goal>,
+    /// 启动时盘上的目标从 `active` 降级成了 `paused`，要向用户说一声。
+    downgraded_goal: bool,
+    /// 生成中收到的、要等这一轮跑完再处理的命令。
+    queued: VecDeque<Command>,
+    /// 侧边会话的系统提示是固定的（见 [`SideWiring`]），主会话每轮现算。
+    fixed_system: Option<Vec<String>>,
+}
 
-    // 事件有三条来源，最终都汇到 AppEvent 上：
-    // * `ui_tx`   —— carter 的 UiEvent（文本增量、用量、通知…）
-    // * `tool_tx` —— 我们自己那层记录包装（**完整**的参数与结果）
-    // * `ask_tx`  —— 工具发起的提问，需要等前端作答
-    //
-    // 分成三条而不是硬塞进一条：`UiEvent` 是 carter 的封闭枚举，加不了变体；
-    // 而工具记录与提问本来就不是 carter 的概念。
-    let (ui_tx, ui_rx) = mpsc::unbounded_channel::<UiEvent>();
-    let (tool_tx, tool_rx) = mpsc::unbounded_channel::<ToolEvent>();
-    let (ask_tx, ask_rx) = mpsc::unbounded_channel::<AskRequest>();
-    let forwarder = tokio::spawn(forward_events(
-        ctx.shell.clone(),
-        session_id.clone(),
-        ctx.handle.asks.clone(),
-        ui_rx,
-        tool_rx,
-        ask_rx,
-    ));
+impl Runner {
+    async fn run(mut self) {
+        let session_id = self.ctx.handle.id.clone();
 
-    // MCP server 启动是异步的（要连子进程 / 网络）。失败不致命：
-    // carter 的 McpManager 会跳过连不上的 server。
-    //
-    // 它在会话开头连一次就不再重连 —— 所以界面上改了 MCP 配置要**新开会话**
-    // 才生效，这与「工具开关下一条消息就生效」不同，界面上分开提示。
-    let (mcp_mgr, mcp_tools) = carter::mcp::McpManager::start(&ctx.config.mcp).await;
+        // 事件有三条来源，最终都汇到 AppEvent 上：
+        // * `ui_tx`   —— carter 的 UiEvent（文本增量、用量、通知…）
+        // * `tool_tx` —— 我们自己那层记录包装（**完整**的参数与结果）
+        // * `ask_tx`  —— 工具发起的提问，需要等前端作答
+        //
+        // 分成三条而不是硬塞进一条：`UiEvent` 是 carter 的封闭枚举，加不了变体；
+        // 而工具记录与提问本来就不是 carter 的概念。
+        let (ui_tx, ui_rx) = mpsc::unbounded_channel::<UiEvent>();
+        let (tool_tx, tool_rx) = mpsc::unbounded_channel::<ToolEvent>();
+        let (ask_tx, ask_rx) = mpsc::unbounded_channel::<AskRequest>();
+        self.ui_tx = Some(ui_tx);
+        self.tool_tx = Some(tool_tx);
+        self.ask_tx = Some(ask_tx);
+        let forwarder = tokio::spawn(forward_events(
+            self.ctx.shell.clone(),
+            session_id.clone(),
+            self.ctx.handle.asks.clone(),
+            ui_rx,
+            tool_rx,
+            ask_rx,
+        ));
 
-    emit(
-        &ctx.shell,
-        &session_id,
-        SessionEvent::Ready {
-            session_id: session_id.clone(),
-            model: ctx.model.api_name.clone(),
-            cwd: ctx.cwd.to_string_lossy().to_string(),
-            resumed: ctx.resumed,
-        },
-    );
-
-    // 声明不出去的服务端工具**必须说出来**。静默丢弃是最坏的选项：
-    // 用户以为开了联网搜索，模型其实一个结果都拿不到，而模型自己也不知道，
-    // 只会一本正经地编。
-    if !ctx.unsupported_server_tools.is_empty() {
-        emit(
-            &ctx.shell,
-            &session_id,
-            SessionEvent::Notice {
-                message: format!(
-                    "当前渠道不支持这些服务端工具，已忽略：{}",
-                    ctx.unsupported_server_tools.join("、")
-                ),
-            },
-        );
-    }
-
-    // 生成中只接取消与作答；其余命令排队，等这一轮跑完再处理。
-    let mut queued: VecDeque<Command> = VecDeque::new();
-
-    loop {
-        let cmd = match queued.pop_front() {
-            Some(c) => c,
-            None => match cmd_rx.recv().await {
-                Some(c) => c,
-                None => break, // 句柄全 drop 了 → 会话结束
-            },
+        // MCP server 启动是异步的（要连子进程 / 网络）。失败不致命：
+        // carter 的 McpManager 会跳过连不上的 server。
+        //
+        // 它在会话开头连一次就不再重连 —— 所以界面上改了 MCP 配置要**新开会话**
+        // 才生效，这与「工具开关下一条消息就生效」不同，界面上分开提示。
+        let mcp_mgr = if self.ctx.include_task {
+            let (mgr, tools) = carter::mcp::McpManager::start(&self.ctx.config.mcp).await;
+            self.mcp_tools = tools;
+            Some(mgr)
+        } else {
+            None
         };
 
-        match cmd {
-            Command::Cancel => {
-                // 没有正在跑的轮次时取消是空操作。
-            }
-            Command::AnswerForm { id, answers } => {
-                ctx.handle.asks.answer(id, answers);
-            }
-            Command::SetModel { model } => match switch_model(&ctx, &model) {
-                Ok(resolved) => {
-                    ctx.model = resolved.model;
-                    ctx.provider = resolved.provider;
-                    ctx.unsupported_server_tools = resolved.unsupported_server_tools;
-                    ctx.handle.model.store(Arc::new(ctx.model.clone()));
-                    emit(
-                        &ctx.shell,
-                        &session_id,
-                        SessionEvent::Notice {
-                            message: format!("模型已切换为 {}", ctx.model.api_name),
-                        },
-                    );
-                }
-                Err(e) => emit(
-                    &ctx.shell,
-                    &session_id,
-                    SessionEvent::Error {
-                        message: format!("切换模型失败：{e}"),
-                    },
-                ),
-            },
-            Command::SendPrompt { text } => {
-                // 热重载落点：每轮开始前重读配置与应用设置。
-                // 界面上改完工具开关、换完渠道、动过 system.md，下一条消息就按新的来。
-                ctx.refresh();
-                let system = ctx.system(meta.git.as_ref());
-                let hooks = Arc::new(HookRegistry::from_configs(ctx.config.hooks.clone()));
+        self.emit(SessionEvent::Ready {
+            session_id: session_id.clone(),
+            model: self.ctx.model.api_name.clone(),
+            cwd: self.ctx.cwd.to_string_lossy().to_string(),
+            resumed: self.ctx.resumed,
+        });
 
-                // 输入框里的 `/命令`、`@文件`、`@图片` 在这里展开。
-                //
-                // 放在后端而不是前端：展开后的文本（几百行文件内容）不该出现在输入框
-                // 里让用户看着它发出去。放在这里还有一个好处 —— 与 CLI 走的是同一套
-                // 规则（自定义命令用 carter 的 `commands::expand`，图片用 carter 的
-                // `media::inline_user_attachments`），两边行为对得上。
-                let text = match expand_input(&ctx.cwd, &text) {
-                    Ok((expanded, note)) => {
-                        if let Some(note) = note {
-                            emit(&ctx.shell, &session_id, SessionEvent::Notice { message: note });
-                        }
-                        expanded
-                    }
-                    Err(e) => {
-                        // 展开失败不吞掉这条消息：把原文发出去，但要说清发生了什么。
-                        emit(
-                            &ctx.shell,
-                            &session_id,
-                            SessionEvent::Notice {
-                                message: format!("{e}（已按原文发送）"),
-                            },
-                        );
-                        text
-                    }
-                };
+        // 目标状态紧跟 ready 发一次：界面上那条目标条靠它画出来。
+        self.emit(SessionEvent::Goal {
+            goal: self.goal.as_ref().map(goal::view),
+        });
+        if self.downgraded_goal {
+            self.notice(
+                "上次退出时这个目标还在进行中，已改为暂停。点目标条上的「继续」可以接着推进。",
+            );
+        }
 
-                let tools = build_tools(
-                    ToolBuildArgs {
-                        provider: ctx.provider.clone(),
-                        model: ctx.model.clone(),
-                        agent_cfg: ctx.config.agent.clone(),
-                        base_system: system.join("\n"),
-                        cancel: cancel.clone(),
-                        mcp_tools: mcp_tools.clone(),
-                        cwd: ctx.cwd.clone(),
-                        skills_enabled: ctx.config.skills.enabled,
-                        tool_tx: tool_tx.clone(),
-                        ask_tx: Some(ask_tx.clone()),
-                    },
-                    &ctx.settings,
-                );
-                let run_opts = RunOptions {
-                    show_thinking: true,
-                    system: system.clone(),
-                    // 压缩复用主模型：GUI 里没有「fast 模型」这个概念的配置入口，
-                    // 多一条链路就多一处会出错的地方。
-                    compact_model: Some(CompactModel {
-                        provider: ctx.provider.clone(),
-                        model: ctx.model.clone(),
-                    }),
-                    hooks: hooks.clone(),
-                    // 单会话里只有主对话这一种请求（压缩与子 agent 也会发，
-                    // 但它们的 purpose 由各自那条路径设置）。
-                    purpose: carter::provider::RequestPurpose::MainTurn,
-                };
+        // 声明不出去的服务端工具**必须说出来**。静默丢弃是最坏的选项：
+        // 用户以为开了联网搜索，模型其实一个结果都拿不到，而模型自己也不知道，
+        // 只会一本正经地编。
+        if !self.ctx.unsupported_server_tools.is_empty() {
+            self.notice(&format!(
+                "当前渠道不支持这些服务端工具，已忽略：{}",
+                self.ctx.unsupported_server_tools.join("、")
+            ));
+        }
 
-                thread.append_user(text);
-                emit(
-                    &ctx.shell,
-                    &session_id,
-                    SessionEvent::TurnStarted {
-                    turn: thread.user_turns,
-                },
-                );
-
-                let mut sink = TxSink(ui_tx.clone());
-                let turn = run_turn(
-                    &mut thread,
-                    &*ctx.provider,
-                    &ctx.model,
-                    &ctx.config.agent,
-                    &run_opts,
-                    &tools,
-                    &mut sink,
-                    &cancel,
-                );
-                tokio::pin!(turn);
-
-                let outcome = loop {
+        loop {
+            let cmd = match self.queued.pop_front() {
+                Some(c) => c,
+                None => {
                     tokio::select! {
-                        res = &mut turn => break res,
-                        Some(inner) = cmd_rx.recv() => match inner {
-                            // 生成中只有这两条命令能即时生效 —— 其它排队等下一轮。
-                            Command::Cancel => cancel.set(),
-                            Command::AnswerForm { id, answers } => {
-                                ctx.handle.asks.answer(id, answers);
-                            }
-                            other => queued.push_back(other),
+                        cmd = self.cmd_rx.recv() => match cmd {
+                            Some(c) => c,
+                            // 命令通道关了（句柄全 drop）→ 会话结束。
+                            None => break,
                         },
+                        // 显式关闭。光靠上面那条 `None` 是不够的 —— 会话任务自己攥着一个
+                        // `Arc<SessionHandle>`，它持有发送端，所以 `recv()` 永远不会返回
+                        // `None`。见 `shell.rs::close_session`。
+                        _ = self.ctx.handle.close.cancelled() => break,
                     }
-                };
-
-                match outcome {
-                    Ok(_) => {}
-                    Err(e) => emit(
-                        &ctx.shell,
-                        &session_id,
-                        SessionEvent::Error {
-                            message: format!("{e}"),
-                        },
-                    ),
                 }
-                emit(&ctx.shell, &session_id, SessionEvent::Idle);
+            };
+            self.handle_command(cmd).await;
+            if self.ctx.handle.close.is_cancelled() {
+                break;
+            }
+        }
+
+        if let Some(mgr) = mcp_mgr {
+            mgr.shutdown().await;
+        }
+        self.ctx.handle.asks.clear();
+        self.ctx.handle.close.set();
+        drop(self.ui_tx.take());
+        drop(self.tool_tx.take());
+        drop(self.ask_tx.take());
+        let _ = forwarder.await;
+        self.ctx.shell.sessions.remove(&session_id);
+    }
+
+    async fn handle_command(&mut self, cmd: Command) {
+        match cmd {
+            // 没有正在跑的轮次时取消是空操作。
+            Command::Cancel => {}
+            Command::AnswerForm { id, answers } => {
+                self.ctx.handle.asks.answer(id, answers);
+            }
+            Command::Goal { action } => {
+                let was_active = self
+                    .goal
+                    .as_ref()
+                    .is_some_and(|g| g.status == GoalStatus::Active);
+                let mut goal = self.goal.clone();
+                apply_goal_action(
+                    &mut goal,
+                    &self.ctx.handle.id.clone(),
+                    &self.ctx.shell.clone(),
+                    action,
+                );
+                let now_active = goal
+                    .as_ref()
+                    .is_some_and(|g| g.status == GoalStatus::Active);
+                self.goal = goal;
+                // 刚刚从「不推进」变成「推进」（设定了新目标、或点了继续）→ 立刻开干。
+                // 不这么做的话，按了「继续」却什么都不发生，得再发一条消息才动 ——
+                // 那颗按钮就没有意义了。
+                if now_active && !was_active {
+                    self.kick_goal().await;
+                }
+            }
+            Command::SetModel { model } => match switch_model(&self.ctx, &model) {
+                Ok(resolved) => {
+                    self.ctx.model = resolved.model;
+                    self.ctx.provider = resolved.provider;
+                    self.ctx.unsupported_server_tools = resolved.unsupported_server_tools;
+                    self.ctx.handle.model.store(Arc::new(self.ctx.model.clone()));
+                    self.notice(&format!("模型已切换为 {}", self.ctx.model.api_name));
+                }
+                Err(e) => self.error(&format!("切换模型失败：{e}")),
+            },
+            Command::SendPrompt { text } => self.submit(text).await,
+        }
+    }
+
+    /// 用户发来一条消息：展开、落进历史、跑一轮，再按目标决定要不要自动继续。
+    async fn submit(&mut self, raw: String) {
+        // 热重载落点：每轮开始前重读配置与应用设置。
+        // 界面上改完工具开关、换完渠道、动过 system.md，下一条消息就按新的来。
+        self.ctx.refresh();
+        let git = self.meta.git.clone();
+
+        // 输入框里的 `/命令`、`@文件`、`@图片` 在这里展开。
+        //
+        // 放在后端而不是前端：展开后的文本（几百行文件内容）不该出现在输入框
+        // 里让用户看着它发出去。放在这里还有一个好处 —— 与 CLI 走的是同一套
+        // 规则（自定义命令用 carter 的 `commands::expand`，图片用 carter 的
+        // `media::inline_user_attachments`），两边行为对得上。
+        let text = match expand_input(&self.ctx.cwd, &raw) {
+            Ok((expanded, note)) => {
+                if let Some(note) = note {
+                    self.notice(&note);
+                }
+                expanded
+            }
+            Err(e) => {
+                // 展开失败不吞掉这条消息：把原文发出去，但要说清发生了什么。
+                self.notice(&format!("{e}（已按原文发送）"));
+                raw
+            }
+        };
+
+        // 用户自己说话了 —— 上一轮「原地打转」的判定就此作废。
+        if let Some(g) = self.goal.as_mut() {
+            if g.idle_streak != 0 {
+                g.idle_streak = 0;
+                self.publish_goal();
+            }
+        }
+
+        self.run_sequence(text, git).await;
+    }
+
+    /// 目标从「不推进」变成「推进」时踢一脚：不等用户再说话，直接开跑。
+    ///
+    /// 走的是与自动继续**同一条**消息与同一条路（`CONTINUE_PROMPT` + `run_sequence`），
+    /// 所以界面上呈现成「自动继续」的分隔条而不是用户气泡 —— 它确实不是用户说的。
+    async fn kick_goal(&mut self) {
+        let git = self.meta.git.clone();
+        self.run_sequence(goal::CONTINUE_PROMPT.to_string(), git).await;
+    }
+
+    /// 把一段文本作为一轮的用户输入跑完（含它引发的自动继续）。
+    async fn run_sequence(&mut self, text: String, git: Option<carter::session::GitInfo>) {
+        self.thread.append_user(text);
+        self.emit(SessionEvent::TurnStarted {
+            turn: self.thread.user_turns,
+        });
+
+        let result = self.run_one_turn(git.clone()).await;
+        self.drive_goal(result, git).await;
+        self.emit(SessionEvent::Idle);
+    }
+
+    /// 跑一轮：装配工具、发请求、执行工具、回灌，直到模型不再调工具。
+    ///
+    /// `git` 只有主会话有（侧边会话不重算系统提示），这里收一个 `Option` 是为了
+    /// 让两条路共用同一个函数体。
+    async fn run_one_turn(&mut self, git: Option<carter::session::GitInfo>) -> TurnResult {
+        let system = match &self.fixed_system {
+            Some(s) => s.clone(),
+            None => {
+                let mut s = self.ctx.system(git.as_ref());
+                // 目标段接在最后：它是最「当下」的指令，而且（将来 carter 打开
+                // cache 断点后）末段正是断点位置 —— 所以它必须是稳定的，
+                // 见 `goal.rs` 模块头。
+                if let Some(seg) = self.goal.as_ref().and_then(goal::system_segment) {
+                    s.push(seg);
+                }
+                s
+            }
+        };
+        // 只有状态为 active 时模型才该调 goal_update。
+        self.goal_signal
+            .set_armed(self.goal.as_ref().is_some_and(|g| g.status == GoalStatus::Active));
+
+        let hooks = Arc::new(HookRegistry::from_configs(self.ctx.config.hooks.clone()));
+        let tools = build_tools(
+            ToolBuildArgs {
+                provider: self.ctx.provider.clone(),
+                model: self.ctx.model.clone(),
+                agent_cfg: self.ctx.config.agent.clone(),
+                base_system: system.join("\n"),
+                cancel: self.ctx.handle.cancel.clone(),
+                mcp_tools: self.mcp_tools.clone(),
+                cwd: self.ctx.cwd.clone(),
+                skills_enabled: self.ctx.config.skills.enabled,
+                tool_tx: self.tool_tx.clone().expect("事件通道在 run() 里建好"),
+                ask_tx: if self.ctx.include_task {
+                    self.ask_tx.clone()
+                } else {
+                    // 侧边聊天不挂 ask_user：抽屉里再套一层提问表单，与「临时问一句」
+                    // 的定位不符，而且那套回答链路要单独接一遍。
+                    None
+                },
+                include_task: self.ctx.include_task,
+                goal_signal: self.goal_signal.clone(),
+                activity: self.activity.clone(),
+            },
+            &self.ctx.settings,
+        );
+        let run_opts = RunOptions {
+            show_thinking: true,
+            system,
+            // 压缩复用主模型：GUI 里没有「fast 模型」这个概念的配置入口，
+            // 多一条链路就多一处会出错的地方。
+            compact_model: Some(CompactModel {
+                provider: self.ctx.provider.clone(),
+                model: self.ctx.model.clone(),
+            }),
+            hooks,
+            // 单会话里只有主对话这一种请求（压缩与子 agent 也会发，
+            // 但它们的 purpose 由各自那条路径设置）。
+            purpose: carter::provider::RequestPurpose::MainTurn,
+        };
+
+        // `thread.turns` 是**整个会话**累计的模型调用次数，而 carter 的
+        // `max_turns`（默认 50）拿它当上限 —— 累计口径下，一条聊了很久的会话
+        // 到第 50 次模型调用之后，每一轮都会被判成 Limit 而立刻返回、什么都不做。
+        // 在自动继续下这尤其致命（目标还在，每轮却零成本空转）。每轮开头清零，
+        // 把 `max_turns` 恢复成它名字上的意思：**一次用户输入**内最多几次模型调用。
+        self.thread.turns = 0;
+        // 上一轮可能残留了取消标记（用户在流结束后、select 收尾前点的停止）。
+        // 不清的话，这一轮一进去就立刻被判成取消。
+        self.ctx.handle.cancel.reset();
+
+        let activity_before = self.activity.load(Ordering::Relaxed);
+        let mut user_cancelled = false;
+        let mut closed = false;
+        let cancel = self.ctx.handle.cancel.clone();
+
+        let outcome = {
+            let mut sink = TxSink(self.ui_tx.clone().expect("事件通道在 run() 里建好"));
+            let turn = run_turn(
+                &mut self.thread,
+                &*self.ctx.provider,
+                &self.ctx.model,
+                &self.ctx.config.agent,
+                &run_opts,
+                &tools,
+                &mut sink,
+                &cancel,
+            );
+            tokio::pin!(turn);
+
+            loop {
+                tokio::select! {
+                    res = &mut turn => break res,
+                    Some(inner) = self.cmd_rx.recv() => match inner {
+                        // 生成中能**立刻**生效的三条命令。其余排队等这一轮跑完。
+                        Command::Cancel => {
+                            user_cancelled = true;
+                            cancel.set();
+                        }
+                        Command::AnswerForm { id, answers } => {
+                            self.ctx.handle.asks.answer(id, answers);
+                        }
+                        // `/goal pause` 必须立刻生效：否则一条正在自动继续的长任务
+                        // 要等整串跑完才停得下来，而用户按暂停正是因为不想再等了。
+                        Command::Goal { action } => {
+                            let mut goal = self.goal.clone();
+                            apply_goal_action(
+                                &mut goal,
+                                &self.ctx.handle.id.clone(),
+                                &self.ctx.shell.clone(),
+                                action,
+                            );
+                            self.goal = goal;
+                        }
+                        other => self.queued.push_back(other),
+                    },
+                    // 关会话（关掉侧边抽屉、换会话）要立刻断流，而不是等这一轮
+                    // 自然跑完 —— 「关掉即丢」的前提就是这个。
+                    _ = self.ctx.handle.close.cancelled() => {
+                        closed = true;
+                        cancel.set();
+                    }
+                }
+            }
+        };
+
+        // 历史快照：侧边聊天靠它拿父会话的上下文。**在每一轮之后都发布**，
+        // 而截断到「干净边界」的活交给 `side.rs` 做 —— 那里才知道自己要的是什么
+        // （中途被取消的一轮尾部可能挂着一个没有结果的 tool_use，见 `side.rs`）。
+        self.ctx.handle.publish_history(&self.thread.messages);
+
+        let used_tools = self.activity.load(Ordering::Relaxed) > activity_before;
+        // 「失败」的三种来源，对自动继续是同一件事：**别接着推**。
+        // 尤其是 `Limit` —— 模型输出被截断、或这一轮撞上 `max_turns` 时，
+        // 接着推只会再撞一次，而每撞一次都是零成本的，于是变成死循环。
+        let failed = match &outcome {
+            Err(_) => true,
+            // 被中断：用户自己点的停止不算失败（那条规则在 `decide_after_turn` 里
+            // 优先级更高）；自己断的（关会话等）算，免得在这儿打转。
+            Ok((carter::agent::TurnOutcome::Cancelled, _)) => !user_cancelled,
+            Ok((carter::agent::TurnOutcome::Limit, _)) => true,
+            // carter 目前不构造这个变体，但枚举里有 —— 真出现了就是「这一轮废了」。
+            Ok((carter::agent::TurnOutcome::Error(_), _)) => true,
+            Ok((carter::agent::TurnOutcome::Assistant, _)) => false,
+        };
+        if let Err(e) = &outcome {
+            // 关会话造成的断流不是错误：用户本来就让这条对话结束，
+            // 报一条「已取消」只会在他按下关闭之后再弹一句废话。
+            if !closed {
+                self.error(&format!("{e}"));
+            }
+        }
+        TurnResult {
+            failed,
+            used_tools,
+            user_cancelled,
+        }
+    }
+
+    /// 一轮跑完后按目标状态决定要不要接着推。
+    ///
+    /// 判定全在 `goal.rs::decide_after_turn`（纯函数、逐条测过），这里只负责
+    /// 「照做」：落盘、发事件、追加那条「继续」再跑一轮。
+    async fn drive_goal(&mut self, first: TurnResult, git: Option<carter::session::GitInfo>) {
+        let mut result = first;
+        loop {
+            let Some(mut g) = self.goal.clone() else { return };
+            if g.status != GoalStatus::Active {
+                return;
+            }
+
+            // 含本轮的连续无工具轮数。有工具调用就是「在干活」，清零。
+            g.idle_streak = if result.used_tools {
+                0
+            } else {
+                g.idle_streak.saturating_add(1)
+            };
+            let outcome = TurnOutcome {
+                user_cancelled: result.user_cancelled,
+                failed: result.failed,
+                used_tools: result.used_tools,
+                idle_streak: g.idle_streak,
+                signal: self.goal_signal.take(),
+            };
+
+            match goal::decide_after_turn(&g, &outcome) {
+                goal::Decision::None => {
+                    // 无事发生，但空转计数变了，落一下盘。
+                    self.set_goal(Some(g));
+                    return;
+                }
+                goal::Decision::Set {
+                    status,
+                    note,
+                    notice,
+                } => {
+                    g.status = status;
+                    g.note = note;
+                    g.updated_at = crate::protocol::now_ms();
+                    self.set_goal(Some(g));
+                    self.notice(&notice);
+                    return;
+                }
+                goal::Decision::Continue => {
+                    g.auto_continues = g.auto_continues.saturating_add(1);
+                    self.set_goal(Some(g));
+
+                    // 给「停止」留一点手感窗口，也避免退化成 tight loop。
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                    if self.ctx.handle.close.is_cancelled() {
+                        return;
+                    }
+
+                    // 这条消息会进历史（会话文件里也留一份，resume 后模型看得到自己
+                    // 被推过；界面把它渲染成「自动继续」的分隔条而不是用户气泡）。
+                    self.thread.append_user(goal::CONTINUE_PROMPT);
+                    self.emit(SessionEvent::TurnStarted {
+                        turn: self.thread.user_turns,
+                    });
+                    result = self.run_one_turn(git.clone()).await;
+                    if self.ctx.handle.close.is_cancelled() {
+                        return;
+                    }
+                }
             }
         }
     }
 
-    mcp_mgr.shutdown().await;
-    ctx.handle.asks.clear();
-    drop(ui_tx);
-    let _ = forwarder.await;
-    ctx.shell.sessions.remove(&session_id);
+    /// 改目标：落内存、落盘、发事件。三件事必须一起做 —— 少落盘的话重启就丢，
+    /// 少发事件的话界面上的目标条会和实际状态对不上。
+    fn set_goal(&mut self, goal: Option<Goal>) {
+        self.goal = goal;
+        self.publish_goal();
+    }
+
+    fn publish_goal(&self) {
+        publish_goal(&self.goal, &self.ctx.handle.id, &self.ctx.shell);
+    }
+
+    fn emit(&self, event: SessionEvent) {
+        emit(&self.ctx.shell, &self.ctx.handle.id, event);
+    }
+
+    fn notice(&self, message: &str) {
+        self.emit(SessionEvent::Notice {
+            message: message.to_string(),
+        });
+    }
+
+    fn error(&self, message: &str) {
+        self.emit(SessionEvent::Error {
+            message: message.to_string(),
+        });
+    }
+}
+
+/// 把目标落盘并广播给界面。
+fn publish_goal(goal: &Option<Goal>, session_id: &str, shell: &AppShell) {
+    match goal {
+        Some(g) => {
+            if let Err(e) = goal::save(session_id, g) {
+                emit(
+                    shell,
+                    session_id,
+                    SessionEvent::Error {
+                        message: format!("目标没能写进磁盘：{e}"),
+                    },
+                );
+            }
+        }
+        None => {
+            goal::remove(session_id);
+        }
+    }
+    emit(
+        shell,
+        session_id,
+        SessionEvent::Goal {
+            goal: goal.as_ref().map(goal::view),
+        },
+    );
+}
+
+/// 执行一条 `/goal` 动作。**自由函数**，不碰 `Runner`：它要在跑一轮的中途被调用，
+/// 而那时 `self.thread` 正被 `run_turn` 的可变借用占着 —— 只有「不碰 self」的代码
+/// 才进得去那个 select 分支。
+fn apply_goal_action(
+    goal: &mut Option<Goal>,
+    session_id: &str,
+    shell: &AppShell,
+    action: GoalCommand,
+) {
+    let Some(next) = goal::apply_action(goal.clone(), &action) else {
+        emit(
+            shell,
+            session_id,
+            SessionEvent::Notice {
+                message: goal_noop_note(&action, goal.as_ref()).to_string(),
+            },
+        );
+        return;
+    };
+    *goal = next;
+    publish_goal(goal, session_id, shell);
+
+    let message = match (goal.as_ref(), &action) {
+        (Some(_), GoalCommand::Set { .. }) => "目标已设定，开始推进。".to_string(),
+        (Some(_), GoalCommand::Resume) => "目标已继续。".to_string(),
+        (Some(_), GoalCommand::Pause) => {
+            "目标已暂停：不会再有自动继续（正在跑的那一轮会跑完）。".to_string()
+        }
+        (Some(_), GoalCommand::Complete) => "目标已标记为完成。".to_string(),
+        _ => "目标已清除。".to_string(),
+    };
+    emit(
+        shell,
+        session_id,
+        SessionEvent::Notice { message },
+    );
+}
+
+/// 动作在当前状态下没意义时，说清是为什么 —— 静默无事发生最难查。
+fn goal_noop_note(action: &GoalCommand, current: Option<&Goal>) -> &'static str {
+    match (action, current) {
+        (_, None) => "还没有设定目标。用 `/goal <目标>` 设一个。",
+        (GoalCommand::Pause, _) => "目标不在进行中，无需暂停。",
+        (GoalCommand::Resume, _) => "目标已经在推进了。",
+        (GoalCommand::Complete, _) => "目标已经是完成状态。",
+        (GoalCommand::Set { .. }, _) => "目标正文不能是空的。",
+        (GoalCommand::Clear, _) => "没有可清除的目标。",
+    }
 }
 
 /// 展开输入框里的 `/命令` 与 `@文件`。
@@ -473,8 +962,14 @@ fn switch_model(
 ) -> carter::Result<carter::provider::resolve::ResolvedProvider> {
     let cache_json = fetch::read_cache()?;
     // 换模型时也保留抓包 —— 否则一切换就静默停止记录了。
-    let capture_hook = Arc::new(crate::capture::CaptureHook::new(ctx.capture.clone()));
-    carter::provider::resolve_provider(&ctx.config, &cache_json, model_ref, vec![capture_hook])
+    let hooks = match &ctx.capture {
+        Some(store) => vec![
+            Arc::new(crate::capture::CaptureHook::new(store.clone()))
+                as Arc<dyn llm_adapt_core::RequestHook>,
+        ],
+        None => Vec::new(),
+    };
+    carter::provider::resolve_provider(&ctx.config, &cache_json, model_ref, hooks)
 }
 
 fn emit(shell: &AppShell, session_id: &str, event: SessionEvent) {
@@ -502,7 +997,7 @@ async fn forward_events(
     let mut tool_open = true;
     let mut ask_open = true;
 
-    let emit = |shell: &AppShell, event: SessionEvent| {
+    let send = |shell: &AppShell, event: SessionEvent| {
         shell.emit(AppEvent::Session {
             session_id: session_id.clone(),
             event,
@@ -514,17 +1009,17 @@ async fn forward_events(
             ev = ui_rx.recv(), if ui_open => match ev {
                 Some(ev) => {
                     if let Some(out) = map_ui(ev) {
-                        emit(&shell, out);
+                        send(&shell, out);
                     }
                 }
                 None => ui_open = false,
             },
             ev = tool_rx.recv(), if tool_open => match ev {
                 Some(ToolEvent::Started { call_id, name, args }) => {
-                    emit(&shell, SessionEvent::ToolStarted { call_id, name, args });
+                    send(&shell, SessionEvent::ToolStarted { call_id, name, args });
                 }
                 Some(ToolEvent::Finished { call_id, ok, content, elapsed_ms }) => {
-                    emit(&shell, SessionEvent::ToolFinished { call_id, ok, content, elapsed_ms });
+                    send(&shell, SessionEvent::ToolFinished { call_id, ok, content, elapsed_ms });
                 }
                 None => tool_open = false,
             },
@@ -532,7 +1027,7 @@ async fn forward_events(
                 Some(AskRequest::Questions { id, questions, reply }) => {
                     // 发送端存住：前端要跨一次进程边界才回得来，而 oneshot 只能发一次。
                     asks.insert(id, reply);
-                    emit(&shell, SessionEvent::AskForm { id, questions });
+                    send(&shell, SessionEvent::AskForm { id, questions });
                 }
                 None => ask_open = false,
             },
@@ -621,5 +1116,21 @@ mod tests {
             msg.contains("tokio runtime"),
             "错误信息要指明根因，实际是：{msg}"
         );
+    }
+
+    /// 动作在当前状态下没有意义时，提示必须说清是哪种「没意义」。
+    #[test]
+    fn a_goal_no_op_explains_itself() {
+        let none = goal_noop_note(&GoalCommand::Pause, None);
+        assert!(none.contains("/goal"), "要告诉用户怎么设：{none}");
+
+        let g = Goal::new("x");
+        assert!(goal_noop_note(&GoalCommand::Pause, Some(&g)).contains("不在进行中"));
+        let paused = {
+            let mut g = g.clone();
+            g.status = GoalStatus::Paused;
+            g
+        };
+        assert!(goal_noop_note(&GoalCommand::Resume, Some(&paused)).contains("已经在推进"));
     }
 }
