@@ -17,14 +17,23 @@
 //! **是同一份值**（见 [`filter_tools`]）。这是「关掉的工具对子 agent 同样失效」
 //! 的唯一保证，也正因为如此两条路径必须共用这一个函数的返回值。
 //!
-//! ## 换掉哪两个实现
+//! ## 换掉 / 包住哪些实现
 //!
 //! * **`bash`** —— carter 那个硬编码 `sh -c`，Windows 上从 GUI 启动时 PATH 里多半
 //!   没有 `sh`，模型每次都拿到「program not found」而且看不出原因。换成
 //!   [`bash::PlatformBash`]：探测 shell、显式设工作目录、描述里写明当前平台。
+//! * **文件工具**（`read_file` / `write_file` / `edit_file` / `glob` / `grep`）——
+//!   包一层 [`cwd::CwdScoped`]，把相对路径按会话的 cwd 解析。
 //! * **`ask_user_question`** —— carter 那个一次只能问一个问题、选项只有标签没有说明。
 //!   界面里「问三件事」要来回三轮，而每轮都是一次完整的模型请求。换成
 //!   [`ask_user::AskUserTool`]：一次问一组、支持多选。
+//!
+//! ## 路径解析
+//!
+//! carter 的文件工具**不解析相对路径** —— 它们直接 `Path::new(&path)`，于是相对路径
+//! 落到进程的 cwd 上。命令行下这是对的（进程 cwd 就是用户所在目录），桌面应用下必然
+//! 错：进程 cwd 取决于从哪启动，而会话有自己的工作目录。而且它**不报错** ——
+//! 系统提示里写着「工作目录：…」，文件却读写到了别处。
 //!
 //! ## 记录包装
 //!
@@ -39,6 +48,7 @@
 
 pub mod ask_user;
 pub mod bash;
+pub mod cwd;
 pub mod record;
 
 use std::sync::Arc;
@@ -55,6 +65,7 @@ use tokio::sync::mpsc;
 use crate::app_settings::AppSettings;
 use ask_user::{AskRequest, AskUserTool};
 use bash::PlatformBash;
+use cwd::{CwdScoped, ProjectMemoryGuard};
 use record::{Recorded, ToolEvent};
 
 /// 装配工具池需要的一整套东西。
@@ -131,9 +142,17 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
     };
 
     for t in filter_tools(&full, settings) {
-        // `bash` 换成跨平台实现 —— 其余原样。
         let t: Arc<dyn Tool> = if t.name() == "bash" {
+            // `bash` 换成跨平台实现。
             Arc::new(PlatformBash::new(cwd.clone()))
+        } else if CwdScoped::applies_to(t.name()) {
+            // 文件工具：相对路径按会话的 cwd 解析。原实现（行号、图片、截断…）全部保留，
+            // 只是在执行前把 `path` 改写成绝对路径。
+            Arc::new(CwdScoped::new(t, cwd.clone()))
+        } else if t.name() == "save_memory" {
+            // 它没有 path 参数可改写，目标路径是内部按 scope 算的 —— 项目级作用域
+            // 在桌面应用里必然是错的，明确拒绝掉。
+            Arc::new(ProjectMemoryGuard::new(t))
         } else {
             t
         };

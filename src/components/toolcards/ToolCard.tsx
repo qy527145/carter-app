@@ -96,7 +96,11 @@ function Card({
   forceOpen?: boolean;
   collapsible?: boolean;
 }) {
-  const [open, setOpen] = useState(defaultOpen);
+  // `defaultOpen` 只是**初始**值。流式过程中每个 todo_write 到达时都曾是「最后一个」，
+  // 于是它们各自以展开状态挂载、之后不再收回去 —— 一轮下来同一份清单展开好几遍。
+  // 所以这里让「展开/收起」跟着 `defaultOpen` 走，只在用户手动点过之后才由用户说了算。
+  const [manual, setManual] = useState<boolean | null>(null);
+  const open = manual ?? defaultOpen;
   const expanded = forceOpen || open;
   const hasBody = children != null;
 
@@ -124,7 +128,7 @@ function Card({
     <div className="overflow-hidden rounded-lg border border-edge bg-card">
       {collapsible && hasBody ? (
         <button
-          onClick={() => setOpen((o) => !o)}
+          onClick={() => setManual(!expanded)}
           className="flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-base"
         >
           {head}

@@ -515,6 +515,10 @@ M8 的移植过程中逐条比对了两版 IR 的表达力。llm_adapt 的 IR �
    `SessionEvent` 的 `tool_call_started`/`tool_result` 随之换成
    `tool_started`/`tool_finished`。
 
+**相对路径**（第三轮补）：carter 的文件工具不解析相对路径，全部落到**进程**的 cwd
+上 —— 命令行下没问题，桌面应用下必然错且不报错。包一层 `CwdScoped` 按会话 cwd 解析；
+`save_memory` 的项目级作用域（默认值！）没法靠改参数救，明确拒绝。
+
 **没做**：hooks / `[env]` / `system.md` 的界面（只能改文件）；API Key 进系统凭据库；
 单个 MCP 工具的开关（工具名要连上 server 才知道）；自绘标题栏；
 被 `PreToolUse` hook 阻断的调用不会产生卡片（本应用没有配 hooks 的界面，这条路径到不了）。
