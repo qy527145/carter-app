@@ -214,7 +214,7 @@ export function Composer() {
   const sessionId = useStore((s) => s.sessionId);
   const cwd = useStore((s) => s.cwd);
   const model = useStore((s) => s.model);
-  const pendingAsk = useStore((s) => s.pendingAsk);
+  const pendingAsk = useStore((s) => s.pendingForm);
   const addUserTurn = useStore((s) => s.addUserTurn);
   const setNotice = useStore((s) => s.setNotice);
 

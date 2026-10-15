@@ -636,6 +636,7 @@ name = "carter-app-core"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "async-trait",
  "base64 0.22.1",
  "carter",
  "dashmap",
@@ -646,6 +647,7 @@ dependencies = [
  "tokio",
  "toml_edit 0.22.27",
  "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -410,27 +410,53 @@ fn list_tools(shell: State<'_, Arc<AppShell>>) -> Vec<ToolRow> {
             carter::config::paths::skills_dir(),
         )));
     }
-    // ask_user_question 在真的会话里是带发送端注册的；这里只是要看它的说明与 schema，
-    // 给一个没人读的通道即可。
-    registry.push(Arc::new(carter::agent::AskUserQuestionTool::new(
-        tokio::sync::mpsc::unbounded_channel().0,
-    )));
 
-    let mut rows: Vec<ToolRow> = registry
-        .specs()
-        .into_iter()
-        .map(|s| {
-            let enabled = settings.tool_enabled(&s.name);
-            ToolRow {
-                enabled,
+    // 这两个在真的会话里被换成了本应用的实现（跨平台 bash、一次问一组问题的
+    // ask_user）。设置页要显示**实际生效的**说明与 schema，不能用 carter 的 ——
+    // 那会让用户看到一份和真实行为对不上的文档。
+    let mut rows: Vec<ToolRow> = Vec::new();
+    for spec in registry.specs() {
+        if spec.name == "bash" {
+            let b = carter_app_core::tools::bash::PlatformBash::new(
+                carter::config::paths::carter_home(),
+            );
+            use carter::tools::Tool as _;
+            rows.push(ToolRow {
+                enabled: settings.tool_enabled("bash"),
                 toggleable: true,
-                note: None,
-                name: s.name,
-                description: s.description.unwrap_or_default(),
-                parameters: s.input_schema,
-            }
-        })
-        .collect();
+                note: Some(carter_app_core::platform::os_label().to_string()),
+                name: b.name().to_string(),
+                description: b.description().to_string(),
+                parameters: b.parameters(),
+            });
+            continue;
+        }
+        let enabled = settings.tool_enabled(&spec.name);
+        rows.push(ToolRow {
+            enabled,
+            toggleable: true,
+            note: None,
+            name: spec.name,
+            description: spec.description.unwrap_or_default(),
+            parameters: spec.input_schema,
+        });
+    }
+
+    // ask_user_question 的 schema 也来自本应用的实现（给一个没人读的通道即可）。
+    {
+        use carter::tools::Tool as _;
+        let a = carter_app_core::tools::ask_user::AskUserTool::new(
+            tokio::sync::mpsc::unbounded_channel().0,
+        );
+        rows.push(ToolRow {
+            enabled: settings.tool_enabled("ask_user_question"),
+            toggleable: true,
+            note: None,
+            name: a.name().to_string(),
+            description: a.description().to_string(),
+            parameters: a.parameters(),
+        });
+    }
 
     // `task` 构造要一个 provider，这里拿不到 —— 单独补一行，标明它不可关。
     // 子 agent 的能力开关该是独立的一项，而不是混在「工具开关」里顺手关掉。

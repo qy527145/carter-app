@@ -17,25 +17,20 @@ import {
   Brain,
   ChevronRight,
   CircleCheck,
-  CircleX,
   FileText,
-  Globe,
-  Info,
   LoaderCircle,
   ScanSearch,
   TriangleAlert,
-  Wrench,
+  X,
 } from "lucide-react";
 
-import { sendCommand } from "../lib/api";
 import { useStore, type Item, type Turn } from "../store";
-import { Button, IconButton } from "./ui/Button";
+import { AskForm } from "./AskForm";
 import { Composer, MessageImages } from "./Composer";
-import { Input } from "./ui/Input";
+import { Glyph, ServerCard, ToolCard } from "./toolcards/ToolCard";
+import { IconButton } from "./ui/Button";
 import { Banner } from "./ui/Panel";
 
-type ToolItem = Extract<Item, { kind: "tool" }>;
-type ServerItem = Extract<Item, { kind: "server" }>;
 type ImageItem = Extract<Item, { kind: "image" }>;
 type AssistantTurnT = Extract<Turn, { role: "assistant" }>;
 
@@ -48,29 +43,6 @@ function MarkdownText({ text }: { text: string }) {
     <div className="carter-md">
       <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
     </div>
-  );
-}
-
-/** 内容块左侧那个小图标底衬。全应用唯一的彩色落点。 */
-function Glyph({
-  tone,
-  children,
-}: {
-  tone: "blue" | "green" | "orange" | "violet" | "pink";
-  children: React.ReactNode;
-}) {
-  // 类名必须是字面量：拼接出来的 Tailwind 扫描不到，颜色会静默失效。
-  const cls = {
-    blue: "bg-tone-blue-soft text-tone-blue",
-    green: "bg-tone-green-soft text-tone-green",
-    orange: "bg-tone-orange-soft text-tone-orange",
-    violet: "bg-tone-violet-soft text-tone-violet",
-    pink: "bg-tone-pink-soft text-tone-pink",
-  }[tone];
-  return (
-    <span className={`flex size-5 shrink-0 items-center justify-center rounded ${cls}`}>
-      {children}
-    </span>
   );
 }
 
@@ -97,71 +69,13 @@ function ThinkingBlock({ text, hasSignature }: { text: string; hasSignature?: bo
   );
 }
 
-function ToolCard({ item }: { item: ToolItem }) {
-  const r = item.result;
-  return (
-    <div className="rounded-lg border border-edge bg-card px-3 py-2">
-      <div className="flex items-center gap-2">
-        <Glyph tone="blue">
-          <Wrench size={11} />
-        </Glyph>
-        <span className="font-mono text-xs text-ink">{item.name}</span>
-        {r ? (
-          r.ok ? (
-            <CircleCheck size={13} className="text-[var(--ok)]" />
-          ) : (
-            <CircleX size={13} className="text-[var(--danger)]" />
-          )
-        ) : (
-          <LoaderCircle size={12} className="animate-spin text-dim" />
-        )}
-      </div>
-      {item.argsPreview && (
-        <div className="mt-1.5 truncate font-mono text-[11px] text-dim" title={item.argsPreview}>
-          {item.argsPreview}
-        </div>
-      )}
-      {r && (
-        <div
-          className={`mt-1 truncate text-xs ${
-            r.ok ? "text-dim" : "text-[var(--danger)]"
-          }`}
-          title={r.summary}
-        >
-          {r.summary || "（无输出）"}
-        </div>
-      )}
-    </div>
-  );
-}
-
 /**
- * 服务端工具活动（web_search 等）。
+ * 历史里的图片块。
  *
- * 刻意与本地工具卡片长得不一样：这类活动是**厂商在服务端跑完**的，本地没有执行过，
- * 用同一套样式会让人以为是我们自己调的工具。
+ * **不是**粘贴的图 —— 粘贴的图在文本里是 `[img:hash.ext]`，由 `MessageImages`
+ * 渲染成真实缩略图。这一条是 IR 里 `Block::Image` 的投影，视图层刻意只带类型与
+ * hash、不背字节（一张图几百 KB，塞进 IPC 会让界面卡死），所以只给一个占位标识。
  */
-function ServerCard({ item }: { item: ServerItem }) {
-  return (
-    <div className="rounded-lg border border-dashed border-edge bg-card/50 px-3 py-2">
-      <div className="flex items-center gap-2">
-        <Glyph tone="orange">
-          <Globe size={11} />
-        </Glyph>
-        <span className="font-mono text-xs text-ink">{item.rawType}</span>
-        <span className="rounded border border-edge px-1.5 py-0.5 text-[10px] text-dim">
-          服务端活动
-        </span>
-      </div>
-      {item.summary && (
-        <div className="mt-1 truncate text-xs text-dim" title={item.summary}>
-          {item.summary}
-        </div>
-      )}
-    </div>
-  );
-}
-
 function ImageCard({ item }: { item: ImageItem }) {
   return (
     <div className="flex items-center gap-2 rounded-lg border border-edge bg-card px-3 py-2 text-xs text-dim">
@@ -169,13 +83,20 @@ function ImageCard({ item }: { item: ImageItem }) {
         <FileText size={11} />
       </Glyph>
       <span className="mono">{item.mediaType}</span>
-      {/* 视图里只带 hash、不带字节，所以这里只给一个占位标识。 */}
       {item.hash && <span className="truncate text-dim/70">#{item.hash.slice(0, 12)}</span>}
     </div>
   );
 }
 
-function ItemView({ item, showCursor }: { item: Item; showCursor: boolean }) {
+function ItemView({
+  item,
+  showCursor,
+  isLast,
+}: {
+  item: Item;
+  showCursor: boolean;
+  isLast: boolean;
+}) {
   switch (item.kind) {
     case "thinking":
       return <ThinkingBlock text={item.text} hasSignature={item.hasSignature} />;
@@ -186,8 +107,10 @@ function ItemView({ item, showCursor }: { item: Item; showCursor: boolean }) {
           {showCursor && <span className="carter-cursor">▍</span>}
         </div>
       );
+    // 按名字分派到各自的呈现。所有工具共用一种卡片是之前数据不够的产物，
+    // 不是设计选择 —— 见 toolcards/ToolCard.tsx 的模块头。
     case "tool":
-      return <ToolCard item={item} />;
+      return <ToolCard item={item} isLast={isLast} />;
     case "server":
       return <ServerCard item={item} />;
     case "image":
@@ -228,6 +151,7 @@ function AssistantTurn({
         <ItemView
           key={i}
           item={item}
+          isLast={i === items.length - 1}
           showCursor={streaming && isLast && i === items.length - 1 && item.kind === "text"}
         />
       ))}
@@ -331,30 +255,66 @@ function EmptyState() {
 // 待办 / 提示条 / 提问面板 / 输入框
 // ---------------------------------------------------------------------------
 
+/**
+ * 底栏的待办进度。
+ *
+ * **全部完成就自动收起** —— 之前它会一直挂在那里（`todos.length > 0` 就渲染），
+ * 一轮做完之后还占着版面，用户分不清那是「还要做」还是「已经做完了」。
+ * 清单本身在对话流里有一张 todo_write 卡片（可折叠、可回看），底栏这条只是
+ * 「此刻进行到哪」的提示，做完就该让位。
+ */
 function TodoPanel() {
   const todos = useStore((s) => s.todos);
+  const [dismissed, setDismissed] = useState(false);
+
+  const allDone = todos.length > 0 && todos.every((t) => t.status === "completed");
+
+  // 全部完成之后**自己收起来**。
+  //
+  // 留 6 秒而不是立刻消失：最后一项打勾得让人看见，否则「做完了没有」这件事
+  // 会变成一个悬案。留太久又等于没做 —— 一轮做完之后它还挂在那里，用户分不清
+  // 那是「还要做」还是「已经做完了」。
+  useEffect(() => {
+    if (!allDone) {
+      // 新一轮开始（出现未完成项）时重置，否则后续任务不再显示进度。
+      setDismissed(false);
+      return;
+    }
+    const t = setTimeout(() => setDismissed(true), 6000);
+    return () => clearTimeout(t);
+  }, [allDone]);
+
   if (todos.length === 0) return null;
+  if (allDone && dismissed) return null;
+
+  const done = todos.filter((t) => t.status === "completed").length;
+
   return (
     <div className="border-t border-edge bg-sidebar px-4 py-2">
-      <div className="mx-auto max-w-3xl space-y-1">
-        {todos.map((t, i) => (
-          <div key={i} className="flex items-center gap-2 text-xs">
-            {t.status === "completed" ? (
-              <CircleCheck size={13} className="shrink-0 text-[var(--ok)]" />
-            ) : t.status === "in_progress" ? (
-              <LoaderCircle size={13} className="shrink-0 animate-spin text-tone-blue" />
-            ) : (
-              <span className="inline-block size-3 shrink-0 rounded-full border border-edge" />
-            )}
-            <span
-              className={
-                t.status === "completed" ? "text-dim line-through" : "text-ink"
-              }
-            >
-              {t.status === "in_progress" ? t.active_form : t.content}
-            </span>
+      <div className="mx-auto flex max-w-3xl items-start gap-2">
+        <div className="min-w-0 flex-1 space-y-1">
+          <div className="flex items-center gap-2 text-[10px] text-dim">
+            <span>待办 {done}/{todos.length}</span>
+            {allDone && <span className="text-[var(--ok)]">已全部完成</span>}
           </div>
-        ))}
+          {todos.map((t, i) => (
+            <div key={i} className="flex items-center gap-2 text-xs">
+              {t.status === "completed" ? (
+                <CircleCheck size={13} className="shrink-0 text-[var(--ok)]" />
+              ) : t.status === "in_progress" ? (
+                <LoaderCircle size={13} className="shrink-0 animate-spin text-tone-blue" />
+              ) : (
+                <span className="inline-block size-3 shrink-0 rounded-full border border-edge" />
+              )}
+              <span className={t.status === "completed" ? "text-dim line-through" : "text-ink"}>
+                {t.status === "in_progress" ? t.active_form : t.content}
+              </span>
+            </div>
+          ))}
+        </div>
+        <IconButton title="收起待办" onClick={() => setDismissed(true)}>
+          <X size={12} />
+        </IconButton>
       </div>
     </div>
   );
@@ -373,63 +333,6 @@ function NoticeBanner() {
             <span className="whitespace-pre-wrap break-words">{notice}</span>
           </div>
         </Banner>
-      </div>
-    </div>
-  );
-}
-
-function AskPanel() {
-  const pendingAsk = useStore((s) => s.pendingAsk);
-  const clearPendingAsk = useStore((s) => s.clearPendingAsk);
-  const [free, setFree] = useState("");
-
-  if (!pendingAsk) return null;
-
-  const answer = (a: string) => {
-    const sid = useStore.getState().sessionId;
-    if (sid) {
-      sendCommand(sid, { type: "answer_ask", id: pendingAsk.id, answer: a }).catch((e) =>
-        useStore.getState().setNotice(String(e)),
-      );
-    }
-    clearPendingAsk();
-    setFree("");
-  };
-
-  return (
-    <div className="px-4 pb-2">
-      <div className="mx-auto max-w-3xl rounded-xl border border-edge bg-elevated p-3 shadow-soft">
-        <div className="mb-2 flex items-center gap-2 text-xs text-dim">
-          <Info size={13} />
-          模型在等你回答
-        </div>
-        <div className="mb-2.5 text-sm text-ink">{pendingAsk.question}</div>
-        {pendingAsk.options.length > 0 && (
-          <div className="mb-2 flex flex-wrap gap-2">
-            {pendingAsk.options.map((opt) => (
-              <Button key={opt} onClick={() => answer(opt)}>
-                {opt}
-              </Button>
-            ))}
-          </div>
-        )}
-        <div className="flex gap-2">
-          <Input
-            value={free}
-            onChange={(e) => setFree(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && free.trim()) {
-                e.preventDefault();
-                answer(free.trim());
-              }
-            }}
-            placeholder="或直接输入回答…"
-            className="flex-1"
-          />
-          <Button variant="primary" disabled={!free.trim()} onClick={() => answer(free.trim())}>
-            回答
-          </Button>
-        </div>
       </div>
     </div>
   );
@@ -464,7 +367,7 @@ export function ChatView() {
       <NoticeBanner />
       <MessageList />
       <TodoPanel />
-      <AskPanel />
+      <AskForm />
       <Composer />
     </div>
   );

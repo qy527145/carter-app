@@ -34,7 +34,10 @@ use carter::session::{self, SessionOpts};
 use crate::app_settings::AppSettings;
 use crate::protocol::{AppEvent, Command, SessionEvent, TodoView, UsageView};
 use crate::shell::{AppShell, AskRegistry, SessionHandle};
-use crate::tools::{build_tools, ToolBuildArgs};
+use crate::tools::ask_user::AskRequest;
+use crate::tools::build_tools;
+use crate::tools::record::ToolEvent;
+use crate::tools::ToolBuildArgs;
 
 pub struct SessionOptions {
     pub cwd: PathBuf,
@@ -191,13 +194,23 @@ async fn runner(
     let session_id = ctx.handle.id.clone();
     let cancel = CancelToken::new();
 
-    // UiEvent → AppEvent 的转发任务。它活着期间一直是同一条通道。
+    // 事件有三条来源，最终都汇到 AppEvent 上：
+    // * `ui_tx`   —— carter 的 UiEvent（文本增量、用量、通知…）
+    // * `tool_tx` —— 我们自己那层记录包装（**完整**的参数与结果）
+    // * `ask_tx`  —— 工具发起的提问，需要等前端作答
+    //
+    // 分成三条而不是硬塞进一条：`UiEvent` 是 carter 的封闭枚举，加不了变体；
+    // 而工具记录与提问本来就不是 carter 的概念。
     let (ui_tx, ui_rx) = mpsc::unbounded_channel::<UiEvent>();
+    let (tool_tx, tool_rx) = mpsc::unbounded_channel::<ToolEvent>();
+    let (ask_tx, ask_rx) = mpsc::unbounded_channel::<AskRequest>();
     let forwarder = tokio::spawn(forward_events(
         ctx.shell.clone(),
         session_id.clone(),
         ctx.handle.asks.clone(),
         ui_rx,
+        tool_rx,
+        ask_rx,
     ));
 
     // MCP server 启动是异步的（要连子进程 / 网络）。失败不致命：
@@ -250,8 +263,8 @@ async fn runner(
             Command::Cancel => {
                 // 没有正在跑的轮次时取消是空操作。
             }
-            Command::AnswerAsk { id, answer } => {
-                ctx.handle.asks.answer(id, answer);
+            Command::AnswerForm { id, answers } => {
+                ctx.handle.asks.answer(id, answers);
             }
             Command::SetModel { model } => match switch_model(&ctx, &model) {
                 Ok(resolved) => {
@@ -316,8 +329,10 @@ async fn runner(
                         base_system: system.join("\n"),
                         cancel: cancel.clone(),
                         mcp_tools: mcp_tools.clone(),
-                        ui_tx: Some(ui_tx.clone()),
+                        cwd: ctx.cwd.clone(),
                         skills_enabled: ctx.config.skills.enabled,
+                        tool_tx: tool_tx.clone(),
+                        ask_tx: Some(ask_tx.clone()),
                     },
                     &ctx.settings,
                 );
@@ -364,8 +379,8 @@ async fn runner(
                         Some(inner) = cmd_rx.recv() => match inner {
                             // 生成中只有这两条命令能即时生效 —— 其它排队等下一轮。
                             Command::Cancel => cancel.set(),
-                            Command::AnswerAsk { id, answer } => {
-                                ctx.handle.asks.answer(id, answer);
+                            Command::AnswerForm { id, answers } => {
+                                ctx.handle.asks.answer(id, answers);
                             }
                             other => queued.push_back(other),
                         },
@@ -469,75 +484,88 @@ fn emit(shell: &AppShell, session_id: &str, event: SessionEvent) {
     });
 }
 
-/// 把 carter 的事件词汇翻译成 IPC 词汇。
+/// 把三条来源翻译成统一的 IPC 事件。
+///
+/// carter 的 `ToolCallStarted` / `ToolResult` / `AskUser` **刻意丢弃**：
+/// 前两者只带截断的预览（结果只有第一行 120 字符），界面上画不出有意义的卡片；
+/// 后者是 carter 那个一问一答的 ask_user 工具，已经被我们自己的实现顶掉了。
+/// 留着它们只会让每个工具出现两张卡片。
 async fn forward_events(
     shell: Arc<AppShell>,
     session_id: String,
     asks: Arc<AskRegistry>,
-    mut rx: mpsc::UnboundedReceiver<UiEvent>,
+    mut ui_rx: mpsc::UnboundedReceiver<UiEvent>,
+    mut tool_rx: mpsc::UnboundedReceiver<ToolEvent>,
+    mut ask_rx: mpsc::UnboundedReceiver<AskRequest>,
 ) {
-    // 工具调用的配对：carter 的 `UiEvent` 不带 id，但 started/result 都按调用顺序发。
-    // 这里补一个稳定 id，让并行工具调用的卡片能正确配对。
-    let mut open_calls: VecDeque<String> = VecDeque::new();
-    let mut next_call: u64 = 0;
+    let mut ui_open = true;
+    let mut tool_open = true;
+    let mut ask_open = true;
 
-    while let Some(ev) = rx.recv().await {
-        let out = match ev {
-            UiEvent::AssistantTextDelta(text) => Some(SessionEvent::TextDelta { text }),
-            UiEvent::ThinkingDelta(text) => Some(SessionEvent::ThinkingDelta { text }),
-            UiEvent::AssistantTextEnd => Some(SessionEvent::TextEnd),
-            UiEvent::ToolCallStarted { name, args_preview } => {
-                let call_id = format!("c{next_call}");
-                next_call += 1;
-                open_calls.push_back(call_id.clone());
-                Some(SessionEvent::ToolCallStarted {
-                    call_id,
-                    name,
-                    args_preview,
-                })
-            }
-            UiEvent::ToolResult { ok, summary } => Some(SessionEvent::ToolResult {
-                call_id: open_calls.pop_front().unwrap_or_default(),
-                ok,
-                summary,
-            }),
-            UiEvent::TodoUpdated(todos) => Some(SessionEvent::TodoUpdated {
-                todos: todos.iter().map(todo_view).collect(),
-            }),
-            UiEvent::AskUser {
-                id,
-                question,
-                options,
-                response_tx,
-            } => {
-                // 把 oneshot 发送端取出来存住 —— 事件本身要被广播给多个订阅者，
-                // 而 oneshot 只能发一次。取不出来说明已经有人处理过了。
-                if let Some(tx) = response_tx.lock().unwrap().take() {
-                    asks.insert(id, tx);
+    let emit = |shell: &AppShell, event: SessionEvent| {
+        shell.emit(AppEvent::Session {
+            session_id: session_id.clone(),
+            event,
+        });
+    };
+
+    while ui_open || tool_open || ask_open {
+        tokio::select! {
+            ev = ui_rx.recv(), if ui_open => match ev {
+                Some(ev) => {
+                    if let Some(out) = map_ui(ev) {
+                        emit(&shell, out);
+                    }
                 }
-                Some(SessionEvent::AskUser {
-                    id,
-                    question,
-                    options,
-                })
-            }
-            UiEvent::TurnUsage { usage, cost, model } => Some(SessionEvent::TurnUsage {
-                usage: UsageView::from(&usage),
-                cost,
-                model,
-            }),
-            UiEvent::Notice(message) => Some(SessionEvent::Notice { message }),
-            UiEvent::Title(_) | UiEvent::ReplayHistory(_) => None,
-            UiEvent::ModelChanged(model) => Some(SessionEvent::Notice {
-                message: format!("模型：{model}"),
-            }),
-            UiEvent::Divider(label) => Some(SessionEvent::Notice { message: label }),
-            UiEvent::Idle => Some(SessionEvent::Idle),
-        };
-        if let Some(event) = out {
-            emit(&shell, &session_id, event);
+                None => ui_open = false,
+            },
+            ev = tool_rx.recv(), if tool_open => match ev {
+                Some(ToolEvent::Started { call_id, name, args }) => {
+                    emit(&shell, SessionEvent::ToolStarted { call_id, name, args });
+                }
+                Some(ToolEvent::Finished { call_id, ok, content, elapsed_ms }) => {
+                    emit(&shell, SessionEvent::ToolFinished { call_id, ok, content, elapsed_ms });
+                }
+                None => tool_open = false,
+            },
+            req = ask_rx.recv(), if ask_open => match req {
+                Some(AskRequest::Questions { id, questions, reply }) => {
+                    // 发送端存住：前端要跨一次进程边界才回得来，而 oneshot 只能发一次。
+                    asks.insert(id, reply);
+                    emit(&shell, SessionEvent::AskForm { id, questions });
+                }
+                None => ask_open = false,
+            },
         }
     }
+}
+
+/// carter 的事件 → IPC 事件。返回 `None` = 这条不往前端送（见上面的说明）。
+fn map_ui(ev: UiEvent) -> Option<SessionEvent> {
+    Some(match ev {
+        UiEvent::AssistantTextDelta(text) => SessionEvent::TextDelta { text },
+        UiEvent::ThinkingDelta(text) => SessionEvent::ThinkingDelta { text },
+        UiEvent::AssistantTextEnd => SessionEvent::TextEnd,
+        UiEvent::TodoUpdated(todos) => SessionEvent::TodoUpdated {
+            todos: todos.iter().map(todo_view).collect(),
+        },
+        UiEvent::TurnUsage { usage, cost, model } => SessionEvent::TurnUsage {
+            usage: UsageView::from(&usage),
+            cost,
+            model,
+        },
+        UiEvent::Notice(message) => SessionEvent::Notice { message },
+        UiEvent::Idle => SessionEvent::Idle,
+        UiEvent::ModelChanged(model) => SessionEvent::Notice {
+            message: format!("模型：{model}"),
+        },
+        UiEvent::Divider(label) => SessionEvent::Notice { message: label },
+        UiEvent::Title(_) | UiEvent::ReplayHistory(_) => return None,
+        // 见函数文档：这三条由记录包装层或我们自己的实现接管。
+        UiEvent::ToolCallStarted { .. }
+        | UiEvent::ToolResult { .. }
+        | UiEvent::AskUser { .. } => return None,
+    })
 }
 
 fn todo_view(t: &carter::tools::TodoItem) -> TodoView {

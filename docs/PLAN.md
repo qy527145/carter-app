@@ -499,8 +499,25 @@ M8 的移植过程中逐条比对了两版 IR 的表达力。llm_adapt 的 IR �
 保持纯文本，重复粘贴自动去重，入库前还会把长边压到 1568px。斜杠命令与 `@文件` 的
 展开放在后端（`session.rs` 的 `expand_input`），不放进输入框。
 
+**工具**（第三轮，同一日）：三件事。
+
+1. **`bash` 跨平台**。carter 硬编码 `sh -c`，而 Git for Windows 只把 `Git\cmd` 写进
+   PATH（有 `git.exe` 没有 `sh.exe`），从 GUI 启动时模型每次调用都拿到
+   `failed to spawn command`。新增 `platform.rs`：PATH → 常见安装位置探测 POSIX shell，
+   找不到退回 `cmd /C`；**探测结果写进工具描述**（模型看不到我们的进程环境，只能从
+   描述里知道该写 `ls` 还是 `dir`）；显式跑在会话 cwd 里；Windows 上按 OEM 代码页解
+   cmd 的中文输出。
+2. **`ask_user_question` 一次问一组**，支持多选、选项带说明。carter 那个是一问一答，
+   三个问题 = 三轮完整模型往返。
+3. **工具卡片差异化**。根因不是样式而是**数据**：carter 的 `UiEvent` 只给截断的参数与
+   「结果第一行 120 字符」。新增 `tools/record.rs` 在工具外面套一层，把完整参数、结果
+   与耗时经自己的通道送给界面（三条事件流在会话侧合并）。
+   `SessionEvent` 的 `tool_call_started`/`tool_result` 随之换成
+   `tool_started`/`tool_finished`。
+
 **没做**：hooks / `[env]` / `system.md` 的界面（只能改文件）；API Key 进系统凭据库；
-单个 MCP 工具的开关（工具名要连上 server 才知道）；自绘标题栏。
+单个 MCP 工具的开关（工具名要连上 server 才知道）；自绘标题栏；
+被 `PreToolUse` hook 阻断的调用不会产生卡片（本应用没有配 hooks 的界面，这条路径到不了）。
 
 ## 十、最终状态
 

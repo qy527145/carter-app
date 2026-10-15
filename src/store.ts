@@ -17,6 +17,7 @@ import { create } from "zustand";
 import type {
   AppInfo,
   AppSettings,
+  AskQuestion,
   BlockView,
   CreatedSession,
   MessageView,
@@ -34,8 +35,9 @@ export type Item =
       kind: "tool";
       callId: string;
       name: string;
-      argsPreview: string;
-      result?: { ok: boolean; summary: string };
+      /** **完整的**参数对象。差异化渲染靠它（见 components/toolcards）。 */
+      args: unknown;
+      result?: { ok: boolean; content: string; elapsedMs: number };
     }
   | { kind: "server"; rawType: string; summary: string }
   | { kind: "image"; mediaType: string; hash: string | null }
@@ -47,7 +49,8 @@ export type Turn =
   // 靠它把助手消息筛到那次 API 调用。历史消息没有这个数（事件不回放），为 undefined。
   | { role: "assistant"; turn?: number; items: Item[] };
 
-export type PendingAsk = { id: number; question: string; options: string[] };
+/** 模型提问，等用户填完一次性提交。 */
+export type PendingForm = { id: number; questions: AskQuestion[] };
 
 type Store = {
   // 会话
@@ -60,7 +63,7 @@ type Store = {
   usage: UsageView | null;
   cost: number;
   todos: TodoView[];
-  pendingAsk: PendingAsk | null;
+  pendingForm: PendingForm | null;
   notice: string | null;
   // 报文面板：open 控制显示，turn 是「只看这一轮」的筛选（null = 全部）。
   inspectorOpen: boolean;
@@ -87,7 +90,7 @@ type Store = {
   addUserTurn: (text: string) => void;
   applyEvent: (e: SessionEvent) => void;
   setNotice: (m: string | null) => void;
-  clearPendingAsk: () => void;
+  clearPendingForm: () => void;
   openInspector: (turn?: number | null) => void;
   closeInspector: () => void;
   setInspectorTurn: (turn: number | null) => void;
@@ -144,7 +147,7 @@ function closeText(items: Item[]): Item[] {
 function fillToolResult(
   turns: Turn[],
   callId: string,
-  result: { ok: boolean; summary: string },
+  result: { ok: boolean; content: string; elapsedMs: number },
 ): Turn[] {
   for (let i = turns.length - 1; i >= 0; i--) {
     const t = turns[i];
@@ -162,10 +165,18 @@ function fillToolResult(
   return turns;
 }
 
-/** 把多行工具结果压成一行摘要，供卡片展示。 */
-function firstLine(s: string, max = 160): string {
-  const line = (s.split("\n", 1)[0] ?? "").trim();
-  return line.length > max ? line.slice(0, max) + "…" : line;
+/**
+ * 历史里的工具参数是**紧凑 JSON 字符串**（保留模型原样的分片拼接结果）。
+ * 卡片需要对象才能按字段取值，所以这里解析一次；解析不了就原样留着字符串，
+ * 让兜底卡片把它显示出来 —— 坏数据不该让整条消息渲染不出来。
+ */
+function parseArgs(raw: string): unknown {
+  if (!raw.trim()) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return raw;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -179,7 +190,7 @@ function blockToItem(b: BlockView): Item | null {
     case "thinking":
       return { kind: "thinking", text: b.text, hasSignature: b.has_signature };
     case "tool_call":
-      return { kind: "tool", callId: b.id, name: b.name, argsPreview: b.args };
+      return { kind: "tool", callId: b.id, name: b.name, args: parseArgs(b.args) };
     case "server_activity":
       return { kind: "server", rawType: b.raw_type, summary: b.summary };
     case "image":
@@ -211,9 +222,11 @@ export function historyToTurns(history: MessageView[]): Turn[] {
     if (msg.role === "user") {
       for (const b of msg.blocks) {
         if (b.kind === "tool_result") {
+          // 历史里没有耗时（事件不回放），给 0 —— 卡片会跳过 0 的展示。
           turns = fillToolResult(turns, b.tool_use_id, {
             ok: !b.is_error,
-            summary: firstLine(b.text),
+            content: b.text,
+            elapsedMs: 0,
           });
         }
       }
@@ -244,7 +257,7 @@ const emptyConversation = {
   usage: null as UsageView | null,
   cost: 0,
   todos: [] as TodoView[],
-  pendingAsk: null as PendingAsk | null,
+  pendingForm: null as PendingForm | null,
   notice: null as string | null,
   // 换会话时把报文面板一起收起来 —— 否则会显示上一个会话的请求。
   inspectorOpen: false,
@@ -287,7 +300,7 @@ export const useStore = create<Store>((set) => ({
 
   setNotice: (notice) => set({ notice }),
 
-  clearPendingAsk: () => set({ pendingAsk: null }),
+  clearPendingForm: () => set({ pendingForm: null }),
 
   openInspector: (turn = null) => set({ inspectorOpen: true, inspectorTurn: turn }),
   closeInspector: () => set({ inspectorOpen: false }),
@@ -318,7 +331,7 @@ export const useStore = create<Store>((set) => ({
           return { turns: withAssistant(s.turns, (items) => appendThinking(items, e.text)) };
         case "text_end":
           return { turns: withAssistant(s.turns, closeText) };
-        case "tool_call_started":
+        case "tool_started":
           return {
             turns: withAssistant(s.turns, (items) => [
               ...closeText(items),
@@ -326,23 +339,27 @@ export const useStore = create<Store>((set) => ({
                 kind: "tool",
                 callId: e.call_id,
                 name: e.name,
-                argsPreview: e.args_preview,
+                args: e.args,
               },
             ]),
           };
-        case "tool_result":
+        case "tool_finished":
           return {
-            turns: fillToolResult(s.turns, e.call_id, { ok: e.ok, summary: e.summary }),
+            turns: fillToolResult(s.turns, e.call_id, {
+              ok: e.ok,
+              content: e.content,
+              elapsedMs: e.elapsed_ms,
+            }),
           };
         case "todo_updated":
           return { todos: e.todos };
-        case "ask_user":
-          return { pendingAsk: { id: e.id, question: e.question, options: e.options } };
+        case "ask_form":
+          return { pendingForm: { id: e.id, questions: e.questions } };
         case "turn_usage":
           return { usage: e.usage, cost: e.cost, model: e.model };
         case "idle":
           // 一轮收尾：解除生成态，并清掉可能还悬着的提问（模型已不再等）。
-          return { streaming: false, pendingAsk: null };
+          return { streaming: false, pendingForm: null };
         case "notice":
           return { notice: e.message };
         case "error":

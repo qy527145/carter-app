@@ -7,8 +7,17 @@
 //!
 //! 多个会话可以同时跑（一个在等模型、另一个在等工具）。事件里带 `session_id`，
 //! 前端按会话分桶渲染，不会把两个对话的增量混到一个气泡里。
+//!
+//! ## 工具事件为什么带完整参数与结果
+//!
+//! 一开始这里只有 `args_preview`（截断字符串）与 `summary`（结果第一行截断到
+//! 120 字符）。那样的数据只够画一种卡片：名字 + 一行参数 + 一行结果 —— 于是界面上
+//! 每个工具长得都一样。要做差异化呈现（bash 显示命令与输出、todo_write 显示清单、
+//! edit_file 显示改动），就必须把**完整的参数 JSON 与结果正文**带过来。
+//! 来源是 `tools/record.rs` 那层包装，不是 carter 的 `UiEvent`（它给的就是截断的）。
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// epoch 毫秒。不引入日期库 —— 这里只需要一个单调可比的数。
 pub fn now_ms() -> u64 {
@@ -18,19 +27,57 @@ pub fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+// ---------------------------------------------------------------------------
+// 提问
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AskOption {
+    pub label: String,
+    /// 这个选项意味着什么。界面上作为次要说明显示。
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AskQuestion {
+    pub question: String,
+    /// 极短标签，界面上当标题用。
+    #[serde(default)]
+    pub header: Option<String>,
+    #[serde(default)]
+    pub multi_select: bool,
+    #[serde(default)]
+    pub options: Vec<AskOption>,
+}
+
+// ---------------------------------------------------------------------------
+// 前端 → 后端
+// ---------------------------------------------------------------------------
+
 /// 前端 → 后端。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Command {
     /// 提交一条用户消息。会话正在跑时会被拒绝（先 Cancel 或等 Idle）。
+    ///
+    /// `text` 里可以带 `/命令`、`@文件`、`[img:...]` —— 展开在会话侧做，
+    /// 见 `session.rs::expand_input`。
     SendPrompt { text: String },
     /// 中断当前轮。已经生成的内容保留。
     Cancel,
     /// 切换本会话使用的模型（`provider/model` 形式）。
     SetModel { model: String },
-    /// 回答模型通过 `ask_user_question` 工具提的问题。
-    AnswerAsk { id: u64, answer: String },
+    /// 回答 `ask_user_question` 提的问题。
+    ///
+    /// `answers` 与问题一一对应，每项是该问题选中的标签（或自由输入）。
+    /// 空数组 = 这一问被跳过。
+    AnswerForm { id: u64, answers: Vec<Vec<String>> },
 }
+
+// ---------------------------------------------------------------------------
+// 后端 → 前端
+// ---------------------------------------------------------------------------
 
 /// 后端 → 前端。统一走 `carter://event`。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,11 +100,11 @@ pub enum AppEvent {
 /// 一个会话内的事件流。
 ///
 /// 顺序即语义：前端按到达顺序把 `thinking_delta` / `text_delta` 攒进同一个
-/// 助手气泡，`tool_call_started` 与 `tool_result` 按 `call_id` 配对。
+/// 助手气泡，`tool_started` 与 `tool_finished` 按 `call_id` 配对。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionEvent {
-    /// 会话就绪（刚创建或刚续接）。历史不由事件回放，走 `session_history` 命令取。
+    /// 会话就绪（刚创建或刚续接）。历史不由事件回放，走 `create_session` 的返回值。
     Ready {
         session_id: String,
         model: String,
@@ -72,33 +119,32 @@ pub enum SessionEvent {
     TextDelta { text: String },
     /// 一段正文结束（换行/收尾），前端据此收束当前气泡。
     TextEnd,
-    /// 工具调用即将执行。
-    ToolCallStarted {
+    /// 工具调用即将执行。`args` 是**完整**的参数对象。
+    ToolStarted {
         call_id: String,
         name: String,
-        args_preview: String,
+        args: Value,
     },
-    /// 工具执行结束。与 `ToolCallStarted` 按 `call_id` 配对。
-    ToolResult {
+    /// 工具执行结束。与 `ToolStarted` 按 `call_id` 配对。
+    ///
+    /// `content` 是工具回灌给模型的那段正文（可能被截断，截断处有明确标注）。
+    ToolFinished {
         call_id: String,
         ok: bool,
-        summary: String,
+        content: String,
+        elapsed_ms: u64,
     },
-    /// todo 列表整表更新。
+    /// todo 列表整表更新。用于底栏那条进度提示。
     TodoUpdated { todos: Vec<TodoView> },
-    /// 模型主动提问，等用户作答（`answer_ask` 命令）。
-    AskUser {
-        id: u64,
-        question: String,
-        options: Vec<String>,
-    },
+    /// 模型在等用户回答问题。前端渲染成表单，用 `answer_form` 回。
+    AskForm { id: u64, questions: Vec<AskQuestion> },
     /// 一轮的用量与成本。
     TurnUsage {
         usage: UsageView,
         cost: f64,
         model: String,
     },
-    /// 提示（压缩日志、上游流内错误等）。
+    /// 提示（压缩日志、上游流内错误、`@文件` 展开情况等）。
     Notice { message: String },
     /// 一轮结束，前端可以解除「正在生成」状态。
     Idle,

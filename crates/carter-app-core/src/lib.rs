@@ -15,6 +15,7 @@
 //! * [`catalog`] —— 全部模型引用摊平成一张带元数据的表。
 //! * [`input`] —— 输入框里的斜杠命令与 `@文件` 引用。
 //! * [`images`] —— 粘贴进来的图片（复用 carter 的内容寻址图片库）。
+//! * [`platform`] —— 操作系统与 shell 探测（bash 工具的跨平台基础）。
 
 pub mod app_settings;
 pub mod capture;
@@ -23,6 +24,7 @@ pub mod config_edit;
 pub mod images;
 pub mod input;
 pub mod paths;
+pub mod platform;
 pub mod protocol;
 pub mod session;
 pub mod sessions;

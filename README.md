@@ -70,6 +70,26 @@ server_tools = ["web_search"]      # 可选：让模型自己联网搜索
 摆在输入框里给用户看着它发出去没有意义。这也让 GUI 与 CLI 走同一套规则
 （自定义命令用 carter 的 `commands::expand`，图片用 `media::inline_user_attachments`）。
 
+## 工具
+
+内置工具**不是** carter 那套原样搬过来的 —— 有两个换成了本应用的实现：
+
+- **`bash`** 跨平台。carter 那个硬编码 `sh -c`；从资源管理器或 IDE 启动时 PATH 常被
+  精简（Git for Windows 只把 `Git\cmd` 写进 PATH，那里有 `git.exe` 却没有 `sh.exe`），
+  于是模型每次调用都拿到 `failed to spawn command` 而且看不出原因。现在会按
+  PATH → 常见安装位置探测 POSIX shell，找不到才退回 `cmd /C`，并且**把探测结果写进
+  工具描述** —— 模型看不到我们的进程环境，只能从描述里知道该写 `ls` 还是 `dir`。
+  另外 `bash` 显式跑在会话的 cwd 里（桌面进程的 cwd 取决于从哪启动，与会话的 cwd
+  不是一回事），Windows 上还会按 OEM 代码页解 `cmd` 的中文输出。
+- **`ask_user_question`** 一次问一组问题，支持多选、选项可带说明。carter 那个一次
+  只能问一个：三个问题就是三轮完整的模型往返，而且用户看不到全貌就没法做取舍。
+
+其余工具（`read_file` / `grep` / `todo_write` / …）沿用 carter 的实现，但外面套了一层
+**记录包装**：carter 的 UI 事件只带截断的参数与「结果第一行 120 字符」，数据不够就只能
+给所有工具画同一种卡片。包装层把完整的参数、结果与耗时送给界面，于是每种工具能按
+自己的习惯呈现 —— bash 显示命令与输出、`todo_write` 显示清单、`edit_file` 显示改动前后、
+`grep` 显示命中数。底栏的待办进度在全部完成后 6 秒自动收起。
+
 ## 界面里能配什么
 
 | 页 | 能做什么 |

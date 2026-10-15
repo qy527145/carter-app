@@ -33,10 +33,18 @@ export type SessionEvent =
   | { type: "thinking_delta"; text: string }
   | { type: "text_delta"; text: string }
   | { type: "text_end" }
-  | { type: "tool_call_started"; call_id: string; name: string; args_preview: string }
-  | { type: "tool_result"; call_id: string; ok: boolean; summary: string }
+  /** `args` 是**完整的**参数对象 —— 差异化渲染靠它。 */
+  | { type: "tool_started"; call_id: string; name: string; args: unknown }
+  | {
+      type: "tool_finished";
+      call_id: string;
+      ok: boolean;
+      /** 工具回灌给模型的那段正文（过长时后端已截断并标注）。 */
+      content: string;
+      elapsed_ms: number;
+    }
   | { type: "todo_updated"; todos: TodoView[] }
-  | { type: "ask_user"; id: number; question: string; options: string[] }
+  | { type: "ask_form"; id: number; questions: AskQuestion[] }
   | { type: "turn_usage"; usage: UsageView; cost: number; model: string }
   | { type: "notice"; message: string }
   | { type: "idle" }
@@ -75,12 +83,33 @@ export type BlockView =
 
 export type MessageView = { role: "user" | "assistant" | "system"; blocks: BlockView[] };
 
+/** 一个问题。支持多选与带说明的选项。 */
+export type AskOption = {
+  label: string;
+  /** 这个选项意味着什么。界面上作为次要说明。 */
+  description: string | null;
+};
+
+export type AskQuestion = {
+  question: string;
+  /** 极短标签，界面上当标题用。 */
+  header: string | null;
+  multi_select: boolean;
+  options: AskOption[];
+};
+
 /** 前端 → 后端。 */
 export type Command =
   | { type: "send_prompt"; text: string }
   | { type: "cancel" }
   | { type: "set_model"; model: string }
-  | { type: "answer_ask"; id: number; answer: string };
+  /**
+   * 回答 `ask_user_question` 提的问题。
+   *
+   * `answers` 与问题一一对应，每项是该问题选中的标签（含自由输入）。
+   * 空数组 = 这一问被跳过。
+   */
+  | { type: "answer_form"; id: number; answers: string[][] };
 
 // ---------------------------------------------------------------------------
 // 应用信息与设置

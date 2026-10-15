@@ -1,4 +1,5 @@
-//! 工具池装配：在 carter 的装配结果之上套一层用户开关。
+//! 工具池装配：在 carter 的装配结果之上做三件事 —— 换掉两个实现、套一层用户开关、
+//! 外面再包一层记录。
 //!
 //! ## 为什么不是在 carter 里加开关
 //!
@@ -16,26 +17,50 @@
 //! **是同一份值**（见 [`filter_tools`]）。这是「关掉的工具对子 agent 同样失效」
 //! 的唯一保证，也正因为如此两条路径必须共用这一个函数的返回值。
 //!
+//! ## 换掉哪两个实现
+//!
+//! * **`bash`** —— carter 那个硬编码 `sh -c`，Windows 上从 GUI 启动时 PATH 里多半
+//!   没有 `sh`，模型每次都拿到「program not found」而且看不出原因。换成
+//!   [`bash::PlatformBash`]：探测 shell、显式设工作目录、描述里写明当前平台。
+//! * **`ask_user_question`** —— carter 那个一次只能问一个问题、选项只有标签没有说明。
+//!   界面里「问三件事」要来回三轮，而每轮都是一次完整的模型请求。换成
+//!   [`ask_user::AskUserTool`]：一次问一组、支持多选。
+//!
+//! ## 记录包装
+//!
+//! 每个工具外面再包一层 [`record::Recorded`]，把**完整的参数与结果**送给界面。
+//! carter 的 `UiEvent` 只给截断的预览 —— 数据不够，界面上就只能给所有工具画同一种
+//! 卡片。这是「工具看起来都一样」的根因。
+//!
 //! ## 这份开关只影响本应用
 //!
 //! 名单存在 `~/.carter-app/settings.json`，不是 `~/.carter/config.toml`。
 //! carter CLI 读不到它，也不会受它影响 —— 界面上必须把这句话写出来。
 
+pub mod ask_user;
+pub mod bash;
+pub mod record;
+
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use carter::agent::bootstrap::build_tools as carter_build_tools;
-use carter::agent::{CancelToken, TaskTool, ToolFactory, UiEvent};
+use carter::agent::{CancelToken, TaskTool, ToolFactory};
 use carter::config::AgentConfig;
 use carter::provider::LlmProvider;
 use carter::registry::ModelInfo;
 use carter::tools::{Tool, ToolRegistry};
+use tokio::sync::mpsc;
 
 use crate::app_settings::AppSettings;
+use ask_user::{AskRequest, AskUserTool};
+use bash::PlatformBash;
+use record::{Recorded, ToolEvent};
 
 /// 装配工具池需要的一整套东西。
 ///
-/// 打包成结构体是因为裸参数有八个，而其中四个在重建 `task` 时要各用两次 ——
-/// 八个位置参数摆在那里，早晚会有人传错顺序。
+/// 打包成结构体是因为裸参数有九个，而其中四个在重建 `task` 时要各用两次 ——
+/// 九个位置参数摆在那里，早晚会有人传错顺序。
 pub struct ToolBuildArgs {
     pub provider: Arc<dyn LlmProvider>,
     pub model: ModelInfo,
@@ -43,14 +68,19 @@ pub struct ToolBuildArgs {
     pub base_system: String,
     pub cancel: CancelToken,
     pub mcp_tools: Vec<Arc<dyn Tool>>,
-    pub ui_tx: Option<tokio::sync::mpsc::UnboundedSender<UiEvent>>,
+    /// 会话的工作目录。bash 会在这个目录里跑。
+    pub cwd: std::path::PathBuf,
     pub skills_enabled: bool,
+    /// 工具事件（完整参数与结果）的出口。
+    pub tool_tx: mpsc::UnboundedSender<ToolEvent>,
+    /// 提问请求的出口。`None` = 不给这个会话注册 `ask_user_question`。
+    pub ask_tx: Option<mpsc::UnboundedSender<AskRequest>>,
 }
 
-/// 按设置挑出要保留的工具，**不含 `task`**。
+/// 按设置挑出要保留的工具（不含 `task`、不含 `ask_user_question`）。
 ///
-/// 返回值同时是主工具池的内容与子 agent 工厂的快照 —— `build_tools` 里
-/// 那两处用的是同一个值，不是各自算一遍。
+/// `ask_user_question` 单独处理：carter 的 `build_tools` 只在给了 `ui_tx` 时才注册
+/// 它，而我们不用 carter 那个实现，所以这里传 `None`、自己加。
 pub fn filter_tools(full: &ToolRegistry, settings: &AppSettings) -> Vec<Arc<dyn Tool>> {
     full.tools()
         .iter()
@@ -61,7 +91,11 @@ pub fn filter_tools(full: &ToolRegistry, settings: &AppSettings) -> Vec<Arc<dyn 
         .collect()
 }
 
-/// 装配工具池，并按设置里的名单过滤掉被关掉的工具。
+/// 装配工具池。
+///
+/// 顺序：carter 装配 → 换实现 → 过滤 → 记录包装 → 快照 → 挂上 `task`。
+/// `task` 必须最后挂：子 agent 的工厂闭包捕获的是「此刻已有的工具」，
+/// 这个顺序就是递归守卫（工厂里不含 `task`，子 agent 不能再派生）。
 pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry {
     let ToolBuildArgs {
         provider,
@@ -70,12 +104,14 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
         base_system,
         cancel,
         mcp_tools,
-        ui_tx,
+        cwd,
         skills_enabled,
+        tool_tx,
+        ask_tx,
     } = args;
 
-    // 先按 carter 的标准方式装一遍：内置 8 个 + skill + ask_user + MCP 工具 + task。
-    // 递归守卫与装配顺序都留在 carter 那侧，我们只做筛选、不重写装配逻辑。
+    // ui_tx 传 None：carter 的 ask_user 会一并注册进来，而我们用自己的那个
+    // （见模块头的说明）。传 None 之后 carter 就不加它了。
     let full = carter_build_tools(
         skills_enabled,
         provider.clone(),
@@ -84,18 +120,35 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
         base_system.clone(),
         cancel.clone(),
         mcp_tools,
-        ui_tx,
+        None,
     );
 
-    let kept = filter_tools(&full, settings);
-
+    let seq = Arc::new(AtomicU64::new(0));
     let mut tools = ToolRegistry::empty();
-    for t in &kept {
-        tools.push(t.clone());
+
+    let push = |t: Arc<dyn Tool>, tools: &mut ToolRegistry| {
+        tools.push(Arc::new(Recorded::new(t, tool_tx.clone(), seq.clone())));
+    };
+
+    for t in filter_tools(&full, settings) {
+        // `bash` 换成跨平台实现 —— 其余原样。
+        let t: Arc<dyn Tool> = if t.name() == "bash" {
+            Arc::new(PlatformBash::new(cwd.clone()))
+        } else {
+            t
+        };
+        push(t, &mut tools);
     }
 
-    // 工厂闭包里放的正是上面那份 `kept` —— 与主工具池同源。
-    let snapshot: Vec<Arc<dyn Tool>> = kept;
+    // 我们自己那个一次问一组问题的 ask_user。
+    if let Some(ask_tx) = ask_tx {
+        if settings.tool_enabled("ask_user_question") {
+            push(Arc::new(AskUserTool::new(ask_tx)), &mut tools);
+        }
+    }
+
+    // 子 agent 工厂：产出「主 registry 中的所有工具（去掉 task）」。
+    let snapshot: Vec<Arc<dyn Tool>> = tools.tools().to_vec();
     let factory: ToolFactory = Arc::new(move || snapshot.clone());
     tools.push(Arc::new(TaskTool::new(
         provider,
@@ -158,7 +211,7 @@ mod tests {
     /// `task` 永远不进筛选结果 —— `build_tools` 会另造一个。
     ///
     /// 摆在这条上的是「子 agent 也遵守开关」这个保证：`build_tools` 里
-    /// `task` 的工厂闭包捕获的就是 `filter_tools` 的返回值，所以只要这个函数
+    /// `task` 的工厂闭包捕获的就是过滤之后的工具表，所以只要这个函数
     /// 把被关掉的工具筛掉了，子 agent 那边也一定拿不到。
     #[test]
     fn the_task_tool_never_comes_through_the_filter() {
