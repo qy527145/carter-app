@@ -24,15 +24,17 @@ use arc_swap::ArcSwap;
 use tokio::sync::mpsc;
 
 use carter::agent::{
-    bootstrap::build_tools, run_turn, CancelToken, CompactModel, RunOptions, Thread, UiEvent, UiSink,
+    run_turn, CancelToken, CompactModel, RunOptions, Thread, UiEvent, UiSink,
 };
 use carter::config::Config;
 use carter::hooks::HookRegistry;
 use carter::registry::{fetch, ModelInfo};
 use carter::session::{self, SessionOpts};
 
+use crate::app_settings::AppSettings;
 use crate::protocol::{AppEvent, Command, SessionEvent, TodoView, UsageView};
 use crate::shell::{AppShell, AskRegistry, SessionHandle};
+use crate::tools::{build_tools, ToolBuildArgs};
 
 pub struct SessionOptions {
     pub cwd: PathBuf,
@@ -119,6 +121,7 @@ pub fn start_session(
         model,
         provider,
         config,
+        settings: AppSettings::load(),
         resumed,
         cwd: opts.cwd,
         unsupported_server_tools,
@@ -134,13 +137,49 @@ struct SessionCtx {
     handle: Arc<SessionHandle>,
     model: ModelInfo,
     provider: Arc<dyn carter::provider::LlmProvider>,
+    /// 启动时的配置快照。**每一轮开始前会重新读一遍**，见 [`SessionCtx::refresh`]。
     config: Arc<Config>,
+    /// 应用私有设置（工具开关）。同样每轮重读 —— 用户在界面上关掉一个工具，
+    /// 下一条消息就该生效。
+    settings: AppSettings,
     resumed: bool,
     cwd: PathBuf,
     /// 渠道声明不出去的服务端工具（该协议没有对应物、或名字不认识）。
     unsupported_server_tools: Vec<String>,
     /// 抓包存储。换模型时要重挂钩子，所以得留着。
     capture: Arc<crate::capture::CaptureStore>,
+}
+
+impl SessionCtx {
+    /// 重新读一遍配置与应用设置。
+    ///
+    /// 这是**热重载的落点**：界面写完 `config.toml` 会 `store` 进 `AppShell`，
+    /// 但已经跑着的会话手里还攥着启动时那份 `Arc<Config>`。每轮开头刷新一次，
+    /// 于是「改完配置 → 下一条消息生效」，不必重开会话。
+    ///
+    /// 刻意**不动** `model` / `provider`：那是这条对话的身份。用户改了默认模型，
+    /// 新会话用新的，这条接着用它自己选的那个。
+    fn refresh(&mut self) {
+        self.config = self.shell.config.load_full();
+        self.settings = AppSettings::load();
+    }
+
+    /// 当前的系统提示（含技能目录）。技能开关会变，所以每轮重算。
+    fn system(&self, git: Option<&carter::session::GitInfo>) -> Vec<String> {
+        let skill_metas = if self.config.skills.enabled {
+            carter::skills::discover(&carter::config::paths::skills_dir())
+        } else {
+            Vec::new()
+        };
+        carter::prompt::assemble_system(
+            &self.config,
+            &self.cwd,
+            &self.model.key,
+            git,
+            &skill_metas,
+            true,
+        )
+    }
 }
 
 async fn runner(
@@ -163,23 +202,10 @@ async fn runner(
 
     // MCP server 启动是异步的（要连子进程 / 网络）。失败不致命：
     // carter 的 McpManager 会跳过连不上的 server。
+    //
+    // 它在会话开头连一次就不再重连 —— 所以界面上改了 MCP 配置要**新开会话**
+    // 才生效，这与「工具开关下一条消息就生效」不同，界面上分开提示。
     let (mcp_mgr, mcp_tools) = carter::mcp::McpManager::start(&ctx.config.mcp).await;
-
-    let skills_dir = carter::config::paths::skills_dir();
-    let skill_metas = if ctx.config.skills.enabled {
-        carter::skills::discover(&skills_dir)
-    } else {
-        Vec::new()
-    };
-    let system = carter::prompt::assemble_system(
-        &ctx.config,
-        &ctx.cwd,
-        &ctx.model.key,
-        meta.git.as_ref(),
-        &skill_metas,
-        true,
-    );
-    let hooks = Arc::new(HookRegistry::from_configs(ctx.config.hooks.clone()));
 
     emit(
         &ctx.shell,
@@ -250,15 +276,24 @@ async fn runner(
                 ),
             },
             Command::SendPrompt { text } => {
+                // 热重载落点：每轮开始前重读配置与应用设置。
+                // 界面上改完工具开关、换完渠道、动过 system.md，下一条消息就按新的来。
+                ctx.refresh();
+                let system = ctx.system(meta.git.as_ref());
+                let hooks = Arc::new(HookRegistry::from_configs(ctx.config.hooks.clone()));
+
                 let tools = build_tools(
-                    ctx.config.skills.enabled,
-                    ctx.provider.clone(),
-                    ctx.model.clone(),
-                    ctx.config.agent.clone(),
-                    system.join("\n"),
-                    cancel.clone(),
-                    mcp_tools.clone(),
-                    Some(ui_tx.clone()),
+                    ToolBuildArgs {
+                        provider: ctx.provider.clone(),
+                        model: ctx.model.clone(),
+                        agent_cfg: ctx.config.agent.clone(),
+                        base_system: system.join("\n"),
+                        cancel: cancel.clone(),
+                        mcp_tools: mcp_tools.clone(),
+                        ui_tx: Some(ui_tx.clone()),
+                        skills_enabled: ctx.config.skills.enabled,
+                    },
+                    &ctx.settings,
                 );
                 let run_opts = RunOptions {
                     show_thinking: true,

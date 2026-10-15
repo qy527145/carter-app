@@ -12,9 +12,11 @@
   "app": {
     "windows": [
       {
-        "title": "carter-app",
-        "width": 800,
-        "height": 600
+        "title": "Carter",
+        "width": 1180,
+        "height": 780,
+        "minWidth": 900,
+        "minHeight": 600
       }
     ],
     "security": {

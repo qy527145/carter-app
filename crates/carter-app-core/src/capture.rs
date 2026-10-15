@@ -64,15 +64,7 @@ impl CaptureStore {
 
     /// `~/.carter-app/captures`。
     pub fn default_root() -> PathBuf {
-        let base = std::env::var_os("CARTER_APP_HOME")
-            .map(PathBuf::from)
-            .or_else(|| {
-                std::env::var_os("USERPROFILE")
-                    .or_else(|| std::env::var_os("HOME"))
-                    .map(|h| PathBuf::from(h).join(".carter-app"))
-            })
-            .unwrap_or_else(|| PathBuf::from(".carter-app"));
-        base.join("captures")
+        crate::paths::captures_dir()
     }
 
     fn path_for(&self, session_id: &str) -> PathBuf {

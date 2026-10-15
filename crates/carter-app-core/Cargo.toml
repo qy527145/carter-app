@@ -14,3 +14,7 @@ tracing = { workspace = true }
 arc-swap = { workspace = true }
 dashmap = { workspace = true }
 futures = { workspace = true }
+# 界面里改 config.toml 用的**保真** TOML 编辑器：保留注释、格式与 `${ENV}` 字面量。
+# 不能用 serde 反序列化再序列化回去 —— 那条路会把环境变量引用烤成明文密钥，
+# 详见 src/config_edit.rs 顶部的说明。
+toml_edit = { workspace = true }

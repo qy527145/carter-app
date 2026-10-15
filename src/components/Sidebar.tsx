@@ -1,106 +1,211 @@
-// 左侧栏：会话列表 + 新建。
+// 左侧栏：视图切换 + 会话列表 + 主题。
 //
-// 每条会话都按 id 打开（`create_session({ resumeId })`），不用「只续接最新」
-// 那条老路。当前会话自己不可点，避免无谓地重建一次。
+// 宽度可拖，拖完存进设置的 `sidebar_width`（应用私有，见 lib/api 的 AppSettings）。
+// 会话列表按 今天 / 昨天 / 更早 分组 —— 平铺一长条时，找「昨天那条」只能靠时间戳。
 
-import { MessageSquare, Plus } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  MessageSquare,
+  Monitor,
+  Moon,
+  Plus,
+  Search,
+  Settings as SettingsIcon,
+  Sun,
+} from "lucide-react";
 
-import { useStore } from "../store";
+import { setAppSettings, type AppSettings, type ThemePref } from "../lib/api";
+import { newSession } from "../lib/sessionOps";
+import { SessionList } from "./SessionList";
 import { Button } from "./ui/Button";
+import { Input } from "./ui/Input";
+import { useStore } from "../store";
 
-// created_at 是**毫秒**（后端 `now_ms()`），不是秒 —— 别再乘 1000。
-function relTime(ms: number): string {
-  const d = new Date(ms);
-  if (Number.isNaN(d.getTime())) return "";
-  return d.toLocaleString("zh-CN", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
-const VIEW_OPTIONS = [
-  { id: "chat", label: "对话" },
-  { id: "settings", label: "设置" },
+const NAV = [
+  { id: "chat", label: "对话", icon: MessageSquare },
+  { id: "settings", label: "设置", icon: SettingsIcon },
 ] as const;
 
-export function Sidebar({
-  onNew,
-  onOpen,
-}: {
-  onNew: () => void;
-  onOpen: (id: string) => void;
-}) {
-  const sessions = useStore((s) => s.sessions);
-  const sessionId = useStore((s) => s.sessionId);
-  const appVersion = useStore((s) => s.appVersion);
-  const view = useStore((s) => s.view);
-  const setView = useStore((s) => s.setView);
+const THEMES: { id: ThemePref; label: string; icon: typeof Sun }[] = [
+  { id: "system", label: "跟随系统", icon: Monitor },
+  { id: "light", label: "浅色", icon: Sun },
+  { id: "dark", label: "深色", icon: Moon },
+];
+
+const MIN_W = 200;
+const MAX_W = 420;
+
+function ThemeToggle() {
+  const settings = useStore((s) => s.settings);
+  const setSettings = useStore((s) => s.setSettings);
+  if (!settings) return null;
+
+  const pick = (theme: ThemePref) => {
+    const next = { ...settings, theme };
+    setSettings(next); // 先落界面，主题立刻切
+    void setAppSettings(next).catch(() => {
+      /* 存不下就只是下次启动回到旧主题，不值得打断用户 */
+    });
+  };
 
   return (
-    <aside className="flex w-60 shrink-0 flex-col border-r border-slate-800 bg-slate-900/40">
-      <div className="flex items-center gap-2 px-4 py-3">
-        <div className="flex h-7 w-7 items-center justify-center rounded-md bg-sky-600 text-white">
-          <MessageSquare size={16} />
+    <div className="flex gap-1">
+      {THEMES.map((t) => (
+        <button
+          key={t.id}
+          title={t.label}
+          aria-label={t.label}
+          onClick={() => pick(t.id)}
+          className={`flex flex-1 items-center justify-center rounded-md border py-1.5 transition-colors ${
+            settings.theme === t.id
+              ? "border-dim bg-base text-ink"
+              : "border-edge text-dim hover:text-ink"
+          }`}
+        >
+          <t.icon size={13} />
+        </button>
+      ))}
+    </div>
+  );
+}
+
+export function Sidebar() {
+  const sessions = useStore((s) => s.sessions);
+  const sessionId = useStore((s) => s.sessionId);
+  const appInfo = useStore((s) => s.appInfo);
+  const view = useStore((s) => s.view);
+  const setView = useStore((s) => s.setView);
+  const settings = useStore((s) => s.settings);
+  const setSettings = useStore((s) => s.setSettings);
+
+  const [query, setQuery] = useState("");
+  const [width, setWidth] = useState(settings?.sidebar_width ?? 260);
+  const dragging = useRef(false);
+
+  // 设置加载晚于首帧，拿到后对齐一次。
+  useEffect(() => {
+    if (settings?.sidebar_width) setWidth(settings.sidebar_width);
+  }, [settings?.sidebar_width]);
+
+  const onDragStart = useCallback((e: React.PointerEvent) => {
+    dragging.current = true;
+    e.currentTarget.setPointerCapture(e.pointerId);
+  }, []);
+
+  const onDragMove = useCallback((e: React.PointerEvent) => {
+    if (!dragging.current) return;
+    setWidth(Math.min(MAX_W, Math.max(MIN_W, e.clientX)));
+  }, []);
+
+  const saveWidth = useCallback(
+    (w: number) => {
+      const s = useStore.getState().settings;
+      if (!s) return;
+      const next: AppSettings = { ...s, sidebar_width: w };
+      setSettings(next);
+      // 存不下就只是下次启动回到旧宽度，不值得打断用户。
+      void setAppSettings(next).catch(() => {});
+    },
+    [setSettings],
+  );
+
+  const onDragEnd = useCallback(() => {
+    if (!dragging.current) return;
+    dragging.current = false;
+    // 只在松手时落盘 —— 拖动过程中每一帧都写文件没有意义。
+    saveWidth(width);
+  }, [width, saveWidth]);
+
+  const q = query.trim().toLowerCase();
+  const shown = q
+    ? sessions.filter(
+        (s) =>
+          (s.title ?? "").toLowerCase().includes(q) ||
+          s.model.toLowerCase().includes(q),
+      )
+    : sessions;
+
+  return (
+    <>
+      <aside
+        style={{ width }}
+        className="flex shrink-0 flex-col border-r border-edge bg-sidebar"
+      >
+        {/* 品牌行 */}
+        <div className="flex items-center gap-2 px-3 pb-2 pt-3">
+          <div className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-ink text-[var(--accent-contrast)]">
+            <MessageSquare size={14} />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-sm font-semibold tracking-tight">Carter</div>
+            {appInfo && <div className="text-[10px] text-dim">v{appInfo.version}</div>}
+          </div>
         </div>
-        <div className="min-w-0">
-          <div className="truncate text-sm font-semibold text-slate-100">Carter</div>
-          {appVersion && <div className="text-[11px] text-slate-500">v{appVersion}</div>}
-        </div>
-      </div>
 
-      <div className="mx-3 mb-2 flex rounded-md border border-slate-700 bg-slate-900/60 p-0.5 text-xs">
-        {VIEW_OPTIONS.map((o) => (
-          <button
-            key={o.id}
-            onClick={() => setView(o.id)}
-            className={`flex-1 rounded px-2 py-1 transition-colors ${
-              view === o.id ? "bg-slate-700 text-slate-100" : "text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            {o.label}
-          </button>
-        ))}
-      </div>
-
-      <div className="px-3 pb-2">
-        <Button onClick={onNew} className="w-full">
-          <Plus size={15} />
-          新建会话
-        </Button>
-      </div>
-
-      <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
-        {sessions.length === 0 && (
-          <div className="px-2 py-6 text-center text-xs text-slate-600">暂无历史会话</div>
-        )}
-        {sessions.map((s) => {
-          const active = s.id === sessionId;
-          return (
+        {/* 视图切换 */}
+        <nav className="flex flex-col gap-0.5 px-2 pb-2">
+          {NAV.map((n) => (
             <button
-              key={s.id}
-              disabled={active}
-              onClick={() => onOpen(s.id)}
-              title={active ? "当前会话" : "打开这个会话"}
-              className={`mb-1 w-full rounded-md px-2.5 py-2 text-left transition-colors ${
-                active
-                  ? "cursor-default bg-sky-600/20 ring-1 ring-sky-700/60"
-                  : "hover:bg-slate-800/70"
+              key={n.id}
+              onClick={() => setView(n.id)}
+              className={`flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors ${
+                view === n.id ? "bg-card font-medium text-ink" : "text-dim hover:bg-card"
               }`}
             >
-              <div className="truncate text-sm text-slate-200">
-                {s.title || "未命名会话"}
-              </div>
-              <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-slate-500">
-                <span className="truncate">{s.model}</span>
-                <span>·</span>
-                <span className="shrink-0">{relTime(s.created_at)}</span>
-              </div>
+              <n.icon size={14} />
+              {n.label}
             </button>
-          );
-        })}
-      </div>
-    </aside>
+          ))}
+        </nav>
+
+        <div className="px-3 pb-2">
+          <Button variant="primary" onClick={newSession} className="w-full">
+            <Plus size={14} />
+            新对话
+          </Button>
+        </div>
+
+        {sessions.length > 4 && (
+          <div className="px-2 pb-2">
+            <div className="relative">
+              <Search
+                size={12}
+                className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-dim"
+              />
+              <Input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="搜索会话"
+                className="py-1.5 pl-7 text-xs"
+              />
+            </div>
+          </div>
+        )}
+
+        <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
+          {sessions.length === 0 && (
+            <div className="px-2 py-6 text-center text-xs text-dim">暂无历史会话</div>
+          )}
+          {shown.length === 0 && sessions.length > 0 && (
+            <div className="px-2 py-6 text-center text-xs text-dim">没有匹配的会话</div>
+          )}
+          <SessionList sessions={shown} activeId={sessionId} dense />
+        </div>
+
+        <div className="border-t border-edge p-2">
+          <ThemeToggle />
+        </div>
+      </aside>
+
+      {/* 拖动条。落在 aside 外面，免得被它的 overflow 裁掉。 */}
+      <div
+        onPointerDown={onDragStart}
+        onPointerMove={onDragMove}
+        onPointerUp={onDragEnd}
+        // 双击复位到默认宽度 —— 拖窄了想调回来时不用瞄着拖。
+        onDoubleClick={() => saveWidth(260)}
+        className="w-1 shrink-0 cursor-col-resize transition-colors hover:bg-edge"
+      />
+    </>
   );
 }

@@ -16,6 +16,7 @@ import {
   type ExchangeRecord,
   type ExchangeSummary,
 } from "../lib/api";
+import { fmtMs } from "../lib/format";
 import { useStore } from "../store";
 
 type View = "visual" | "formatted" | "raw";
@@ -32,13 +33,13 @@ const VIEW_TABS: { id: View; label: string }[] = [
 
 function ViewTabs({ value, onChange }: { value: View; onChange: (v: View) => void }) {
   return (
-    <div className="inline-flex rounded-md border border-slate-700 bg-slate-900/60 p-0.5 text-xs">
+    <div className="inline-flex rounded-md border border-edge bg-base p-0.5 text-xs">
       {VIEW_TABS.map((t) => (
         <button
           key={t.id}
           onClick={() => onChange(t.id)}
           className={`rounded px-2.5 py-1 transition-colors ${
-            value === t.id ? "bg-slate-700 text-slate-100" : "text-slate-400 hover:text-slate-200"
+            value === t.id ? "bg-card text-ink" : "text-dim hover:text-ink"
           }`}
         >
           {t.label}
@@ -50,11 +51,11 @@ function ViewTabs({ value, onChange }: { value: View; onChange: (v: View) => voi
 
 /** 状态码配色：2xx 绿、4xx 琥珀、5xx 红。 */
 function statusClass(status: number | null): string {
-  if (status === null) return "bg-slate-700/60 text-slate-300";
-  if (status >= 500) return "bg-red-900/60 text-red-300";
-  if (status >= 400) return "bg-amber-900/60 text-amber-300";
-  if (status >= 200 && status < 300) return "bg-emerald-900/60 text-emerald-300";
-  return "bg-slate-700/60 text-slate-300";
+  if (status === null) return "border border-edge text-dim";
+  if (status >= 500) return "bg-[var(--error-bg)] text-[var(--danger)]";
+  if (status >= 400) return "bg-[var(--warn-bg)] text-tone-orange";
+  if (status >= 200 && status < 300) return "bg-tone-green-soft text-tone-green";
+  return "border border-edge text-dim";
 }
 
 function StatusBadge({ status }: { status: number | null }) {
@@ -63,11 +64,6 @@ function StatusBadge({ status }: { status: number | null }) {
       {status ?? "—"}
     </span>
   );
-}
-
-function ms(v: number | null): string {
-  if (v === null) return "—";
-  return v < 1000 ? `${v}ms` : `${(v / 1000).toFixed(2)}s`;
 }
 
 /** 能当 JSON 解析就美化，否则返回 null 让调用方回落成原文。 */
@@ -114,17 +110,17 @@ function parseSseEvents(frame: string): SseEvent[] {
 // ---------------------------------------------------------------------------
 
 function HeadersTable({ headers }: { headers: [string, string][] }) {
-  if (headers.length === 0) return <div className="text-xs text-slate-600">（无）</div>;
+  if (headers.length === 0) return <div className="text-xs text-dim">（无）</div>;
   return (
-    <div className="overflow-hidden rounded border border-slate-700/70">
+    <div className="overflow-hidden rounded-md border border-edge">
       <table className="w-full border-collapse text-xs">
         <tbody>
           {headers.map(([k, v], i) => (
-            <tr key={i} className={i % 2 ? "bg-slate-900/40" : ""}>
-              <td className="w-44 border-r border-slate-700/70 px-2 py-1 align-top font-mono text-slate-400">
+            <tr key={i} className={i % 2 ? "bg-base" : ""}>
+              <td className="w-44 border-r border-edge px-2 py-1 align-top mono text-dim">
                 {k}
               </td>
-              <td className="break-all px-2 py-1 font-mono text-slate-300">{v}</td>
+              <td className="break-all px-2 py-1 mono text-ink">{v}</td>
             </tr>
           ))}
         </tbody>
@@ -135,9 +131,9 @@ function HeadersTable({ headers }: { headers: [string, string][] }) {
 
 /** 请求/响应正文：是 JSON 就美化，不是就原样显示。 */
 function BodyBlock({ text }: { text: string }) {
-  if (!text.trim()) return <div className="text-xs text-slate-600">（空）</div>;
+  if (!text.trim()) return <div className="text-xs text-dim">（空）</div>;
   return (
-    <pre className="max-h-[40vh] overflow-auto whitespace-pre-wrap rounded border border-slate-700/70 bg-slate-950/70 p-2 font-mono text-[11px] leading-relaxed text-slate-300">
+    <pre className="max-h-[40vh] overflow-auto whitespace-pre-wrap rounded-md border border-edge bg-base p-2 mono text-[11px] leading-relaxed text-ink">
       {tryPretty(text) ?? text}
     </pre>
   );
@@ -151,21 +147,21 @@ function SseFrames({ frames }: { frames: string[] }) {
         const events = parseSseEvents(frame);
         return (
           <div key={fi} className="space-y-1.5">
-            <div className="text-[11px] text-slate-600">
+            <div className="text-[11px] text-dim">
               帧 #{fi + 1} · {frame.length} 字节
             </div>
             {events.length === 0 ? (
-              <pre className="overflow-auto whitespace-pre-wrap rounded border border-slate-700/70 bg-slate-950/70 p-2 font-mono text-[11px] text-slate-400">
+              <pre className="mono overflow-auto whitespace-pre-wrap rounded-md border border-edge bg-base p-2 text-[11px] text-dim">
                 {frame}
               </pre>
             ) : (
               events.map((ev, ei) => (
-                <div key={ei} className="overflow-hidden rounded border border-slate-700/70 bg-slate-900/40">
-                  <div className="flex items-center gap-2 border-b border-slate-700/50 px-2 py-1">
-                    <Radio size={12} className="text-sky-400" />
-                    <span className="font-mono text-[11px] text-sky-300">{ev.name}</span>
+                <div key={ei} className="overflow-hidden rounded-md border border-edge bg-base">
+                  <div className="flex items-center gap-2 border-b border-edge px-2 py-1">
+                    <Radio size={12} className="text-tone-blue" />
+                    <span className="mono text-[11px] text-tone-blue">{ev.name}</span>
                   </div>
-                  <pre className="max-h-80 overflow-auto whitespace-pre-wrap p-2 font-mono text-[11px] leading-relaxed text-slate-300">
+                  <pre className="max-h-80 overflow-auto whitespace-pre-wrap p-2 mono text-[11px] leading-relaxed text-ink">
                     {tryPretty(ev.data) ?? ev.data}
                   </pre>
                 </div>
@@ -182,30 +178,30 @@ function VisualView({ rec }: { rec: ExchangeRecord }) {
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-2">
-        <span className="rounded bg-slate-700 px-1.5 py-0.5 font-mono text-[11px] text-slate-200">
+        <span className="rounded border border-edge px-1.5 py-0.5 mono text-[11px] text-ink">
           {rec.method}
         </span>
-        <span className="break-all font-mono text-xs text-slate-300">{rec.url}</span>
+        <span className="break-all mono text-xs text-ink">{rec.url}</span>
       </div>
 
       <section className="space-y-1.5">
-        <h3 className="text-xs font-semibold text-slate-400">请求头</h3>
+        <h3 className="text-xs font-semibold text-dim">请求头</h3>
         <HeadersTable headers={rec.request_headers} />
       </section>
 
       <section className="space-y-1.5">
-        <h3 className="text-xs font-semibold text-slate-400">请求体</h3>
+        <h3 className="text-xs font-semibold text-dim">请求体</h3>
         <BodyBlock text={rec.request_body} />
       </section>
 
       <section className="space-y-1.5">
         <div className="flex items-center gap-2">
-          <h3 className="text-xs font-semibold text-slate-400">响应</h3>
+          <h3 className="text-xs font-semibold text-dim">响应</h3>
           <StatusBadge status={rec.status} />
         </div>
         <HeadersTable headers={rec.response_headers} />
         {rec.stream_error && (
-          <div className="rounded border border-red-800/60 bg-red-950/30 px-2 py-1.5 text-xs text-red-300">
+          <div className="rounded-md border border-[var(--error-border)] bg-[var(--error-bg)] px-2 py-1.5 text-xs text-[var(--danger)]">
             流内错误：{rec.stream_error}
           </div>
         )}
@@ -221,7 +217,7 @@ function VisualView({ rec }: { rec: ExchangeRecord }) {
 
 function FormattedView({ rec }: { rec: ExchangeRecord }) {
   return (
-    <pre className="overflow-auto rounded border border-slate-700/70 bg-slate-950/70 p-2 font-mono text-[11px] leading-relaxed text-slate-300">
+    <pre className="overflow-auto rounded-md border border-edge bg-base p-2 mono text-[11px] leading-relaxed text-ink">
       {JSON.stringify(rec, null, 2)}
     </pre>
   );
@@ -234,16 +230,16 @@ function RawView({ rec }: { rec: ExchangeRecord }) {
   return (
     <div className="space-y-3">
       <div>
-        <div className="mb-1 text-[11px] text-slate-600">请求体（原样）</div>
-        <pre className="max-h-[40vh] overflow-auto whitespace-pre-wrap rounded border border-slate-700/70 bg-slate-950/70 p-2 font-mono text-[11px] leading-relaxed text-slate-300">
+        <div className="mb-1 text-[11px] text-dim">请求体（原样）</div>
+        <pre className="max-h-[40vh] overflow-auto whitespace-pre-wrap rounded-md border border-edge bg-base p-2 mono text-[11px] leading-relaxed text-ink">
           {rec.request_body || "（空）"}
         </pre>
       </div>
       <div>
-        <div className="mb-1 text-[11px] text-slate-600">
+        <div className="mb-1 text-[11px] text-dim">
           {streaming ? "流式响应原始字节（按到达顺序原样拼接）" : "响应体（原样）"}
         </div>
-        <pre className="max-h-[40vh] overflow-auto whitespace-pre-wrap rounded border border-slate-700/70 bg-slate-950/70 p-2 font-mono text-[11px] leading-relaxed text-slate-300">
+        <pre className="max-h-[40vh] overflow-auto whitespace-pre-wrap rounded-md border border-edge bg-base p-2 mono text-[11px] leading-relaxed text-ink">
           {response || "（空）"}
         </pre>
       </div>
@@ -279,16 +275,16 @@ function ExchangeRow({
   return (
     <button
       onClick={onClick}
-      className={`w-full border-b border-slate-800/70 px-3 py-2 text-left transition-colors ${
-        active ? "bg-sky-600/20" : "hover:bg-slate-800/60"
+      className={`w-full border-b border-edge px-3 py-2 text-left transition-colors ${
+        active ? "bg-card" : "hover:bg-base"
       }`}
     >
       <div className="flex items-center gap-2">
-        <span className="text-xs text-slate-200">
+        <span className="text-xs text-ink">
           第 {s.turn ?? "?"} 轮 · 第 {s.round ?? "?"} 次
         </span>
         {label && (
-          <span className="rounded bg-indigo-900/50 px-1 py-0.5 text-[10px] text-indigo-300">
+          <span className="rounded bg-tone-violet-soft px-1 py-0.5 text-[10px] text-tone-violet">
             {label}
           </span>
         )}
@@ -296,16 +292,16 @@ function ExchangeRow({
           <StatusBadge status={s.status} />
         </span>
       </div>
-      <div className="mt-1 flex items-center gap-2 text-[11px] text-slate-500" title="首字节 / 总耗时">
+      <div className="mt-1 flex items-center gap-2 text-[11px] text-dim" title="首字节 / 总耗时">
         <Clock size={11} />
         <span className="tabular-nums">
-          {ms(s.ttfb_ms)} / {ms(s.total_ms)}
+          {fmtMs(s.ttfb_ms)} / {fmtMs(s.total_ms)}
         </span>
         {s.frame_count > 0 && (
-          <span className="rounded bg-slate-700/60 px-1 text-slate-300">{s.frame_count} 帧</span>
+          <span className="rounded border border-edge px-1 text-dim">{s.frame_count} 帧</span>
         )}
       </div>
-      <div className="mt-0.5 truncate font-mono text-[10px] text-slate-600">
+      <div className="mt-0.5 truncate mono text-[10px] text-dim/70">
         {s.method} {s.url}
       </div>
     </button>
@@ -391,15 +387,15 @@ export function Inspector() {
   return (
     // 用 vw 兜底：窗口窄时（默认只有 800px）也要留下一截对话可见，
     // 否则「抽屉」就变成了全屏、失去了与对话对照的意义。
-    <div className="fixed inset-y-0 right-0 z-40 flex w-[min(56rem,85vw)] flex-col border-l border-slate-700 bg-slate-900 shadow-2xl">
-      <div className="flex items-center gap-2 border-b border-slate-800 px-3 py-2">
-        <FileSearch size={16} className="text-slate-400" />
-        <span className="text-sm font-semibold text-slate-200">报文</span>
+    <div className="fixed inset-y-0 right-0 z-40 flex w-[min(56rem,85vw)] flex-col border-l border-edge bg-sidebar shadow-2xl">
+      <div className="flex h-10 items-center gap-2 border-b border-edge px-3">
+        <FileSearch size={15} className="text-dim" />
+        <span className="text-sm font-semibold">报文</span>
         {turn !== null && (
           <button
             onClick={() => setInspectorTurn(null)}
             title="清除筛选"
-            className="inline-flex items-center gap-1 rounded-full bg-sky-900/50 px-2 py-0.5 text-[11px] text-sky-300 hover:bg-sky-900/80"
+            className="inline-flex items-center gap-1 rounded-full border border-edge px-2 py-0.5 text-[11px] text-dim transition-colors hover:text-ink"
           >
             <X size={11} />
             清除筛选 · 只看第 {turn} 轮
@@ -408,7 +404,7 @@ export function Inspector() {
         <button
           onClick={closeInspector}
           aria-label="关闭"
-          className="ml-auto rounded p-1 text-slate-400 hover:bg-slate-800 hover:text-slate-200"
+          className="ml-auto rounded p-1 text-dim transition-colors hover:text-ink"
         >
           <X size={16} />
         </button>
@@ -416,31 +412,31 @@ export function Inspector() {
 
       <div className="flex min-h-0 flex-1">
         {/* 左：交换列表 */}
-        <div className="w-64 shrink-0 overflow-y-auto border-r border-slate-800">
+        <div className="w-64 shrink-0 overflow-y-auto border-r border-edge">
           {list === null && (
-            <div className="flex items-center gap-2 px-3 py-4 text-xs text-slate-500">
+            <div className="flex items-center gap-2 px-3 py-4 text-xs text-dim">
               <LoaderCircle size={13} className="animate-spin" />
               加载中…
             </div>
           )}
           {listError && (
-            <div className="m-2 rounded border border-amber-900/50 bg-amber-950/30 px-2 py-2 text-xs text-amber-200">
+            <div className="m-2 rounded-md border border-[var(--error-border)] bg-[var(--error-bg)] px-2 py-2 text-xs">
               <div className="flex items-center gap-1.5 font-medium">
                 <CircleAlert size={13} />
                 读取报文失败
               </div>
-              <div className="mt-1 break-all text-amber-200/80">{listError}</div>
+              <div className="mt-1 break-all text-dim">{listError}</div>
             </div>
           )}
           {groups && groups.length === 0 && !listError && (
-            <div className="m-2 rounded border border-slate-800 px-2 py-3 text-xs leading-relaxed text-slate-500">
+            <div className="m-2 rounded-md border border-dashed border-edge px-2 py-3 text-xs leading-relaxed text-dim">
               {turn !== null ? (
                 <>这一轮没有抓到请求。</>
               ) : (
                 <>
                   还没有抓到报文。
                   <br />
-                  抓包只记录<strong className="font-medium text-slate-400">本应用运行期间</strong>
+                  抓包只记录<strong className="font-medium text-ink">本应用运行期间</strong>
                   发出的请求 —— 启动前的历史不会补录，也不包含其它程序发出的流量。
                 </>
               )}
@@ -448,7 +444,7 @@ export function Inspector() {
           )}
           {groups?.map((g, gi) => (
             <div key={gi}>
-              <div className="sticky top-0 bg-slate-900/95 px-3 py-1 text-[11px] font-medium text-slate-400 backdrop-blur">
+              <div className="sticky top-0 bg-sidebar px-3 py-1 text-[11px] font-medium text-dim backdrop-blur">
                 {g.turn === null ? "未标注轮次" : `第 ${g.turn} 轮`}
               </div>
               {g.items.map((s) => (
@@ -466,19 +462,19 @@ export function Inspector() {
         {/* 右：详情 */}
         <div className="min-w-0 flex-1 overflow-y-auto">
           {!selected && (
-            <div className="flex h-full flex-col items-center justify-center gap-2 text-sm text-slate-600">
+            <div className="flex h-full flex-col items-center justify-center gap-2 text-sm text-dim">
               <Inbox size={22} />
               从左侧选择一条报文
             </div>
           )}
           {selected && record === undefined && (
-            <div className="flex items-center gap-2 p-4 text-xs text-slate-500">
+            <div className="flex items-center gap-2 p-4 text-xs text-dim">
               <LoaderCircle size={13} className="animate-spin" />
               加载中…
             </div>
           )}
           {selected && record === null && (
-            <div className="p-4 text-sm text-slate-500">
+            <div className="p-4 text-sm text-dim">
               该报文已不存在（可能已被清理）。
             </div>
           )}
@@ -486,7 +482,7 @@ export function Inspector() {
             <div className="space-y-3 p-3">
               <div className="flex items-center gap-2">
                 <ViewTabs value={view} onChange={setView} />
-                <span className="text-[11px] text-slate-600">
+                <span className="text-[11px] text-dim">
                   {new Date(record.ts).toLocaleString("zh-CN")}
                 </span>
               </div>

@@ -179,6 +179,7 @@ apilot(后置)    ─┘        ^
 | M7 harness 管理页 | ✅ 只读版完成 2026-10-15 | 渠道/工具/技能/MCP/会话；改配置待定 |
 | M8 双向能力 | ✅ llm_adapt 侧完成 2026-10-15 | 入站 codec + 九方向 + 损耗清单转测试 |
 | M8 附带的 apilot 本体迁移 | ⏸ 未做 | 那是 apilot 自己的一次大改，值得单独立项 |
+| 依赖切换 + 界面现代化 + 可视化配置 | ✅ 完成 2026-10-15 | 见下方「后续：界面现代化」一节 |
 
 ### M0 — llm_adapt 地基重构
 
@@ -454,7 +455,47 @@ M8 的移植过程中逐条比对了两版 IR 的表达力。llm_adapt 的 IR �
 - 非流式 Responses 的 `encode_response` 现在总会带 `encrypted_content`（未知时给 null），
   与流式的硬契约一致；apilot 的非流式路径会省略它。
 
-## 九、最终状态
+## 九、后续：界面现代化 + 可视化配置（2026-10-15）
+
+方案之外追加的一轮。起因是两件事：`carter` 与 `llm_adapt_core` 都已发布到 crates.io，
+不该再挂路径依赖；以及管理页只读、界面观感是硬编码的 slate/sky 深色。
+
+**依赖**：`carter = "0.1.4"`、`llm_adapt_core = "0.1.0"`，全部走 registry。
+
+**设计系统**：照 `../kalo` 的 token 体系重写 `src/index.css`（Tailwind v4 的
+`@theme inline` + `@custom-variant dark`）。三条纪律：accent 无色（主按钮黑白）、
+分隔靠半透明边框、行内动作悬停才出现。浅色 / 深色 / 跟随系统三档。
+
+**可视化配置**（新增 `crates/carter-app-core/src/{config_edit,app_settings,catalog,sessions,skills,tools}.rs`）：
+
+| 页 | 数据来源 |
+|---|---|
+| 渠道 | `config_edit` 增删改 `[providers.*]` |
+| 模型 | `catalog` 解出全部 `渠道/模型` 的 models.dev 元数据；增删改 + 设默认 |
+| 工具 | `app_settings` 的工具开关；`tools` 在 carter 装配之后过滤 |
+| 技能 | `skills` 读 / 建 / 改 / 启停（搬目录）/ 删 |
+| MCP | `config_edit` 增删改 `[mcp.servers.*]` |
+| 会话 | `sessions` 重命名 / fork / 删除 / 全文搜索 / 导出 |
+
+**两处必须写下来的判断**：
+
+1. **改配置走 toml_edit 定点编辑，不是「读进来再全量写回」。** `Config` 是
+   Deserialize-only，且 `Config::load()` 会先对整份文本做 `${ENV_VAR}` 插值 ——
+   全量重序列化会把 `api_key = "${ANTHROPIC_API_KEY}"` 换成明文密钥写进磁盘。
+   写盘后再 `Config::load()` 验一次，读不回来就还原上一版。测试守着这两条。
+2. **工具开关只对本应用生效，界面上写明了这一点。** carter 0.1.4 的 `ToolRegistry`
+   是「全部常开」、`Config` 里也没有开关字段，所以本应用在装配之后自己筛一遍
+   （`tools.rs`），名单存 `~/.carter-app/settings.json`。子 agent 的工具池用的是
+   同一份筛过的快照，所以关掉的工具对子 agent 也失效。
+
+**热重载**：`AppShell.config` 本来就是 `ArcSwap`；会话任务改为在**每轮开始前**重读
+配置与应用设置，于是「改完 → 下一条消息生效」。MCP server 是会话建立时连的，
+那条要新开会话，界面上单独提示。
+
+**没做**：hooks / `[env]` / `system.md` 的界面（只能改文件）；API Key 进系统凭据库；
+单个 MCP 工具的开关（工具名要连上 server 才知道）；自绘标题栏。
+
+## 十、最终状态
 
 | 仓库 | 测试 | 提交 |
 |---|---|---|

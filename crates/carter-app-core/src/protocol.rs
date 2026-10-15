@@ -41,6 +41,11 @@ pub enum AppEvent {
         session_id: String,
         event: SessionEvent,
     },
+    /// `~/.carter/config.toml` 被界面改过并已热重载。
+    ///
+    /// 各设置页据此重拉数据 —— 改完渠道后「模型」页上的列表必须跟着变，
+    /// 否则用户会看到一份自相矛盾的界面。
+    ConfigChanged,
     /// 与具体会话无关的失败（命令层出错等）。
     Error { message: String },
 }

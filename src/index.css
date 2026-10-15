@@ -1,10 +1,157 @@
 /* Tailwind v4 入口。v4 用这一行取代旧版的 @tailwind base/components/utilities 三条。 */
 @import "tailwindcss";
 
-/* 递归应用在 <html> 上：整体暗色，避免滚动条/表单控件回落到系统亮色。 */
+/* 深色由 `<html class="dark">` 驱动，而不是跟随系统 —— 主题是应用内设置项，
+   系统偏好只是「跟随系统」那一档的输入之一（见 src/lib/theme.ts）。
+   v4 默认的 dark: 走 prefers-color-scheme，必须显式改成 class 变体。 */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ==========================================================================
+   主题 token
+   --------------------------------------------------------------------------
+   一套近无彩的底色 + 一组只用于**图标底衬**的 tone 色。这是整套观感的关键：
+   accent 是近黑/近白而不是某个品牌色，所以主按钮永远是黑白；彩色只出现在
+   小面积图标底衬与状态点上。半透明边框承担全部分隔职责（bg-card 与 --bg
+   在浅色下几乎同值，靠边框分开）。
+
+   下面两段是**运行时**变量（会被 .dark 覆盖），所以上面的 @theme inline
+   引用它们时不能是 @theme —— 非 inline 形式会把 var() 引用折进去，
+   切主题时工具类不会跟着变。
+   ========================================================================== */
+
 :root {
-  color-scheme: dark;
+  color-scheme: light;
+
+  --bg: #ffffff;
+  --bg-sidebar: #f7f7f5;
+  --bg-card: #f7f7f5;
+  /* 比 --bg 高一层：输入卡片、首屏入口卡。浅色下是「白上白」，
+     靠边框 + 阴影把它托起来。 */
+  --bg-elevated: #ffffff;
+  --bubble: #f0f0ed;
+  --border: rgba(0, 0, 0, 0.07);
+
+  --text: #1a1a1a;
+  --text-dim: #6b6b6b;
+  --accent: #1a1a1a;
+  --accent-contrast: #ffffff;
+
+  /* tone：图标底衬专用。每个色有一个描边色和一个 -soft 背板。 */
+  --tone-blue: #2f6fed;
+  --tone-blue-soft: #eaf1fe;
+  --tone-green: #12a150;
+  --tone-green-soft: #e7f7ee;
+  --tone-orange: #e07b1a;
+  --tone-orange-soft: #fdf1e3;
+  --tone-violet: #7a5af8;
+  --tone-violet-soft: #f0ecfe;
+  --tone-pink: #e0489b;
+  --tone-pink-soft: #fdecf5;
+
+  --ok: #1a7f37;
+  --warn-bg: #fff8e6;
+  --warn-border: #f0d48a;
+  --error-bg: #fdecec;
+  --error-border: #f3b5b5;
+  --danger: #c92a2a;
+
+  --diff-add-bg: #e6ffec;
+  --diff-del-bg: #ffebe9;
 }
+
+.dark {
+  color-scheme: dark;
+
+  --bg: #171717;
+  --bg-sidebar: #1e1e1e;
+  --bg-card: #212121;
+  /* 深色下阴影做不了托举的活，靠把亮度提上去。 */
+  --bg-elevated: #262626;
+  --bubble: #2b2b2b;
+  --border: rgba(255, 255, 255, 0.09);
+
+  --text: #ececec;
+  --text-dim: #9b9b9b;
+  --accent: #ececec;
+  --accent-contrast: #171717;
+
+  /* 描边色提亮以保住对比度；背板从浅色调改成同色低透明度的淡淡一层。 */
+  --tone-blue: #6f9dff;
+  --tone-blue-soft: rgba(111, 157, 255, 0.14);
+  --tone-green: #4ac26b;
+  --tone-green-soft: rgba(74, 194, 107, 0.14);
+  --tone-orange: #f0a859;
+  --tone-orange-soft: rgba(240, 168, 89, 0.14);
+  --tone-violet: #a794ff;
+  --tone-violet-soft: rgba(167, 148, 255, 0.14);
+  --tone-pink: #f07ab8;
+  --tone-pink-soft: rgba(240, 122, 184, 0.14);
+
+  --ok: #4ac26b;
+  --warn-bg: #2e2716;
+  --warn-border: #6b5a2a;
+  --error-bg: #331b1b;
+  --error-border: #7a3535;
+  --danger: #ff6b6b;
+
+  --diff-add-bg: #1f3326;
+  --diff-del-bg: #3d1f1f;
+}
+
+@theme inline {
+  --color-base: var(--bg);
+  --color-sidebar: var(--bg-sidebar);
+  --color-card: var(--bg-card);
+  --color-elevated: var(--bg-elevated);
+  --color-bubble: var(--bubble);
+  --color-edge: var(--border);
+  --color-ink: var(--text);
+  --color-dim: var(--text-dim);
+  --color-accent: var(--accent);
+  /* accent 上的文字色。用 text-[var(--accent-contrast)]，因为 Tailwind 会从
+     调色板派生出 text-accent-contrast 之外的一堆影子工具类，命名容易撞。 */
+
+  --color-tone-blue: var(--tone-blue);
+  --color-tone-blue-soft: var(--tone-blue-soft);
+  --color-tone-green: var(--tone-green);
+  --color-tone-green-soft: var(--tone-green-soft);
+  --color-tone-orange: var(--tone-orange);
+  --color-tone-orange-soft: var(--tone-orange-soft);
+  --color-tone-violet: var(--tone-violet);
+  --color-tone-violet-soft: var(--tone-violet-soft);
+  --color-tone-pink: var(--tone-pink);
+  --color-tone-pink-soft: var(--tone-pink-soft);
+
+  --color-ok: var(--ok);
+  --color-danger: var(--danger);
+  --color-warn-bg: var(--warn-bg);
+  --color-warn-border: var(--warn-border);
+  --color-error-bg: var(--error-bg);
+  --color-error-border: var(--error-border);
+
+  /* 圆角整体比 Tailwind 默认大一档：按钮落到 8px、面板 16px、输入卡片 20px。
+     只覆盖命名档位，不用裸 rounded（那一个走的是 v4 内置值，改不动）。 */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-2xl: 20px;
+
+  /* 柔和、宽、低透明度 —— 「浮起来的卡片」。不要用调色板里的颜色名来命名
+     阴影（Tailwind 会额外派生 shadow-<color> 工具类，颜色那条后发射会赢）。 */
+  --shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.03), 0 6px 20px rgba(0, 0, 0, 0.05);
+  --shadow-lift: 0 2px 4px rgba(0, 0, 0, 0.04), 0 10px 28px rgba(0, 0, 0, 0.07);
+
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+  --font-mono:
+    ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+/* ==========================================================================
+   基座
+   ========================================================================== */
 
 html,
 body,
@@ -14,27 +161,44 @@ body,
 
 body {
   margin: 0;
-  font-family: Inter, "Segoe UI", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  font-family: var(--font-sans);
+  background: var(--bg);
+  color: var(--text);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
 
-/* 细滚动条，别让细长的对话区被一条粗滚动条占掉视觉。 */
+/* 机器味的东西一律等宽：路径、模型 id、API key、工具参数。散文不等宽。 */
+.mono {
+  font-family: var(--font-mono);
+}
+
+/* ==========================================================================
+   滚动条
+   ========================================================================== */
+
 * {
   scrollbar-width: thin;
-  scrollbar-color: rgb(71 85 105) transparent; /* slate-600 */
+  scrollbar-color: var(--border) transparent;
 }
 *::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 *::-webkit-scrollbar-thumb {
-  background: rgb(71 85 105);
+  background: var(--border);
   border-radius: 4px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--text-dim);
 }
 *::-webkit-scrollbar-track {
   background: transparent;
 }
+
+/* ==========================================================================
+   动效
+   ========================================================================== */
 
 /* 流式生成时尾部那个闪烁光标。 */
 @keyframes carter-blink {
@@ -50,12 +214,58 @@ body {
   display: inline-block;
   width: 0.5em;
   margin-left: 1px;
+  color: var(--text-dim);
   animation: carter-blink 1s step-end infinite;
-  color: rgb(148 163 184); /* slate-400 */
 }
 
-/* --- markdown 正文 --- */
-/* 手写而不是靠 typography 插件：只需要覆盖助手气泡这一处的标签，量很小。 */
+/* 「正在运行」的三点。 */
+@keyframes carter-typing {
+  0%,
+  60%,
+  100% {
+    opacity: 0.25;
+    transform: translateY(0);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
+}
+.carter-dots {
+  display: inline-flex;
+  gap: 4px;
+}
+.carter-dots > span {
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--text-dim);
+  animation: carter-typing 1.2s infinite;
+}
+.carter-dots > span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+.carter-dots > span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .carter-cursor,
+  .carter-dots > span {
+    animation: none;
+  }
+}
+
+/* ==========================================================================
+   markdown 正文
+   --------------------------------------------------------------------------
+   手写而不是靠 typography 插件：只需要覆盖助手气泡这一处的标签，量很小。
+   全部走 token，浅色主题下也读得清。
+
+   例外：代码块**不随主题变**，固定用 GitHub-dark 配色。正文是给人读的，
+   代码是给眼睛扫的 —— 深色代码块在浅色页面里长期是编辑器的既定观感。
+   ========================================================================== */
+
 .carter-md {
   line-height: 1.7;
   word-break: break-word;
@@ -101,55 +311,65 @@ body {
   margin: 0.2em 0;
 }
 .carter-md a {
-  color: rgb(96 165 250); /* blue-400 */
+  color: var(--tone-blue);
   text-decoration: underline;
+  text-underline-offset: 2px;
 }
 .carter-md blockquote {
   margin: 0.6em 0;
   padding-left: 0.9em;
-  border-left: 3px solid rgb(71 85 105);
-  color: rgb(148 163 184);
+  border-left: 3px solid var(--border);
+  color: var(--text-dim);
 }
 .carter-md hr {
   margin: 1em 0;
   border: 0;
-  border-top: 1px solid rgb(51 65 85);
+  border-top: 1px solid var(--border);
 }
-/* 行内代码 */
+
+/* 行内代码：跟着主题走。 */
 .carter-md code {
-  font-family: "JetBrains Mono", "Cascadia Code", Consolas, "Courier New", monospace;
+  font-family: var(--font-mono);
   font-size: 0.88em;
-  background: rgb(30 41 59); /* slate-800 */
-  padding: 0.1em 0.35em;
-  border-radius: 4px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  padding: 0.05em 0.32em;
+  border-radius: 5px;
 }
-/* 代码块：外层 pre 承担背景与滚动，内层 code 去掉行内样式。 */
+
+/* 代码块：固定 GitHub-dark，不看主题。 */
 .carter-md pre {
   margin: 0.7em 0;
   padding: 0.8em 0.9em;
   overflow-x: auto;
-  border-radius: 8px;
-  background: rgb(15 23 42); /* slate-900 */
-  border: 1px solid rgb(51 65 85);
+  border-radius: 10px;
+  background: #0d1117;
+  border: 1px solid #21262d;
+  color: #c9d1d9;
 }
 .carter-md pre code {
   background: transparent;
+  border: 0;
   padding: 0;
   font-size: 0.85em;
   line-height: 1.55;
+  color: inherit;
 }
+
 .carter-md table {
   margin: 0.7em 0;
   border-collapse: collapse;
   display: block;
   overflow-x: auto;
+  font-size: 0.94em;
 }
 .carter-md th,
 .carter-md td {
-  border: 1px solid rgb(51 65 85);
+  border: 1px solid var(--border);
   padding: 0.35em 0.6em;
   text-align: left;
 }
 .carter-md th {
-  background: rgb(30 41 59);
+  background: var(--bg-card);
+  font-weight: 600;
 }

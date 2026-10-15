@@ -20,6 +20,11 @@ export function useAppEvents() {
 
     listen<AppEvent>(EVENT_NAME, ({ payload }) => {
       const state = useStore.getState();
+      if (payload.type === "config_changed") {
+        // 配置被界面改过并已热重载。设置页据此重拉数据。
+        state.bumpConfig();
+        return;
+      }
       if (payload.type === "session") {
         // 还没连上会话、或事件属于别的会话 —— 都不是当前界面该关心的。
         if (state.sessionId === null || payload.session_id !== state.sessionId) return;

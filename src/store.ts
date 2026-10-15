@@ -16,11 +16,12 @@ import { create } from "zustand";
 
 import type {
   AppInfo,
+  AppSettings,
   BlockView,
   CreatedSession,
   MessageView,
   SessionEvent,
-  SessionSummary,
+  SessionRow,
   TodoView,
   UsageView,
 } from "./lib/api";
@@ -65,13 +66,22 @@ type Store = {
   inspectorOpen: boolean;
   inspectorTurn: number | null;
   // 侧栏 / 底栏用
-  sessions: SessionSummary[];
-  appVersion: string;
+  sessions: SessionRow[];
+  appInfo: AppInfo | null;
+  /** 界面设置（主题、工具开关、侧栏宽度）。carter CLI 不读它。 */
+  settings: AppSettings | null;
+  /**
+   * 配置被改过几次。设置页把它放进 useEffect 的依赖里，就能在
+   * 「改完渠道 → 模型页跟着刷新」这类联动上自动重拉数据。
+   */
+  configNonce: number;
   /** 主区显示哪个视图。默认对话。 */
   view: "chat" | "settings";
 
   setAppInfo: (i: AppInfo) => void;
-  setSessions: (s: SessionSummary[]) => void;
+  setSettings: (s: AppSettings) => void;
+  bumpConfig: () => void;
+  setSessions: (s: SessionRow[]) => void;
   beginSession: (c: CreatedSession) => void;
   resetSession: () => void;
   addUserTurn: (text: string) => void;
@@ -247,10 +257,17 @@ export const useStore = create<Store>((set) => ({
   cwd: "",
   ...emptyConversation,
   sessions: [],
-  appVersion: "",
+  appInfo: null,
+  settings: null,
+  configNonce: 0,
   view: "chat",
 
-  setAppInfo: (i) => set({ appVersion: i.version }),
+  // 应用信息里带着设置，一起落地 —— 分开拉会让主题在首帧闪一下。
+  setAppInfo: (i) => set({ appInfo: i, settings: i.settings }),
+
+  setSettings: (settings) => set({ settings }),
+
+  bumpConfig: () => set((s) => ({ configNonce: s.configNonce + 1 })),
 
   setSessions: (sessions) => set({ sessions }),
 

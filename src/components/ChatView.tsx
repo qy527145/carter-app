@@ -4,6 +4,10 @@
 // 都在改末尾元素的高度，虚拟器要不断重测；在这个「跟着底部滚」的场景里，它带来
 // 的复杂度（动态高度 + 保持贴底 + markdown 异步布局）比收益大。
 // TODO: 长会话需要时再引入虚拟滚动（依赖已在 package.json）。
+//
+// 视觉上照参考实现的方向：**助手输出不套气泡也不带头像**，正文就是页面上的正文；
+// 只有用户消息给一个气泡。工具与思考是嵌在其中的卡片 —— 它们是流程的一部分，
+// 不该跟正文抢同一层视觉重量。
 
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
@@ -14,7 +18,6 @@ import {
   ChevronRight,
   CircleCheck,
   CircleX,
-  FileSearch,
   FileText,
   Globe,
   Info,
@@ -24,13 +27,13 @@ import {
   Square,
   TriangleAlert,
   Wrench,
-  X,
 } from "lucide-react";
 
 import { sendCommand } from "../lib/api";
 import { useStore, type Item, type Turn } from "../store";
-import { Button } from "./ui/Button";
+import { Button, IconButton } from "./ui/Button";
 import { Input } from "./ui/Input";
+import { Banner } from "./ui/Panel";
 
 type ToolItem = Extract<Item, { kind: "tool" }>;
 type ServerItem = Extract<Item, { kind: "server" }>;
@@ -49,21 +52,46 @@ function MarkdownText({ text }: { text: string }) {
   );
 }
 
+/** 内容块左侧那个小图标底衬。全应用唯一的彩色落点。 */
+function Glyph({
+  tone,
+  children,
+}: {
+  tone: "blue" | "green" | "orange" | "violet" | "pink";
+  children: React.ReactNode;
+}) {
+  // 类名必须是字面量：拼接出来的 Tailwind 扫描不到，颜色会静默失效。
+  const cls = {
+    blue: "bg-tone-blue-soft text-tone-blue",
+    green: "bg-tone-green-soft text-tone-green",
+    orange: "bg-tone-orange-soft text-tone-orange",
+    violet: "bg-tone-violet-soft text-tone-violet",
+    pink: "bg-tone-pink-soft text-tone-pink",
+  }[tone];
+  return (
+    <span className={`flex size-5 shrink-0 items-center justify-center rounded ${cls}`}>
+      {children}
+    </span>
+  );
+}
+
 function ThinkingBlock({ text, hasSignature }: { text: string; hasSignature?: boolean }) {
   return (
-    <details className="group rounded-lg border border-slate-700/70 bg-slate-800/30">
-      <summary className="flex cursor-pointer list-none items-center gap-1.5 px-3 py-1.5 text-xs text-slate-400 hover:text-slate-200">
-        <ChevronRight size={13} className="transition-transform group-open:rotate-90" />
-        <Brain size={13} />
+    <details className="group rounded-lg border border-edge bg-card/50">
+      <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-1.5 text-xs text-dim transition-colors hover:text-ink">
+        <ChevronRight size={12} className="transition-transform group-open:rotate-90" />
+        <Glyph tone="violet">
+          <Brain size={11} />
+        </Glyph>
         <span>思考</span>
         {/* hasSignature 只在历史消息里带值；实时增量拿不到签名状态，不显示提示。 */}
         {hasSignature === false && (
-          <span className="ml-1 text-[11px] text-amber-500/80">
+          <span className="ml-1 text-[11px] text-tone-orange">
             无签名 · 历史消息无法原样回传
           </span>
         )}
       </summary>
-      <div className="whitespace-pre-wrap border-t border-slate-700/70 px-3 py-2 text-xs leading-relaxed text-slate-400">
+      <div className="whitespace-pre-wrap border-t border-edge px-3 py-2 text-xs leading-relaxed text-dim">
         {text}
       </div>
     </details>
@@ -73,31 +101,32 @@ function ThinkingBlock({ text, hasSignature }: { text: string; hasSignature?: bo
 function ToolCard({ item }: { item: ToolItem }) {
   const r = item.result;
   return (
-    <div className="rounded-lg border border-slate-700 bg-slate-800/40 px-3 py-2">
-      <div className="flex items-center gap-2 text-sm">
-        <Wrench size={14} className="text-slate-400" />
-        <span className="font-medium text-slate-200">{item.name}</span>
+    <div className="rounded-lg border border-edge bg-card px-3 py-2">
+      <div className="flex items-center gap-2">
+        <Glyph tone="blue">
+          <Wrench size={11} />
+        </Glyph>
+        <span className="font-mono text-xs text-ink">{item.name}</span>
         {r ? (
           r.ok ? (
-            <CircleCheck size={14} className="text-emerald-400" />
+            <CircleCheck size={13} className="text-[var(--ok)]" />
           ) : (
-            <CircleX size={14} className="text-red-400" />
+            <CircleX size={13} className="text-[var(--danger)]" />
           )
         ) : (
-          <LoaderCircle size={13} className="animate-spin text-slate-500" />
+          <LoaderCircle size={12} className="animate-spin text-dim" />
         )}
       </div>
       {item.argsPreview && (
-        <div
-          className="mt-1.5 truncate font-mono text-[11px] text-slate-500"
-          title={item.argsPreview}
-        >
+        <div className="mt-1.5 truncate font-mono text-[11px] text-dim" title={item.argsPreview}>
           {item.argsPreview}
         </div>
       )}
       {r && (
         <div
-          className={`mt-1 truncate text-xs ${r.ok ? "text-slate-400" : "text-red-300"}`}
+          className={`mt-1 truncate text-xs ${
+            r.ok ? "text-dim" : "text-[var(--danger)]"
+          }`}
           title={r.summary}
         >
           {r.summary || "（无输出）"}
@@ -115,16 +144,18 @@ function ToolCard({ item }: { item: ToolItem }) {
  */
 function ServerCard({ item }: { item: ServerItem }) {
   return (
-    <div className="rounded-lg border border-indigo-800/60 bg-indigo-950/30 px-3 py-2">
-      <div className="flex items-center gap-2 text-sm">
-        <Globe size={14} className="text-indigo-300" />
-        <span className="font-mono text-xs text-indigo-200">{item.rawType}</span>
-        <span className="rounded bg-indigo-900/60 px-1.5 py-0.5 text-[10px] text-indigo-300">
+    <div className="rounded-lg border border-dashed border-edge bg-card/50 px-3 py-2">
+      <div className="flex items-center gap-2">
+        <Glyph tone="orange">
+          <Globe size={11} />
+        </Glyph>
+        <span className="font-mono text-xs text-ink">{item.rawType}</span>
+        <span className="rounded border border-edge px-1.5 py-0.5 text-[10px] text-dim">
           服务端活动
         </span>
       </div>
       {item.summary && (
-        <div className="mt-1 truncate text-xs text-indigo-200/80" title={item.summary}>
+        <div className="mt-1 truncate text-xs text-dim" title={item.summary}>
           {item.summary}
         </div>
       )}
@@ -134,11 +165,13 @@ function ServerCard({ item }: { item: ServerItem }) {
 
 function ImageCard({ item }: { item: ImageItem }) {
   return (
-    <div className="flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-800/40 px-3 py-2 text-xs text-slate-400">
-      <FileText size={14} />
-      <span className="font-mono">{item.mediaType}</span>
+    <div className="flex items-center gap-2 rounded-lg border border-edge bg-card px-3 py-2 text-xs text-dim">
+      <Glyph tone="pink">
+        <FileText size={11} />
+      </Glyph>
+      <span className="mono">{item.mediaType}</span>
       {/* 视图里只带 hash、不带字节，所以这里只给一个占位标识。 */}
-      {item.hash && <span className="truncate text-slate-600">#{item.hash.slice(0, 12)}</span>}
+      {item.hash && <span className="truncate text-dim/70">#{item.hash.slice(0, 12)}</span>}
     </div>
   );
 }
@@ -149,7 +182,7 @@ function ItemView({ item, showCursor }: { item: Item; showCursor: boolean }) {
       return <ThinkingBlock text={item.text} hasSignature={item.hasSignature} />;
     case "text":
       return (
-        <div className="text-slate-100">
+        <div className="text-sm text-ink">
           <MarkdownText text={item.text} />
           {showCursor && <span className="carter-cursor">▍</span>}
         </div>
@@ -161,9 +194,7 @@ function ItemView({ item, showCursor }: { item: Item; showCursor: boolean }) {
     case "image":
       return <ImageCard item={item} />;
     case "note":
-      return (
-        <div className="whitespace-pre-wrap text-xs text-slate-500">{item.text}</div>
-      );
+      return <div className="whitespace-pre-wrap text-xs text-dim">{item.text}</div>;
   }
 }
 
@@ -183,37 +214,36 @@ function AssistantTurn({
   const openInspector = useStore((s) => s.openInspector);
   const items = t.items;
   return (
-    <div className="flex gap-3">
-      <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-slate-700 text-slate-300">
-        <Bot size={15} />
-      </div>
-      <div className="min-w-0 flex-1 space-y-2 pt-0.5">
-        {items.length === 0 && streaming && (
-          <div className="flex items-center gap-2 text-sm text-slate-500">
-            <LoaderCircle size={14} className="animate-spin" />
-            正在生成…
-          </div>
-        )}
-        {items.map((item, i) => (
-          <ItemView
-            key={i}
-            item={item}
-            showCursor={streaming && isLast && i === items.length - 1 && item.kind === "text"}
-          />
-        ))}
-        {/* 把这条回答对回产生它的那次 API 请求。历史消息没有轮次号（事件不回放），
-            所以只有本轮之后的消息才拿得到这个入口。 */}
-        {t.turn !== undefined && items.length > 0 && (
-          <button
-            onClick={() => openInspector(t.turn ?? null)}
-            title={`查看第 ${t.turn} 轮发出的请求`}
-            className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-slate-500 transition-colors hover:bg-slate-800 hover:text-slate-300"
-          >
-            <ScanSearch size={12} />
-            查看报文
-          </button>
-        )}
-      </div>
+    <div className="group/msg min-w-0 space-y-2">
+      {items.length === 0 && streaming && (
+        <div className="flex items-center gap-2 text-sm text-dim">
+          <span className="carter-dots">
+            <span />
+            <span />
+            <span />
+          </span>
+          正在生成…
+        </div>
+      )}
+      {items.map((item, i) => (
+        <ItemView
+          key={i}
+          item={item}
+          showCursor={streaming && isLast && i === items.length - 1 && item.kind === "text"}
+        />
+      ))}
+      {/* 把这条回答对回产生它的那次 API 请求。历史消息没有轮次号（事件不回放），
+          所以只有本轮之后的消息才拿得到这个入口。 */}
+      {t.turn !== undefined && items.length > 0 && (
+        <button
+          onClick={() => openInspector(t.turn ?? null)}
+          title={`查看第 ${t.turn} 轮发出的请求`}
+          className="group/msg inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-dim opacity-0 transition-opacity hover:bg-card hover:text-ink group-hover/msg:opacity-100"
+        >
+          <ScanSearch size={12} />
+          查看报文
+        </button>
+      )}
     </div>
   );
 }
@@ -221,7 +251,7 @@ function AssistantTurn({
 function UserTurn({ turn }: { turn: Extract<Turn, { role: "user" }> }) {
   return (
     <div className="flex justify-end">
-      <div className="max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-br-sm bg-sky-600 px-3.5 py-2 text-sm text-white">
+      <div className="max-w-[75%] whitespace-pre-wrap break-words rounded-2xl bg-bubble px-3.5 py-2 text-sm leading-relaxed text-ink">
         {turn.text}
       </div>
     </div>
@@ -264,20 +294,33 @@ function MessageList() {
   };
 
   return (
-    <div
-      ref={scrollRef}
-      onScroll={onScroll}
-      className="flex-1 overflow-y-auto px-4 py-5"
-    >
-      <div className="mx-auto flex max-w-3xl flex-col gap-5">
-        {turns.length === 0 && (
-          <div className="mt-16 text-center text-sm text-slate-600">
-            发条消息开始对话吧。
-          </div>
-        )}
+    <div ref={scrollRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto px-4 py-6">
+      <div className="mx-auto flex max-w-3xl flex-col gap-6">
+        {turns.length === 0 && <EmptyState />}
         {turns.map((t, i) => (
           <TurnView key={i} turn={t} isLast={i === turns.length - 1} streaming={streaming} />
         ))}
+      </div>
+    </div>
+  );
+}
+
+function EmptyState() {
+  const model = useStore((s) => s.model);
+  return (
+    <div className="flex flex-col items-center justify-center py-20 text-center">
+      <div className="mb-5 flex size-11 items-center justify-center rounded-xl bg-ink text-[var(--accent-contrast)]">
+        <Bot size={22} />
+      </div>
+      <div className="mb-1.5 text-[22px] font-semibold tracking-tight">开始一段对话</div>
+      <div className="text-sm text-dim">
+        {model ? (
+          <>
+            当前模型 <span className="mono text-ink">{model}</span>
+          </>
+        ) : (
+          "发条消息就能开始。"
+        )}
       </div>
     </div>
   );
@@ -291,18 +334,22 @@ function TodoPanel() {
   const todos = useStore((s) => s.todos);
   if (todos.length === 0) return null;
   return (
-    <div className="border-t border-slate-800 bg-slate-900/60 px-4 py-2">
+    <div className="border-t border-edge bg-sidebar px-4 py-2">
       <div className="mx-auto max-w-3xl space-y-1">
         {todos.map((t, i) => (
           <div key={i} className="flex items-center gap-2 text-xs">
             {t.status === "completed" ? (
-              <CircleCheck size={13} className="text-emerald-400" />
+              <CircleCheck size={13} className="shrink-0 text-[var(--ok)]" />
             ) : t.status === "in_progress" ? (
-              <LoaderCircle size={13} className="animate-spin text-sky-400" />
+              <LoaderCircle size={13} className="shrink-0 animate-spin text-tone-blue" />
             ) : (
-              <span className="inline-block h-3 w-3 rounded-full border border-slate-600" />
+              <span className="inline-block size-3 shrink-0 rounded-full border border-edge" />
             )}
-            <span className={t.status === "completed" ? "text-slate-500 line-through" : "text-slate-300"}>
+            <span
+              className={
+                t.status === "completed" ? "text-dim line-through" : "text-ink"
+              }
+            >
               {t.status === "in_progress" ? t.active_form : t.content}
             </span>
           </div>
@@ -317,16 +364,15 @@ function NoticeBanner() {
   const setNotice = useStore((s) => s.setNotice);
   if (!notice) return null;
   return (
-    <div className="flex items-start gap-2 border-b border-amber-900/50 bg-amber-950/40 px-4 py-2 text-sm text-amber-200">
-      <TriangleAlert size={15} className="mt-0.5 shrink-0" />
-      <span className="flex-1 whitespace-pre-wrap break-words">{notice}</span>
-      <button
-        onClick={() => setNotice(null)}
-        className="shrink-0 rounded p-0.5 hover:bg-amber-900/40"
-        aria-label="关闭"
-      >
-        <X size={14} />
-      </button>
+    <div className="px-4 pt-3">
+      <div className="mx-auto max-w-3xl">
+        <Banner kind="warn" onClose={() => setNotice(null)}>
+          <div className="flex items-start gap-2">
+            <TriangleAlert size={14} className="mt-0.5 shrink-0" />
+            <span className="whitespace-pre-wrap break-words">{notice}</span>
+          </div>
+        </Banner>
+      </div>
     </div>
   );
 }
@@ -334,7 +380,6 @@ function NoticeBanner() {
 function AskPanel() {
   const pendingAsk = useStore((s) => s.pendingAsk);
   const clearPendingAsk = useStore((s) => s.clearPendingAsk);
-  const setNotice = useStore((s) => s.setNotice);
   const [free, setFree] = useState("");
 
   if (!pendingAsk) return null;
@@ -343,7 +388,7 @@ function AskPanel() {
     const sid = useStore.getState().sessionId;
     if (sid) {
       sendCommand(sid, { type: "answer_ask", id: pendingAsk.id, answer: a }).catch((e) =>
-        setNotice(String(e)),
+        useStore.getState().setNotice(String(e)),
       );
     }
     clearPendingAsk();
@@ -351,17 +396,17 @@ function AskPanel() {
   };
 
   return (
-    <div className="border-t border-sky-900/50 bg-sky-950/30 px-4 py-3">
-      <div className="mx-auto max-w-3xl space-y-2">
-        <div className="flex items-center gap-2 text-xs text-sky-300">
-          <Info size={14} />
+    <div className="px-4 pb-2">
+      <div className="mx-auto max-w-3xl rounded-xl border border-edge bg-elevated p-3 shadow-soft">
+        <div className="mb-2 flex items-center gap-2 text-xs text-dim">
+          <Info size={13} />
           模型在等你回答
         </div>
-        <div className="text-sm text-slate-100">{pendingAsk.question}</div>
+        <div className="mb-2.5 text-sm text-ink">{pendingAsk.question}</div>
         {pendingAsk.options.length > 0 && (
-          <div className="flex flex-wrap gap-2">
+          <div className="mb-2 flex flex-wrap gap-2">
             {pendingAsk.options.map((opt) => (
-              <Button key={opt} variant="outline" onClick={() => answer(opt)}>
+              <Button key={opt} onClick={() => answer(opt)}>
                 {opt}
               </Button>
             ))}
@@ -380,7 +425,7 @@ function AskPanel() {
             placeholder="或直接输入回答…"
             className="flex-1"
           />
-          <Button disabled={!free.trim()} onClick={() => answer(free.trim())}>
+          <Button variant="primary" disabled={!free.trim()} onClick={() => answer(free.trim())}>
             回答
           </Button>
         </div>
@@ -394,6 +439,7 @@ function Composer() {
   const streaming = useStore((s) => s.streaming);
   const connected = useStore((s) => s.sessionId !== null);
   const pendingAsk = useStore((s) => s.pendingAsk);
+  const model = useStore((s) => s.model);
   const addUserTurn = useStore((s) => s.addUserTurn);
   const setNotice = useStore((s) => s.setNotice);
   const taRef = useRef<HTMLTextAreaElement>(null);
@@ -422,46 +468,63 @@ function Composer() {
   const disabled = !connected || pendingAsk !== null;
 
   return (
-    <div className="border-t border-slate-800 bg-slate-900/60 px-4 py-3">
-      <div className="mx-auto flex max-w-3xl items-end gap-2">
-        <textarea
-          ref={taRef}
-          rows={1}
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          onInput={(e) => {
-            const el = e.currentTarget;
-            el.style.height = "auto";
-            el.style.height = Math.min(el.scrollHeight, 200) + "px";
-          }}
-          onKeyDown={(e) => {
-            // Enter 发送，Shift+Enter 换行。
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              send();
+    <div className="shrink-0 px-4 pb-4 pt-1">
+      <div className="mx-auto max-w-3xl">
+        <div className="rounded-2xl border border-edge bg-elevated shadow-soft transition-shadow focus-within:shadow-lift">
+          <textarea
+            ref={taRef}
+            rows={1}
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            onInput={(e) => {
+              const el = e.currentTarget;
+              el.style.height = "auto";
+              el.style.height = Math.min(el.scrollHeight, 200) + "px";
+            }}
+            onKeyDown={(e) => {
+              // Enter 发送，Shift+Enter 换行。
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                send();
+              }
+            }}
+            disabled={disabled}
+            placeholder={
+              !connected
+                ? "会话未就绪 —— 点「新对话」开始"
+                : pendingAsk
+                  ? "请先回答上面的问题"
+                  : "输入消息，Enter 发送，Shift+Enter 换行"
             }
-          }}
-          disabled={disabled}
-          placeholder={
-            !connected
-              ? "会话未就绪 —— 点「新建会话」开始"
-              : pendingAsk
-                ? "请先回答上面的问题"
-                : "输入消息，Enter 发送，Shift+Enter 换行"
-          }
-          className="flex-1 resize-none rounded-lg border border-slate-700 bg-slate-950/60 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 outline-none focus:border-sky-600 disabled:opacity-50"
-        />
-        {streaming ? (
-          <Button variant="danger" onClick={cancel} className="h-9">
-            <Square size={14} />
-            取消
-          </Button>
-        ) : (
-          <Button onClick={send} disabled={disabled || !text.trim()} className="h-9">
-            <Send size={14} />
-            发送
-          </Button>
-        )}
+            className="max-h-48 min-h-14 w-full resize-none bg-transparent px-4 pb-1 pt-3.5 text-[15px] leading-relaxed text-ink outline-none placeholder:text-dim disabled:opacity-50"
+          />
+          <div className="flex items-center gap-2 px-2.5 pb-2">
+            {/* 模型名放在输入框里而不是顶栏：它跟着「这条消息发给谁」走，
+                和发送按钮属于同一组信息。 */}
+            <span className="mono min-w-0 flex-1 truncate px-1.5 text-[11px] text-dim">
+              {model || "—"}
+            </span>
+            {streaming ? (
+              <button
+                onClick={cancel}
+                title="中断这一轮"
+                className="inline-flex items-center gap-1.5 rounded-full border border-edge px-3 py-1.5 text-xs text-dim transition-colors hover:text-[var(--danger)]"
+              >
+                <Square size={11} />
+                停止
+              </button>
+            ) : (
+              <button
+                onClick={send}
+                disabled={disabled || !text.trim()}
+                title="发送"
+                className="rounded-full bg-accent p-2 text-[var(--accent-contrast)] transition-opacity hover:opacity-90 disabled:opacity-30"
+              >
+                <Send size={14} />
+              </button>
+            )}
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -475,18 +538,16 @@ function ChatHeader() {
   const title = sessions.find((s) => s.id === sessionId)?.title;
 
   return (
-    <div className="flex items-center gap-2 border-b border-slate-800 px-4 py-2">
-      <span className="truncate text-sm text-slate-300">{title || "新会话"}</span>
-      <Button
-        variant="ghost"
+    <div className="flex h-10 shrink-0 items-center gap-2 border-b border-edge px-4">
+      <span className="truncate text-sm text-dim">{title || "新对话"}</span>
+      <IconButton
         className="ml-auto"
         disabled={!sessionId}
         onClick={() => openInspector(null)}
         title="查看本次会话抓到的 HTTP 报文"
       >
-        <FileSearch size={14} />
-        报文
-      </Button>
+        <ScanSearch size={15} />
+      </IconButton>
     </div>
   );
 }
