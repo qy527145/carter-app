@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0.35" y2="1">
+      <stop offset="0" stop-color="#254271"/>
+      <stop offset="0.55" stop-color="#16233F"/>
+      <stop offset="1" stop-color="#0B1322"/>
+    </linearGradient>
+
+    <linearGradient id="gold" gradientUnits="userSpaceOnUse" x1="300" y1="300" x2="740" y2="680">
+      <stop offset="0" stop-color="#F2DA84"/>
+      <stop offset="0.42" stop-color="#D4AF37"/>
+      <stop offset="1" stop-color="#96731A"/>
+    </linearGradient>
+
+    <linearGradient id="shieldFill" x1="0.1" y1="0" x2="0.7" y2="1">
+      <stop offset="0" stop-color="#2E5289"/>
+      <stop offset="0.5" stop-color="#1B3157"/>
+      <stop offset="1" stop-color="#0D1A2E"/>
+    </linearGradient>
+
+    <!-- 左翼：整块斜向上举的翼面，中段饱满、翼尖收窄 -->
+    <g id="wing">
+      <path d="M500 424 C452 378 390 330 330 300 C314 292 300 308 312 322
+               C346 358 382 398 410 436 C428 462 452 490 474 512
+               C490 502 498 462 500 424 Z"/>
+    </g>
+
+    <clipPath id="shieldClip">
+      <path d="M252 218 L772 218 C772 498 736 634 512 806 C288 634 252 498 252 218 Z"/>
+    </clipPath>
+  </defs>
+
+  <rect x="0" y="0" width="1024" height="1024" rx="228" fill="url(#bg)"/>
+
+  <!-- Art Deco 外环 -->
+  <circle cx="512" cy="512" r="450" fill="none" stroke="#D4AF37" stroke-width="13"/>
+  <circle cx="512" cy="512" r="418" fill="none" stroke="#D4AF37" stroke-width="3" opacity="0.5"/>
+
+  <!-- 盾牌 -->
+  <g transform="translate(0,-6)">
+    <path d="M252 218 L772 218 C772 498 736 634 512 806 C288 634 252 498 252 218 Z"
+          fill="url(#shieldFill)" stroke="url(#gold)" stroke-width="15" stroke-linejoin="round"/>
+
+    <g clip-path="url(#shieldClip)">
+      <g transform="translate(0,26)">
+        <g fill="url(#gold)">
+          <!-- 双翼 -->
+          <use href="#wing"/>
+          <use href="#wing" transform="translate(1024,0) scale(-1,1)"/>
+
+          <!-- 身体 -->
+          <path d="M512 384 C498 384 490 396 489 412 L483 500
+                   C481 530 488 554 496 574 L506 636 L512 622 L518 636
+                   L528 574 C536 554 543 530 541 500 L535 412
+                   C534 396 526 384 512 384 Z"/>
+
+          <!-- 尾羽 -->
+          <path d="M488 566 L478 664 C492 676 532 676 546 664 L536 566 Z"/>
+
+          <!-- 头与喙 -->
+          <ellipse cx="512" cy="360" rx="26" ry="28"/>
+          <path d="M492 351 L458 363 L492 373 Z"/>
+        </g>
+      </g>
+    </g>
+  </g>
+</svg>
