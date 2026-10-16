@@ -86,7 +86,7 @@ export function SidePanel() {
         {side.inheritedTurns.length > 0 && (
           <details className="mb-4 rounded-lg border border-edge bg-card/40">
             <summary className="cursor-pointer list-none px-3 py-1.5 text-[11px] text-dim">
-              继承自主对话的上下文（{side.inheritedTurns.length} 条）· 仅供参考
+              打开时主对话的上下文（{side.inheritedTurns.length} 条）· 提问时会读最新进展
             </summary>
             <div className="border-t border-edge px-3 py-3 opacity-70">
               <TurnList turns={side.inheritedTurns} streaming={false} />

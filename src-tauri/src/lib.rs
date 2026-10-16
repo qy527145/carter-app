@@ -132,7 +132,7 @@ struct CreatedSide {
     session_id: String,
     model: String,
     cwd: String,
-    /// 继承下来的历史（已截到干净边界）。界面把它折叠在顶部，让用户知道
+    /// 继承下来的历史（打开那一刻的快照）。界面把它折叠在顶部，让用户知道
     /// 「这条会话看得见主对话说到哪了」。
     inherited: Vec<MessageView>,
 }

@@ -60,12 +60,19 @@ pub struct SessionHandle {
     /// 父会话 id。只有侧边聊天（`/btw`）有 —— 它继承父会话的上下文，
     /// 父会话一关就该跟着走，否则抽屉里那条对话会孤悬着。
     pub parent_id: Option<String>,
-    /// 这一份对话**到目前为止**的消息快照，由会话任务在每轮结束时刷新。
+    /// 这一份对话**到目前为止**的消息快照，由会话任务在每轮开始与结束时刷新。
     ///
     /// 侧边聊天靠它拿父会话的上下文。两条路都走不通所以只能这样：`session::load`
     /// 会给父会话文件挂上 `Recorder`（侧边的 append 会写进父文件里），而会话文件
     /// 是惰性建的 —— 一条还没发过消息的新会话根本没有文件。
     pub history: ArcSwap<Vec<WireMessage>>,
+    /// 正在跑的这一轮里已经发生的事（模型说到一半的话、调过的工具）。
+    ///
+    /// `history` 只在轮次边界上刷新，而 carter 的 `run_turn` 在一轮之内独占 `Thread`
+    /// —— 主对话跑长任务时（正是最想开 `/btw` 的时候），光看 `history` 只能看到
+    /// 「用户提了个要求」，看不到它已经干到哪了。这一份由事件转发任务边收边记，
+    /// 补上这段空白。不在跑的时候它是空的。
+    pub live: Arc<LiveLog>,
     /// 中断当前轮。会话任务用它来响应 `Command::Cancel`。
     pub cancel: CancelToken,
     /// 关闭整个会话（任务退出、MCP 回收）。与 `cancel` 分开是必须的：
@@ -91,6 +98,7 @@ impl SessionHandle {
             asks: Arc::new(AskRegistry::default()),
             parent_id,
             history: ArcSwap::from_pointee(Vec::<WireMessage>::new()),
+            live: Arc::new(LiveLog::default()),
             cancel: CancelToken::new(),
             close: CancelToken::new(),
             cmd_tx,
@@ -103,8 +111,73 @@ impl SessionHandle {
     }
 
     /// 刷新历史快照（只有会话任务会调）。
+    ///
+    /// 同时清空 `live`：快照里已经有的东西，不该再在「进行中」里出现一遍。
     pub fn publish_history(&self, messages: &[WireMessage]) {
         self.history.store(Arc::new(messages.to_vec()));
+        self.live.clear();
+    }
+}
+
+/// 进行中那一轮的一条记录，见 [`SessionHandle::live`]。
+#[derive(Debug, Clone, PartialEq)]
+pub enum LiveItem {
+    /// 模型的正文（流式增量拼起来的）。
+    Text(String),
+    Tool {
+        call_id: String,
+        name: String,
+        args: String,
+        /// `None` = 还在跑。
+        result: Option<String>,
+    },
+}
+
+/// 进行中那一轮的记录。
+///
+/// 由**生产方**同步写入（`TxSink` 收文本增量、`Recorded` 包装层记工具），而不是由
+/// 事件转发任务写：转发是异步的，它落后半拍收到的事件会在 `publish_history` 清空
+/// 之后才写进来，于是同一段内容在快照与「进行中」里各出现一遍。
+#[derive(Debug, Default)]
+pub struct LiveLog(Mutex<Vec<LiveItem>>);
+
+impl LiveLog {
+    pub fn snapshot(&self) -> Vec<LiveItem> {
+        self.0.lock().unwrap().clone()
+    }
+
+    pub fn clear(&self) {
+        self.0.lock().unwrap().clear();
+    }
+
+    /// 记一段流式正文。连续的增量并进同一条，免得一个字一条。
+    pub fn text(&self, delta: &str) {
+        let mut live = self.0.lock().unwrap();
+        match live.last_mut() {
+            Some(LiveItem::Text(t)) => t.push_str(delta),
+            _ => live.push(LiveItem::Text(delta.to_string())),
+        }
+    }
+
+    pub fn tool_started(&self, call_id: &str, name: &str, args: &serde_json::Value) {
+        self.0.lock().unwrap().push(LiveItem::Tool {
+            call_id: call_id.to_string(),
+            name: name.to_string(),
+            args: args.to_string(),
+            result: None,
+        });
+    }
+
+    pub fn tool_finished(&self, call_id: &str, content: &str) {
+        let mut live = self.0.lock().unwrap();
+        for item in live.iter_mut().rev() {
+            if let LiveItem::Tool { call_id: id, result, .. } = item {
+                if id == call_id {
+                    *result = Some(content.to_string());
+                    return;
+                }
+            }
+        }
     }
 }
 

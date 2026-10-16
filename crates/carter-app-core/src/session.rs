@@ -197,10 +197,10 @@ pub(crate) struct SideWiring {
     pub provider: Arc<dyn carter::provider::LlmProvider>,
     pub config: Arc<Config>,
     pub unsupported_server_tools: Vec<String>,
-    /// 已经种好历史、**没有挂 recorder** 的 `Thread`（见 `side.rs::seed_thread`）。
+    /// 空的、**没有挂 recorder** 的 `Thread`（见 `side.rs::side_thread`）。
     pub thread: Thread,
-    /// 系统提示（父会话的 + 侧边那一段说明）。每轮复用同一份 —— 侧边会话没有
-    /// 会变的东西（技能开关、目标状态都不影响它）。
+    /// 系统提示的固定部分（父会话那一套 + 侧边那一段说明）。主对话的内容每轮现取、
+    /// 接在它后面，见 [`Runner::run_one_turn`]。
     pub system: Vec<String>,
 }
 
@@ -359,7 +359,7 @@ struct Runner {
     downgraded_goal: bool,
     /// 生成中收到的、要等这一轮跑完再处理的命令。
     queued: VecDeque<Command>,
-    /// 侧边会话的系统提示是固定的（见 [`SideWiring`]），主会话每轮现算。
+    /// 侧边会话的系统提示固定部分（见 [`SideWiring`]），主会话每轮现算。
     fixed_system: Option<Vec<String>>,
 }
 
@@ -558,6 +558,9 @@ impl Runner {
     /// 把一段文本作为一轮的用户输入跑完（含它引发的自动继续）。
     async fn run_sequence(&mut self, text: String, git: Option<carter::session::GitInfo>) {
         self.thread.append_user(text);
+        // 轮次开头也发布一次：这一轮可能很长，侧边聊天在这期间至少要能看到
+        // 「用户提了什么要求」（之后的进展由 `live` 补上）。
+        self.ctx.handle.publish_history(&self.thread.messages);
         self.emit(SessionEvent::TurnStarted {
             turn: self.thread.user_turns,
         });
@@ -573,7 +576,18 @@ impl Runner {
     /// 让两条路共用同一个函数体。
     async fn run_one_turn(&mut self, git: Option<carter::session::GitInfo>) -> TurnResult {
         let system = match &self.fixed_system {
-            Some(s) => s.clone(),
+            Some(s) => {
+                let mut s = s.clone();
+                // 侧边会话：主对话的最新状态（含进行中的那一轮）每轮现取。
+                // 放在最后 —— 它是最「当下」的东西，也是每轮都会变的那段。
+                if let Some(parent) = self.ctx.handle.parent_id.as_deref() {
+                    match crate::side::parent_context(&self.ctx.shell, parent) {
+                        Some(c) => s.push(c),
+                        None => s.push("## 主对话\n\n（主对话已经关闭，看不到了。）".into()),
+                    }
+                }
+                s
+            }
             None => {
                 let mut s = self.ctx.system(git.as_ref());
                 // 目标段接在最后：它是最「当下」的指令，而且（将来 carter 打开
@@ -611,6 +625,7 @@ impl Runner {
                 include_task: self.ctx.include_task,
                 goal_signal: self.goal_signal.clone(),
                 activity: self.activity.clone(),
+                live: self.live(),
             },
             &self.ctx.settings,
         );
@@ -645,7 +660,10 @@ impl Runner {
         let cancel = self.ctx.handle.cancel.clone();
 
         let outcome = {
-            let mut sink = TxSink(self.ui_tx.clone().expect("事件通道在 run() 里建好"));
+            let mut sink = TxSink {
+                tx: self.ui_tx.clone().expect("事件通道在 run() 里建好"),
+                live: self.live(),
+            };
             let turn = run_turn(
                 &mut self.thread,
                 &*self.ctx.provider,
@@ -694,9 +712,8 @@ impl Runner {
             }
         };
 
-        // 历史快照：侧边聊天靠它拿父会话的上下文。**在每一轮之后都发布**，
-        // 而截断到「干净边界」的活交给 `side.rs` 做 —— 那里才知道自己要的是什么
-        // （中途被取消的一轮尾部可能挂着一个没有结果的 tool_use，见 `side.rs`）。
+        // 历史快照：侧边聊天靠它拿父会话的上下文。**在每一轮之后都发布**
+        // （同时清空 `live` —— 这一轮的进展已经进了快照）。
         self.ctx.handle.publish_history(&self.thread.messages);
 
         let used_tools = self.activity.load(Ordering::Relaxed) > activity_before;
@@ -784,6 +801,7 @@ impl Runner {
                     // 这条消息会进历史（会话文件里也留一份，resume 后模型看得到自己
                     // 被推过；界面把它渲染成「自动继续」的分隔条而不是用户气泡）。
                     self.thread.append_user(goal::CONTINUE_PROMPT);
+                    self.ctx.handle.publish_history(&self.thread.messages);
                     self.emit(SessionEvent::TurnStarted {
                         turn: self.thread.user_turns,
                     });
@@ -794,6 +812,15 @@ impl Runner {
                 }
             }
         }
+    }
+
+    /// 进行中那一轮要不要记下来：只有会被侧边聊天看的主会话才记。
+    fn live(&self) -> Option<Arc<crate::shell::LiveLog>> {
+        self.ctx
+            .handle
+            .parent_id
+            .is_none()
+            .then(|| self.ctx.handle.live.clone())
     }
 
     /// 改目标：落内存、落盘、发事件。三件事必须一起做 —— 少落盘的话重启就丢，
@@ -1080,12 +1107,19 @@ fn todo_view(t: &carter::tools::TodoItem) -> TodoView {
 }
 
 /// 把 `run_turn` 的渲染出口接到事件通道上。
-struct TxSink(mpsc::UnboundedSender<UiEvent>);
+struct TxSink {
+    tx: mpsc::UnboundedSender<UiEvent>,
+    /// 进行中那一轮的记录，见 `shell.rs::LiveLog`。
+    live: Option<Arc<crate::shell::LiveLog>>,
+}
 
 impl UiSink for TxSink {
     fn emit(&mut self, ev: UiEvent) {
+        if let (Some(live), UiEvent::AssistantTextDelta(t)) = (&self.live, &ev) {
+            live.text(t);
+        }
         // 接收端没了说明会话正在退出，丢弃即可。
-        let _ = self.0.send(ev);
+        let _ = self.tx.send(ev);
     }
 }
 

@@ -103,6 +103,8 @@ pub struct ToolBuildArgs {
     pub goal_signal: Arc<GoalSignal>,
     /// 工具调用计数。runner 靠它判断「这一轮到底动没动手」（自动继续的空转检测）。
     pub activity: Arc<AtomicU32>,
+    /// 进行中那一轮的记录。`None` = 没人要看（侧边会话自己就不需要被别人看）。
+    pub live: Option<Arc<crate::shell::LiveLog>>,
 }
 
 /// 按设置挑出要保留的工具（不含 `task`、不含 `ask_user_question`）。
@@ -160,6 +162,7 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
         include_task,
         goal_signal,
         activity,
+        live,
     } = args;
 
     // ui_tx 传 None：carter 的 ask_user 会一并注册进来，而我们用自己的那个
@@ -179,12 +182,10 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
     let mut tools = ToolRegistry::empty();
 
     let push = |t: Arc<dyn Tool>, tools: &mut ToolRegistry| {
-        tools.push(Arc::new(Recorded::new(
-            t,
-            tool_tx.clone(),
-            seq.clone(),
-            activity.clone(),
-        )));
+        tools.push(Arc::new(
+            Recorded::new(t, tool_tx.clone(), seq.clone(), activity.clone())
+                .with_live(live.clone()),
+        ));
     };
 
     for t in filter_tools(&full, settings) {

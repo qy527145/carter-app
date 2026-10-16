@@ -194,7 +194,7 @@ export type CreatedSide = {
   session_id: string;
   model: string;
   cwd: string;
-  /** 继承下来的历史（已截到干净边界）。 */
+  /** 继承下来的历史（打开那一刻的快照；模型那边每轮现取最新的）。 */
   inherited: MessageView[];
 };
 

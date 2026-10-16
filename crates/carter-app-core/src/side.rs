@@ -12,18 +12,30 @@
 //! 1. **不落盘。** `Thread` 不挂 `Recorder`，会话文件不存在，于是它也不出现在侧栏
 //!    （列表是扫文件的）、不会被导出、不会被误当成一条真对话。`close_session` 之后
 //!    内存释放，干干净净。
-//! 2. **只在干净边界上种历史。** 见 [`truncate_to_clean`]：中途被取消的一轮尾部会挂着
-//!    一个没有结果的 `tool_use`，把它喂进去，第一次请求就会被上游以
-//!    「tool_use 没有对应的 tool_result」拒掉 —— 而报错的是**侧边会话**，
-//!    用户完全看不出跟主对话有什么关系。
-//! 3. **继承的历史只是参考。** 那里面可能有「做完这个再做那个」之类的计划，侧边会话
-//!    不该接着执行 —— 由 [`SIDE_INSTRUCTIONS`] 明确写给模型。
+//! 2. **主对话以文字转录的形式给出，每轮现取。** 见 [`parent_context`]。
+//! 3. **主对话里的计划不接着执行。** 那里面可能有「做完这个再做那个」，侧边会话只回答
+//!    问题 —— 由 [`SIDE_INSTRUCTIONS`] 写给模型。
+//!
+//! ## 为什么是文字转录，而不是把父会话的消息原样种进来
+//!
+//! 最早是原样种进 `Thread` 的，结果模型**认不出那是主对话**：一串以「用户」开头的消息
+//! 摆在前面，再加一句「这些只是参考、你不是那条对话的延续」，它的理解是「我看不到主
+//! 对话」，被问「主对话在干嘛」时直接说不知道。另外两个毛病也是原样种带来的：
+//!
+//! * 只能种在干净边界上（悬空的 `tool_use` 会被上游 400），而主对话正在跑长任务时
+//!   —— 恰恰是最想开 `/btw` 的时候 —— 干净边界之后的那一整段（用户的要求、模型已经
+//!   调过的工具）全被砍掉了；
+//! * 开的那一刻就冻住了，主对话后来又干了什么，侧边一概不知。
+//!
+//! 现在每轮开头读父会话的快照（`history`）加上进行中那一轮的记录（`live`），渲染成
+//! 一段明确标着「主对话」的文本放进系统提示。侧边自己的 `Thread` 只装侧边自己的问答。
 //!
 //! ## 为什么不用 `session::load` 拿父会话的历史
 //!
 //! 那会给父会话文件挂上一个 `Recorder`：侧边会话每 append 一条，都会写进**父会话**
 //! 的文件里（历史被改写，还多出一些不属于它的工具往返）。而且会话文件是惰性建的 ——
-//! 一条还没发过消息的新会话根本没有文件。所以走 `SessionHandle::history` 那份快照。
+//! 一条还没发过消息的新会话根本没有文件，进行中的那一轮也还没落盘。所以走
+//! `SessionHandle` 上的 `history` + `live`。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -36,7 +48,7 @@ use llm_adapt_core::{Block, Role};
 
 use crate::app_settings::AppSettings;
 use crate::session::{start_side, SideWiring};
-use crate::shell::{AppShell, SessionHandle};
+use crate::shell::{AppShell, LiveItem, SessionHandle};
 use crate::view::MessageView;
 
 /// 侧边会话 id 的前缀。
@@ -52,12 +64,15 @@ pub const SIDE_PREFIX: &str = "side-";
 const SIDE_INSTRUCTIONS: &str = "\
 ## 这是一次侧边聊天
 
-用户在主对话之外开了这个临时会话，用来随手问几句。分割线以上的内容是**继承来的
-参考上下文，不是你的当前任务**：
+用户在主对话旁边开了这个临时会话，用来随手问几句 —— 通常就是问主对话的事：
+「它现在在干嘛」「刚才那个改动是什么意思」「这个思路靠谱吗」。主对话的内容就在
+下面「主对话」一节里（每次用户发消息时现取的最新状态，可能还在进行中），
+**你能看到它，要据此回答**，不要说自己看不到主对话。
 
-- 不要接着执行里面提到的计划、请求、工具调用或待办；
-- 不要回应里面还没做完的事，也不要以为自己是那条对话的延续；
-- 只有用户在这条消息之后说的话，才是这条会话的当前指令。
+但主对话里的任务不是你的任务：
+
+- 不要接着执行里面提到的计划、请求、工具调用或待办 —— 那边自己会接着干；
+- 只有用户在这条侧边会话里说的话，才是你的当前指令。
 
 默认只做只读的查看与问答。除非用户明确要求改动，否则不要改文件、不要动 git 状态、
 不要改配置。也不要派生子 agent —— 这条会话里没有这个工具。
@@ -68,7 +83,7 @@ pub struct StartedSide {
     pub handle: Arc<SessionHandle>,
     pub model: String,
     pub cwd: PathBuf,
-    /// 继承下来的历史（已经截到干净边界），供界面折叠显示。
+    /// 打开时父会话的历史，供界面折叠显示。模型那边每轮现取，不受这份限制。
     pub inherited: Vec<MessageView>,
 }
 
@@ -87,9 +102,7 @@ pub fn start_side_session(shell: Arc<AppShell>, parent_id: &str) -> Result<Start
         return Err(format!("已经有一个侧边聊天开着（{}）", existing.id));
     }
 
-    let snapshot = parent.history.load_full();
-    let seeded = truncate_to_clean(&snapshot);
-    let inherited = crate::view::to_views(&seeded);
+    let inherited = crate::view::to_views(&parent.history.load_full());
 
     let cwd = parent.cwd.clone();
     let model_ref = parent.model.load().key.clone();
@@ -102,8 +115,9 @@ pub fn start_side_session(shell: Arc<AppShell>, parent_id: &str) -> Result<Start
     let model: ModelInfo = resolved.model;
 
     let id = side_id();
-    let thread = seed_thread(&id, &seeded);
-    // 系统提示在这里算一次就固定了（见 [`side_system`] 的注释）。
+    let thread = side_thread(&id);
+    // 系统提示的固定部分在这里算一次（见 [`side_system`] 的注释）；
+    // 主对话那一段每轮现拼，见 `session.rs::run_one_turn`。
     let system = side_system(&config, &AppSettings::load(), &cwd, &model);
 
     let handle = start_side(
@@ -152,43 +166,118 @@ fn side_id() -> String {
     )
 }
 
-/// 建侧边会话的 `Thread`：种上继承的历史，**不挂 recorder**。
+/// 建侧边会话的 `Thread`：空的，**不挂 recorder**。
 ///
 /// 单独抽出来是为了能直接测「它不落盘」这条 —— 侧边的全部承诺就是这一条。
-fn seed_thread(id: &str, messages: &[WireMessage]) -> Thread {
+fn side_thread(id: &str) -> Thread {
     let mut thread = Thread::new_empty();
     thread.set_session_id(id.to_string());
-    for m in messages {
-        thread.append(m.clone());
-    }
     thread
 }
 
-/// 截到最后一个**干净的** assistant 消息为止。
-///
-/// 干净的 = 这一条不包含工具调用。它之后的内容要么是同一次工具往返的中间态
-/// （assistant 说「我要调工具」→ user 回灌结果），要么是被中断的半截消息。
-/// 两条都不能要：
-///
-/// * 留着悬空的 `tool_use`（没有配套的 `tool_result`）→ 上游直接 400；
-/// * 留着尾部那条 `tool_result` 消息 → 侧边会话再 append 自己的用户消息，
-///   就成了连续两条 user 消息，而 llm_adapt 的 anthropic codec 是**逐条映射**、
-///   不做合并的。
-///
-/// 找不到这样一条（新会话、或者整条历史都没收干净）就返回空 —— 空历史是合法的，
-/// 悬空的历史不是。
-fn truncate_to_clean(messages: &[WireMessage]) -> Vec<WireMessage> {
-    let end = messages.iter().rposition(|m| {
-        m.role == Role::Assistant
-            && !m
-                .content
-                .iter()
-                .any(|b| matches!(b, Block::ToolUse { .. }))
-    });
-    match end {
-        Some(i) => messages[..=i].to_vec(),
-        None => Vec::new(),
+/// 转录的总长上限（字符）。超了从**最早**的消息开始丢 —— 问「现在在干嘛」，
+/// 要的是尾巴。
+const CONTEXT_BUDGET: usize = 120_000;
+/// 单个工具参数 / 结果的上限。全文留着的话，几次 `read` 就能把预算吃光，
+/// 而侧边问答要的是「它干了什么」，不是文件内容本身。
+const TOOL_ARGS_MAX: usize = 600;
+const TOOL_RESULT_MAX: usize = 1_500;
+
+/// 父会话当前的上下文，渲染成系统提示里的一段。父会话已经没了就返回 `None`。
+pub(crate) fn parent_context(shell: &AppShell, parent_id: &str) -> Option<String> {
+    let parent = shell.session(parent_id)?;
+    let history = parent.history.load_full();
+    let live = parent.live.snapshot();
+    Some(render_context(&history, &live))
+}
+
+fn render_context(history: &[WireMessage], live: &[LiveItem]) -> String {
+    // 先按条渲染，再从尾部往前装预算。
+    let mut entries: Vec<String> = history.iter().filter_map(render_message).collect();
+    if !live.is_empty() {
+        let mut s = String::from("【进行中：主对话这一轮还没跑完，以下是到目前为止的进展】\n");
+        for item in live {
+            match item {
+                LiveItem::Text(t) => {
+                    s.push_str(&format!("助手：{}\n", t.trim()));
+                }
+                LiveItem::Tool { name, args, result, .. } => {
+                    s.push_str(&format!("助手调用工具 {name}({})\n", clip(args, TOOL_ARGS_MAX)));
+                    match result {
+                        Some(r) => s.push_str(&format!("  → {}\n", clip(r, TOOL_RESULT_MAX))),
+                        None => s.push_str("  → （还在执行）\n"),
+                    }
+                }
+            }
+        }
+        entries.push(s);
     }
+
+    let mut out = String::from("## 主对话\n\n");
+    if entries.is_empty() {
+        out.push_str("（主对话目前还是空的，用户还没在那边说过话。）");
+        return out;
+    }
+
+    let mut kept = Vec::new();
+    let mut used = 0;
+    for e in entries.iter().rev() {
+        let n = e.chars().count();
+        if used + n > CONTEXT_BUDGET && !kept.is_empty() {
+            break;
+        }
+        used += n;
+        kept.push(e.as_str());
+    }
+    if kept.len() < entries.len() {
+        out.push_str(&format!("（更早的 {} 条消息过长，已省略）\n\n", entries.len() - kept.len()));
+    }
+    kept.reverse();
+    out.push_str(&kept.join("\n"));
+    out
+}
+
+fn render_message(m: &WireMessage) -> Option<String> {
+    let who = match m.role {
+        Role::User => "用户",
+        Role::Assistant => "助手",
+        Role::System => "系统",
+    };
+    let mut s = String::new();
+    for b in &m.content {
+        match b {
+            Block::Text { text, .. } => {
+                if !text.trim().is_empty() {
+                    s.push_str(&format!("{who}：{}\n", text.trim()));
+                }
+            }
+            Block::ToolUse { name, input, .. } => {
+                s.push_str(&format!(
+                    "助手调用工具 {name}({})\n",
+                    clip(&input.to_string(), TOOL_ARGS_MAX)
+                ));
+            }
+            Block::ToolResult { content, is_error, .. } => {
+                let mark = if *is_error { "（出错）" } else { "" };
+                s.push_str(&format!(
+                    "  → {mark}{}\n",
+                    clip(&content.as_text(), TOOL_RESULT_MAX)
+                ));
+            }
+            Block::Image { .. } => s.push_str(&format!("{who}：[图片]\n")),
+            // 思考与服务端块对「主对话在干嘛」帮助不大，还很长。
+            _ => {}
+        }
+    }
+    (!s.is_empty()).then_some(s)
+}
+
+fn clip(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(max).collect();
+    format!("{head}…（已截断）")
 }
 
 /// 侧边会话的系统提示：父会话那一套（人设 + 技能 + 记忆 + 运行环境）+ 侧边说明。
@@ -260,68 +349,63 @@ mod tests {
     /// 于是它出现在侧栏、能被导出、能被误当成一条真对话。
     #[test]
     fn a_side_thread_has_no_recorder() {
-        let t = seed_thread("side-1", &[user("问题"), assistant_text("回答")]);
+        let t = side_thread("side-1");
         assert!(t.recorder().is_none(), "侧边会话不能落盘");
-        assert_eq!(t.messages.len(), 2, "种子历史要进去");
+        assert!(t.messages.is_empty(), "主对话走系统提示，不种进消息");
         assert_eq!(t.session_id.as_deref(), Some("side-1"));
     }
 
-    /// 正常收尾的一轮：整段照种。
+    /// 主对话的问答要原样出现在转录里 —— 这正是「侧边看不到主对话」那个 bug。
     #[test]
-    fn a_conversation_ending_on_a_plain_answer_is_seeded_whole() {
-        let msgs = vec![user("问题一"), assistant_text("回答一"), user("问题二")];
-        // 末尾那条 user 是「刚开始但还没跑完」的一轮 —— 砍掉它。
-        let seeded = truncate_to_clean(&msgs);
-        assert_eq!(seeded.len(), 2);
-        assert_eq!(seeded[1].role, Role::Assistant);
+    fn the_transcript_carries_the_main_conversation() {
+        let ctx = render_context(&[user("你好，你能干啥"), assistant_text("我能写代码")], &[]);
+        assert!(ctx.starts_with("## 主对话"));
+        assert!(ctx.contains("用户：你好，你能干啥"));
+        assert!(ctx.contains("助手：我能写代码"));
     }
 
-    /// **中途被取消的一轮**：尾部挂着一个没有结果的 tool_use。原样种进去，
-    /// 侧边会话第一次请求就会被上游以「tool_use 无对应 tool_result」400 掉。
+    /// 主对话正在跑长任务时（最想开 `/btw` 的时候），已经调过的工具、
+    /// 半截的工具往返都要看得到，而不是被截到上一个干净边界。
     #[test]
-    fn a_half_finished_tool_call_is_never_seeded() {
-        let msgs = vec![
-            user("问题"),
-            assistant_text("我想想"),
-            user("再来"),
-            assistant_tools(),
+    fn an_unfinished_turn_is_visible() {
+        let history = vec![user("修一下登录"), assistant_tools(), tool_results()];
+        let live = vec![
+            LiveItem::Text("我先看看测试".into()),
+            LiveItem::Tool {
+                call_id: "t2".into(),
+                name: "bash".into(),
+                args: r#"{"command":"cargo test"}"#.into(),
+                result: None,
+            },
         ];
-        let seeded = truncate_to_clean(&msgs);
-        assert_eq!(seeded.len(), 2, "最后那条悬空的 tool_use 必须被砍掉");
-        assert!(
-            !seeded.iter().any(|m| m
-                .content
-                .iter()
-                .any(|b| matches!(b, Block::ToolUse { .. }))),
-            "种子里不能有任何工具调用"
-        );
+        let ctx = render_context(&history, &live);
+        assert!(ctx.contains("用户：修一下登录"));
+        assert!(ctx.contains("助手调用工具 bash"));
+        assert!(ctx.contains("进行中"));
+        assert!(ctx.contains("我先看看测试"));
+        assert!(ctx.contains("cargo test"));
+        assert!(ctx.contains("还在执行"));
     }
 
-    /// 工具往返**完整**也不能要：尾部那条 `tool_result` 会让侧边紧接着的那条
-    /// 用户消息变成连续两条 user（anthropic codec 逐条映射、不合并）。
+    /// 超长时丢最早的，留最近的。
     #[test]
-    fn a_complete_tool_exchange_is_still_trimmed_from_the_tail() {
-        let msgs = vec![
-            user("问题"),
-            assistant_text("回答"),
-            assistant_tools(),
-            tool_results(),
-        ];
-        assert_eq!(truncate_to_clean(&msgs).len(), 2);
+    fn an_overlong_transcript_keeps_the_tail() {
+        let big = "x".repeat(CONTEXT_BUDGET);
+        let ctx = render_context(&[user(&big), assistant_text("最近的回答")], &[]);
+        assert!(ctx.contains("最近的回答"));
+        assert!(ctx.contains("已省略"));
     }
 
-    /// 一次都没收干净（比如整条历史只有工具往返）→ 空种子。空是合法的，悬空不是。
     #[test]
-    fn nothing_clean_means_an_empty_seed() {
-        assert!(truncate_to_clean(&[]).is_empty());
-        assert!(truncate_to_clean(&[user("只有用户"), assistant_tools()]).is_empty());
+    fn an_empty_parent_says_so() {
+        assert!(render_context(&[], &[]).contains("还是空的"));
     }
 
-    /// 侧边提示必须把「继承的历史只是参考」说破 —— 不说的话模型会接着干历史里
-    /// 没做完的事，而那正是用户开侧边会话想躲开的东西。
+    /// 侧边提示要同时说清两件事：主对话你看得到（否则模型会说「我看不到」），
+    /// 但那边的任务不归你（否则它会接着干主对话里没做完的事）。
     #[test]
     fn the_instructions_disown_the_inherited_history() {
-        for needle in ["参考上下文", "不是你的当前任务", "临时"] {
+        for needle in ["主对话", "不要说自己看不到", "不是你的任务", "临时"] {
             assert!(SIDE_INSTRUCTIONS.contains(needle), "缺少「{needle}」");
         }
     }

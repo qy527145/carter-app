@@ -31,6 +31,8 @@ use tokio::sync::mpsc;
 
 use carter::tools::{Tool, ToolResult};
 
+use crate::shell::LiveLog;
+
 /// 送给界面的工具事件。与 `protocol::SessionEvent` 的两条对应。
 pub enum ToolEvent {
     Started {
@@ -64,6 +66,8 @@ pub struct Recorded {
     /// 占着，runner 自己看不到工具事件；而这里是**每个**工具（含 MCP、
     /// 含 `goal_update`）的必经之路。
     activity: Arc<AtomicU32>,
+    /// 进行中那一轮的记录（侧边聊天读它，见 `shell.rs::LiveLog`）。
+    live: Option<Arc<LiveLog>>,
 }
 
 impl Recorded {
@@ -78,7 +82,13 @@ impl Recorded {
             tx,
             seq,
             activity,
+            live: None,
         }
+    }
+
+    pub fn with_live(mut self, live: Option<Arc<LiveLog>>) -> Self {
+        self.live = live;
+        self
     }
 }
 
@@ -114,6 +124,9 @@ impl Tool for Recorded {
         let started = Instant::now();
         self.activity.fetch_add(1, Ordering::Relaxed);
 
+        if let Some(live) = &self.live {
+            live.tool_started(&call_id, self.inner.name(), &args);
+        }
         // 先发「开始」再执行：长时间跑的命令（构建、测试）应当立刻在界面上出现。
         let _ = self.tx.send(ToolEvent::Started {
             call_id: call_id.clone(),
@@ -122,6 +135,9 @@ impl Tool for Recorded {
         });
 
         let res = self.inner.execute(args).await;
+        if let Some(live) = &self.live {
+            live.tool_finished(&call_id, &res.content);
+        }
 
         let _ = self.tx.send(ToolEvent::Finished {
             call_id,
