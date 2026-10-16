@@ -641,6 +641,7 @@ dependencies = [
  "carter",
  "dashmap",
  "futures",
+ "libc",
  "llm_adapt_core",
  "serde",
  "serde_json",

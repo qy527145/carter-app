@@ -28,3 +28,8 @@ base64 = "0.22"
 # windows-sys 本来就在依赖树里（经 tauri），这里只是显式声明 + 开 feature。
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Globalization"] }
+
+# Unix 上 bash 工具用 setsid 开独立进程组、超时时 kill(-pgid) 清理整棵进程树。
+# libc 本来就在依赖树里，这里只是显式声明。
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

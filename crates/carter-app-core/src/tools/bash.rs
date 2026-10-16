@@ -20,9 +20,6 @@
 use std::process::Stdio;
 use std::time::Duration;
 
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
-
 use serde_json::{Value, json};
 
 use carter::tools::{Tool, ToolResult};
