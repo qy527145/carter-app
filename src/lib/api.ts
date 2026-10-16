@@ -426,6 +426,23 @@ export function setDefaultModel(modelRef: string): Promise<void> {
   return invoke<void>("set_default_model", { modelRef });
 }
 
+/** models.dev 目录里的一个模型。镜像 `catalog.rs` 的 `CatalogEntry`。 */
+export type CatalogEntry = {
+  /** models.dev 的模型 id —— `meta` 的后半截，也是官方端点认的模型名。 */
+  id: string;
+  name: string;
+  context_window: number | null;
+  max_output_tokens: number | null;
+  reasoning: boolean;
+  deprecated: boolean;
+  release_date: string | null;
+};
+
+/** 某个 models.dev 服务商下的模型，能用的、新的在前。还没有缓存时会 reject。 */
+export function listCatalogModels(providerId: string): Promise<CatalogEntry[]> {
+  return invoke<CatalogEntry[]>("list_catalog_models", { providerId });
+}
+
 /** 拉一次 models.dev 目录，返回拉到的模型条数。 */
 export function refreshModelCatalog(): Promise<number> {
   return invoke<number>("refresh_model_catalog");

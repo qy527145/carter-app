@@ -361,6 +361,8 @@ pub fn save_provider_reload(
     shell: &crate::shell::AppShell,
     d: &ProviderDraft,
 ) -> Result<ProviderDetail, String> {
+    // meta 写错要在保存时就说，而不是等到开会话才报「缓存中找不到」。
+    crate::catalog::check_metas(d.models.iter().map(|m| m.meta.as_str()))?;
     let mut doc = load_doc()?;
     save_provider(&mut doc, d)?;
     apply(shell, &doc)?;

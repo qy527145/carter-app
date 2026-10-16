@@ -15,6 +15,7 @@ import {
 } from "../../lib/api";
 import {
   REASONING_EFFORTS,
+  presetFor,
   reasoningIsCustom,
   reasoningText,
 } from "../../lib/protocols";
@@ -24,6 +25,7 @@ import { Button } from "../../components/ui/Button";
 import { Field, Input } from "../../components/ui/Input";
 import { ConfirmDialog, Modal } from "../../components/ui/Panel";
 import { Select } from "../../components/ui/Select";
+import { CatalogError, CatalogPicker, applyPick, catalogIdOf, useCatalog } from "./CatalogPicker";
 
 export function ModelEditor({
   /** 给了就是在编辑这一条；`null` 是新增。 */
@@ -70,6 +72,12 @@ export function ModelEditor({
     }
     return list;
   }, [channels.data, provider]);
+
+  // 渠道是官方的（有 models.dev 目录）就让人从目录里选，选中即填好块名 / meta / api_name。
+  const providerKind = options.find((c) => c.name === provider)?.kind ?? "";
+  const metaProvider = presetFor(providerKind)?.metaProvider ?? "";
+  const catalog = useCatalog(metaProvider);
+  const pickedId = catalogIdOf(meta, metaProvider);
 
   const valid = provider.trim() !== "" && name.trim() !== "" && meta.trim() !== "";
 
@@ -138,6 +146,24 @@ export function ModelEditor({
           options={options.map((c) => ({ value: c.name, label: c.name }))}
         />
       </Field>
+
+      <CatalogError catalog={catalog} />
+      {catalog.entries && (
+        <Field label="从目录选择" hint="选中后自动填好下面三项">
+          <CatalogPicker
+            entries={catalog.entries}
+            value={catalog.entries.some((e) => e.id === pickedId) ? pickedId : ""}
+            onPick={(e) => {
+              const next = applyPick({ name, meta, api_name: apiName }, metaProvider, e);
+              // 编辑时块名是这条记录的身份，不能跟着换 —— 那就靠 api_name 指到真名上。
+              const block = nameLocked ? name : next.name;
+              setName(block);
+              setMeta(next.meta);
+              setApiName(block === e.id ? "" : e.id);
+            }}
+          />
+        </Field>
+      )}
 
       <Field label="块名" hint="模型引用会是 渠道名/块名，只能用字母、数字、-、_">
         <Input

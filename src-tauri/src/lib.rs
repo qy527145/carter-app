@@ -403,6 +403,14 @@ fn set_default_model(shell: State<'_, Arc<AppShell>>, model_ref: String) -> Resu
     config_edit::set_default_model_reload(shell.inner(), &model_ref)
 }
 
+/// models.dev 里某个服务商下的模型（给渠道编辑框的「从目录选」下拉用）。
+#[tauri::command]
+fn list_catalog_models(
+    provider_id: String,
+) -> Result<Vec<carter_app_core::CatalogEntry>, String> {
+    catalog::provider_models(&provider_id)
+}
+
 /// 拉一次 models.dev 目录。返回拉到的模型条数。
 #[tauri::command]
 async fn refresh_model_catalog() -> Result<usize, String> {
@@ -844,6 +852,7 @@ pub fn run() {
             list_models,
             set_default_model,
             refresh_model_catalog,
+            list_catalog_models,
             // 工具
             list_tools,
             // 技能

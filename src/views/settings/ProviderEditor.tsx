@@ -14,6 +14,7 @@ import {
   checkServerTools,
   deleteProvider,
   getProviderDetail,
+  listChannels,
   saveProvider,
   type ModelDetail,
   type ModelDraft,
@@ -29,6 +30,14 @@ import {
   reasoningText,
 } from "../../lib/protocols";
 import { toastError } from "../../lib/toast";
+import {
+  CatalogError,
+  CatalogPicker,
+  applyPick,
+  catalogIdOf,
+  firstLive,
+  useCatalog,
+} from "./CatalogPicker";
 import { Button, IconButton } from "../../components/ui/Button";
 import { Field, Input, Label, Switch } from "../../components/ui/Input";
 import { Banner, ConfirmDialog, Modal } from "../../components/ui/Panel";
@@ -47,10 +56,12 @@ type ModelState = {
   api_name: string;
   reasoning: string;
   reasoningCustom: boolean;
+  /** 手写 meta / api_name。渠道有模型目录时默认关着，只露一个下拉。 */
+  manual: boolean;
 };
 
 function blankModel(): ModelState {
-  return { name: "", meta: "", api_name: "", reasoning: "", reasoningCustom: false };
+  return { name: "", meta: "", api_name: "", reasoning: "", reasoningCustom: false, manual: false };
 }
 
 function toState(m: ModelDetail): ModelState {
@@ -60,6 +71,7 @@ function toState(m: ModelDetail): ModelState {
     api_name: m.api_name ?? "",
     reasoning: reasoningText(m.default_reasoning),
     reasoningCustom: reasoningIsCustom(m.default_reasoning),
+    manual: false,
   };
 }
 
@@ -85,8 +97,11 @@ export function ProviderEditor({
   const [loadError, setLoadError] = useState<string | null>(null);
 
   // 表单。新建时先给一份空壳。
-  const [name, setName] = useState(editing ?? "");
+  // 新建时渠道名先跟着默认协议走，选别的协议会跟着换（见 changeKind）。
+  const [name, setName] = useState(editing ?? "anthropic");
   const [kind, setKind] = useState("anthropic");
+  // 新建时要防重名：保存是按名字 upsert 的，撞上已有渠道会把它整个覆盖掉。
+  const [existing, setExisting] = useState<string[]>([]);
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
   // 留空 = 不改；想真的清掉已存的密钥得明说。两种意图不能共用一个空串。
@@ -104,6 +119,9 @@ export function ProviderEditor({
   useEffect(() => {
     if (!editing) {
       setModels([blankModel()]);
+      listChannels()
+        .then((cs) => setExisting(cs.map((c) => c.name)))
+        .catch(() => setExisting([]));
       return;
     }
     let cancelled = false;
@@ -137,16 +155,61 @@ export function ProviderEditor({
 
   const preset = presetFor(kind);
   const nameLocked = editing !== null;
+  const metaProvider = preset?.metaProvider ?? "";
+  const catalog = useCatalog(metaProvider);
+
+  /** 这一行能不能只用下拉：有目录，且 meta 为空或就在目录里。 */
+  const pickable = (m: ModelState) => {
+    if (!catalog.entries || m.manual) return false;
+    if (!m.meta.trim()) return true;
+    const id = catalogIdOf(m.meta, metaProvider);
+    return id !== "" && catalog.entries.some((e) => e.id === id);
+  };
+
+  const patchModel = (i: number, patch: Partial<ModelState>) =>
+    setModels((ms) => ms.map((x, j) => (j === i ? { ...x, ...patch } : x)));
+
+  // 新建官方渠道：渠道名跟着协议走、模型行预选目录里最新的那个 ——
+  // 用户只剩填密钥这一件事。只动还没被用户碰过的值。
+  const changeKind = (k: string) => {
+    if (!nameLocked && (name.trim() === "" || name === kind)) setName(k);
+    // 上个协议的目录里自动填的模型，换了协议就不对了 —— 清掉让下面重新预选。
+    // 有一行是用户手写的就整个不动。
+    if (!nameLocked) {
+      setModels((ms) =>
+        ms.every(
+          (m) =>
+            (!m.name.trim() && !m.meta.trim()) ||
+            (!m.manual && catalogIdOf(m.meta, metaProvider) !== ""),
+        )
+          ? [blankModel()]
+          : ms,
+      );
+    }
+    setKind(k);
+  };
+  useEffect(() => {
+    if (nameLocked || !catalog.entries) return;
+    const first = firstLive(catalog.entries);
+    if (!first) return;
+    setModels((ms) =>
+      ms.length === 1 && !ms[0].name.trim() && !ms[0].meta.trim()
+        ? [{ ...ms[0], ...applyPick(ms[0], metaProvider, first) }]
+        : ms,
+    );
+  }, [catalog.entries, metaProvider, nameLocked]);
+
+  const duplicate = !nameLocked && existing.includes(name.trim());
 
   const valid = useMemo(() => {
-    if (!name.trim()) return false;
+    if (!name.trim() || duplicate) return false;
     if (!kind.trim()) return false;
     // 模型行允许整行留空（用户点了「加一个」还没填），但不能有半填的。
     return models.every((m) => {
       const empty = !m.name.trim() && !m.meta.trim();
       return empty || (m.name.trim() !== "" && m.meta.trim() !== "");
     });
-  }, [name, kind, models]);
+  }, [name, kind, models, duplicate]);
 
   const addTool = (t: string) => {
     const v = t.trim();
@@ -234,7 +297,9 @@ export function ProviderEditor({
         hint={
           nameLocked
             ? "改名要新建一个渠道再删掉旧的"
-            : "只能用字母、数字、-、_（它会变成配置里的表键）"
+            : duplicate
+              ? <span className="text-[var(--danger)]">已有同名渠道，换一个名字或去编辑它</span>
+              : "只能用字母、数字、-、_（它会变成配置里的表键）"
         }
       >
         <Input
@@ -256,7 +321,7 @@ export function ProviderEditor({
       >
         <Select
           value={kind}
-          onChange={setKind}
+          onChange={changeKind}
           options={PROTOCOLS.map((p) => ({
             value: p.kind,
             label: p.label,
@@ -287,7 +352,16 @@ export function ProviderEditor({
         />
       </Field>
 
-      <Field label="API Key" hint={loaded?.has_api_key ? "已配置（留空则不改）" : "可填 ${ENV_VAR}"}>
+      <Field
+        label="API Key"
+        hint={
+          loaded?.has_api_key
+            ? "已配置（留空则不改）"
+            : metaProvider
+              ? "官方渠道填上密钥就能用；也可填 ${ENV_VAR}"
+              : "可填 ${ENV_VAR}"
+        }
+      >
         <Input
           mono
           type="password"
@@ -396,7 +470,9 @@ export function ProviderEditor({
         <div className="mb-2 flex items-center gap-2">
           <Label>模型</Label>
           <span className="text-[11px] text-dim">
-            块名会成为模型引用 <span className="mono">渠道名/块名</span>，meta 是 models.dev 的查找 id
+            {catalog.entries
+              ? "从目录里选；中转或自定义模型点「手写」"
+              : <>块名会成为模型引用 <span className="mono">渠道名/块名</span>，meta 是 models.dev 的查找 id</>}
           </span>
           <Button
             size="sm"
@@ -408,8 +484,60 @@ export function ProviderEditor({
           </Button>
         </div>
 
+        <CatalogError catalog={catalog} />
+
         <div className="space-y-2">
-          {models.map((m, i) => (
+          {models.map((m, i) =>
+            pickable(m) && catalog.entries ? (
+              <div key={i} className="rounded-lg border border-edge bg-base p-2.5">
+                <div className="flex items-center gap-2">
+                  <CatalogPicker
+                    className="min-w-0 flex-1"
+                    entries={catalog.entries}
+                    value={catalogIdOf(m.meta, metaProvider)}
+                    onPick={(e) => patchModel(i, applyPick(m, metaProvider, e))}
+                  />
+                  {m.reasoningCustom ? (
+                    <span
+                      className="w-28 shrink-0 rounded-md border border-dashed border-edge px-2 py-1.5 text-center text-[11px] text-dim"
+                      title="这个取值界面改不了，去配置文件里改"
+                    >
+                      自定义
+                    </span>
+                  ) : (
+                    <Select
+                      className="w-28 shrink-0"
+                      value={m.reasoning}
+                      onChange={(v) => patchModel(i, { reasoning: v })}
+                      options={REASONING_EFFORTS.map((r) => ({ value: r.value, label: r.label }))}
+                    />
+                  )}
+                  <IconButton
+                    title="删除这个模型"
+                    onClick={() => setModels(models.filter((_, j) => j !== i))}
+                  >
+                    <X size={12} />
+                  </IconButton>
+                </div>
+                <div className="mt-1.5 flex items-center gap-2 text-[11px] text-dim">
+                  <span className="min-w-0 flex-1 truncate">
+                    {m.name ? (
+                      <>
+                        引用名 <span className="mono text-ink">{(name.trim() || "渠道名") + "/" + m.name}</span>
+                      </>
+                    ) : (
+                      "选一个模型"
+                    )}
+                  </span>
+                  <button
+                    onClick={() => patchModel(i, { manual: true })}
+                    className="shrink-0 transition-colors hover:text-ink"
+                  >
+                    手写
+                  </button>
+                </div>
+              </div>
+            ) : (
             <div key={i} className="rounded-lg border border-edge bg-base p-2.5">
               <div className="flex items-center gap-2">
                 <Input
@@ -421,6 +549,21 @@ export function ProviderEditor({
                   placeholder="块名，如 sonnet"
                   className="py-1.5 text-xs"
                 />
+                {catalog.entries && (
+                  <button
+                    onClick={() =>
+                      // 手写的 meta 不在目录里就清掉，否则切回去还是显示成手写框。
+                      patchModel(i, {
+                        manual: false,
+                        meta: pickable({ ...m, manual: false }) ? m.meta : "",
+                      })
+                    }
+                    className="shrink-0 text-[11px] text-dim transition-colors hover:text-ink"
+                    title="改用目录下拉选择"
+                  >
+                    从目录选
+                  </button>
+                )}
                 <IconButton
                   title="删除这个模型"
                   onClick={() => setModels(models.filter((_, j) => j !== i))}
@@ -469,7 +612,8 @@ export function ProviderEditor({
                 )}
               </div>
             </div>
-          ))}
+            ),
+          )}
         </div>
       </div>
 

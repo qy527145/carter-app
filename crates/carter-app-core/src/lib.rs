@@ -37,7 +37,7 @@ pub mod view;
 
 pub use app_settings::AppSettings;
 pub use capture::{CaptureHook, CaptureStore, ExchangeRecord};
-pub use catalog::ModelRow;
+pub use catalog::{CatalogEntry, ModelRow};
 pub use config_edit::{McpDraft, ModelDraft, ProviderDetail, ProviderDraft};
 pub use goal::{Goal, GoalStatus};
 pub use input::{CommandRow, FileKind};

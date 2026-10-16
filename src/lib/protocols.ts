@@ -18,6 +18,11 @@ export type ProtocolPreset = {
   defaultBaseUrl: string;
   /** 常见服务端工具名，供 chip 快选。 */
   serverTools: string[];
+  /**
+   * models.dev 里对应的服务商 id（`meta` 的前半截）。有值说明这是个官方渠道：
+   * 模型可以直接从目录里选，不用手写 meta。通用协议（openai_chat、ollama）为空。
+   */
+  metaProvider: string;
 };
 
 export const PROTOCOLS: ProtocolPreset[] = [
@@ -27,6 +32,7 @@ export const PROTOCOLS: ProtocolPreset[] = [
     protocol: "anthropic",
     defaultBaseUrl: "https://api.anthropic.com",
     serverTools: ["web_search", "web_fetch", "code_execution", "computer_use"],
+    metaProvider: "anthropic",
   },
   {
     kind: "openai_responses",
@@ -39,6 +45,7 @@ export const PROTOCOLS: ProtocolPreset[] = [
       "code_interpreter",
       "file_search",
     ],
+    metaProvider: "openai",
   },
   {
     kind: "openai_chat",
@@ -46,6 +53,7 @@ export const PROTOCOLS: ProtocolPreset[] = [
     protocol: "openai_chat",
     defaultBaseUrl: "",
     serverTools: [],
+    metaProvider: "",
   },
   {
     kind: "deepseek",
@@ -53,6 +61,7 @@ export const PROTOCOLS: ProtocolPreset[] = [
     protocol: "openai_chat",
     defaultBaseUrl: "https://api.deepseek.com",
     serverTools: [],
+    metaProvider: "deepseek",
   },
   {
     kind: "openrouter",
@@ -60,6 +69,7 @@ export const PROTOCOLS: ProtocolPreset[] = [
     protocol: "openai_chat",
     defaultBaseUrl: "https://openrouter.ai/api/v1",
     serverTools: [],
+    metaProvider: "openrouter",
   },
   {
     kind: "gemini",
@@ -67,6 +77,7 @@ export const PROTOCOLS: ProtocolPreset[] = [
     protocol: "openai_chat",
     defaultBaseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
     serverTools: [],
+    metaProvider: "google",
   },
   {
     kind: "groq",
@@ -74,6 +85,7 @@ export const PROTOCOLS: ProtocolPreset[] = [
     protocol: "openai_chat",
     defaultBaseUrl: "https://api.groq.com/openai/v1",
     serverTools: [],
+    metaProvider: "groq",
   },
   {
     kind: "xai",
@@ -81,6 +93,7 @@ export const PROTOCOLS: ProtocolPreset[] = [
     protocol: "openai_chat",
     defaultBaseUrl: "https://api.x.ai/v1",
     serverTools: [],
+    metaProvider: "xai",
   },
   {
     kind: "ollama",
@@ -88,6 +101,7 @@ export const PROTOCOLS: ProtocolPreset[] = [
     protocol: "openai_chat",
     defaultBaseUrl: "http://localhost:11434/v1",
     serverTools: [],
+    metaProvider: "",
   },
 ];
 

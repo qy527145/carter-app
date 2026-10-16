@@ -193,6 +193,126 @@ pub async fn refresh() -> Result<usize, String> {
     Ok(count)
 }
 
+// ---------------------------------------------------------------------------
+// 按服务商浏览 models.dev 目录
+//
+// 官方渠道（deepseek / anthropic / openai …）本该只填一个密钥就能用。卡住人的是
+// `meta`：它必须和 models.dev 的 `id` 一字不差，而 id 和展示名常常对不上
+// （「DeepSeek V4.1 Flash」的 id 是 `deepseek-flash`）。所以界面不再让人手写，
+// 而是从这张表里选。
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CatalogEntry {
+    /// models.dev 的模型 id —— `meta` 的后半截，也是官方端点认的模型名。
+    pub id: String,
+    /// 展示名，如「DeepSeek V4.1 Flash」。
+    pub name: String,
+    pub context_window: Option<u64>,
+    pub max_output_tokens: Option<u64>,
+    pub reasoning: bool,
+    /// models.dev 标了 `status = "deprecated"`。
+    pub deprecated: bool,
+    pub release_date: Option<String>,
+}
+
+fn parse_cache(cache_json: &str) -> Result<serde_json::Value, String> {
+    serde_json::from_str(cache_json).map_err(|e| format!("models.dev 缓存无法解析：{e}"))
+}
+
+fn entries_of(root: &serde_json::Value, provider_id: &str) -> Vec<CatalogEntry> {
+    let Some(models) = root
+        .get(provider_id)
+        .and_then(|p| p.get("models"))
+        .and_then(|m| m.as_object())
+    else {
+        return Vec::new();
+    };
+    let mut out: Vec<CatalogEntry> = models
+        .iter()
+        .map(|(id, m)| {
+            let s = |k: &str| m.get(k).and_then(|v| v.as_str()).map(str::to_string);
+            let limit = |k: &str| m.get("limit").and_then(|l| l.get(k)).and_then(|v| v.as_u64());
+            CatalogEntry {
+                id: id.clone(),
+                name: s("name").unwrap_or_else(|| id.clone()),
+                context_window: limit("context"),
+                max_output_tokens: limit("output"),
+                reasoning: m.get("reasoning").and_then(|v| v.as_bool()).unwrap_or(false),
+                deprecated: s("status").as_deref() == Some("deprecated"),
+                release_date: s("release_date"),
+            }
+        })
+        .collect();
+    // 能用的排前面，同组里新的排前面 —— 下拉框第一项基本就是想要的那个。
+    out.sort_by(|a, b| {
+        a.deprecated
+            .cmp(&b.deprecated)
+            .then_with(|| b.release_date.cmp(&a.release_date))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    out
+}
+
+/// 某个 models.dev 服务商下的全部模型。缓存里没有这个服务商时返回空表（不是错误）。
+pub fn provider_models(provider_id: &str) -> Result<Vec<CatalogEntry>, String> {
+    let cache = fetch::read_cache().map_err(|e| format!("还没有 models.dev 缓存：{e}"))?;
+    Ok(entries_of(&parse_cache(&cache)?, provider_id))
+}
+
+/// 校验一个 `meta` 能不能在缓存里查到。查不到时尽量给出正确写法。
+///
+/// 常见的写错方式是照着展示名或 `canonical_model_id` 填（`deepseek/deepseek-v4.1-flash`），
+/// 而查找用的是 `id`（`deepseek/deepseek-flash`）—— 这两种都能反查出来。
+pub fn check_meta(root: &serde_json::Value, meta: &str) -> Result<(), String> {
+    let meta = meta.trim();
+    let Some((pid, mid)) = meta.split_once('/') else {
+        return Err(format!("meta `{meta}` 格式应为 `服务商/模型id`，如 deepseek/deepseek-flash"));
+    };
+    let Some(models) = root
+        .get(pid)
+        .and_then(|p| p.get("models"))
+        .and_then(|m| m.as_object())
+    else {
+        return Err(format!("models.dev 里没有服务商 `{pid}`（meta `{meta}`）"));
+    };
+    if models.contains_key(mid) {
+        return Ok(());
+    }
+    let norm = |s: &str| s.to_lowercase().replace([' ', '_', '.'], "-");
+    let suggestion = models.iter().find_map(|(id, m)| {
+        let canonical = m.get("canonical_model_id").and_then(|v| v.as_str());
+        let name = m.get("name").and_then(|v| v.as_str()).unwrap_or_default();
+        let hit = canonical == Some(meta)
+            || canonical.and_then(|c| c.split_once('/')).map(|(_, c)| c) == Some(mid)
+            || norm(name) == norm(mid)
+            || id.eq_ignore_ascii_case(mid);
+        hit.then(|| format!("{pid}/{id}"))
+    });
+    Err(match suggestion {
+        Some(s) => format!("models.dev 里查不到 `{meta}` —— 应该写成 `{s}`"),
+        None => format!(
+            "models.dev 里查不到 `{meta}`；`{pid}` 下可用的有：{}",
+            entries_of(root, pid)
+                .iter()
+                .filter(|e| !e.deprecated)
+                .map(|e| e.id.as_str())
+                .collect::<Vec<_>>()
+                .join("、")
+        ),
+    })
+}
+
+/// 保存前校验一组 meta。**还没有缓存时放行** —— 那种情况下查不了，不该挡住保存，
+/// 模型页会把「去刷新元数据」挂在那几行上。
+pub fn check_metas<'a>(metas: impl IntoIterator<Item = &'a str>) -> Result<(), String> {
+    let Ok(cache) = fetch::read_cache() else {
+        return Ok(());
+    };
+    let root = parse_cache(&cache)?;
+    metas.into_iter().try_for_each(|m| check_meta(&root, m))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,5 +424,41 @@ kind = "anthropic"
         assert!(good.error.is_none());
         assert!(bad.error.is_some(), "查不到的 meta 应当在这一行上报错");
         assert_eq!(bad.meta, "anthropic/does-not-exist", "报错行也要显示 meta");
+    }
+
+    fn dev_cache() -> serde_json::Value {
+        serde_json::from_str(r#"{"deepseek":{"models":{
+            "deepseek-flash":{"id":"deepseek-flash","name":"DeepSeek V4.1 Flash",
+              "canonical_model_id":"deepseek/deepseek-v4.1-flash","reasoning":true,
+              "release_date":"2026-09-10","limit":{"context":1000000,"output":393216}},
+            "deepseek-v4-flash":{"id":"deepseek-v4-flash","name":"DeepSeek V4 Flash",
+              "status":"deprecated","release_date":"2026-09-10"},
+            "deepseek-v4-pro":{"id":"deepseek-v4-pro","name":"DeepSeek V4 Pro",
+              "release_date":"2026-08-12"}
+        }}}"#)
+        .unwrap()
+    }
+
+    /// 照着 canonical id 填的 meta 要能反查出正确写法 —— 这正是用户真实踩过的坑。
+    #[test]
+    fn a_canonical_meta_is_rejected_with_the_right_suggestion() {
+        let root = dev_cache();
+        assert!(check_meta(&root, "deepseek/deepseek-flash").is_ok());
+        let err = check_meta(&root, "deepseek/deepseek-v4.1-flash").unwrap_err();
+        assert!(err.contains("deepseek/deepseek-flash"), "{err}");
+    }
+
+    #[test]
+    fn an_unknown_meta_lists_the_live_models() {
+        let err = check_meta(&dev_cache(), "deepseek/nope").unwrap_err();
+        assert!(err.contains("deepseek-v4-pro"), "{err}");
+        assert!(!err.contains("deepseek-v4-flash"), "弃用的不该推荐：{err}");
+    }
+
+    #[test]
+    fn catalog_puts_live_and_newest_models_first() {
+        let ids: Vec<String> = entries_of(&dev_cache(), "deepseek").into_iter().map(|e| e.id).collect();
+        assert_eq!(ids, ["deepseek-flash", "deepseek-v4-pro", "deepseek-v4-flash"]);
+        assert!(entries_of(&dev_cache(), "nobody").is_empty());
     }
 }
