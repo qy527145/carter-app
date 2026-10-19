@@ -60,6 +60,11 @@ export function fmtBytes(n: number): string {
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
+/** 计数（字数、token、事件数）的千分位：12345 → 12,345。 */
+export function fmtNumber(n: number): string {
+  return n.toLocaleString("zh-CN");
+}
+
 /** 上下文窗口这类大数字：200000 → 200K。 */
 export function fmtTokens(n: number): string {
   if (n >= 1000) {

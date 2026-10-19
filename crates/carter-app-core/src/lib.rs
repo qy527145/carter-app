@@ -23,6 +23,7 @@ pub mod catalog;
 pub mod config_edit;
 pub mod goal;
 pub mod images;
+pub mod inspect;
 pub mod input;
 pub mod paths;
 pub mod platform;

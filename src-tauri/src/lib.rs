@@ -785,6 +785,25 @@ fn get_exchange(
     shell.capture.get(&session_id, &exchange_id)
 }
 
+/// 把一条交换**解回 IR**（报文面板「可视化」那一页）。
+///
+/// 解码放在后端而不是前端：那是三个协议各自的 wire 语法，用 `llm_adapt` 现成的
+/// codec 解一遍就够，前端再写一份必然与真实链路走样 —— 而「报文面板显示的」与
+/// 「模型实际收到/说出的」不是同一份东西，这个面板就没有意义了。
+///
+/// 解码失败**不是命令失败**：`InspectExchange` 里带着原因，界面据此降级到「原始」页。
+#[tauri::command]
+fn inspect_exchange(
+    shell: State<'_, Arc<AppShell>>,
+    session_id: String,
+    exchange_id: String,
+) -> Option<carter_app_core::inspect::InspectedExchange> {
+    shell
+        .capture
+        .get(&session_id, &exchange_id)
+        .map(|rec| carter_app_core::inspect::inspect(&rec))
+}
+
 // ---------------------------------------------------------------------------
 // 共用
 // ---------------------------------------------------------------------------
@@ -876,6 +895,7 @@ pub fn run() {
             // 报文检视
             list_exchanges,
             get_exchange,
+            inspect_exchange,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

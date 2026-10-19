@@ -3,21 +3,29 @@
 // 右侧抽屉而不是整屏模态：看报文时要能同时看到对话，才知道「这条请求是给哪句回答的」。
 //
 // 三个视图（可视化 / 格式化 / 原始）用同一个 `ViewTabs` 切换，用户学一次就够。
-// 「可视化」是给人读的拆解，「格式化」是整条记录的 JSON，「原始」是不做任何改动的
-// 字节 —— 排障时经常要拿原始字节去比对上游返回，格式化会把空白改掉。
+// 「可视化」是给人读的**语义**拆解（`PayloadView.tsx`：后端把字节解回 IR 之后的样子），
+// 「格式化」把请求与响应**分开**摊成结构化 JSON（响应是流式的话，就是一串排开、
+// 各自美化的 SSE 事件），「原始」是不做任何改动的字节 —— 排障时经常要拿原始字节去
+// 比对上游返回，格式化会把空白改掉。
+//
+// 「可视化」刻意**不铺逐帧碎片**：一次流式回答是一百多个网络字节块、每片一个字，
+// 摊开只能看出传输有多碎，看不出模型答了什么。逐事件留在那一页的折叠区里。
 
 import { useEffect, useState } from "react";
-import { CircleAlert, Clock, FileSearch, Inbox, LoaderCircle, Radio, X } from "lucide-react";
+import { CircleAlert, Clock, FileSearch, Inbox, LoaderCircle, X } from "lucide-react";
 
 import {
   getExchange,
+  inspectExchange,
   listExchanges,
   purposeLabel,
   type ExchangeRecord,
   type ExchangeSummary,
+  type InspectedExchange,
 } from "../lib/api";
 import { fmtMs } from "../lib/format";
 import { useStore } from "../store";
+import { FormattedView, PayloadView } from "./PayloadView";
 
 type View = "visual" | "formatted" | "raw";
 
@@ -66,160 +74,47 @@ function StatusBadge({ status }: { status: number | null }) {
   );
 }
 
-/** 能当 JSON 解析就美化，否则返回 null 让调用方回落成原文。 */
-function tryPretty(text: string): string | null {
-  if (!text.trim()) return null;
-  try {
-    return JSON.stringify(JSON.parse(text), null, 2);
-  } catch {
-    return null;
-  }
-}
-
-type SseEvent = { name: string; data: string };
-
 /**
- * 把一段原始 SSE 文本切成事件。
+ * 可视化页：把字节**解回 IR** 之后按语义渲染。
  *
- * 按**空行**切，而不是引入完整解析器：SSE 规范里事件本来就是空行分隔的。我们只想
- * 把原始帧显示得更可读，而解析器会顺手丢掉注释行（`: keep-alive` 心跳）和不认识的
- * 字段 —— 那些恰恰是排障时要看的东西。所以这里只做最小识别。
+ * 解出来的东西由后端给（`inspect_exchange`）—— 那里用的是与真实链路同一套 codec，
+ * 所以这一页显示的就是模型实际收到/说出的内容。解不开时不白屏：`PayloadView` 会把
+ * 原因顶出来并指向「原始」页。
  */
-function parseSseEvents(frame: string): SseEvent[] {
-  return frame
-    .split(/\r?\n\r?\n/)
-    .filter((block) => block.trim() !== "")
-    .map((block) => {
-      let name = "message";
-      const data: string[] = [];
-      for (const line of block.split(/\r?\n/)) {
-        if (line.startsWith(":")) continue; // 注释 / 心跳
-        const idx = line.indexOf(":");
-        const field = idx === -1 ? line : line.slice(0, idx);
-        let value = idx === -1 ? "" : line.slice(idx + 1);
-        if (value.startsWith(" ")) value = value.slice(1);
-        if (field === "event") name = value;
-        else if (field === "data") data.push(value);
-      }
-      return { name, data: data.join("\n") };
-    });
-}
-
-// ---------------------------------------------------------------------------
-// 视图
-// ---------------------------------------------------------------------------
-
-function HeadersTable({ headers }: { headers: [string, string][] }) {
-  if (headers.length === 0) return <div className="text-xs text-dim">（无）</div>;
-  return (
-    <div className="overflow-hidden rounded-md border border-edge">
-      <table className="w-full border-collapse text-xs">
-        <tbody>
-          {headers.map(([k, v], i) => (
-            <tr key={i} className={i % 2 ? "bg-base" : ""}>
-              <td className="w-44 border-r border-edge px-2 py-1 align-top mono text-dim">
-                {k}
-              </td>
-              <td className="break-all px-2 py-1 mono text-ink">{v}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-/** 请求/响应正文：是 JSON 就美化，不是就原样显示。 */
-function BodyBlock({ text }: { text: string }) {
-  if (!text.trim()) return <div className="text-xs text-dim">（空）</div>;
-  return (
-    <pre className="max-h-[40vh] overflow-auto whitespace-pre-wrap rounded-md border border-edge bg-base p-2 mono text-[11px] leading-relaxed text-ink">
-      {tryPretty(text) ?? text}
-    </pre>
-  );
-}
-
-/** 流式响应：逐个帧、逐个 SSE 事件地展开，不把整坨拼成一个框。 */
-function SseFrames({ frames }: { frames: string[] }) {
+function VisualView({
+  rec,
+  inspected,
+}: {
+  rec: ExchangeRecord;
+  inspected: InspectedExchange | null;
+}) {
+  if (!inspected) {
+    return (
+      <div className="flex items-center gap-2 text-xs text-dim">
+        <LoaderCircle size={13} className="animate-spin" />
+        正在解读报文…
+      </div>
+    );
+  }
   return (
     <div className="space-y-3">
-      {frames.map((frame, fi) => {
-        const events = parseSseEvents(frame);
-        return (
-          <div key={fi} className="space-y-1.5">
-            <div className="text-[11px] text-dim">
-              帧 #{fi + 1} · {frame.length} 字节
-            </div>
-            {events.length === 0 ? (
-              <pre className="mono overflow-auto whitespace-pre-wrap rounded-md border border-edge bg-base p-2 text-[11px] text-dim">
-                {frame}
-              </pre>
-            ) : (
-              events.map((ev, ei) => (
-                <div key={ei} className="overflow-hidden rounded-md border border-edge bg-base">
-                  <div className="flex items-center gap-2 border-b border-edge px-2 py-1">
-                    <Radio size={12} className="text-tone-blue" />
-                    <span className="mono text-[11px] text-tone-blue">{ev.name}</span>
-                  </div>
-                  <pre className="max-h-80 overflow-auto whitespace-pre-wrap p-2 mono text-[11px] leading-relaxed text-ink">
-                    {tryPretty(ev.data) ?? ev.data}
-                  </pre>
-                </div>
-              ))
-            )}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-function VisualView({ rec }: { rec: ExchangeRecord }) {
-  return (
-    <div className="space-y-4">
-      <div className="flex items-center gap-2">
-        <span className="rounded border border-edge px-1.5 py-0.5 mono text-[11px] text-ink">
-          {rec.method}
-        </span>
-        <span className="break-all mono text-xs text-ink">{rec.url}</span>
-      </div>
-
-      <section className="space-y-1.5">
-        <h3 className="text-xs font-semibold text-dim">请求头</h3>
-        <HeadersTable headers={rec.request_headers} />
-      </section>
-
-      <section className="space-y-1.5">
-        <h3 className="text-xs font-semibold text-dim">请求体</h3>
-        <BodyBlock text={rec.request_body} />
-      </section>
-
-      <section className="space-y-1.5">
-        <div className="flex items-center gap-2">
-          <h3 className="text-xs font-semibold text-dim">响应</h3>
-          <StatusBadge status={rec.status} />
+      {rec.stream_error && (
+        <div className="rounded-md border border-[var(--error-border)] bg-[var(--error-bg)] px-2 py-1.5 text-xs text-[var(--danger)]">
+          流内错误：{rec.stream_error}
         </div>
-        <HeadersTable headers={rec.response_headers} />
-        {rec.stream_error && (
-          <div className="rounded-md border border-[var(--error-border)] bg-[var(--error-bg)] px-2 py-1.5 text-xs text-[var(--danger)]">
-            流内错误：{rec.stream_error}
-          </div>
-        )}
-        {rec.stream_frames.length > 0 ? (
-          <SseFrames frames={rec.stream_frames} />
-        ) : (
-          <BodyBlock text={rec.response_body} />
-        )}
-      </section>
+      )}
+      <PayloadView
+        inspected={inspected}
+        method={rec.method}
+        url={rec.url}
+        status={rec.status}
+        ttfbMs={rec.ttfb_ms}
+        totalMs={rec.total_ms}
+        // 帧是原始字节块，空串拼接才等于上游实际吐出的字节流；用换行拼会凭空插入字符。
+        streamText={rec.stream_frames.join("")}
+        headers={{ request: rec.request_headers, response: rec.response_headers }}
+      />
     </div>
-  );
-}
-
-function FormattedView({ rec }: { rec: ExchangeRecord }) {
-  return (
-    <pre className="overflow-auto rounded-md border border-edge bg-base p-2 mono text-[11px] leading-relaxed text-ink">
-      {JSON.stringify(rec, null, 2)}
-    </pre>
   );
 }
 
@@ -325,6 +220,9 @@ export function Inspector() {
   const [selected, setSelected] = useState<string | null>(null);
   // undefined = 加载中，null = 后端说没有这条（已被清理）
   const [record, setRecord] = useState<ExchangeRecord | null | undefined>(undefined);
+  // 可视化页的数据：后端把字节解回 IR 的结果。与 `record` 分开取 ——
+  // 解码要跑一遍协议 codec，只在真要画「可视化」时才值得花这个钱。
+  const [inspected, setInspected] = useState<InspectedExchange | null>(null);
   const [view, setView] = useState<View>("visual");
 
   // 打开面板 / 换会话时拉列表。
@@ -352,6 +250,35 @@ export function Inspector() {
   useEffect(() => {
     setSelected(null);
   }, [turn]);
+
+  // 换会话同样清掉：选中的是**上一条**会话里的报文，带着这个 id 去新会话里查
+  // 一定查不到，然后那句「该报文已不存在」就冒出来了 —— 用户不过是换了个对话。
+  useEffect(() => {
+    setSelected(null);
+  }, [sessionId]);
+
+  // 选中某条、且看的是可视化页时，才去解它。
+  useEffect(() => {
+    if (!selected || !sessionId || view !== "visual") {
+      setInspected(null);
+      return;
+    }
+    let cancelled = false;
+    setInspected(null);
+    inspectExchange(sessionId, selected)
+      .then((v) => {
+        if (!cancelled) setInspected(v);
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setInspected(null);
+          setNotice(String(e));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selected, sessionId, view, setNotice]);
 
   // 选中某条时取完整记录。
   useEffect(() => {
@@ -486,7 +413,7 @@ export function Inspector() {
                   {new Date(record.ts).toLocaleString("zh-CN")}
                 </span>
               </div>
-              {view === "visual" && <VisualView rec={record} />}
+              {view === "visual" && <VisualView rec={record} inspected={inspected} />}
               {view === "formatted" && <FormattedView rec={record} />}
               {view === "raw" && <RawView rec={record} />}
             </div>
