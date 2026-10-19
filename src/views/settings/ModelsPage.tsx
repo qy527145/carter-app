@@ -5,12 +5,13 @@
 // 会把 models.dev 的元数据解出来 —— 上下文窗口、能力、定价。
 
 import { useState } from "react";
-import { CircleAlert, Download, Pencil, Plus, Star } from "lucide-react";
+import { CircleAlert, Download, Pencil, Plus, Star, Zap } from "lucide-react";
 
 import {
   listModels,
   refreshModelCatalog,
   setDefaultModel,
+  setFastModel,
   type ModelRow,
 } from "../../lib/api";
 import { capabilityLabel, fmtPrice, fmtTokens } from "../../lib/format";
@@ -25,10 +26,12 @@ import { ModelEditor } from "./ModelEditor";
 function ModelCard({
   m,
   onSetDefault,
+  onSetFast,
   onEdit,
 }: {
   m: ModelRow;
   onSetDefault: () => void;
+  onSetFast: () => void;
   onEdit: () => void;
 }) {
   return (
@@ -43,6 +46,12 @@ function ModelCard({
           <span className="inline-flex items-center gap-1 text-[10px] text-tone-blue">
             <Star size={10} />
             默认
+          </span>
+        )}
+        {m.is_fast && (
+          <span className="inline-flex items-center gap-1 text-[10px] text-tone-violet">
+            <Zap size={10} />
+            副模型
           </span>
         )}
         <span className="ml-auto flex items-center gap-1">
@@ -95,11 +104,27 @@ function ModelCard({
         </div>
       )}
 
-      {!m.is_default && (
-        <Button size="sm" className="mt-2" onClick={onSetDefault}>
-          设为默认
-        </Button>
-      )}
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        {!m.is_default && (
+          <Button size="sm" onClick={onSetDefault} title="新对话默认用它">
+            设为默认
+          </Button>
+        )}
+        {!m.is_fast && (
+          <Button
+            size="sm"
+            onClick={onSetFast}
+            title="压缩上下文、生成标题、总结用它（要便宜、要快）"
+          >
+            设为副模型
+          </Button>
+        )}
+        {m.is_fast && (
+          <Button size="sm" onClick={() => onSetFast()} title="清除后回落主模型">
+            清除副模型
+          </Button>
+        )}
+      </div>
     </div>
   );
 }
@@ -145,7 +170,11 @@ export function ModelsPage() {
       <PageIntro>
         上下文窗口、能力与定价来自 models.dev 的本地缓存。缓存不在、或某条{" "}
         <span className="mono">meta</span> 查不到时，只有那一行会标出原因 —— 其余照常显示。
-        默认模型写进配置的 <span className="mono">agent.model</span>。
+        <br />
+        <span className="text-ink">主模型</span>（<span className="mono">agent.model</span>）
+        是新对话默认用的；<span className="text-ink">副模型</span>（
+        <span className="mono">agent.fast_model</span>）只用于压缩上下文、生成标题、总结 ——
+        那些活儿要的是便宜和快，不必用最强的模型。副模型没设时回落主模型。
       </PageIntro>
 
       <div className="space-y-2">
@@ -170,6 +199,16 @@ export function ModelsPage() {
                     setDefaultModel(m.reference)
                       .then(() => {
                         toastOk(`默认模型已设为 ${m.reference}`);
+                        state.reload();
+                      })
+                      .catch(toastError);
+                  }}
+                  onSetFast={() => {
+                    // 已经是副模型 → 再点一次是清除（按钮文案已经说明）。
+                    const next = m.is_fast ? null : m.reference;
+                    setFastModel(next)
+                      .then(() => {
+                        toastOk(next ? `副模型已设为 ${next}` : "副模型已清除");
                         state.reload();
                       })
                       .catch(toastError);

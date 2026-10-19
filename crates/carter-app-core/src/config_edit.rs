@@ -260,6 +260,28 @@ pub fn set_default_model(doc: &mut DocumentMut, model_ref: &str) -> Result<(), S
     Ok(())
 }
 
+/// 副模型（`agent.fast_model`）：压缩上下文、生成标题、总结用的那个。
+///
+/// `None` = 删掉这个键，回落主模型。**删键而不是写空串**：配置里留一句
+/// `fast_model = ""` 会让读的人以为配了个空模型，而 carter 那边它是 `Option<String>`，
+/// 空串是个"配了但没法解析"的坏值。
+pub fn set_fast_model(doc: &mut DocumentMut, model_ref: Option<&str>) -> Result<(), String> {
+    let agent = child_table(doc.as_table_mut(), "agent")?;
+    match model_ref {
+        Some(r) => {
+            if !r.contains('/') {
+                return Err(format!("模型引用 `{r}` 应为 `渠道/模型` 形式"));
+            }
+            agent.insert("fast_model", value(r));
+        }
+        None => {
+            // 没有这个键时 remove 返回 false，那不是错误。
+            agent.remove("fast_model");
+        }
+    }
+    Ok(())
+}
+
 pub fn set_skills_enabled(doc: &mut DocumentMut, enabled: bool) -> Result<(), String> {
     child_table(doc.as_table_mut(), "skills")?.insert("enabled", value(enabled));
     Ok(())
@@ -381,6 +403,15 @@ pub fn set_default_model_reload(
 ) -> Result<(), String> {
     let mut doc = load_doc()?;
     set_default_model(&mut doc, model_ref)?;
+    apply(shell, &doc)
+}
+
+pub fn set_fast_model_reload(
+    shell: &crate::shell::AppShell,
+    model_ref: Option<&str>,
+) -> Result<(), String> {
+    let mut doc = load_doc()?;
+    set_fast_model(&mut doc, model_ref)?;
     apply(shell, &doc)
 }
 
@@ -598,6 +629,26 @@ whatever = true
         );
         assert!(!out.contains("sk-"), "核心里不该出现任何明文密钥");
         assert!(out.contains("https://example.test"), "改过的字段要写进去");
+    }
+
+    /// 副模型：写进去、清掉，而且两件事都不动别的键。
+    #[test]
+    fn fast_model_is_written_and_cleared_without_touching_the_main_model() {
+        let mut d = doc();
+        set_fast_model(&mut d, Some("local/haiku")).unwrap();
+        let out = d.to_string();
+        assert!(out.contains(r#"fast_model = "local/haiku""#), "{out}");
+        // 主模型那行以及它的行尾注释都要原样留着。
+        assert!(out.contains(r#"model = "ws/sonnet"   # 默认模型"#), "{out}");
+
+        // 清除 = 删键，不是写空串（空串在 carter 那边是个"配了但没法解析"的坏值）。
+        set_fast_model(&mut d, None).unwrap();
+        let out = d.to_string();
+        assert!(!out.contains("fast_model"), "{out}");
+        assert!(out.contains(r#"model = "ws/sonnet""#), "{out}");
+
+        // 引用要带渠道名 —— 与主模型同一个校验，写错了要当场说。
+        assert!(set_fast_model(&mut d, Some("sonnet")).is_err());
     }
 
     /// 注释、空行与本应用不认识的段都要留住 —— 用户在文件里手写的东西

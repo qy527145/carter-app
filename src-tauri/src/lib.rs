@@ -403,6 +403,16 @@ fn set_default_model(shell: State<'_, Arc<AppShell>>, model_ref: String) -> Resu
     config_edit::set_default_model_reload(shell.inner(), &model_ref)
 }
 
+/// 设副模型（`agent.fast_model`）：压缩上下文、生成标题用的那个。`None` = 清除，
+/// 回落主模型 —— 所以界面上「清除副模型」和「设为副模型」共用一个命令。
+#[tauri::command]
+fn set_fast_model(
+    shell: State<'_, Arc<AppShell>>,
+    model_ref: Option<String>,
+) -> Result<(), String> {
+    config_edit::set_fast_model_reload(shell.inner(), model_ref.as_deref())
+}
+
 /// models.dev 里某个服务商下的模型（给渠道编辑框的「从目录选」下拉用）。
 #[tauri::command]
 fn list_catalog_models(
@@ -870,6 +880,7 @@ pub fn run() {
             delete_model,
             list_models,
             set_default_model,
+            set_fast_model,
             refresh_model_catalog,
             list_catalog_models,
             // 工具

@@ -6,13 +6,20 @@
 
 import * as api from "./api";
 import type { GoalCommand } from "./api";
-import { useStore } from "../store";
+import { useStore, withCurrent } from "../store";
 import { toastError, toastOk } from "./toast";
 
-/** 重拉会话列表。侧栏与设置页共用同一份。 */
+/**
+ * 重拉会话列表。侧栏与设置页共用同一份。
+ *
+ * 拉回来之后补一次 `withCurrent`：刚开的会话在磁盘上还没有文件（carter 的 Recorder
+ * 惰性建文件），不补的话「点了新对话，左边什么都没多」。
+ */
 export async function refreshSessions(): Promise<void> {
   try {
-    useStore.getState().setSessions(await api.listSessions(false));
+    const list = await api.listSessions(false);
+    const s = useStore.getState();
+    s.setSessions(withCurrent(list, { id: s.sessionId, model: s.model, cwd: s.cwd }));
   } catch (e) {
     toastError(e);
   }

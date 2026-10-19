@@ -15,6 +15,8 @@
 //! * [`catalog`] —— 全部模型引用摊平成一张带元数据的表。
 //! * [`input`] —— 输入框里的斜杠命令与 `@文件` 引用。
 //! * [`images`] —— 粘贴进来的图片（复用 carter 的内容寻址图片库）。
+//! * [`inspect`] —— 抓到的报文解回 IR，供报文面板按语义渲染。
+//! * [`title`] —— 首轮之后用副模型起会话标题（含「别思考」的那层包装）。
 //! * [`platform`] —— 操作系统与 shell 探测（bash 工具的跨平台基础）。
 
 pub mod app_settings;
@@ -33,6 +35,7 @@ pub mod sessions;
 pub mod shell;
 pub mod side;
 pub mod skills;
+pub mod title;
 pub mod tools;
 pub mod view;
 

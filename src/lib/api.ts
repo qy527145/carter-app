@@ -49,6 +49,8 @@ export type SessionEvent =
   | { type: "ask_form"; id: number; questions: AskQuestion[] }
   | { type: "turn_usage"; usage: UsageView; cost: number; model: string }
   | { type: "notice"; message: string }
+  /** 会话标题自动生成好了。前端据此刷新会话列表（侧栏那一行 + 顶部标题）。 */
+  | { type: "title"; title: string }
   | { type: "idle" }
   | { type: "error"; message: string };
 
@@ -375,6 +377,8 @@ export type ModelRow = {
   api_name: string;
   meta: string;
   is_default: boolean;
+  /** 是不是副模型（`agent.fast_model`）：压缩上下文、生成标题用的那个。 */
+  is_fast: boolean;
   protocol: string;
   /** 配置里给这个模型指定的默认推理档位，原样（字符串或表）。 */
   default_reasoning: unknown;
@@ -431,6 +435,13 @@ export function deleteModel(provider: string, model: string): Promise<ProviderDe
 
 export function listModels(): Promise<ModelRow[]> {
   return invoke<ModelRow[]>("list_models");
+}
+
+/**
+ * 设副模型（压缩上下文、生成标题用）。传 `null` 清除、回落主模型。
+ */
+export function setFastModel(modelRef: string | null): Promise<void> {
+  return invoke<void>("set_fast_model", { modelRef });
 }
 
 export function setDefaultModel(modelRef: string): Promise<void> {

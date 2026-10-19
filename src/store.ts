@@ -271,6 +271,10 @@ export function reduceConv(c: Conv, e: SessionEvent): Partial<Conv> {
       return { streaming: false, pendingForm: null };
     case "notice":
       return { notice: e.message };
+    case "title":
+      // 标题不是对话内容，是会话列表里那一行的属性 —— 由事件层去重拉列表
+      // （见 `lib/events.ts`）。这里什么都不用改。
+      return {};
     case "error":
       return { notice: e.message };
     case "ready":
@@ -388,6 +392,36 @@ export function historyToTurns(history: MessageView[]): Turn[] {
 // store
 // ---------------------------------------------------------------------------
 
+/**
+ * 让列表里一定有「当前这条会话」。
+ *
+ * carter 的会话文件是**惰性创建**的（`Recorder` 等到第一条消息才建文件），所以刚
+ * 点「新对话」时它还没落盘、不在 `list_sessions` 的结果里 —— 界面上就表现为
+ * 「左边什么都没多」。可它确实是当前开着的对话，只是还没说过话。
+ *
+ * 于是补一行临时的：标题为 null（界面上显示「新对话」），等第一条消息写下去之后，
+ * 下一次刷新自然会用磁盘上那份把它换掉 —— 那时通常也已经有自动标题了。
+ */
+export function withCurrent(
+  list: SessionRow[],
+  cur: { id: string | null; model: string; cwd: string },
+): SessionRow[] {
+  if (!cur.id || list.some((s) => s.id === cur.id)) return list;
+  return [
+    {
+      id: cur.id,
+      // 与顶部标题一致地显示成「新对话」（真名由第一轮的自动标题补上）。
+      title: "新对话",
+      model: cur.model,
+      cwd: cur.cwd,
+      created_at: Date.now(),
+      forked_from: null,
+      bytes: 0,
+    },
+    ...list,
+  ];
+}
+
 const emptyConversation: Conv = {
   turns: [],
   streaming: false,
@@ -439,18 +473,34 @@ export const useStore = create<Store>((set) => ({
   setSessions: (sessions) => set({ sessions }),
 
   beginSession: (c) =>
-    set({
+    set((s) => ({
       sessionId: c.session_id,
       model: c.model,
       cwd: c.cwd,
       ...emptyConversation,
       goal: c.goal,
       turns: historyToTurns(c.history),
-    }),
+      sessions: withCurrent(s.sessions, {
+        id: c.session_id,
+        model: c.model,
+        cwd: c.cwd,
+      }),
+    })),
 
   // 换会话时侧边聊天一起收掉：它继承的是**上一条**主对话的上下文，
   // 留着它只会让人以为它还在跟着当前这条对话。
-  resetSession: () => set({ sessionId: null, ...emptyConversation, side: null }),
+  //
+  // 报文面板同样要收起来：它开着的时候选中的是**上一条**会话的报文，留着它，
+  // 面板会拿那个 id 去新会话里查 —— 查不到，于是弹一句「该报文已不存在」，
+  // 而用户只是开了个新对话。
+  resetSession: () =>
+    set({
+      sessionId: null,
+      ...emptyConversation,
+      side: null,
+      inspectorOpen: false,
+      inspectorTurn: null,
+    }),
 
   // 用户消息在本地先落一条：事件流里没有「用户发言」事件，唯一的来源就是提交动作。
   addUserTurn: (text) => set((s) => ({ turns: [...s.turns, { role: "user", text }] })),

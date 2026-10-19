@@ -55,6 +55,9 @@ pub struct ModelRow {
     /// models.dev 的查找 id。
     pub meta: String,
     pub is_default: bool,
+    /// 是不是**副模型**（`agent.fast_model`）：压缩上下文、生成标题、总结用的那个。
+    /// 没配就是主模型自己上（`false`）。
+    pub is_fast: bool,
     /// 渠道走哪种线协议（kind 可能是别名）。
     pub protocol: String,
     /// 配置里给这个模型指定的默认推理档位，**原样**（字符串或 `{ budget = n }`）。
@@ -77,6 +80,7 @@ fn resolve_one(
     provider: &str,
     name: &str,
     default_ref: &str,
+    fast_ref: Option<&str>,
     protocol: &str,
 ) -> ModelRow {
     let reference = format!("{provider}/{name}");
@@ -88,6 +92,7 @@ fn resolve_one(
         api_name: name.to_string(),
         meta: String::new(),
         is_default: reference == default_ref,
+        is_fast: fast_ref == Some(reference.as_str()),
         protocol: protocol.to_string(),
         default_reasoning: reasoning_raw,
         context_window: None,
@@ -142,6 +147,7 @@ pub fn list(config: &Config) -> Vec<ModelRow> {
     // 缓存读不到不算致命：照样把模型列出来，只是元数据那几栏空着。
     let cache = fetch::read_cache().map_err(|e| e.to_string());
     let default_ref = config.agent.model.clone();
+    let fast_ref = config.agent.fast_model.clone();
     // `default_reasoning` 取配置里的**原值** —— `ModelInfo` 上那个字段已经被解析成
     // `ReasoningEffort`，`{ budget = 1024 }` 这种写法反推不回来。
     let reasoning = crate::config_edit::raw_default_reasoning();
@@ -163,6 +169,7 @@ pub fn list(config: &Config) -> Vec<ModelRow> {
                 pname,
                 mname,
                 &default_ref,
+                fast_ref.as_deref(),
                 &protocol,
             ));
         }
@@ -346,6 +353,7 @@ kind = "anthropic"
             "ws",
             "sonnet",
             "ws/sonnet",
+            None,
             "anthropic",
         );
 
@@ -376,6 +384,7 @@ kind = "anthropic"
             "ws",
             "sonnet",
             "ws/sonnet",
+            None,
             "anthropic",
         );
 
@@ -409,6 +418,7 @@ kind = "anthropic"
             "ws",
             "sonnet",
             "ws/sonnet",
+            None,
             "anthropic",
         );
         let bad = resolve_one(
@@ -418,6 +428,7 @@ kind = "anthropic"
             "ws",
             "sonnet",
             "ws/sonnet",
+            None,
             "anthropic",
         );
 

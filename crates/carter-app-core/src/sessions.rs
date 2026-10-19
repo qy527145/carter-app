@@ -84,6 +84,23 @@ pub fn rename(id: &str, title: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// 会话当前的标题（盘上折叠后的结果）。会话还没落盘、读不出来都返回 `None`。
+pub fn title_of(id: &str) -> Option<String> {
+    find(id).and_then(|e| e.meta.title)
+}
+
+/// 自动标题能不能写：**已经有名字就不能**。
+///
+/// 起标题是几百毫秒前发起的模型调用（跑在另一条任务上），结果回来时用户完全可能
+/// 已经自己改过名字 —— 那时再拿机器起的名字盖回去，就是把人的操作丢掉。
+/// 手动改名走 [`rename`]（无条件覆盖），这条只管自动生成的那一次。
+///
+/// 抽成纯函数是为了给这条规则一个能测的落点：它在真实路径上要读写会话文件，
+/// 而那些文件在用户的家目录里。
+pub fn auto_title_allowed(existing: Option<&str>) -> bool {
+    existing.is_none()
+}
+
 /// fork 一条会话。返回新会话的 id。
 pub fn fork(id: &str) -> Result<String, String> {
     let entry = find(id).ok_or_else(|| format!("找不到会话 {id}"))?;
@@ -335,3 +352,18 @@ fn message_json(msg: &WireMessage) -> serde_json::Value {
     })
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::auto_title_allowed;
+
+    /// 自动标题不覆盖已有的名字。
+    ///
+    /// 这是异步链路与用户抢同一份数据的那条缝：标题是几百毫秒前发起的模型调用，
+    /// 结果回来时用户完全可能已经自己改过名字 —— 覆盖掉就是把人的操作丢了。
+    #[test]
+    fn auto_title_never_overwrites_a_name_that_is_already_there() {
+        assert!(auto_title_allowed(None), "没名字：该写");
+        assert!(!auto_title_allowed(Some("我自己起的")), "已有名字：不写");
+    }
+}

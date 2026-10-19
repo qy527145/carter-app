@@ -8,6 +8,7 @@ import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 
 import { EVENT_NAME, type AppEvent } from "./api";
+import { refreshSessions } from "./sessionOps";
 import { useStore } from "../store";
 
 /** 订阅 `carter://event`，在整个 App 生命周期内生效。 */
@@ -28,6 +29,9 @@ export function useAppEvents() {
       if (payload.type === "session") {
         if (state.sessionId !== null && payload.session_id === state.sessionId) {
           state.applyEvent(payload.event);
+          // 标题是**异步**来的（首轮跑着的时候另一条任务在起名）。它不改对话内容，
+          // 只改会话列表里那一行 —— 重拉一次列表，侧栏与顶部标题一起更新。
+          if (payload.event.type === "title") void refreshSessions();
         } else if (state.side !== null && payload.session_id === state.side.sessionId) {
           state.applySideEvent(payload.event);
         }

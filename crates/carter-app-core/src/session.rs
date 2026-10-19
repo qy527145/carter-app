@@ -169,7 +169,11 @@ pub fn start_session(
         unsupported_server_tools,
         capture: Some(capture_store),
         include_task: true,
+        fast: None,
+        fast_ref: None,
     };
+    // 会话文件里还没标题（`meta` 下面要整个移进 Runner，先问一句）。
+    let unnamed = meta.title.is_none();
     let runner = Runner {
         ctx,
         thread,
@@ -186,6 +190,9 @@ pub fn start_session(
         queued: VecDeque::new(),
         // 主会话的系统提示每轮现算（技能会变、目标会变），见 `run_one_turn`。
         fixed_system: None,
+        // 只有「新起的会话」才配自动标题：续接一条已经在聊的会话，标题早该有了；
+        // 而它没有的时候（老版本建的），也不该拿用户**现在**说的这句话去给它起名。
+        title_pending: !resumed && unnamed,
     };
     tokio::spawn(runner.run());
     Ok(StartedSession {
@@ -240,6 +247,8 @@ pub(crate) fn start_side(w: SideWiring, id: String, parent_id: String) -> Arc<Se
         // 侧边会话：不派生子 agent、不连 MCP、不抓包。见 `side.rs` 的模块头。
         include_task: false,
         capture: None,
+        fast: None,
+        fast_ref: None,
     };
     let runner = Runner {
         meta: side_meta(&handle),
@@ -257,6 +266,8 @@ pub(crate) fn start_side(w: SideWiring, id: String, parent_id: String) -> Arc<Se
         downgraded_goal: false,
         queued: VecDeque::new(),
         fixed_system: Some(w.system),
+        // 侧边聊天不落盘，也就没有「会话列表里那一行」要起名。
+        title_pending: false,
     };
     tokio::spawn(runner.run());
     handle
@@ -300,6 +311,11 @@ struct SessionCtx {
     capture: Option<Arc<crate::capture::CaptureStore>>,
     /// 是否挂 `task`（派生子 agent）。侧边聊天不挂。
     include_task: bool,
+    /// 副模型（`agent.fast_model`）解析出来的句柄，配了才算数。
+    /// 见 [`SessionCtx::fast_model`] —— 压缩与标题走它。
+    fast: Option<CompactModel>,
+    /// 上面那份是按哪个引用解析出来的 —— 用户在设置页改了副模型，下一轮要重解析。
+    fast_ref: Option<String>,
 }
 
 impl SessionCtx {
@@ -314,6 +330,79 @@ impl SessionCtx {
     fn refresh(&mut self) {
         self.config = self.shell.config.load_full();
         self.settings = AppSettings::load();
+    }
+
+    /// 副模型（`agent.fast_model`）：压缩上下文、生成标题、总结用它。
+    ///
+    /// 解析结果**缓存住**：解析一次要建一个 HTTP 客户端，而压缩判断每轮都要问一次。
+    /// 缓存的键是引用串本身 —— 用户在设置页改了副模型，下一轮就重解析。
+    ///
+    /// 解析失败**不报错**（只 warn 一条）：副模型是锦上添花，为它把主对话带崩是错的。
+    /// 调用方拿到 `None` 就回落主模型。
+    fn fast_model(&mut self) -> Option<CompactModel> {
+        let want = self
+            .config
+            .agent
+            .fast_model
+            .clone()
+            .filter(|s| !s.trim().is_empty());
+        if want.as_deref() == self.fast_ref.as_deref() {
+            return self.fast.clone();
+        }
+        self.fast_ref = want.clone();
+        let Some(reference) = want else {
+            // 副模型被清掉了：回到「没配」的状态。
+            self.fast = None;
+            return None;
+        };
+        // 副模型就是这条会话正在用的模型：直接复用主 provider —— 再解析一遍
+        // 要多建一个 HTTP 客户端，而它们会打出两个一模一样的请求。
+        if reference == self.model.key {
+            self.fast = Some(CompactModel {
+                provider: self.provider.clone(),
+                model: self.model.clone(),
+            });
+            return self.fast.clone();
+        }
+
+        // 副模型发的请求（压缩、标题）同样挂抓包钩子 —— 与 `switch_model` 一个道理：
+        // 那些请求也是这条对话的一部分，静默不抓会让人以为「报文面板漏了」。
+        // 它们没带 `WireRequest.meta`（carter 的压缩与标题不标会话），所以落进
+        // `_orphan.jsonl` 而不是会话文件里。
+        let hook = self
+            .capture
+            .as_ref()
+            .map(|store| Arc::new(crate::capture::CaptureHook::new(store.clone())));
+        let hooks: Vec<Arc<dyn llm_adapt_core::RequestHook>> = hook
+            .iter()
+            .map(|h| h.clone() as Arc<dyn llm_adapt_core::RequestHook>)
+            .collect();
+
+        let cache = match fetch::read_cache() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("副模型 `{reference}` 用不上：读模型缓存失败（{e}）");
+                return None;
+            }
+        };
+        self.fast = match carter::provider::resolve_provider(&self.config, &cache, &reference, hooks)
+        {
+            Ok(r) => {
+                // 协议按**副模型自己那个渠道**标（主模型可能在另一个渠道、另一个协议上）。
+                if let Some(h) = &hook {
+                    label_capture(h, &self.config, &r.model);
+                }
+                Some(CompactModel {
+                    provider: r.provider,
+                    model: r.model,
+                })
+            }
+            Err(e) => {
+                tracing::warn!("副模型 `{reference}` 解析失败，这一轮回落主模型：{e}");
+                None
+            }
+        };
+        self.fast.clone()
     }
 
     /// 当前的系统提示（含技能目录）。技能开关与扫描路径都会变，所以每轮重算。
@@ -371,6 +460,8 @@ struct Runner {
     queued: VecDeque<Command>,
     /// 侧边会话的系统提示固定部分（见 [`SideWiring`]），主会话每轮现算。
     fixed_system: Option<Vec<String>>,
+    /// 还欠这条会话一个自动标题（首轮开始时去生成，见 [`Runner::spawn_title`]）。
+    title_pending: bool,
 }
 
 impl Runner {
@@ -567,7 +658,13 @@ impl Runner {
 
     /// 把一段文本作为一轮的用户输入跑完（含它引发的自动继续）。
     async fn run_sequence(&mut self, text: String, git: Option<carter::session::GitInfo>) {
-        self.thread.append_user(text);
+        self.thread.append_user(text.clone());
+        // 标题在这一刻并行去生成，**不挡这一轮**（见 [`Runner::spawn_title`]）。
+        // 放在 append 之后：carter 的 Recorder 是惰性建文件的，第一条消息落盘
+        // 才让会话文件存在，而写标题要往那个文件里追加。
+        if std::mem::take(&mut self.title_pending) {
+            self.spawn_title(&text);
+        }
         // 轮次开头也发布一次：这一轮可能很长，侧边聊天在这期间至少要能看到
         // 「用户提了什么要求」（之后的进展由 `live` 补上）。
         self.ctx.handle.publish_history(&self.thread.messages);
@@ -578,6 +675,69 @@ impl Runner {
         let result = self.run_one_turn(git.clone()).await;
         self.drive_goal(result, git).await;
         self.emit(SessionEvent::Idle);
+    }
+
+    /// 首轮之后并行生成会话标题。
+    ///
+    /// ## 为什么是另一条任务
+    ///
+    /// 生成标题是一次完整的模型调用（哪怕用的是副模型也要几百毫秒到几秒）。串在
+    /// `run_sequence` 里就会**挡住这一轮**：用户盯着的是第一句回答，而这里在等一个
+    /// 只影响侧栏一行的东西。串在轮末也一样 —— 会话任务同时在处理队列里的命令，
+    /// 标题那几秒里用户发第二条消息就得排队。
+    ///
+    /// ## 与手动改名的先后
+    ///
+    /// 写回走 [`sessions::title_if_unnamed`]：**只在还没有标题时写**。用户在这几百
+    /// 毫秒里自己改了名字的话（侧栏行内重命名），机器起的这个名字不该把它盖掉。
+    ///
+    /// ## 失败就静默
+    ///
+    /// 副模型配错、网络不通、上游拒答 —— 都只让这条会话暂时没有标题，侧栏显示
+    /// 「未命名会话」。为它弹一个错误条，比没有标题更打扰人。
+    fn spawn_title(&mut self, first_prompt: &str) {
+        // 侧边会话没有 recorder（不落盘），也就没有「列表里那一行」要起名。
+        let Some(recorder) = self.thread.recorder() else {
+            return;
+        };
+        // 与 carter CLI 同一个函数（`generate_title`）：3-6 词中文、取首行、去引号。
+        //
+        // 这里显式解析一次副模型（不能靠 `run_one_turn` 里那份缓存：标题跑在它前面，
+        // 那时缓存还没填）。解析过一次之后就是同一份缓存。
+        let (provider, model) = match self.ctx.fast_model() {
+            Some(f) => (f.provider, f.model),
+            // 没配副模型（或它解析不出来）：用主模型起标题，也好过没有标题。
+            None => (self.ctx.provider.clone(), self.ctx.model.clone()),
+        };
+        // 渠道种类决定要不要关思考（见 `title.rs`：推理模型会把 32 个 token
+        // 全花在思考上，正文一个字都不留）。副模型可能挂在另一个渠道上，所以取
+        // **它自己那个** kind。
+        let kind = self.ctx.config.provider_for(&model.provider).kind;
+        let shell = self.ctx.shell.clone();
+        let session_id = self.ctx.handle.id.clone();
+        let prompt = first_prompt.to_string();
+
+        tokio::spawn(async move {
+            let Ok(title) = crate::title::generate(&prompt, provider, &model, &kind).await else {
+                return;
+            };
+            if title.trim().is_empty() {
+                return;
+            }
+            // 用**会话自己那个 recorder** 追加，而不是新开一个句柄：同一个文件上的
+            // 两个追加句柄，写一行会拆成两次 write（正文 + 换行），并发时可能把两条
+            // 记录绞在一起。这个 recorder 内部有 Mutex，是唯一安全的那条路。
+            //
+            // 文件还没建出来也不怕：carter 的 recorder 是惰性的，第一次写会先把
+            // 文件头（SessionMeta）落下去 —— 第一条消息早就写过了，这一步只是兜底。
+            if !crate::sessions::auto_title_allowed(
+                crate::sessions::title_of(&session_id).as_deref(),
+            ) {
+                return;
+            }
+            recorder.record(carter::session::RecordKind::Title { title: title.clone() });
+            emit(&shell, &session_id, SessionEvent::Title { title });
+        });
     }
 
     /// 跑一轮：装配工具、发请求、执行工具、回灌，直到模型不再调工具。
@@ -639,15 +799,18 @@ impl Runner {
             },
             &self.ctx.settings,
         );
+        // 压缩用副模型（`agent.fast_model`）：压缩是"把长历史揉短"的活儿，
+        // 要的是便宜和快。没配副模型就回落主模型。
+        let fast = self.ctx.fast_model();
+        let compact_model = Some(fast.unwrap_or_else(|| CompactModel {
+            provider: self.ctx.provider.clone(),
+            model: self.ctx.model.clone(),
+        }));
+
         let run_opts = RunOptions {
             show_thinking: true,
             system,
-            // 压缩复用主模型：GUI 里没有「fast 模型」这个概念的配置入口，
-            // 多一条链路就多一处会出错的地方。
-            compact_model: Some(CompactModel {
-                provider: self.ctx.provider.clone(),
-                model: self.ctx.model.clone(),
-            }),
+            compact_model,
             hooks,
             // 单会话里只有主对话这一种请求（压缩与子 agent 也会发，
             // 但它们的 purpose 由各自那条路径设置）。
