@@ -37,6 +37,7 @@ import type {
   SessionEvent,
   SessionRow,
   TodoView,
+  TurnFiles,
   UsageView,
 } from "./lib/api";
 
@@ -82,6 +83,13 @@ export type Conv = {
   notice: string | null;
   /** 长任务目标（`/goal`）。`null` = 这条对话没有目标。 */
   goal: GoalView | null;
+  /**
+   * 每一轮**实际改过**的文件（轮次号 → 相对 cwd 的路径）。
+   *
+   * 来源是后端的文件系统监听（见 core 的 `changes.rs`），不是解析工具参数。
+   * 历史里那几轮随 `create_session` 带回，实时那几轮走 `files_changed` 事件。
+   */
+  changed: Record<number, string[]>;
 };
 
 /** 侧边聊天：一份 `Conv` + 它是谁（事件按 session_id 路由，见 `lib/events.ts`）。 */
@@ -262,6 +270,9 @@ export function reduceConv(c: Conv, e: SessionEvent): Partial<Conv> {
       return { todos: e.todos };
     case "ask_form":
       return { pendingForm: { id: e.id, questions: e.questions } };
+    case "files_changed":
+      // 轮末一次性到达。空清单后端就不发了，这里只负责合并。
+      return { changed: { ...c.changed, [e.turn]: e.files } };
     case "turn_usage":
       return { usage: e.usage, cost: e.cost };
     case "goal":
@@ -431,6 +442,7 @@ const emptyConversation: Conv = {
   pendingForm: null,
   notice: null,
   goal: null,
+  changed: {},
 };
 
 /** 主对话那部分状态（`Conv` 的字段藏在 store 里，还原出来给 reducer 用）。 */
@@ -444,7 +456,15 @@ function convOf(s: Conv): Conv {
     pendingForm: s.pendingForm,
     notice: s.notice,
     goal: s.goal,
+    changed: s.changed,
   };
+}
+
+/** 历史里的按轮清单 → 界面用的映射。 */
+function changedRecord(list: TurnFiles[]): Record<number, string[]> {
+  const out: Record<number, string[]> = {};
+  for (const t of list) out[t.turn] = t.files;
+  return out;
 }
 
 export const useStore = create<Store>((set) => ({
@@ -480,6 +500,7 @@ export const useStore = create<Store>((set) => ({
       ...emptyConversation,
       goal: c.goal,
       turns: historyToTurns(c.history),
+      changed: changedRecord(c.changes),
       sessions: withCurrent(s.sessions, {
         id: c.session_id,
         model: c.model,

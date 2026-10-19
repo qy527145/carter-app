@@ -7,6 +7,7 @@
 import { useState } from "react";
 import {
   Cpu,
+  FileDiff,
   Info,
   MessagesSquare,
   Palette,
@@ -17,6 +18,7 @@ import {
 } from "lucide-react";
 
 import { AboutPage } from "./AboutPage";
+import { ChangesPage } from "./ChangesPage";
 import { AppearancePage } from "./AppearancePage";
 import { ChannelsPage } from "./ChannelsPage";
 import { McpPage } from "./McpPage";
@@ -29,6 +31,7 @@ const TABS = [
   { id: "channels", label: "渠道", icon: Plug },
   { id: "models", label: "模型", icon: Cpu },
   { id: "tools", label: "工具", icon: Wrench },
+  { id: "changes", label: "变更", icon: FileDiff },
   { id: "skills", label: "技能", icon: Sparkles },
   { id: "mcp", label: "MCP", icon: Server },
   { id: "sessions", label: "会话", icon: MessagesSquare },
@@ -70,6 +73,7 @@ export function SettingsPage() {
           {tab === "channels" && <ChannelsPage />}
           {tab === "models" && <ModelsPage />}
           {tab === "tools" && <ToolsPage />}
+          {tab === "changes" && <ChangesPage />}
           {tab === "skills" && <SkillsPage />}
           {tab === "mcp" && <McpPage />}
           {tab === "sessions" && <SessionsPage />}

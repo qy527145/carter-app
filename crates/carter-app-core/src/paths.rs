@@ -157,6 +157,15 @@ pub fn goals_dir() -> PathBuf {
     app_home().join("goals")
 }
 
+/// 「这一轮实际改了哪些文件」的存放目录：一个会话一个文件。
+///
+/// 与 `goals/` 同形同理由。这份数据只服务界面（回答末尾的清单），不参与会话
+/// 恢复 —— 会话文件仍是 carter 的 JSONL，我们不改它的记录格式（见 `goal.rs`
+/// 模块头：多一种 `RecordKind` 会让整条会话读不出来）。
+pub fn changes_dir() -> PathBuf {
+    app_home().join("changes")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

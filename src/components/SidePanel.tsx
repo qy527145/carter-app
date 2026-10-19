@@ -89,7 +89,12 @@ export function SidePanel() {
               打开时主对话的上下文（{side.inheritedTurns.length} 条）· 提问时会读最新进展
             </summary>
             <div className="border-t border-edge px-3 py-3 opacity-70">
-              <TurnList turns={side.inheritedTurns} streaming={false} showPayload={false} />
+              <TurnList
+                turns={side.inheritedTurns}
+                streaming={false}
+                showPayload={false}
+                cwd={side.cwd}
+              />
             </div>
           </details>
         )}
@@ -97,7 +102,13 @@ export function SidePanel() {
         {side.turns.length === 0 && side.streaming && (
           <div className="text-sm text-dim">正在生成…</div>
         )}
-        <TurnList turns={side.turns} streaming={side.streaming} showPayload={false} />
+        <TurnList
+          turns={side.turns}
+          streaming={side.streaming}
+          showPayload={false}
+          changedByTurn={side.changed}
+          cwd={side.cwd}
+        />
       </div>
 
       <div className="shrink-0 border-t border-edge p-2.5">

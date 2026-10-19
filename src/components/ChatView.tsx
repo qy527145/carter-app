@@ -29,6 +29,7 @@ import {
 
 import { useStore, type Item, type Turn } from "../store";
 import { copyText } from "../lib/clipboard";
+import { FilePreviewModal } from "./FilePreview";
 import { AskForm } from "./AskForm";
 import { Composer, MessageImages } from "./Composer";
 import { GoalBar } from "./GoalBar";
@@ -130,8 +131,17 @@ function ItemView({
 // 本轮动过的文件
 // ---------------------------------------------------------------------------
 
-/** 一条「本轮动过这个文件」的记录。同一文件被改多次只占一行，计数累加。 */
-type ChangedFile = { path: string; kind: "write" | "edit"; count: number };
+/**
+ * 一条「本轮动过这个文件」的记录。
+ *
+ * `kind` 只影响**来源标签**：`write` / `edit` 来自成功的 `write_file` / `edit_file`
+ * 调用，`other` 表示只有文件系统监听看见了（`bash`、python、MCP、子进程…）。
+ * 清单本身以监听为准，工具参数只补两件事：cwd 之外的写入，以及更具体的标签。
+ */
+type ChangedFile = { path: string; kind: "write" | "edit" | "other"; count: number };
+
+/** 同一路径被多种方式改过时，标签取更强的那个。 */
+const KIND_RANK: Record<ChangedFile["kind"], number> = { other: 1, edit: 2, write: 3 };
 
 function argStr(args: unknown, key: string): string | null {
   if (args && typeof args === "object" && key in args) {
@@ -141,27 +151,53 @@ function argStr(args: unknown, key: string): string | null {
   return null;
 }
 
-function changedFiles(items: Item[]): ChangedFile[] {
+/**
+ * 路径对齐：工具参数可能是 `./a.txt`、绝对路径或 Windows 反斜杠，监听器给的是
+ * 相对 cwd 的 `/` 分隔路径。两边不化成同一形状，同一个文件就会占两行。
+ */
+function normalizePath(raw: string, cwd: string): string {
+  let p = raw.trim().replace(/\\/g, "/");
+  const root = cwd.replace(/\\/g, "/").replace(/\/+$/, "");
+  if (root && p.startsWith(`${root}/`)) p = p.slice(root.length + 1);
+  while (p.startsWith("./")) p = p.slice(2);
+  return p;
+}
+
+/**
+ * 合并两种来源，得到这一轮真正动过的文件。
+ *
+ * 1. 文件系统监听（`watched`）是**权威集合** —— 不管谁写的都在里面；
+ * 2. 成功的 `write_file` / `edit_file` 参数补 cwd 之外的写入，并给出具体标签。
+ *
+ * 同一个文件两边都有时只算一条：计数用工具调用次数，监听只补「没被工具报过」的。
+ */
+function changedFiles(items: Item[], watched: string[], cwd: string): ChangedFile[] {
   const byPath = new Map<string, ChangedFile>();
-  for (const item of items) {
-    if (item.kind !== "tool") continue;
-    if (item.name !== "write_file" && item.name !== "edit_file") continue;
-    // 失败的写入没改到磁盘；还在跑（没有结果）的先不算，等结果回来再说。
-    if (!item.result?.ok) continue;
-    const path = argStr(item.args, "path") ?? argStr(item.args, "file_path");
-    if (!path) continue;
+  const add = (raw: string, kind: ChangedFile["kind"], count: number) => {
+    const path = normalizePath(raw, cwd);
+    if (!path) return;
     const prev = byPath.get(path);
     if (prev) {
-      prev.count += 1;
+      prev.count += count;
       // 先 write 再 edit 的文件仍标「写入」：同一条路径的语义不要来回跳。
-      if (item.name === "write_file") prev.kind = "write";
+      if (KIND_RANK[kind] > KIND_RANK[prev.kind]) prev.kind = kind;
     } else {
-      byPath.set(path, {
-        path,
-        kind: item.name === "write_file" ? "write" : "edit",
-        count: 1,
-      });
+      byPath.set(path, { path, kind, count });
     }
+  };
+
+  for (const item of items) {
+    if (item.kind !== "tool") continue;
+    // 失败的调用没改到磁盘；还在跑（没有结果）的先不算，等结果回来再说。
+    if (!item.result?.ok) continue;
+    if (item.name !== "write_file" && item.name !== "edit_file") continue;
+    const path = argStr(item.args, "path") ?? argStr(item.args, "file_path");
+    if (path) add(path, item.name === "write_file" ? "write" : "edit", 1);
+  }
+
+  for (const path of watched) {
+    const key = normalizePath(path, cwd);
+    if (key && !byPath.has(key)) byPath.set(key, { path: key, kind: "other", count: 1 });
   }
   return [...byPath.values()];
 }
@@ -170,11 +206,27 @@ function changedFiles(items: Item[]): ChangedFile[] {
  * 一轮跑完后「到底改了哪几个文件」。
  *
  * 工具卡片已经在流里各画了一张，但十几次调用之后，这件事不该靠用户往上翻着数。
- * 只认**成功的** `write_file` / `edit_file`：`bash` 里重定向写文件认不出来，
- * 与其猜错不如不列。
+ * 清单主要来自后端轮首轮末的文件系统监听（见 core 的 `changes.rs`），而不是解析
+ * 工具参数 —— 后者只用来补 cwd 之外的写入与「写入 / 修改」标签。
  */
-function ChangedFiles({ files }: { files: ChangedFile[] }) {
+function ChangedFiles({
+  files,
+  cwd,
+  turn,
+}: {
+  files: ChangedFile[];
+  cwd: string;
+  /** 这一轮的用户输入序号：算本轮 diff 用。 */
+  turn?: number;
+}) {
+  // 点开的是**现在磁盘上的内容**，不是这一轮的历史快照。
+  const [preview, setPreview] = useState<string | null>(null);
   if (files.length === 0) return null;
+  const label: Record<ChangedFile["kind"], string> = {
+    write: "写入",
+    edit: "修改",
+    other: "变更",
+  };
   return (
     <div className="rounded-lg border border-edge bg-card px-3 py-2">
       <div className="mb-1.5 flex items-center gap-1.5 text-[11px] text-dim">
@@ -183,20 +235,34 @@ function ChangedFiles({ files }: { files: ChangedFile[] }) {
       </div>
       <ul className="space-y-1">
         {files.map((f) => (
-          <li key={f.path} className="flex min-w-0 items-center gap-2">
-            <Glyph tone={f.kind === "write" ? "blue" : "orange"}>
-              {f.kind === "write" ? <FileText size={11} /> : <Pencil size={11} />}
-            </Glyph>
-            <span className="mono min-w-0 flex-1 truncate text-xs text-ink" title={f.path}>
-              {f.path}
-            </span>
-            {f.count > 1 && <span className="shrink-0 text-[10px] text-dim">×{f.count}</span>}
-            <span className="shrink-0 text-[10px] text-dim">
-              {f.kind === "write" ? "写入" : "修改"}
-            </span>
+          <li key={f.path} className="min-w-0">
+            <button
+              onClick={() => setPreview(f.path)}
+              title={`预览 ${f.path}`}
+              className="flex w-full min-w-0 cursor-pointer items-center gap-2 rounded px-1 py-0.5 text-left transition-colors hover:bg-elevated"
+            >
+              <Glyph
+                tone={f.kind === "write" ? "blue" : f.kind === "edit" ? "orange" : "violet"}
+              >
+                {f.kind === "edit" ? <Pencil size={11} /> : <FileText size={11} />}
+              </Glyph>
+              <span className="mono min-w-0 flex-1 truncate text-xs text-ink" title={f.path}>
+                {f.path}
+              </span>
+              {f.count > 1 && <span className="shrink-0 text-[10px] text-dim">×{f.count}</span>}
+              <span className="shrink-0 text-[10px] text-dim">{label[f.kind]}</span>
+            </button>
           </li>
         ))}
       </ul>
+      {preview !== null && (
+        <FilePreviewModal
+          path={preview}
+          cwd={cwd}
+          turn={turn}
+          onClose={() => setPreview(null)}
+        />
+      )}
     </div>
   );
 }
@@ -208,8 +274,14 @@ function ChangedFiles({ files }: { files: ChangedFile[] }) {
  * 但历史里工具的每次往返各是一条助手消息（见 `store.ts::historyToTurns`）。
  * 按 `turn` 号把相邻的助手轮并成一组、把汇总挂在**最后一个**上面，实时与回看
  * 才会落在同一个位置 —— 这条回答的末尾，而不是半途某次工具调用下面。
+ *
+ * `changedByTurn` 是后端按轮存下来的**实际**变更（历史回看时靠它，事件不回放）。
  */
-function changedFilesPerTurn(turns: Turn[]): ChangedFile[][] {
+function changedFilesPerTurn(
+  turns: Turn[],
+  changedByTurn: Record<number, string[]>,
+  cwd: string,
+): ChangedFile[][] {
   const out: ChangedFile[][] = turns.map(() => []);
   let i = 0;
   while (i < turns.length) {
@@ -230,7 +302,8 @@ function changedFilesPerTurn(turns: Turn[]): ChangedFile[][] {
     const items = turns
       .slice(i, j + 1)
       .flatMap((x) => (x.role === "assistant" ? x.items : []));
-    out[j] = changedFiles(items);
+    const watched = t.turn !== undefined ? (changedByTurn[t.turn] ?? []) : [];
+    out[j] = changedFiles(items, watched, cwd);
     i = j + 1;
   }
   return out;
@@ -246,6 +319,7 @@ function AssistantTurn({
   streaming,
   showPayload,
   changed,
+  cwd,
 }: {
   turn: AssistantTurnT;
   isLast: boolean;
@@ -253,6 +327,8 @@ function AssistantTurn({
   showPayload: boolean;
   /** 这一轮用户输入改过的文件，由 `TurnList` 按 `turn` 聚合（见那边的注释）。 */
   changed: ChangedFile[];
+  /** 预览文件时用来解析相对路径。 */
+  cwd: string;
 }) {
   const openInspector = useStore((s) => s.openInspector);
   const menu = useContextMenu();
@@ -320,7 +396,7 @@ function AssistantTurn({
           showCursor={streaming && isLast && i === items.length - 1 && item.kind === "text"}
         />
       ))}
-      {changed.length > 0 && <ChangedFiles files={changed} />}
+      {changed.length > 0 && <ChangedFiles files={changed} cwd={cwd} turn={t.turn} />}
       {/* 把这条回答对回产生它的那次 API 请求。轮次号对**历史消息**也成立
           （后端按同样口径算好，见 `view.rs`），所以切走再回来入口还在。
           侧边聊天不给（`showPayload=false`）：它不落盘、不抓包，按主对话的轮次号
@@ -371,12 +447,14 @@ function TurnView({
   streaming,
   showPayload,
   changed,
+  cwd,
 }: {
   turn: Turn;
   isLast: boolean;
   streaming: boolean;
   showPayload: boolean;
   changed: ChangedFile[];
+  cwd: string;
 }) {
   if (turn.role === "user") return <UserTurn turn={turn} />;
   return (
@@ -386,6 +464,7 @@ function TurnView({
       streaming={streaming}
       showPayload={showPayload}
       changed={changed}
+      cwd={cwd}
     />
   );
 }
@@ -398,14 +477,20 @@ export function TurnList({
   turns,
   streaming,
   showPayload = true,
+  changedByTurn = {},
+  cwd = "",
 }: {
   turns: Turn[];
   streaming: boolean;
   /** 是否给助手轮画「查看报文」入口。侧边聊天传 false（它不抓包）。 */
   showPayload?: boolean;
+  /** 后端记下的按轮实际变更（`files_changed` 事件 / `create_session` 的历史）。 */
+  changedByTurn?: Record<number, string[]>;
+  /** 用来把工具参数里的绝对路径对回监听器给的相对路径。 */
+  cwd?: string;
 }) {
   // 挂在「这一轮用户输入的最后一条助手消息」上，而不是每条助手消息各算各的。
-  const changed = changedFilesPerTurn(turns);
+  const changed = changedFilesPerTurn(turns, changedByTurn, cwd);
 
   return (
     <div className="flex flex-col gap-6">
@@ -417,6 +502,7 @@ export function TurnList({
           streaming={streaming}
           showPayload={showPayload}
           changed={changed[i]}
+          cwd={cwd}
         />
       ))}
     </div>
@@ -430,6 +516,8 @@ export function TurnList({
 function MessageList() {
   const turns = useStore((s) => s.turns);
   const streaming = useStore((s) => s.streaming);
+  const changed = useStore((s) => s.changed);
+  const cwd = useStore((s) => s.cwd);
   const scrollRef = useRef<HTMLDivElement>(null);
   // 用户往上翻时不要把他拽回底部 —— 只在「本来就在底部」时跟随。
   const stick = useRef(true);
@@ -448,7 +536,16 @@ function MessageList() {
   return (
     <div ref={scrollRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto px-4 py-6">
       <div className="mx-auto max-w-3xl">
-        {turns.length === 0 ? <EmptyState /> : <TurnList turns={turns} streaming={streaming} />}
+        {turns.length === 0 ? (
+          <EmptyState />
+        ) : (
+          <TurnList
+            turns={turns}
+            streaming={streaming}
+            changedByTurn={changed}
+            cwd={cwd}
+          />
+        )}
       </div>
     </div>
   );

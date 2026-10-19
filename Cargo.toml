@@ -26,6 +26,10 @@ futures = "0.3"
 # 那样会被绑死在别人的依赖升级节奏上，而这里只是多编一个小 crate。
 # `serde` 特性是给 `toml_edit::de` 用的（读回原始值填表单）。
 toml_edit = { version = "0.22", features = ["serde"] }
+# 文件系统监听：回答末尾「这一轮实际改了哪些文件」靠它，而不是去解析 shell 命令。
+notify = "8"
+# 用户在设置里写的额外忽略规则（glob）。只匹配路径字符串，不遍历目录。
+globset = "0.4"
 
 # 见 https://tauri.app/concept/size/#cargo-configuration
 [profile.release]

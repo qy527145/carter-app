@@ -39,6 +39,7 @@ use carter::session::{self, SessionOpts};
 use carter::tools::Tool;
 
 use crate::app_settings::AppSettings;
+use crate::changes::ChangeWatch;
 use crate::goal::{self, Goal, GoalSignal, GoalStatus, TurnOutcome};
 use crate::protocol::{AppEvent, Command, GoalCommand, GoalView, SessionEvent, TodoView, UsageView};
 use crate::shell::{AppShell, AskRegistry, SessionHandle};
@@ -69,6 +70,11 @@ pub struct StartedSession {
     /// 目标变化本来靠事件推，但 `ready` / `goal` 事件可能在界面挂上监听之前就发出去了
     /// （`create_session` 是 await 的，事件比 `beginSession` 先到）—— 返回值是那条路的兜底。
     pub goal: Option<GoalView>,
+    /// 历史里每一轮**实际改过**的文件（见 `changes.rs`）。
+    ///
+    /// 与 `goal` 同理：这些数据只存在应用私有目录里，不能回放成事件，所以随
+    /// `create_session` 一次性带回；实时那几轮走 `files_changed` 事件。
+    pub changes: Vec<crate::changes::TurnFiles>,
 }
 
 /// 新建 / 续接一个会话。返回的句柄立即可以投递命令。
@@ -193,12 +199,16 @@ pub fn start_session(
         // 只有「新起的会话」才配自动标题：续接一条已经在聊的会话，标题早该有了；
         // 而它没有的时候（老版本建的），也不该拿用户**现在**说的这句话去给它起名。
         title_pending: !resumed && unnamed,
+        changes: None,
+        changes_turn: 0,
     };
     tokio::spawn(runner.run());
+    let changes = crate::changes::load(&handle.id);
     Ok(StartedSession {
         handle,
         history,
         goal: goal_view,
+        changes,
     })
 }
 
@@ -268,6 +278,8 @@ pub(crate) fn start_side(w: SideWiring, id: String, parent_id: String) -> Arc<Se
         fixed_system: Some(w.system),
         // 侧边聊天不落盘，也就没有「会话列表里那一行」要起名。
         title_pending: false,
+        changes: None,
+        changes_turn: 0,
     };
     tokio::spawn(runner.run());
     handle
@@ -462,6 +474,16 @@ struct Runner {
     fixed_system: Option<Vec<String>>,
     /// 还欠这条会话一个自动标题（首轮开始时去生成，见 [`Runner::spawn_title`]）。
     title_pending: bool,
+    /// 正在收集的这一轮的文件变更。轮首建、轮末收（见 `changes.rs`）。
+    ///
+    /// `None` = 不在轮内（空闲时），或监听器没建起来 —— 两种情况都只是「这一轮
+    /// 没有清单可列」，不该影响对话本身。
+    changes: Option<ChangeWatch>,
+    /// 上面那个监听器对应哪一轮。
+    ///
+    /// 必须在轮首记下来：`carter::agent::run_turn` 一进去就把 `thread.user_turns`
+    /// 加一，轮末再去读就成了**下一轮**的号 —— 历史回看时清单会挂错回答。
+    changes_turn: u32,
 }
 
 impl Runner {
@@ -668,11 +690,13 @@ impl Runner {
         // 轮次开头也发布一次：这一轮可能很长，侧边聊天在这期间至少要能看到
         // 「用户提了什么要求」（之后的进展由 `live` 补上）。
         self.ctx.handle.publish_history(&self.thread.messages);
+        self.begin_changes();
         self.emit(SessionEvent::TurnStarted {
             turn: self.thread.user_turns,
         });
 
         let result = self.run_one_turn(git.clone()).await;
+        self.finish_changes(result.used_tools).await;
         self.drive_goal(result, git).await;
         self.emit(SessionEvent::Idle);
     }
@@ -975,16 +999,55 @@ impl Runner {
                     // 被推过；界面把它渲染成「自动继续」的分隔条而不是用户气泡）。
                     self.thread.append_user(goal::CONTINUE_PROMPT);
                     self.ctx.handle.publish_history(&self.thread.messages);
+                    self.begin_changes();
                     self.emit(SessionEvent::TurnStarted {
                         turn: self.thread.user_turns,
                     });
                     result = self.run_one_turn(git.clone()).await;
+                    self.finish_changes(result.used_tools).await;
                     if self.ctx.handle.close.is_cancelled() {
                         return;
                     }
                 }
             }
         }
+    }
+
+    /// 轮首：开始监听 cwd 的文件变更。
+    ///
+    /// 监听器只是**观察**，不参与工具执行 —— 它建不起来也不影响这一轮。
+    fn begin_changes(&mut self) {
+        // 上一轮理论上已经收走了；真剩下来也别把两轮的变更混在一起。
+        self.changes = None;
+        self.changes_turn = self.thread.user_turns;
+        self.changes = ChangeWatch::start(&self.ctx.cwd, &self.ctx.settings.changes_ignore);
+    }
+
+    /// 轮末：收回这一轮真实变更的文件，落盘并推给界面。
+    ///
+    /// 空清单不发事件 —— 前端仍会从成功的 `write_file` / `edit_file` 参数里补，
+    /// 那些落在 cwd 之外的写入（比如写 `/tmp`）监听器本来就看不见。
+    async fn finish_changes(&mut self, used_tools: bool) {
+        let Some(watch) = self.changes.take() else { return };
+        // 这一轮一个工具都没调，就不可能有人动文件 —— 连那 150ms 的收尾等待一起省掉。
+        if !used_tools {
+            return;
+        }
+        let done = watch.finish().await;
+        if done.files.is_empty() {
+            return;
+        }
+        let turn = self.changes_turn;
+        if let Err(e) =
+            crate::changes::record(&self.ctx.handle.id, turn, &done.files, done.baseline.as_deref())
+        {
+            // 落不了盘只影响历史回看，实时清单照发。
+            tracing::warn!("记录本轮变更文件失败：{e}");
+        }
+        self.emit(SessionEvent::FilesChanged {
+            turn,
+            files: done.files,
+        });
     }
 
     /// 进行中那一轮要不要记下来：只有会被侧边聊天看的主会话才记。

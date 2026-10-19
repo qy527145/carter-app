@@ -104,6 +104,8 @@ struct CreatedSession {
     history: Vec<MessageView>,
     /// 这条会话现有的长任务目标（`/goal`）。续接时从盘上读回来。
     goal: Option<carter_app_core::GoalView>,
+    /// 历史里每一轮实际改过的文件。事件不回放，所以随历史一起带回。
+    changes: Vec<carter_app_core::TurnFiles>,
 }
 
 /// 新建或续接一个会话，并把已有历史一并带回。
@@ -134,6 +136,7 @@ async fn create_session(
         cwd: handle.cwd.to_string_lossy().to_string(),
         history: started.history,
         goal: started.goal,
+        changes: started.changes,
     })
 }
 
@@ -212,8 +215,10 @@ fn delete_session(shell: State<'_, Arc<AppShell>>, session_id: String) -> Result
     // 先关会话再删文件。会话任务持有同一份会话文件的 Recorder，不先关掉的话
     // 它下一轮 append 会把文件重新写出来 —— 表现为「删了又回来了」。
     shell.close_session(&session_id);
-    // 目标也一并清掉：那个目录是按会话 id 分文件的，不删就会跟着历史会话一直长。
+    // 目标与变更记录也一并清掉：那两个目录都是按会话 id 分文件的，不删就会
+    // 跟着历史会话一直长。
     carter_app_core::goal::remove(&session_id);
+    carter_app_core::changes::remove(&session_id);
     sessions::delete(&session_id)
 }
 
@@ -738,6 +743,71 @@ fn read_image(token: String) -> Option<String> {
     carter_app_core::images::read_image(&token)
 }
 
+/// 文件预览：点击「本轮变更的文件」里的一行时打开。
+///
+/// 读的是**现在磁盘上的内容**，不是历史快照 —— 预览要回答的是「它现在什么样」。
+/// 返回的是可渲染的形状（文本 / 图片 data URL / 二进制 / 消失 / 读失败），
+/// 前端不需要自己判断文件类型。
+#[tauri::command]
+fn preview_file(cwd: Option<String>, path: String) -> carter_app_core::FilePreview {
+    carter_app_core::preview::preview(
+        &cwd.map(PathBuf::from).unwrap_or_else(default_cwd),
+        &path,
+    )
+}
+
+/// 「本轮变更的文件」的固定忽略名单，给设置页展示用。
+///
+/// 从核心拿，不在前端抄一份 —— 抄的那份迟早和真实行为对不上，而「界面上写着会
+/// 忽略、实际上没忽略」比不显示更糟（与工具页同一个道理）。
+#[derive(serde::Serialize)]
+struct ChangeRules {
+    dirs: Vec<String>,
+    files: Vec<String>,
+}
+
+#[tauri::command]
+fn change_rules() -> ChangeRules {
+    ChangeRules {
+        dirs: carter_app_core::changes::builtin_ignored_dirs()
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        files: carter_app_core::changes::builtin_ignored_files()
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+    }
+}
+
+/// 某一轮里某个文件的 diff：点开预览时按需算（见 core 的 `changes.rs`）。
+///
+/// 只有 cwd 在 git 仓库里、且那一轮记下了基线时才有结果；其余情况返回
+/// `unavailable` 与一句人话原因。`spawn_blocking`：要起 git 进程，别占着
+/// async 的工作线程。
+#[tauri::command]
+async fn file_diff(
+    session_id: String,
+    turn: u32,
+    cwd: String,
+    path: String,
+) -> carter_app_core::FileDiff {
+    let fallback = path.clone();
+    tokio::task::spawn_blocking(move || {
+        carter_app_core::changes::diff_for(
+            &session_id,
+            turn,
+            std::path::Path::new(&cwd),
+            &path,
+        )
+    })
+    .await
+    .unwrap_or_else(|_| carter_app_core::FileDiff::Unavailable {
+        path: fallback,
+        reason: "计算 diff 失败".into(),
+    })
+}
+
 // ---------------------------------------------------------------------------
 // 报文检视
 // ---------------------------------------------------------------------------
@@ -914,6 +984,9 @@ pub fn run() {
             list_files,
             save_image,
             read_image,
+            preview_file,
+            file_diff,
+            change_rules,
             // 报文检视
             list_exchanges,
             get_exchange,

@@ -43,6 +43,16 @@ pub struct AppSettings {
     /// 的技能一次性全塞进每一轮请求的系统提示。想挑几个用，就只有「按名字忽略」
     /// 这一条路可走。
     pub ignored_skills: Vec<String>,
+    /// 「本轮变更的文件」清单额外忽略的规则，每条一个 glob，**相对会话 cwd**。
+    ///
+    /// 内置的 `.git` / `node_modules` / `target` 等固定规则不在这里 —— 那些是
+    /// 绝大多数项目都成立的噪音，不该要求每个人手写一遍。这里只放「这个项目
+    /// 特有的、不想看见的产物」。
+    ///
+    /// 写法与 `.gitignore` 类似：含 `/` 的按相对路径匹配（`dist/**`），
+    /// 不含 `/` 的按任意层级的名字匹配（`*.log`、`__generated__`）。后向
+    /// 兼容：旧文件没有这个字段时就是空列表。
+    pub changes_ignore: Vec<String>,
 }
 
 impl Default for AppSettings {
@@ -53,6 +63,7 @@ impl Default for AppSettings {
             sidebar_width: 260,
             skill_roots: Vec::new(),
             ignored_skills: Vec::new(),
+            changes_ignore: Vec::new(),
         }
     }
 }
@@ -199,6 +210,7 @@ mod tests {
             sidebar_width: 300,
             skill_roots: vec!["C:\\scans\\claude".into()],
             ignored_skills: vec!["pdf".into()],
+            changes_ignore: vec!["*.snap".into()],
         };
         s.save_to(&path).unwrap();
 
@@ -208,6 +220,7 @@ mod tests {
         assert_eq!(back.sidebar_width, 300);
         assert_eq!(back.skill_roots, vec!["C:\\scans\\claude".to_string()]);
         assert!(back.skill_ignored("pdf"));
+        assert_eq!(back.changes_ignore, vec!["*.snap".to_string()]);
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }

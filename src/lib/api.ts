@@ -47,6 +47,14 @@ export type SessionEvent =
   /** 长任务目标变了（设定 / 暂停 / 恢复 / 完成 / 清除）。`null` = 已经没有目标。 */
   | { type: "goal"; goal: GoalView | null }
   | { type: "ask_form"; id: number; questions: AskQuestion[] }
+  /**
+   * 这一轮**实际**改了哪些文件（相对会话 cwd，`/` 分隔）。
+   *
+   * 后端在轮首挂文件系统监听、轮末收回，所以 `bash`、子进程、MCP 的写入都在里面。
+   * 与前端的 `write_file` / `edit_file` 参数合并后显示在回答末尾（后者能补上
+   * 写在 cwd 之外的文件，并提供「写入 / 修改」的来源标签）。
+   */
+  | { type: "files_changed"; turn: number; files: string[] }
   | { type: "turn_usage"; usage: UsageView; cost: number; model: string }
   | { type: "notice"; message: string }
   /** 会话标题自动生成好了。前端据此刷新会话列表（侧栏那一行 + 顶部标题）。 */
@@ -167,6 +175,13 @@ export type AppSettings = {
   skill_roots: string[];
   /** 按名字忽略的技能。**只作用于外部扫描路径**（本地技能靠搬目录启停）。 */
   ignored_skills: string[];
+  /**
+   * 「本轮变更的文件」额外忽略的规则，每条一个 glob，相对会话 cwd。
+   *
+   * 含 `/` 按相对路径匹配（`dist/**`），不含 `/` 按任意层级的名字匹配（`*.log`）。
+   * 内置目录规则与 `.gitignore` 不在这里，它们始终生效。
+   */
+  changes_ignore: string[];
 };
 
 export type AppInfo = {
@@ -203,6 +218,13 @@ export function openDevtools(): Promise<void> {
 // 会话
 // ---------------------------------------------------------------------------
 
+/** 历史里某一轮实际改过的文件。 */
+export type TurnFiles = {
+  turn: number;
+  /** 相对会话 cwd，`/` 分隔。 */
+  files: string[];
+};
+
 export type CreatedSession = {
   session_id: string;
   model: string;
@@ -210,6 +232,8 @@ export type CreatedSession = {
   history: MessageView[];
   /** 这条会话现有的长任务目标。 */
   goal: GoalView | null;
+  /** 历史里每一轮实际改过的文件。事件不回放，所以随历史一起带回。 */
+  changes: TurnFiles[];
 };
 
 /** 侧边聊天（`/btw`）：继承主会话上下文、不落盘、关掉即丢。 */
@@ -705,6 +729,61 @@ export function saveImage(data: string, ext?: string | null): Promise<string> {
 export function readImage(token: string): Promise<string | null> {
   return invoke<string | null>("read_image", { token });
 }
+
+/**
+ * 文件预览：点击「本轮变更的文件」里的一行时打开。
+ *
+ * `path` 可以是相对会话 cwd 的路径，也可以是绝对路径（工具可能写到 cwd 之外）。
+ * 后端把「文件不在了 / 是二进制 / 是图片 / 读失败」都收成枚举变体，所以这里
+ * 不会 reject —— 调用方按 `kind` 分别渲染即可。
+ */
+export function previewFile(cwd: string | null, path: string): Promise<FilePreview> {
+  return invoke<FilePreview>("preview_file", { cwd, path });
+}
+
+/** 一个文件的预览结果。`kind` 决定弹窗里画什么。 */
+/**
+ * 某一轮里某个文件的 diff（点开预览时按需算）。
+ *
+ * 只有 cwd 在 git 仓库里、且那一轮记下了轮首基线时才会有 `diff`；其余情况是
+ * `unavailable` + 一句原因。
+ */
+export type FileDiff =
+  | { kind: "diff"; path: string; text: string; truncated: boolean }
+  | { kind: "empty"; path: string }
+  | { kind: "unavailable"; path: string; reason: string };
+
+export function fileDiff(
+  sessionId: string,
+  turn: number,
+  cwd: string,
+  path: string,
+): Promise<FileDiff> {
+  return invoke<FileDiff>("file_diff", { sessionId, turn, cwd, path });
+}
+
+/** 「本轮变更的文件」的固定忽略名单。设置页展示用，真实来源在 core 里。 */
+export type ChangeRules = { dirs: string[]; files: string[] };
+
+export function changeRules(): Promise<ChangeRules> {
+  return invoke<ChangeRules>("change_rules");
+}
+
+export type FilePreview =
+  | {
+      kind: "text";
+      path: string;
+      bytes: number;
+      mtime: number | null;
+      content: string;
+      /** 文件过大，`content` 只是开头一段（后端已截断）。 */
+      truncated: boolean;
+    }
+  | { kind: "image"; path: string; bytes: number; mtime: number | null; data_url: string }
+  | { kind: "binary"; path: string; bytes: number; mtime: number | null }
+  | { kind: "dir"; path: string }
+  | { kind: "missing"; path: string }
+  | { kind: "error"; path: string; message: string };
 
 // ---------------------------------------------------------------------------
 // 报文检视（需求 4）：抓到的原始 HTTP 交换

@@ -162,6 +162,12 @@ pub enum SessionEvent {
     Goal { goal: Option<GoalView> },
     /// 模型在等用户回答问题。前端渲染成表单，用 `answer_form` 回。
     AskForm { id: u64, questions: Vec<AskQuestion> },
+    /// 这一轮**实际**改了哪些文件（相对会话 cwd，`/` 分隔）。
+    ///
+    /// 来自轮首挂上、轮末收起的文件系统监听（见 `changes.rs`）—— 不是解析工具
+    /// 参数，所以 `bash`、子进程、MCP 的写入都在里面。轮末发一次，界面上挂在
+    /// 这条回答的末尾。
+    FilesChanged { turn: u32, files: Vec<String> },
     /// 一轮的用量与成本。
     TurnUsage {
         usage: UsageView,
