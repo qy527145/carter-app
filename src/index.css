@@ -249,9 +249,25 @@ body {
   animation-delay: 0.3s;
 }
 
+/* 右键菜单：贴光标弹出时的一点微动效。时长要短 —— 菜单是「立刻要能点」的东西。 */
+@keyframes carter-menu-in {
+  from {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.carter-menu {
+  animation: carter-menu-in 90ms ease-out;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .carter-cursor,
-  .carter-dots > span {
+  .carter-dots > span,
+  .carter-menu {
     animation: none;
   }
 }

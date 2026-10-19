@@ -70,6 +70,16 @@ fn app_info(shell: State<'_, Arc<AppShell>>) -> AppInfo {
     }
 }
 
+/// 开发用：打开 WebView 的开发者工具。
+///
+/// 应用接管右键菜单之后，默认菜单里那个「检查元素」也没了。前端只在 dev 构建里
+/// 挂这个入口（见 `src/components/ui/ContextMenu.tsx`）；release 构建没有
+/// `devtools` feature，调用它不会有任何效果。
+#[tauri::command]
+fn open_devtools(webview: tauri::WebviewWindow) {
+    webview.open_devtools();
+}
+
 // ---------------------------------------------------------------------------
 // 界面设置
 //
@@ -858,6 +868,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             // 应用信息与设置
             app_info,
+            open_devtools,
             set_app_settings,
             // 会话
             create_session,

@@ -10,6 +10,7 @@ import { Inspector } from "./components/Inspector";
 import { SidePanel } from "./components/SidePanel";
 import { Sidebar } from "./components/Sidebar";
 import { StatusBar } from "./components/StatusBar";
+import { ContextMenuProvider } from "./components/ui/ContextMenu";
 import { ToastContainer } from "./components/ui/Toast";
 import { SettingsPage } from "./views/settings/SettingsPage";
 import { appInfo, createSession, listSessions } from "./lib/api";
@@ -63,23 +64,25 @@ export default function App() {
     // 这一层是全部滚动容器的根：它一旦比视口高，对话区就会把输入框顶出屏幕外
     // （表现是「输入框不见了」，而页面上看不出任何错误）。
     // `overflow-hidden` 是第二道保险。
-    <div className="flex h-screen overflow-hidden bg-base text-ink">
-      <Sidebar />
-      {/* min-h-0 同理：不加的话 flex 子项的自动最小高度是内容高度，
-          内容一长就把这一列撑开，里面的滚动容器就永远不滚了。 */}
-      <main className="flex min-h-0 min-w-0 flex-1 flex-col">
-        {view === "chat" ? (
-          <>
-            <ChatView />
-            <StatusBar />
-          </>
-        ) : (
-          <SettingsPage />
-        )}
-      </main>
-      <SidePanel />
-      <Inspector />
-      <ToastContainer />
-    </div>
+    <ContextMenuProvider>
+      <div className="flex h-screen overflow-hidden bg-base text-ink">
+        <Sidebar />
+        {/* min-h-0 同理：不加的话 flex 子项的自动最小高度是内容高度，
+            内容一长就把这一列撑开，里面的滚动容器就永远不滚了。 */}
+        <main className="flex min-h-0 min-w-0 flex-1 flex-col">
+          {view === "chat" ? (
+            <>
+              <ChatView />
+              <StatusBar />
+            </>
+          ) : (
+            <SettingsPage />
+          )}
+        </main>
+        <SidePanel />
+        <Inspector />
+        <ToastContainer />
+      </div>
+    </ContextMenuProvider>
   );
 }

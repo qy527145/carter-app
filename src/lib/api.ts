@@ -189,6 +189,16 @@ export function setAppSettings(settings: AppSettings): Promise<void> {
   return invoke<void>("set_app_settings", { settings });
 }
 
+/**
+ * 开发用：打开 WebView 的开发者工具。
+ *
+ * 应用接管右键菜单之后，默认菜单里那个「检查元素」也没了 —— 这个命令把同一个入口
+ * 留给 dev 构建（见 components/ui/ContextMenu.tsx），正式包里不会挂出来。
+ */
+export function openDevtools(): Promise<void> {
+  return invoke<void>("open_devtools");
+}
+
 // ---------------------------------------------------------------------------
 // 会话
 // ---------------------------------------------------------------------------

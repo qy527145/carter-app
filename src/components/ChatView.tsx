@@ -17,6 +17,7 @@ import {
   Brain,
   ChevronRight,
   CircleCheck,
+  Copy,
   FileText,
   LoaderCircle,
   ScanSearch,
@@ -26,11 +27,13 @@ import {
 } from "lucide-react";
 
 import { useStore, type Item, type Turn } from "../store";
+import { copyText } from "../lib/clipboard";
 import { AskForm } from "./AskForm";
 import { Composer, MessageImages } from "./Composer";
 import { GoalBar } from "./GoalBar";
 import { Glyph, ServerCard, ToolCard } from "./toolcards/ToolCard";
 import { IconButton } from "./ui/Button";
+import { hasSelection, useContextMenu, type MenuEntry } from "./ui/ContextMenu";
 import { Banner } from "./ui/Panel";
 
 type ImageItem = Extract<Item, { kind: "image" }>;
@@ -138,9 +141,41 @@ function AssistantTurn({
   showPayload: boolean;
 }) {
   const openInspector = useStore((s) => s.openInspector);
+  const menu = useContextMenu();
   const items = t.items;
+
+  // 复制的是**正文**：思考与工具输出属于过程，不是用户想带走的那段话。
+  const answer = items
+    .filter((i): i is Extract<Item, { kind: "text" }> => i.kind === "text")
+    .map((i) => i.text)
+    .join("\n\n")
+    .trim();
+
+  const onContextMenu = (e: React.MouseEvent) => {
+    // 有选中文字时让系统菜单出来：用户要的多半是「复制选中的这一段」。
+    if (hasSelection()) return;
+    const entries: MenuEntry[] = [];
+    if (answer) {
+      entries.push({
+        label: "复制回答",
+        icon: <Copy size={12} />,
+        onSelect: () => void copyText(answer),
+      });
+    }
+    if (showPayload && t.turn !== undefined) {
+      entries.push({
+        label: "查看本轮报文",
+        icon: <ScanSearch size={12} />,
+        onSelect: () => openInspector(t.turn ?? null),
+      });
+    }
+    if (entries.length === 0) return;
+    e.preventDefault();
+    menu.open({ x: e.clientX, y: e.clientY }, entries);
+  };
+
   return (
-    <div className="group/msg min-w-0 space-y-2">
+    <div className="group/msg min-w-0 space-y-2" onContextMenu={onContextMenu}>
       {/* 自动继续的轮次：用户没说话，是长任务目标推起来的。画一条分隔说明来历 ——
           不标的话，界面上会看起来像模型自己莫名其妙又说了很长一段。 */}
       {t.auto && (
@@ -190,8 +225,22 @@ function AssistantTurn({
 }
 
 function UserTurn({ turn }: { turn: Extract<Turn, { role: "user" }> }) {
+  const menu = useContextMenu();
   return (
-    <div className="flex justify-end">
+    <div
+      className="flex justify-end"
+      onContextMenu={(e) => {
+        if (hasSelection()) return;
+        e.preventDefault();
+        menu.open({ x: e.clientX, y: e.clientY }, [
+          {
+            label: "复制消息",
+            icon: <Copy size={12} />,
+            onSelect: () => void copyText(turn.text),
+          },
+        ]);
+      }}
+    >
       {/* 粘贴的图片在会话里存的是 `[img:...]` 引用 token，回看时要渲染回图。
           纯文本消息走 MessageImages 的文本分支，行为与直接输出一致。 */}
       <div className="max-w-[75%] break-words rounded-2xl bg-bubble px-3.5 py-2 text-sm leading-relaxed text-ink">
