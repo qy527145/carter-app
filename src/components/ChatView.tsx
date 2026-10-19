@@ -20,6 +20,7 @@ import {
   Copy,
   FileText,
   LoaderCircle,
+  Pencil,
   ScanSearch,
   Target,
   TriangleAlert,
@@ -126,6 +127,116 @@ function ItemView({
 }
 
 // ---------------------------------------------------------------------------
+// 本轮动过的文件
+// ---------------------------------------------------------------------------
+
+/** 一条「本轮动过这个文件」的记录。同一文件被改多次只占一行，计数累加。 */
+type ChangedFile = { path: string; kind: "write" | "edit"; count: number };
+
+function argStr(args: unknown, key: string): string | null {
+  if (args && typeof args === "object" && key in args) {
+    const v = (args as Record<string, unknown>)[key];
+    if (typeof v === "string") return v;
+  }
+  return null;
+}
+
+function changedFiles(items: Item[]): ChangedFile[] {
+  const byPath = new Map<string, ChangedFile>();
+  for (const item of items) {
+    if (item.kind !== "tool") continue;
+    if (item.name !== "write_file" && item.name !== "edit_file") continue;
+    // 失败的写入没改到磁盘；还在跑（没有结果）的先不算，等结果回来再说。
+    if (!item.result?.ok) continue;
+    const path = argStr(item.args, "path") ?? argStr(item.args, "file_path");
+    if (!path) continue;
+    const prev = byPath.get(path);
+    if (prev) {
+      prev.count += 1;
+      // 先 write 再 edit 的文件仍标「写入」：同一条路径的语义不要来回跳。
+      if (item.name === "write_file") prev.kind = "write";
+    } else {
+      byPath.set(path, {
+        path,
+        kind: item.name === "write_file" ? "write" : "edit",
+        count: 1,
+      });
+    }
+  }
+  return [...byPath.values()];
+}
+
+/**
+ * 一轮跑完后「到底改了哪几个文件」。
+ *
+ * 工具卡片已经在流里各画了一张，但十几次调用之后，这件事不该靠用户往上翻着数。
+ * 只认**成功的** `write_file` / `edit_file`：`bash` 里重定向写文件认不出来，
+ * 与其猜错不如不列。
+ */
+function ChangedFiles({ files }: { files: ChangedFile[] }) {
+  if (files.length === 0) return null;
+  return (
+    <div className="rounded-lg border border-edge bg-card px-3 py-2">
+      <div className="mb-1.5 flex items-center gap-1.5 text-[11px] text-dim">
+        <Pencil size={11} />
+        本轮变更了 {files.length} 个文件
+      </div>
+      <ul className="space-y-1">
+        {files.map((f) => (
+          <li key={f.path} className="flex min-w-0 items-center gap-2">
+            <Glyph tone={f.kind === "write" ? "blue" : "orange"}>
+              {f.kind === "write" ? <FileText size={11} /> : <Pencil size={11} />}
+            </Glyph>
+            <span className="mono min-w-0 flex-1 truncate text-xs text-ink" title={f.path}>
+              {f.path}
+            </span>
+            {f.count > 1 && <span className="shrink-0 text-[10px] text-dim">×{f.count}</span>}
+            <span className="shrink-0 text-[10px] text-dim">
+              {f.kind === "write" ? "写入" : "修改"}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/**
+ * 每一轮用户输入收尾时要列的文件。
+ *
+ * 实时那一轮里，整个工具循环都落在同一条助手轮上（`TurnStarted` 按用户输入发），
+ * 但历史里工具的每次往返各是一条助手消息（见 `store.ts::historyToTurns`）。
+ * 按 `turn` 号把相邻的助手轮并成一组、把汇总挂在**最后一个**上面，实时与回看
+ * 才会落在同一个位置 —— 这条回答的末尾，而不是半途某次工具调用下面。
+ */
+function changedFilesPerTurn(turns: Turn[]): ChangedFile[][] {
+  const out: ChangedFile[][] = turns.map(() => []);
+  let i = 0;
+  while (i < turns.length) {
+    const t = turns[i];
+    if (t.role !== "assistant") {
+      i += 1;
+      continue;
+    }
+    let j = i;
+    // 没有 turn 号（理论上只在事件竞态里出现）就不合并，按自己的 items 算。
+    if (t.turn !== undefined) {
+      while (j + 1 < turns.length) {
+        const next = turns[j + 1];
+        if (next.role !== "assistant" || next.turn !== t.turn) break;
+        j += 1;
+      }
+    }
+    const items = turns
+      .slice(i, j + 1)
+      .flatMap((x) => (x.role === "assistant" ? x.items : []));
+    out[j] = changedFiles(items);
+    i = j + 1;
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // 轮次
 // ---------------------------------------------------------------------------
 
@@ -134,11 +245,14 @@ function AssistantTurn({
   isLast,
   streaming,
   showPayload,
+  changed,
 }: {
   turn: AssistantTurnT;
   isLast: boolean;
   streaming: boolean;
   showPayload: boolean;
+  /** 这一轮用户输入改过的文件，由 `TurnList` 按 `turn` 聚合（见那边的注释）。 */
+  changed: ChangedFile[];
 }) {
   const openInspector = useStore((s) => s.openInspector);
   const menu = useContextMenu();
@@ -206,6 +320,7 @@ function AssistantTurn({
           showCursor={streaming && isLast && i === items.length - 1 && item.kind === "text"}
         />
       ))}
+      {changed.length > 0 && <ChangedFiles files={changed} />}
       {/* 把这条回答对回产生它的那次 API 请求。轮次号对**历史消息**也成立
           （后端按同样口径算好，见 `view.rs`），所以切走再回来入口还在。
           侧边聊天不给（`showPayload=false`）：它不落盘、不抓包，按主对话的轮次号
@@ -255,15 +370,23 @@ function TurnView({
   isLast,
   streaming,
   showPayload,
+  changed,
 }: {
   turn: Turn;
   isLast: boolean;
   streaming: boolean;
   showPayload: boolean;
+  changed: ChangedFile[];
 }) {
   if (turn.role === "user") return <UserTurn turn={turn} />;
   return (
-    <AssistantTurn turn={turn} isLast={isLast} streaming={streaming} showPayload={showPayload} />
+    <AssistantTurn
+      turn={turn}
+      isLast={isLast}
+      streaming={streaming}
+      showPayload={showPayload}
+      changed={changed}
+    />
   );
 }
 
@@ -281,6 +404,9 @@ export function TurnList({
   /** 是否给助手轮画「查看报文」入口。侧边聊天传 false（它不抓包）。 */
   showPayload?: boolean;
 }) {
+  // 挂在「这一轮用户输入的最后一条助手消息」上，而不是每条助手消息各算各的。
+  const changed = changedFilesPerTurn(turns);
+
   return (
     <div className="flex flex-col gap-6">
       {turns.map((t, i) => (
@@ -290,6 +416,7 @@ export function TurnList({
           isLast={i === turns.length - 1}
           streaming={streaming}
           showPayload={showPayload}
+          changed={changed[i]}
         />
       ))}
     </div>
