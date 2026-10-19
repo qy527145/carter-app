@@ -144,22 +144,23 @@ export function Sidebar() {
           </Button>
         </div>
 
-        {sessions.length > 4 && (
-          <div className="px-2 pb-2">
-            <div className="relative">
-              <Search
-                size={12}
-                className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-dim"
-              />
-              <Input
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="搜索会话"
-                className="py-1.5 pl-7 text-xs"
-              />
-            </div>
+        {/* 常驻，不按会话条数隐藏 —— 会话列表短的时候藏起来省不了多少地方，
+            却让人以为「这个应用没有搜索」；而且隐藏期间 query 仍然在生效，
+            会出现列表被过滤着、却没有输入框可以清空的状态。 */}
+        <div className="px-2 pb-2">
+          <div className="relative">
+            <Search
+              size={12}
+              className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-dim"
+            />
+            <Input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="搜索会话"
+              className="py-1.5 pl-7 text-xs"
+            />
           </div>
-        )}
+        </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
           {sessions.length === 0 && (
