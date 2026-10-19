@@ -33,6 +33,13 @@ pub struct ExchangeRecord {
 
     pub method: String,
     pub url: String,
+    /// 这次交换说的是哪个线协议（`anthropic` / `openai_chat` / `openai_responses`）。
+    ///
+    /// 存的是**最终字节**，把字节解回内容块必须知道按哪套语法解 —— 而 URL 反推
+    /// 不可靠（自建镜像换个路径就猜错）。会话建起来时从渠道配置里取，回填给钩子。
+    /// 老记录里没有这个字段（`None`），界面按 URL 兜底。
+    #[serde(default)]
+    pub protocol: Option<String>,
     pub request_headers: Vec<(String, String)>,
     /// 原始请求体（UTF-8 文本；非 UTF-8 时给一段占位说明）。
     pub request_body: String,
@@ -124,6 +131,11 @@ pub struct CaptureHook {
     store: Arc<CaptureStore>,
     pending: Mutex<HashMap<String, Pending>>,
     seq: std::sync::atomic::AtomicU64,
+    /// 本会话用的线协议（见 `ExchangeRecord::protocol` 的说明）。
+    ///
+    /// 钩子先建、协议后知道（协议是解析 provider 时才定下来的），所以留一个
+    /// 回填口子 —— 回填发生在任何请求之前，钩子读到的一定是已填好的值。
+    protocol: Mutex<Option<String>>,
 }
 
 impl CaptureHook {
@@ -132,7 +144,14 @@ impl CaptureHook {
             store,
             pending: Mutex::new(HashMap::new()),
             seq: std::sync::atomic::AtomicU64::new(0),
+            protocol: Mutex::new(None),
         }
+    }
+
+    /// 告诉钩子这条会话说的是哪个协议。每次解析 provider 之后都要调一次
+    /// （换模型可能换协议，比如从 anthropic 渠道切到 deepseek）。
+    pub fn set_protocol(&self, protocol: impl Into<String>) {
+        *self.protocol.lock().unwrap() = Some(protocol.into());
     }
 
     fn key(req: &HttpRequest) -> String {
@@ -169,6 +188,7 @@ impl RequestHook for CaptureHook {
             meta,
             method: format!("{:?}", req.method),
             url: req.url.clone(),
+            protocol: self.protocol.lock().unwrap().clone(),
             request_headers: redact(&req.headers),
             request_body: text_of(&req.body),
             status: None,

@@ -375,7 +375,9 @@ export function historyToTurns(history: MessageView[]): Turn[] {
       .map(blockToItem)
       .filter((x): x is Item => x !== null);
     if (items.length) {
-      turns.push({ role: "assistant", items, auto: pendingAuto || undefined });
+      // `turn` 由后端算好（见 `view.rs`）—— 界面上「这条回答对应哪次请求」全靠它，
+      // 少了它历史里的每条回答都没有「查看报文」入口。
+      turns.push({ role: "assistant", items, turn: msg.turn, auto: pendingAuto || undefined });
       pendingAuto = false;
     }
   }

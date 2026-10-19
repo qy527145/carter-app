@@ -130,10 +130,12 @@ function AssistantTurn({
   turn: t,
   isLast,
   streaming,
+  showPayload,
 }: {
   turn: AssistantTurnT;
   isLast: boolean;
   streaming: boolean;
+  showPayload: boolean;
 }) {
   const openInspector = useStore((s) => s.openInspector);
   const items = t.items;
@@ -169,9 +171,11 @@ function AssistantTurn({
           showCursor={streaming && isLast && i === items.length - 1 && item.kind === "text"}
         />
       ))}
-      {/* 把这条回答对回产生它的那次 API 请求。历史消息没有轮次号（事件不回放），
-          所以只有本轮之后的消息才拿得到这个入口。 */}
-      {t.turn !== undefined && items.length > 0 && (
+      {/* 把这条回答对回产生它的那次 API 请求。轮次号对**历史消息**也成立
+          （后端按同样口径算好，见 `view.rs`），所以切走再回来入口还在。
+          侧边聊天不给（`showPayload=false`）：它不落盘、不抓包，按主对话的轮次号
+          去开主对话的报文只会指错地方。 */}
+      {showPayload && t.turn !== undefined && items.length > 0 && (
         <button
           onClick={() => openInspector(t.turn ?? null)}
           title={`查看第 ${t.turn} 轮发出的请求`}
@@ -201,24 +205,43 @@ function TurnView({
   turn,
   isLast,
   streaming,
+  showPayload,
 }: {
   turn: Turn;
   isLast: boolean;
   streaming: boolean;
+  showPayload: boolean;
 }) {
   if (turn.role === "user") return <UserTurn turn={turn} />;
-  return <AssistantTurn turn={turn} isLast={isLast} streaming={streaming} />;
+  return (
+    <AssistantTurn turn={turn} isLast={isLast} streaming={streaming} showPayload={showPayload} />
+  );
 }
 
 /**
  * 一段对话的正文。**纯展示**（turns 从参数来，不读 store）—— 主对话与侧边聊天
  * 共用这一份：两边的事件词汇、item 形状完全相同，各画一遍必然会走样。
  */
-export function TurnList({ turns, streaming }: { turns: Turn[]; streaming: boolean }) {
+export function TurnList({
+  turns,
+  streaming,
+  showPayload = true,
+}: {
+  turns: Turn[];
+  streaming: boolean;
+  /** 是否给助手轮画「查看报文」入口。侧边聊天传 false（它不抓包）。 */
+  showPayload?: boolean;
+}) {
   return (
     <div className="flex flex-col gap-6">
       {turns.map((t, i) => (
-        <TurnView key={i} turn={t} isLast={i === turns.length - 1} streaming={streaming} />
+        <TurnView
+          key={i}
+          turn={t}
+          isLast={i === turns.length - 1}
+          streaming={streaming}
+          showPayload={showPayload}
+        />
       ))}
     </div>
   );

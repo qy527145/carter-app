@@ -12,7 +12,7 @@ carter = "0.1.4"
 # 线协议底座：三协议编解码、SSE、内容块装配。经由 carter 传递进来，但视图层
 # 要直接用 IR 类型，所以显式依赖一次。版本必须与 carter 依赖的那个一致 ——
 # 两个新类型共存会在类型检查上炸（同一个 crate 的两个版本是两套类型）。
-llm_adapt_core = "0.1.0"
+llm_adapt_core = "0.1.1"
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "fs"] }
 serde = { version = "1", features = ["derive"] }

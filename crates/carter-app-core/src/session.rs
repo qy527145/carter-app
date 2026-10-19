@@ -97,10 +97,12 @@ pub fn start_session(
         &config,
         &cache_json,
         &model_ref,
-        vec![capture_hook],
+        vec![capture_hook.clone()],
     )?;
     let (model, provider) = (resolved.model, resolved.provider);
     let unsupported_server_tools = resolved.unsupported_server_tools;
+    // 协议回填给钩子：抓包存的是最终字节，解码要先知道按哪套语法解。
+    label_capture(&capture_hook, &config, &model);
 
     // 会话文件：按 id 打开 → 续接最近的 → 起一个新的。
     let existing = match &opts.resume_id {
@@ -110,7 +112,15 @@ pub fn start_session(
     };
     let (thread, meta, resumed) = match existing {
         Some(entry) => {
-            let (t, m) = session::load(&entry)?;
+            let (mut t, m) = session::load(&entry)?;
+            // 续接时把用户轮序号接到历史后面。
+            //
+            // carter 的 `Thread::from_parts` 把它从 0 重数，而抓包（`RequestMeta.turn`）、
+            // 界面上的「第 N 轮」、历史消息上的轮次号全都按这一个数对齐 —— 从 0 重数
+            // 会让重启后的第一轮与历史里的第一轮撞号，报文面板上一个筛选条件就套住
+            // 了两条不相干的请求。压缩过的会话这里会数小（早期消息已被摘要替换），
+            // 那是压缩本身的固有损失，与这里无关。
+            t.user_turns = crate::view::user_turn_count(&t.messages);
             (t, m, true)
         }
         None => {
@@ -992,14 +1002,29 @@ fn switch_model(
 ) -> carter::Result<carter::provider::resolve::ResolvedProvider> {
     let cache_json = fetch::read_cache()?;
     // 换模型时也保留抓包 —— 否则一切换就静默停止记录了。
-    let hooks = match &ctx.capture {
-        Some(store) => vec![
-            Arc::new(crate::capture::CaptureHook::new(store.clone()))
-                as Arc<dyn llm_adapt_core::RequestHook>,
-        ],
-        None => Vec::new(),
-    };
-    carter::provider::resolve_provider(&ctx.config, &cache_json, model_ref, hooks)
+    let hook = ctx
+        .capture
+        .as_ref()
+        .map(|store| Arc::new(crate::capture::CaptureHook::new(store.clone())));
+    let hooks: Vec<Arc<dyn llm_adapt_core::RequestHook>> = hook
+        .iter()
+        .map(|h| h.clone() as Arc<dyn llm_adapt_core::RequestHook>)
+        .collect();
+    let resolved = carter::provider::resolve_provider(&ctx.config, &cache_json, model_ref, hooks)?;
+    // 换模型可能换协议（anthropic 渠道 → deepseek 渠道），钩子的协议要跟着走，
+    // 否则新报文会按旧协议的语法去解。
+    if let Some(h) = hook {
+        label_capture(&h, &ctx.config, &resolved.model);
+    }
+    Ok(resolved)
+}
+
+/// 把「这条会话说的是哪个协议」告诉抓包钩子。
+///
+/// 钩子拿不到协议（它只看得见字节），而协议是解析 provider 时才定下来的 ——
+/// 所以是「先建钩子、解析完再回填」。回填在任何请求之前完成。
+fn label_capture(hook: &crate::capture::CaptureHook, config: &Config, model: &ModelInfo) {
+    hook.set_protocol(config.provider_for(&model.provider).protocol().as_str());
 }
 
 fn emit(shell: &AppShell, session_id: &str, event: SessionEvent) {

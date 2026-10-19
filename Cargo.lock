@@ -2782,9 +2782,9 @@ checksum = "4744e383959f0db86ede514b809b1c53251889093803c05267acc7d4e7030d70"
 
 [[package]]
 name = "llm_adapt_core"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d34c468c1c46c4115f57dcb6e52c8999dacedda05683d76dd89444bc9c77d54"
+checksum = "6ee26bcf2a5249873f14a55a81f6aed764d83aeff3114ec5f74d7f13f4e9b265"
 dependencies = [
  "bytes",
  "futures-util",

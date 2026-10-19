@@ -83,7 +83,18 @@ export type BlockView =
   | { kind: "server_activity"; raw_type: string; summary: string }
   | { kind: "image"; media_type: string; hash: string | null };
 
-export type MessageView = { role: "user" | "assistant" | "system"; blocks: BlockView[] };
+export type MessageView = {
+  role: "user" | "assistant" | "system";
+  blocks: BlockView[];
+  /**
+   * 这条消息属于哪一轮用户输入（0 起）。
+   *
+   * 历史里的回答靠它接上「查看报文」——实时那一轮的轮次号走
+   * `turn_started` 事件，历史靠后端按同样的口径算出来（`view.rs`）。
+   * 两者必须是同一个数，否则点历史消息会筛到别人的报文。
+   */
+  turn?: number;
+};
 
 /** 一个问题。支持多选与带说明的选项。 */
 export type AskOption = {
