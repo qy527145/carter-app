@@ -30,6 +30,12 @@ toml_edit = { version = "0.22", features = ["serde"] }
 notify = "8"
 # 用户在设置里写的额外忽略规则（glob）。只匹配路径字符串，不遍历目录。
 globset = "0.4"
+# 内置 ripgrep 引擎：grep 工具直接用 ripgrep 的库，不要求系统装 `rg`。
+# `ignore` 负责遍历目录并遵守 .gitignore（与 rg 默认行为一致），
+# `grep-searcher` / `grep-regex` 是 ripgrep 内核的搜索驱动与正则匹配器。
+ignore = "0.4"
+grep-searcher = "0.1"
+grep-regex = "0.1"
 
 # 见 https://tauri.app/concept/size/#cargo-configuration
 [profile.release]

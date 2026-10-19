@@ -22,6 +22,9 @@
 //! * **`bash`** —— carter 那个硬编码 `sh -c`，Windows 上从 GUI 启动时 PATH 里多半
 //!   没有 `sh`，模型每次都拿到「program not found」而且看不出原因。换成
 //!   [`bash::PlatformBash`]：探测 shell、显式设工作目录、描述里写明当前平台。
+//! * **`grep`** —— carter 那个直接执行系统的 `rg` 二进制，客户机上没装就用不了。
+//!   换成 [`grep::EmbeddedGrep`]：ripgrep 的库（`ignore` + `grep-searcher` +
+//!   `grep-regex`）编进进程，行为与 `rg --line-number --no-heading` 对齐。
 //! * **文件工具**（`read_file` / `write_file` / `edit_file` / `glob` / `grep`）——
 //!   包一层 [`cwd::CwdScoped`]，把相对路径按会话的 cwd 解析。
 //! * **`ask_user_question`** —— carter 那个一次只能问一个问题、选项只有标签没有说明。
@@ -54,6 +57,7 @@ pub mod ask_user;
 pub mod bash;
 pub mod cwd;
 pub mod goal_update;
+pub mod grep;
 pub mod multi_skill;
 pub mod record;
 
@@ -76,6 +80,7 @@ use ask_user::{AskRequest, AskUserTool};
 use bash::PlatformBash;
 use cwd::{CwdScoped, ProjectMemoryGuard};
 use goal_update::GoalUpdateTool;
+use grep::EmbeddedGrep;
 use multi_skill::MultiRootSkill;
 use record::{Recorded, ToolEvent};
 
@@ -130,6 +135,12 @@ pub fn substitute(t: Arc<dyn Tool>, settings: &AppSettings, cwd: &Path) -> Arc<d
     match t.name() {
         // `bash` 换成跨平台实现。
         "bash" => Arc::new(PlatformBash::new(cwd.to_path_buf())),
+        // `grep` 换成内置 ripgrep 引擎（不依赖系统 `rg`），仍然走 `CwdScoped`
+        // 解析相对路径。构造时把 cwd 也传给它 —— 结果里的文件路径要显示成相对路径。
+        "grep" => Arc::new(CwdScoped::new(
+            Arc::new(EmbeddedGrep::new(cwd.to_path_buf())),
+            cwd.to_path_buf(),
+        )),
         // 文件工具：相对路径按会话的 cwd 解析。原实现（行号、图片、截断…）全部保留，
         // 只是在执行前把 `path` 改写成绝对路径。
         name if CwdScoped::applies_to(name) => Arc::new(CwdScoped::new(t, cwd.to_path_buf())),
@@ -281,6 +292,28 @@ mod tests {
         let kept = names(&filter_tools(&full, &AppSettings::default()));
         assert!(!kept.contains(&"task".to_string()));
         assert!(kept.contains(&"ask_user_question".to_string()));
+    }
+
+    /// `grep` 换成本应用自己的实现，名字与参数 schema 不变 —— 上游按名字下发，
+    /// 名字一变 `is_concurrent_safe` 与子 agent 的工具白名单也跟着变。
+    #[test]
+    fn the_grep_tool_is_replaced_and_keeps_its_contract() {
+        let full = ToolRegistry::builtin();
+        let settings = AppSettings::default();
+        let swapped: Vec<_> = filter_tools(&full, &settings)
+            .into_iter()
+            .map(|t| substitute(t, &settings, Path::new("/tmp")))
+            .collect();
+        let greps: Vec<_> = swapped.iter().filter(|t| t.name() == "grep").collect();
+        assert_eq!(greps.len(), 1, "必须恰好一个");
+        assert_eq!(
+            greps[0].parameters()["required"][0],
+            serde_json::json!("pattern"),
+            "参数 schema 不变"
+        );
+        // 换的是实现：描述里不该再让用户去装系统二进制。
+        assert!(!greps[0].description().contains("已安装 rg"));
+        assert!(greps[0].description().contains("内置"));
     }
 
     /// `skill` 是**就地换实现**，不是再多挂一个：池子里两个同名工具会让 `specs()`

@@ -26,6 +26,10 @@ base64 = "0.22"
 notify = { workspace = true }
 # 用户在设置里写的额外忽略规则（glob）。
 globset = { workspace = true }
+# 内置 ripgrep：grep 工具不依赖系统的 `rg` 二进制。
+ignore = { workspace = true }
+grep-searcher = { workspace = true }
+grep-regex = { workspace = true }
 
 # Windows 上用 MultiByteToWideChar 按 OEM 代码页解 cmd 的输出。
 # 中文环境下 `dir`/`ipconfig` 吐的是 GBK，直接 utf8_lossy 会得到一片 �。
