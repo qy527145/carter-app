@@ -1,4 +1,4 @@
-// 输入框：斜杠命令、@ 文件、粘贴图片、模型选择、工作目录。
+// 输入框：斜杠命令、@ 文件/目录、粘贴图片、模型选择、工作目录。
 //
 // ## 弹出菜单的位置
 //
@@ -200,6 +200,43 @@ function InlineImage({ token }: { token: string }) {
 // 输入框
 // ---------------------------------------------------------------------------
 
+/**
+ * 光标前若是一个 `@引用`，返回 `@` 的位置与之后的查询词；否则 null。
+ *
+ * 从光标往回找最近的一个 `@`，中间不能有空白 —— 有空白说明那个 `@` 已经是
+ * 上一个词的事了；`@` 本身也要在词首（邮箱里的 `@` 不算）。
+ */
+function atRefAt(text: string, caret: number): { start: number; query: string } | null {
+  const upto = text.slice(0, caret);
+  const at = upto.lastIndexOf("@");
+  if (at < 0) return null;
+  const query = upto.slice(at + 1);
+  if (/\s/.test(query)) return null;
+  const prev = at > 0 ? upto[at - 1] : " ";
+  if (!/\s/.test(prev)) return null;
+  return { start: at, query };
+}
+
+/** 光标前的 `@` 查询词（菜单用它来筛列表）；不在引用里就返回 null。 */
+function fileQueryAt(text: string, caret: number): string | null {
+  return atRefAt(text, caret)?.query ?? null;
+}
+
+/**
+ * 选中菜单项时，要替换掉的「正在输入的词」从哪儿开始。
+ *
+ * 菜单是边打边筛的，选中时不能把结果**追加**在查询词后面 —— 否则会插成
+ * `@src/@src/components/` 或 `/goal/goal`。`@` 引用从 `@` 原位替换（插入的
+ * snippet 自带 `@`），斜杠命令从行首替换。
+ */
+function tokenStartAt(text: string, caret: number): number {
+  const ref = atRefAt(text, caret);
+  if (ref) return ref.start;
+  const upto = text.slice(0, caret);
+  if (upto.startsWith("/") && !/\s/.test(upto.slice(1))) return 0;
+  return caret;
+}
+
 export function Composer() {
   const [text, setText] = useState("");
   const [attachments, setAttachments] = useState<string[]>([]);
@@ -269,7 +306,16 @@ export function Composer() {
 
   const fileItems: MenuItem[] = useMemo(() => {
     if (fileQuery === null) return [];
-    return files.map((f) => ({ insert: `@${f} `, label: f, hint: undefined }));
+    return files.map((f) => {
+      // 目录（后端用尾随 `/` 标记）选中后**不补空格**：菜单继续停在那个目录里，
+      // 用户可以接着选下一层。文件才补空格、结束这次引用。
+      const isDir = f.endsWith("/");
+      return {
+        insert: isDir ? `@${f}` : `@${f} `,
+        label: f,
+        hint: isDir ? "目录" : undefined,
+      };
+    });
   }, [fileQuery, files]);
 
   const menu = fileQuery !== null ? "file" : slashItems.length > 0 ? "slash" : null;
@@ -280,38 +326,33 @@ export function Composer() {
   /** 文本变化时顺便重新判断光标前是不是 `@`。 */
   const onTextChange = (next: string, caret: number) => {
     setText(next);
-    // 从光标往回找最近的一个 `@`，中间不能有空白 —— 有空白说明那个 `@`
-    // 已经是上一个词的事了。
-    const upto = next.slice(0, caret);
-    const at = upto.lastIndexOf("@");
-    if (at >= 0 && !/[\s]/.test(upto.slice(at + 1))) {
-      // `@` 要在词首。
-      const prev = at > 0 ? upto[at - 1] : " ";
-      if (/\s/.test(prev)) {
-        setFileQuery(upto.slice(at + 1));
-        return;
-      }
-    }
-    setFileQuery(null);
+    setFileQuery(fileQueryAt(next, caret));
   };
 
-  const insert = useCallback((snippet: string) => {
-    const ta = taRef.current;
-    if (!ta) {
-      setText((t) => t + snippet);
-      return;
-    }
-    const start = ta.selectionStart;
-    const end = ta.selectionEnd;
-    setText((t) => t.slice(0, start) + snippet + t.slice(end));
-    setFileQuery(null);
-    // 光标挪到插入内容之后。
-    requestAnimationFrame(() => {
+  const insert = useCallback(
+    (snippet: string) => {
+      const ta = taRef.current;
+      if (!ta) {
+        setText((t) => t + snippet);
+        return;
+      }
+      const caret = ta.selectionStart;
+      const end = ta.selectionEnd;
+      // 正在输入的那段路径/命令名要换掉，而不是在后面追加。
+      const start = tokenStartAt(text, caret);
+      const next = text.slice(0, start) + snippet + text.slice(end);
       const pos = start + snippet.length;
-      ta.focus();
-      ta.setSelectionRange(pos, pos);
-    });
-  }, []);
+      setText(next);
+      // 插入的是 `@dir/`（目录）时菜单继续打开，查询词就是新目录 —— 多级引用
+      // 可以一层层往下点。文件引用带尾随空格，fileQueryAt 会自然返回 null。
+      setFileQuery(fileQueryAt(next, pos));
+      requestAnimationFrame(() => {
+        ta.focus();
+        ta.setSelectionRange(pos, pos);
+      });
+    },
+    [text],
+  );
 
   const onPick = useCallback(
     (item: MenuItem) => {
@@ -504,7 +545,7 @@ export function Composer() {
                   ? "请先回答上面的问题"
                   : streaming
                     ? "可以接着说：Enter 排队，⌘/Ctrl+Enter 插队"
-                    : "输入消息   / 命令   @ 引用文件   可直接粘贴图片"
+                    : "输入消息   / 命令   @ 引用文件/目录   可直接粘贴图片"
             }
             className="max-h-48 min-h-14 w-full resize-none bg-transparent px-4 pb-1 pt-3.5 text-[15px] leading-relaxed text-ink outline-none placeholder:text-dim disabled:opacity-50"
           />
@@ -542,7 +583,7 @@ export function Composer() {
           <Popup title="命令" items={slashItems} active={active} onPick={onPick} />
         )}
         {menu === "file" && (
-          <Popup title="引用文件" items={fileItems} active={active} onPick={onPick} />
+          <Popup title="引用文件 / 目录" items={fileItems} active={active} onPick={onPick} />
         )}
       </div>
     </div>
@@ -938,7 +979,7 @@ const HELP_TEXT = [
   "/settings  打开设置",
   "/help      显示这段说明",
   "",
-  "输入 / 开头会弹出命令菜单，@ 开头会弹出文件引用菜单，图片可以直接粘贴。",
+  "输入 / 开头会弹出命令菜单，@ 开头会弹出文件/目录引用菜单（目录可以一层层往下选），图片可以直接粘贴。",
   "另外 ~/.carter/commands/ 里的自定义命令（Markdown）也会出现在菜单里。",
 ].join("\n");
 

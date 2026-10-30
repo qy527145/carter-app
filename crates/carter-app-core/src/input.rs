@@ -12,15 +12,27 @@
 //!    `commands::expand` 把正文展开成一段 prompt（会注入 `@文件` 内容与 `!shell`
 //!    输出）。这两个函数直接用，不重写 —— 与 CLI 共用同一套语义。
 //!
-//! ## `@文件` 展开
+//! ## `@文件` / `@目录` 展开
 //!
 //! carter 只在**自定义命令的正文**里展开 `@path`（`commands/expand.rs` 的
 //! `inject_files`，私有）。输入框里的 `@path` 在 CLI 里是不展开的，留给模型自己
 //! `read_file`。
 //!
 //! GUI 这边选择展开，因为「添加文件作为上下文」是用户显式要的效果，而让模型先
-//! 花一轮去读、还要猜用户指的是哪个文件，是更差的体验。格式与 carter 完全一致
+//! 花一轮去读、还要猜用户指的是哪个文件，是更差的体验。文件格式与 carter 完全一致
 //! （`--- path ---` 包裹），这样两边的行为对得上。
+//!
+//! 目录是 GUI 独有的能力（carter 的 `inject_files` 只认文件）：`@src/utils`
+//! 会把目录里能读的文本文件按 `--- 相对路径 ---` 逐个附上，总预算与单文件一致
+//! （`MAX_INJECT_BYTES`）。放不下的文件列个名字，让模型自己 `read_file` ——
+//! 目录可以很大，全塞进上下文会把这一轮直接撑爆。
+//!
+//! ## 多级 `@`
+//!
+//! 菜单里的路径是**相对 cwd 的完整路径**，目录以 `/` 结尾。选中目录时插入的是
+//! `@src/utils/`（不带尾随空格），菜单会继续停在这个目录里，用户可以一层层往下选；
+//! 选中文件才补空格、结束这次引用。查询词就是对整条相对路径做子串匹配，所以
+//! `@src/co` 直接筛出 `src/` 下的匹配项。
 
 use std::path::{Path, PathBuf};
 
@@ -120,18 +132,26 @@ const SKIP_DIRS: &[&str] = &[
     "vendor",
 ];
 
-/// 列出工作目录下的文件（相对路径），供 `@` 菜单用。
+/// 列出工作目录下的文件和目录（相对路径），供 `@` 菜单用。
 ///
-/// 朴素遍历 + 跳过名单，不读 `.gitignore` —— 那要拖进 `ignore` crate 与一套
+/// 目录路径以 `/` 结尾，这样菜单能把「还能往下走」和「已经到文件了」区分开，
+/// 选中时的插入行为也不同（见 `Composer.tsx`）。
+///
+/// 广度优先 + 跳过名单，不读 `.gitignore` —— 那要拖进 `ignore` crate 与一套
 /// 语义（嵌套 gitignore、全局 ignore、显式 include），而这里只需要「别把
-/// node_modules 列出来」。真要精确，用户会自己去敲路径。
+/// node_modules 列出来」。广度优先是为了让 `limit` 截断时留下的是**浅层**结果：
+/// 用户一敲 `@`，最先看到的应该是当前这一层有什么，而不是某个角落里碰巧
+/// 先被 `read_dir` 返回的深文件。
 pub fn list_files(cwd: &Path, query: &str, limit: usize) -> Vec<String> {
-    let q = query.trim().to_lowercase();
+    let q = normalized_query(query);
     let mut out: Vec<String> = Vec::new();
     let mut seen = 0usize;
 
-    let mut stack = vec![cwd.to_path_buf()];
-    while let Some(dir) = stack.pop() {
+    let mut queue = std::collections::VecDeque::from([cwd.to_path_buf()]);
+    while let Some(dir) = queue.pop_front() {
+        if seen > MAX_WALK || out.len() >= limit {
+            break;
+        }
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
@@ -139,39 +159,58 @@ pub fn list_files(cwd: &Path, query: &str, limit: usize) -> Vec<String> {
             if seen > MAX_WALK || out.len() >= limit {
                 break;
             }
+            seen += 1;
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
             let Ok(ft) = entry.file_type() else { continue };
-            if ft.is_dir() {
-                if SKIP_DIRS.contains(&name.as_str()) || name.starts_with('.') {
-                    continue;
-                }
-                stack.push(path);
-                continue;
-            }
-            seen += 1;
             let Ok(rel) = path.strip_prefix(cwd) else {
                 continue;
             };
             let rel = rel.to_string_lossy().replace('\\', "/");
-            // 有查询词就按子串过滤（不区分大小写）；空查询给前 limit 个，
-            // 让用户一按 `@` 就有东西可选。
+            if ft.is_dir() {
+                if SKIP_DIRS.contains(&name.as_str()) || name.starts_with('.') {
+                    continue;
+                }
+                let rel = format!("{rel}/");
+                // 用户已经打出 `@src/` 时，`src/` 自己再列一遍没有意义 —— 那会
+                // 让「回车选第一个」原地打转。跳过它，第一项就是目录里的子项。
+                let already_inside = q.ends_with('/')
+                    && q.trim_end_matches('/') == rel.trim_end_matches('/').to_lowercase();
+                // 有查询词就按子串过滤（不区分大小写）；空查询给前 limit 个，
+                // 让用户一按 `@` 就有东西可选。
+                if !already_inside && (q.is_empty() || rel.to_lowercase().contains(&q)) {
+                    out.push(rel);
+                }
+                queue.push_back(path);
+                continue;
+            }
             if q.is_empty() || rel.to_lowercase().contains(&q) {
                 out.push(rel);
-                if out.len() >= limit {
-                    break;
-                }
             }
         }
     }
 
-    // 短的排前面：用户多半在找顶层或浅层的文件。
-    out.sort_by_key(|p| (p.matches('/').count(), p.len()));
+    // 浅的排前面；同一层里目录排文件前面（继续往下走比直接选文件更常见）。
+    out.sort_by_key(|p| {
+        let is_file = !p.ends_with('/');
+        (depth_of(p), is_file, p.len())
+    });
     out.truncate(limit);
     out
 }
 
-/// 把文本里的 `@相对路径` 展开成文件内容块。
+/// 查询词归一化：去空白、统一分隔符、去掉开头的 `./`。
+fn normalized_query(query: &str) -> String {
+    let q = query.trim().replace('\\', "/").to_lowercase();
+    q.strip_prefix("./").unwrap_or(&q).to_string()
+}
+
+/// 相对路径的层级深度（目录的尾随 `/` 不算一层）。
+fn depth_of(rel: &str) -> usize {
+    rel.trim_end_matches('/').matches('/').count()
+}
+
+/// 把文本里的 `@相对路径` 展开成内容块。路径可以是文件，也可以是目录。
 ///
 /// 规则与 carter 的 `commands/expand.rs::inject_files` 一致：`@` 必须在词首
 /// （行首或空白之后），路径读到下一个空白，能读到文件才替换。读不到就原样留着 ——
@@ -207,8 +246,8 @@ pub fn expand_file_refs(text: &str, cwd: &Path) -> String {
         }
 
         match read_for_context(cwd, &token) {
-            Some(block) => {
-                out.push_str(&block);
+            Some(reference) => {
+                out.push_str(&reference.text);
                 i = j;
             }
             None => {
@@ -222,14 +261,33 @@ pub fn expand_file_refs(text: &str, cwd: &Path) -> String {
     out
 }
 
-/// 读一个文件并渲染成上下文块。不是普通文本文件（图片、目录、二进制）就返回 None。
-fn read_for_context(cwd: &Path, token: &str) -> Option<String> {
+/// 一次引用展开的结果。
+struct Reference {
+    /// 要拼进消息的上下文块。
+    text: String,
+    /// 这次引用实际带进来的文件数。目录引用可能带出多个，界面据此提示「N 个文件」。
+    files: usize,
+}
+
+/// 读一个文件或目录并渲染成上下文块。
+///
+/// 图片、不存在的路径、读不了的二进制返回 None（文件引用原样留着）；
+/// 目录返回 Some，内容是递归展开的文本文件。
+fn read_for_context(cwd: &Path, token: &str) -> Option<Reference> {
     let path: PathBuf = if Path::new(token).is_absolute() {
         PathBuf::from(token)
     } else {
         cwd.join(token)
     };
-    if path.is_dir() || !path.is_file() {
+    let meta = std::fs::metadata(&path).ok()?;
+
+    if meta.is_dir() {
+        // 不展开文件系统根：`@/` 几乎一定是手滑，把根目录下的杂项塞进上下文
+        // 没有意义，还会占满预算。
+        let _parent = path.parent()?;
+        return Some(dir_for_context(&path, token));
+    }
+    if !meta.is_file() {
         return None;
     }
     // 图片交给 `[img:...]` 那条路，不要在这里塞 base64。
@@ -237,25 +295,126 @@ fn read_for_context(cwd: &Path, token: &str) -> Option<String> {
         return None;
     }
 
-    let meta = std::fs::metadata(&path).ok()?;
     if meta.len() as usize > MAX_INJECT_BYTES {
-        return Some(format!(
-            "\n--- {token} ---\n（文件 {} 字节，超过 {} 字节的注入上限，请用 read_file 自己读）\n--- end {token} ---\n",
-            meta.len(),
-            MAX_INJECT_BYTES
-        ));
+        return Some(Reference {
+            text: format!(
+                "\n--- {token} ---\n（文件 {} 字节，超过 {} 字节的注入上限，请用 read_file 自己读）\n--- end {token} ---\n",
+                meta.len(),
+                MAX_INJECT_BYTES
+            ),
+            files: 1,
+        });
     }
     // 非 UTF-8（二进制）直接放过，让模型自己决定。
     let content = std::fs::read_to_string(&path).ok()?;
-    Some(format!(
-        "\n--- {token} ---\n{content}\n--- end {token} ---\n"
-    ))
+    Some(Reference {
+        text: format!("\n--- {token} ---\n{content}\n--- end {token} ---\n"),
+        files: 1,
+    })
+}
+
+/// 把目录递归展开成上下文块：能读的文本文件逐个用 `--- 相对路径 ---` 包起来，
+/// 共享 [`MAX_INJECT_BYTES`] 的总预算。放不下的（太大、二进制、图片）只列名字，
+/// 让模型按需 `read_file`。
+fn dir_for_context(dir: &Path, token: &str) -> Reference {
+    // `@src/`（菜单插入的形态）在标题里去掉尾随斜杠，读起来更像路径。
+    let label = token.trim_end_matches('/');
+
+    let mut paths: Vec<PathBuf> = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    let mut seen = 0usize;
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if seen > MAX_WALK {
+                break;
+            }
+            seen += 1;
+            let name = entry.file_name().to_string_lossy().to_string();
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_dir() {
+                if SKIP_DIRS.contains(&name.as_str()) || name.starts_with('.') {
+                    continue;
+                }
+                stack.push(entry.path());
+                continue;
+            }
+            if ft.is_file() {
+                paths.push(entry.path());
+            }
+        }
+    }
+    paths.sort();
+
+    let mut out = format!("\n--- {label}（目录，{} 个文件）---\n", paths.len());
+    if paths.is_empty() {
+        out.push_str("（空目录）\n");
+    }
+    let mut budget = MAX_INJECT_BYTES;
+    let mut injected = 0usize;
+    let mut skipped: Vec<String> = Vec::new();
+    for path in &paths {
+        let rel = path
+            .strip_prefix(dir)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if carter::media::is_image_path(path) {
+            skipped.push(rel);
+            continue;
+        }
+        let Ok(meta) = std::fs::metadata(path) else {
+            skipped.push(rel);
+            continue;
+        };
+        let size = meta.len() as usize;
+        if size > budget {
+            skipped.push(rel);
+            continue;
+        }
+        // 非 UTF-8（二进制）读不出来，也进 skipped。
+        let Ok(content) = std::fs::read_to_string(path) else {
+            skipped.push(rel);
+            continue;
+        };
+        out.push_str(&format!("--- {rel} ---\n{content}\n--- end {rel} ---\n"));
+        budget -= size;
+        injected += 1;
+    }
+    if !skipped.is_empty() {
+        let shown: Vec<&str> = skipped.iter().take(40).map(String::as_str).collect();
+        out.push_str(&format!(
+            "（{} 个文件未注入：{}{}；需要的话用 read_file 自己读）\n",
+            skipped.len(),
+            shown.join(", "),
+            if skipped.len() > shown.len() { " 等" } else { "" }
+        ));
+    }
+    out.push_str(&format!("--- end {label} ---\n"));
+
+    // 空目录 / 全是二进制时也计一次：引用本身是成立的，界面上不该悄悄没反应。
+    Reference {
+        text: out,
+        files: injected.max(1),
+    }
 }
 
 /// 文本里有没有被引用到的文件。界面上要据此提示「这条消息带了 N 个文件」。
+/// 目录引用按它实际展开的文件数计。
 pub fn count_file_refs(text: &str, cwd: &Path) -> usize {
+    split_refs(text)
+        .into_iter()
+        .filter_map(|token| read_for_context(cwd, &token))
+        .map(|r| r.files)
+        .sum()
+}
+
+/// 文本里所有 `@token` 的 token（不含 `@`）。词首规则与 [`expand_file_refs`] 一致。
+fn split_refs(text: &str) -> Vec<String> {
     let chars: Vec<char> = text.chars().collect();
-    let mut n = 0;
+    let mut out = Vec::new();
     let mut i = 0;
     while i < chars.len() {
         let at_boundary = i == 0 || chars[i - 1].is_whitespace();
@@ -266,15 +425,15 @@ pub fn count_file_refs(text: &str, cwd: &Path) -> usize {
                 j += 1;
             }
             let token: String = chars[start..j].iter().collect();
-            if !token.is_empty() && read_for_context(cwd, &token).is_some() {
-                n += 1;
+            if !token.is_empty() {
+                out.push(token);
             }
             i = j.max(i + 1);
             continue;
         }
         i += 1;
     }
-    n
+    out
 }
 
 /// 供图标 / 提示用的文件种类（按扩展名粗分）。
@@ -386,13 +545,80 @@ mod tests {
         let all = list_files(&d, "", 50);
         assert!(all.contains(&"a.rs".to_string()));
         assert!(all.contains(&"src/b.rs".to_string()));
+        // 目录也在列表里，带尾随 `/`。
+        assert!(all.contains(&"src/".to_string()));
         assert!(!all.iter().any(|p| p.contains("node_modules")), "{all:?}");
         assert!(!all.iter().any(|p| p.contains(".git")), "{all:?}");
-        // 浅层的排前面。
-        assert_eq!(all[0], "a.rs");
+        // 同层的目录排文件前面，浅层排深层前面。
+        assert_eq!(all[0], "src/", "{all:?}");
+        assert_eq!(all[1], "a.rs", "{all:?}");
 
+        // 查询词按整条相对路径匹配，所以 `src/` 能筛出这一层的子项。
         let filtered = list_files(&d, "b.rs", 50);
         assert_eq!(filtered, vec!["src/b.rs".to_string()]);
+        // 打出 `src/` 后第一项应当是目录里的内容，而不是 `src/` 本身。
+        let subtree = list_files(&d, "src/", 50);
+        assert_eq!(subtree, vec!["src/b.rs".to_string()], "{subtree:?}");
+        // 不带到尾斜杠时，目录本身仍可选（选中后会插入 `@src/`）。
+        let named = list_files(&d, "src", 50);
+        assert_eq!(
+            named,
+            vec!["src/".to_string(), "src/b.rs".to_string()],
+            "{named:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// 引用目录时把里面能读的文本文件递归附上，目录本身不再被当成「读不到」。
+    #[test]
+    fn a_directory_ref_injects_its_files_recursively() {
+        let d = tmp_dir("dirref");
+        std::fs::create_dir_all(d.join("src/nested/deep")).unwrap();
+        std::fs::write(d.join("src/a.rs"), "fn a() {}").unwrap();
+        std::fs::write(d.join("src/nested/b.rs"), "fn b() {}").unwrap();
+        std::fs::write(d.join("src/nested/deep/c.rs"), "fn c() {}").unwrap();
+        std::fs::create_dir_all(d.join("src/node_modules/pkg")).unwrap();
+        std::fs::write(d.join("src/node_modules/pkg/i.js"), "nope").unwrap();
+
+        let out = expand_file_refs("看看 @src 里有什么", &d);
+        assert!(out.contains("--- src（目录，3 个文件）---"), "{out}");
+        assert!(out.contains("--- a.rs ---\nfn a() {}"), "{out}");
+        assert!(out.contains("--- nested/b.rs ---\nfn b() {}"), "{out}");
+        assert!(out.contains("--- nested/deep/c.rs ---\nfn c() {}"), "{out}");
+        assert!(!out.contains("node_modules"), "跳过名单里的目录不展开：{out}");
+        // 引用之外的文本原样保留。
+        assert!(out.starts_with("看看 "), "{out}");
+
+        // 菜单插入的形态带尾随斜杠，展开行为要一致。
+        let slash = expand_file_refs("@src/", &d);
+        assert_eq!(slash, expand_file_refs("@src", &d));
+
+        // 展开计数按实际文件数算。
+        assert_eq!(count_file_refs("@src", &d), 3);
+        assert_eq!(count_file_refs("@src @src/a.rs", &d), 4);
+
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// 目录太大时只注入预算内的文件，剩下的列名字让模型自己读。
+    #[test]
+    fn a_large_directory_stops_at_the_budget_and_lists_the_rest() {
+        let d = tmp_dir("dirbig");
+        std::fs::create_dir_all(d.join("many")).unwrap();
+        // 每个 4 KB，40 个 = 160 KB > 128 KB 预算。
+        for i in 0..40 {
+            std::fs::write(d.join(format!("many/f{i:02}.txt")), "x".repeat(4096)).unwrap();
+        }
+
+        let out = expand_file_refs("@many", &d);
+        assert!(out.contains("个文件未注入"), "{out}");
+        assert!(out.contains("read_file"), "{out}");
+        assert!(
+            out.len() < MAX_INJECT_BYTES + 20 * 1024,
+            "总长度要被预算挡住，实际 {}",
+            out.len()
+        );
 
         let _ = std::fs::remove_dir_all(d);
     }
