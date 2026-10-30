@@ -31,6 +31,7 @@ use tokio::sync::mpsc;
 
 use carter::tools::{Tool, ToolResult};
 
+use super::control::RunningTools;
 use crate::shell::LiveLog;
 
 /// 送给界面的工具事件。与 `protocol::SessionEvent` 的两条对应。
@@ -68,6 +69,8 @@ pub struct Recorded {
     activity: Arc<AtomicU32>,
     /// 进行中那一轮的记录（侧边聊天读它，见 `shell.rs::LiveLog`）。
     live: Option<Arc<LiveLog>>,
+    /// 正在跑的工具表。界面按 `call_id` 对单条命令做「中断 / 转后台」。
+    running: Option<Arc<RunningTools>>,
 }
 
 impl Recorded {
@@ -83,11 +86,17 @@ impl Recorded {
             seq,
             activity,
             live: None,
+            running: None,
         }
     }
 
     pub fn with_live(mut self, live: Option<Arc<LiveLog>>) -> Self {
         self.live = live;
+        self
+    }
+
+    pub fn with_running(mut self, running: Option<Arc<RunningTools>>) -> Self {
+        self.running = running;
         self
     }
 }
@@ -134,7 +143,13 @@ impl Tool for Recorded {
             args: args.clone(),
         });
 
-        let res = self.inner.execute(args).await;
+        // 把这次调用的控制句柄放进 task-local，工具（`bash`）执行时才能读到
+        // 「用户按了中断 / 转后台」。包装层是唯一知道 `call_id` 的地方 —— 界面
+        // 按钮回传的就是这个 id。
+        let res = match &self.running {
+            Some(running) => running.scope(&call_id, self.inner.execute(args)).await,
+            None => self.inner.execute(args).await,
+        };
         if let Some(live) = &self.live {
             live.tool_finished(&call_id, &res.content);
         }

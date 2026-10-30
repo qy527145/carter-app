@@ -3,7 +3,7 @@
 //! 一个 `Arc<AppShell>`，用 `manage` 交给 Tauri，也被会话任务共享。
 //! 刻意不依赖 Tauri —— 这样核心逻辑能在没有 webview 的情况下测。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -79,6 +79,13 @@ pub struct SessionHandle {
     /// `cancel` 用完会 `reset()`（见 carter 的 `CancelToken`），拿它兼作关闭信号，
     /// 用户点一次「停止」就会把会话关掉。
     pub close: CancelToken,
+    /// 会话任务**真的退出**了。
+    ///
+    /// 与 `close` 不是一回事：`close` 是「请求你退出」，`done` 是「已经退出了」。
+    /// 关会话之后立刻按 id 重新打开同一条会话时，必须等旧任务把 `Thread` 与
+    /// `Recorder` 放掉 —— 否则两个 runner 会往同一个会话文件里追加，历史从此错位
+    /// （见 `AppShell::close_session`）。
+    pub done: CancelToken,
     /// 只有 crate 内能构造 —— 命令通道的持有者是会话运行器，不该由外部塞进来。
     pub(crate) cmd_tx: mpsc::UnboundedSender<Command>,
 }
@@ -101,6 +108,7 @@ impl SessionHandle {
             live: Arc::new(LiveLog::default()),
             cancel: CancelToken::new(),
             close: CancelToken::new(),
+            done: CancelToken::new(),
             cmd_tx,
         })
     }
@@ -189,6 +197,12 @@ pub struct AppShell {
     /// 但存储本身与哪个会话无关，界面要能独立地查它。
     pub capture: Arc<crate::capture::CaptureStore>,
     pub sessions: DashMap<String, Arc<SessionHandle>>,
+    /// 已经发出关闭信号、但任务还没退出的会话 id。
+    ///
+    /// 不能只靠 `sessions` 判断：关闭的第一步就是把它从注册表里拿掉（否则新的命令
+    /// 会被投进一条正在死的会话），而任务可能还要几百毫秒才真正放开会话文件。
+    /// 这段时间里按 id 重开同一条会话会造出第二个写者（见 `close_session`）。
+    closing: Mutex<HashSet<String>>,
     events: broadcast::Sender<AppEvent>,
 }
 
@@ -202,6 +216,7 @@ impl AppShell {
                 crate::capture::CaptureStore::default_root(),
             )),
             sessions: DashMap::new(),
+            closing: Mutex::new(HashSet::new()),
             events,
         })
     }
@@ -244,7 +259,55 @@ impl AppShell {
     /// （任务的主循环在等它），再 `cancel.set()` 让正在跑的那一轮立刻断流。
     ///
     /// 侧边聊天（`/btw`）是挂在主会话上的，一起关掉。
-    pub fn close_session(&self, id: &str) -> bool {
+    ///
+    /// **会等任务真的退出**（最多 5 秒），不只是发个通知。原因是一个真实踩过的
+    /// 坑：用户在一条 `bash` 跑了很久的会话上点「新对话」，旧的 runner 还卡在
+    /// 工具里；这时马上按 id 重开同一条会话，就会有**两个** `Thread`（各带一个
+    /// `Recorder`）往同一个文件追加，模型看的历史与界面上显示的对不上，而且
+    /// `tool_use` / `tool_result` 会被别的消息隔开 —— 那之后每一次请求都失败。
+    ///
+    /// 工具现在都响应取消（见 `tools/bash.rs`、`tools/ask_user.rs`），正常情况下
+    /// 几十毫秒就退出了。5 秒是给「不认识的工具」（MCP）留的兜底。
+    pub async fn close_session(&self, id: &str) -> bool {
+        let handles = self.close_tree(id);
+        if handles.is_empty() {
+            return false;
+        }
+        let ids: Vec<String> = handles.iter().map(|h| h.id.clone()).collect();
+        // 并行等：主会话与侧边聊天各 5 秒串起来就是 10 秒，界面会明显卡一下。
+        // 总时限仍是 5 秒。
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            futures::future::join_all(handles.iter().map(|h| h.done.cancelled())),
+        )
+        .await;
+        // 超时也照样清掉标记：一直卡着它只会让这条会话永远打不开。
+        // 真出现这种情况，`start_session` 那边还有一道「同一 id 不能有两个 runner」
+        // 的兜底。
+        let mut closing = self.closing.lock().unwrap();
+        for id in ids {
+            closing.remove(&id);
+        }
+        true
+    }
+
+    /// 这条会话是不是正在关闭（已经发了信号，任务还没退出）。
+    ///
+    /// `start_session` 用它挡住「同一个会话文件被两个 runner 写」。
+    pub fn is_closing(&self, id: &str) -> bool {
+        self.closing.lock().unwrap().contains(id)
+    }
+
+    /// 会话任务退出了，把它从「正在关闭」里摘掉。
+    ///
+    /// 由 runner 在最后自己调，而不是交给 `close_session`：那个等待有 5 秒上限，
+    /// 超时之后任务才真正退出的话，标记得在这里被清掉。
+    pub(crate) fn mark_closed(&self, id: &str) {
+        self.closing.lock().unwrap().remove(id);
+    }
+
+    /// 发关闭信号、移出注册表，返回要等的句柄。**不 await** —— 递归里用不了。
+    fn close_tree(&self, id: &str) -> Vec<Arc<SessionHandle>> {
         // 先收集再关：`iter()` 期间握着分片锁，直接在里面 remove 是自找麻烦。
         let children: Vec<String> = self
             .sessions
@@ -252,19 +315,18 @@ impl AppShell {
             .filter(|e| e.value().parent_id.as_deref() == Some(id))
             .map(|e| e.key().clone())
             .collect();
+        let mut out = Vec::new();
         for child in children {
-            self.close_session(&child);
+            out.extend(self.close_tree(&child));
         }
-
-        match self.sessions.remove(id) {
-            Some((_, handle)) => {
-                handle.close.set();
-                handle.cancel.set();
-                handle.asks.clear();
-                true
-            }
-            None => false,
+        if let Some((_, handle)) = self.sessions.remove(id) {
+            handle.close.set();
+            handle.cancel.set();
+            handle.asks.clear();
+            self.closing.lock().unwrap().insert(id.to_string());
+            out.push(handle);
         }
+        out
     }
 
     /// 当前活着的会话 id。
@@ -341,9 +403,9 @@ mod tests {
         assert!(!asks.answer(1, vec![vec!["太晚了".into()]]));
     }
 
-    #[test]
-    fn closing_an_unknown_session_is_false_not_an_error() {
-        assert!(!shell().close_session("nope"));
+    #[tokio::test]
+    async fn closing_an_unknown_session_is_false_not_an_error() {
+        assert!(!shell().close_session("nope").await);
     }
 
     /// 拿不到 provider 的小测试用模型。`ModelInfo` 只实现了 `Deserialize`，
@@ -375,26 +437,60 @@ mod tests {
     /// 这条守的是一个真实存在的死结：会话任务自己攥着一个 `Arc<SessionHandle>`，
     /// 而它持有命令通道的发送端 —— 只 remove 的话 `cmd_rx.recv()` 永远不返回 `None`，
     /// 任务（连同 MCP 子进程）永远不退出。`/btw` 的「关掉即丢」正是靠这里成立。
-    #[test]
-    fn closing_a_session_signals_its_task_instead_of_just_forgetting_it() {
+    #[tokio::test]
+    async fn closing_a_session_signals_its_task_instead_of_just_forgetting_it() {
         let shell = shell();
         let h = add(&shell, "m1", None);
         assert!(!h.close.is_cancelled(), "刚建好时是活的");
+        // 这个测试里没有真的会话任务，`done` 永远不会置位 —— 关会话会在 5 秒
+        // 兜底之后返回。为了不让测试等 5 秒，这里自己把它置位。
+        let done = h.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            done.done.set();
+        });
 
-        assert!(shell.close_session("m1"));
+        assert!(shell.close_session("m1").await);
         assert!(h.close.is_cancelled(), "任务得知道要退出");
         assert!(h.cancel.is_cancelled(), "正在跑的那一轮要立刻断流");
     }
 
+    /// 关会话必须等任务**真的退出**：旧 runner 还攥着 `Recorder` 的时候把同一个
+    /// 会话 id 再打开，就会有两个写者往同一个文件追加。
+    #[tokio::test]
+    async fn closing_waits_for_the_runner_to_actually_stop() {
+        let shell = shell();
+        let h = add(&shell, "m1", None);
+        let done = h.clone();
+        let started = std::time::Instant::now();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+            done.done.set();
+        });
+        shell.close_session("m1").await;
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(100),
+            "关会话不能只发信号就返回"
+        );
+        assert!(h.done.is_cancelled());
+    }
+
     /// 侧边聊天继承的是主会话的上下文，主会话都没了，它留着没有意义。
-    #[test]
-    fn closing_a_session_takes_its_side_conversations_with_it() {
+    #[tokio::test]
+    async fn closing_a_session_takes_its_side_conversations_with_it() {
         let shell = shell();
         let main = add(&shell, "m1", None);
         let side = add(&shell, "side-1", Some("m1"));
         let other = add(&shell, "m2", None);
+        for h in [&main, &side] {
+            let h = h.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                h.done.set();
+            });
+        }
 
-        shell.close_session("m1");
+        shell.close_session("m1").await;
 
         assert!(side.close.is_cancelled(), "侧边要跟着关");
         assert!(main.close.is_cancelled(), "主会话自己当然也要关");

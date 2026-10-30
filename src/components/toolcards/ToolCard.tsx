@@ -23,6 +23,7 @@
 
 import { useState } from "react";
 import {
+  ArrowDownToLine,
   Check,
   ChevronRight,
   CircleCheck,
@@ -34,11 +35,14 @@ import {
   LoaderCircle,
   Pencil,
   Search,
+  Square,
   Terminal,
   Wrench,
   X,
 } from "lucide-react";
 
+import { sendCommand } from "../../lib/api";
+import { toastError } from "../../lib/toast";
 import type { Item } from "../../store";
 
 export type ToolItem = Extract<Item, { kind: "tool" }>;
@@ -217,6 +221,21 @@ function BashCard({ item }: { item: ToolItem }) {
   const command = str(item.args, "command") ?? "";
   const r = item.result;
   const parsed = r ? bashBody(r.content) : null;
+  // 卡片自己记着属于哪条会话 —— 侧边聊天的卡片不能用主对话的 id。
+  const sessionId = item.sessionId ?? null;
+
+  /**
+   * 对**这一条**命令做操作。注意与输入框上的「停止」的区别：这里不会结束
+   * 这一轮，模型会拿到「命令被中断 / 已转后台」的结果继续往下走。
+   */
+  const act = (action: "interrupt" | "background") => {
+    if (!sessionId) return;
+    sendCommand(sessionId, {
+      type: "tool_action",
+      call_id: item.callId,
+      action,
+    }).catch(toastError);
+  };
 
   return (
     <Card
@@ -226,9 +245,33 @@ function BashCard({ item }: { item: ToolItem }) {
       status={<Status item={item} />}
       // 命令放 preview：折叠起来的话，这张卡片就只剩一行输出，看不出在跑什么。
       preview={
-        <div className="mono flex gap-2">
-          <span className="shrink-0 select-none text-dim">$</span>
-          <span className="min-w-0 whitespace-pre-wrap break-all text-ink">{command}</span>
+        <div className="space-y-1.5">
+          <div className="mono flex gap-2">
+            <span className="shrink-0 select-none text-dim">$</span>
+            <span className="min-w-0 whitespace-pre-wrap break-all text-ink">{command}</span>
+          </div>
+          {/* 正在跑的命令要有自己的出口。之前只有输入框上的「停止」——
+              一条跑偏的 `brew install` 会顺带掐掉模型已经想好的后续步骤。 */}
+          {!r && (
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={() => act("interrupt")}
+                title="只结束这条命令；模型会拿到「已中断」的结果继续往下走"
+                className="inline-flex items-center gap-1 rounded border border-edge px-1.5 py-0.5 text-[11px] text-dim transition-colors hover:border-[var(--danger)] hover:text-[var(--danger)]"
+              >
+                <Square size={10} />
+                中断命令
+              </button>
+              <button
+                onClick={() => act("background")}
+                title="命令继续跑，工具立刻返回 shell_id；之后模型用 bash_output 读输出"
+                className="inline-flex items-center gap-1 rounded border border-edge px-1.5 py-0.5 text-[11px] text-dim transition-colors hover:border-tone-blue hover:text-tone-blue"
+              >
+                <ArrowDownToLine size={10} />
+                转后台
+              </button>
+            </div>
+          )}
         </div>
       }
       defaultOpen={false}

@@ -29,7 +29,18 @@ export const EVENT_NAME = "carter://event";
 /** 一个会话内的事件流。顺序即语义：按到达顺序把增量攒进同一个助手气泡。 */
 export type SessionEvent =
   | { type: "ready"; session_id: string; model: string; cwd: string; resumed: boolean }
-  | { type: "turn_started"; turn: number }
+  /**
+   * 一轮开始。`prompt_id` 是前端在 `send_prompt` 里带的编号 —— 后端把排队里的
+   * 那条消息**真正开始跑**时原样带回，界面据此把它从「排队中」挪进对话。
+   * 自动继续（`/goal`）推起来的一轮没有它。
+   */
+  | {
+      type: "turn_started";
+      turn: number;
+      prompt_id?: number | null;
+      /** 这条用户消息的原文（`/命令`、`@文件` 展开之前）。界面用它画气泡。 */
+      prompt?: string | null;
+    }
   | { type: "thinking_delta"; text: string }
   | { type: "text_delta"; text: string }
   | { type: "text_end" }
@@ -123,7 +134,24 @@ export type AskQuestion = {
 
 /** 前端 → 后端。 */
 export type Command =
-  | { type: "send_prompt"; text: string }
+  /**
+   * 提交一条用户消息。会话正在跑时**排队**，等这一轮结束再跑。
+   *
+   * `id` 由前端发号，`turn_started` 原样带回；`interject` = 立刻中断当前轮,
+   * 插到队首（输入框里的 Ctrl/⌘+Enter）。
+   */
+  | { type: "send_prompt"; text: string; id?: number | null; interject?: boolean }
+  /** 把一条**已经排队**的消息提到队首，并中断当前轮（排队条上的「插队」）。 */
+  | { type: "promote_prompt"; id: number }
+  /** 撤回一条还没开始跑的消息（排队条上的「×」）。 */
+  | { type: "drop_prompt"; id: number }
+  /**
+   * 对**一条正在跑的**工具调用做操作（bash 卡片上那两颗按钮）。
+   *
+   * `call_id` 来自 `tool_started`。`interrupt` 只结束这条命令、这一轮继续；
+   * `background` 让命令继续跑、工具立刻返回 `shell_id`。
+   */
+  | { type: "tool_action"; call_id: string; action: "interrupt" | "background" }
   | { type: "cancel" }
   | { type: "set_model"; model: string }
   /**

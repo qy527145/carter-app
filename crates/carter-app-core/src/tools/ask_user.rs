@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 
+use carter::agent::CancelToken;
 use carter::tools::{Tool, ToolResult};
 
 use crate::protocol::AskQuestion;
@@ -42,11 +43,15 @@ pub enum AskRequest {
 
 pub struct AskUserTool {
     tx: mpsc::UnboundedSender<AskRequest>,
+    /// 用户按停止 / 关会话时置位。提问**也要**能被打断 —— 否则界面上按了停止，
+    /// 这一轮却还卡在一个永远等不到答案的 oneshot 上（最多等 120 秒的工具超时
+    /// 也救不了它），关掉的会话还得等它醒来才能退出。
+    cancel: CancelToken,
 }
 
 impl AskUserTool {
-    pub fn new(tx: mpsc::UnboundedSender<AskRequest>) -> Self {
-        Self { tx }
+    pub fn new(tx: mpsc::UnboundedSender<AskRequest>, cancel: CancelToken) -> Self {
+        Self { tx, cancel }
     }
 }
 
@@ -232,7 +237,16 @@ impl Tool for AskUserTool {
         }
 
         // `[]` = 用户跳过了。不是错误 —— 模型应当能继续往下走。
-        let answers = rx.await.unwrap_or_default();
+        //
+        // 但「中断」和「跳过」不是一回事：中断之后这一轮本来就要收尾了，给模型
+        // 一段明确的说明，比让它以为用户什么都没选要好。
+        let answers = tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => {
+                return ToolResult::err("这一轮被用户中断了，问题没有作答。");
+            }
+            a = rx => a.unwrap_or_default(),
+        };
         let pairs: Vec<(AskQuestion, Vec<String>)> = questions
             .into_iter()
             .enumerate()
@@ -346,7 +360,7 @@ mod tests {
     #[tokio::test]
     async fn the_tool_round_trips_an_answer_through_the_channel() {
         let (tx, mut rx) = mpsc::unbounded_channel::<AskRequest>();
-        let tool = AskUserTool::new(tx);
+        let tool = AskUserTool::new(tx, CancelToken::new());
 
         tokio::spawn(async move {
             if let Some(AskRequest::Questions { reply, .. }) = rx.recv().await {

@@ -228,11 +228,93 @@ export async function closeSideChat(): Promise<void> {
   }
 }
 
-/** 往会话投递一条命令。发消息的路径只有这一处，方便统一处理「会话已死」。 */
-export async function send(sessionId: string, text: string): Promise<void> {
-  await api.sendCommand(sessionId, { type: "send_prompt", text });
+/**
+ * 往会话投递一条命令。发消息的路径只有这一处，方便统一处理「会话已死」。
+ *
+ * 会话任务已经退出时（窗口重开、任务 panic、上一轮被强制中断），这里**不是**
+ * 弹一句错误了事：按历史把会话重建出来，再把排队里的消息重新投一遍。用户看到
+ * 的只是「消息发出去了」—— 而不是「发进黑洞、界面从此对不上」。
+ */
+export async function send(
+  sessionId: string,
+  text: string,
+  opts: { id?: number | null; interject?: boolean } = {},
+): Promise<void> {
+  try {
+    await api.sendCommand(sessionId, {
+      type: "send_prompt",
+      text,
+      id: opts.id ?? null,
+      interject: opts.interject ?? false,
+    });
+  } catch {
+    // 恢复成功就当没发生（消息已经重新投出去了）；失败才往上抛，
+    // 由调用方把原因显示出来。
+    const err = await recoverSession(sessionId);
+    if (err) throw new Error(err);
+  }
 }
 
 export async function cancel(sessionId: string): Promise<void> {
   await api.sendCommand(sessionId, { type: "cancel" });
+}
+
+/** 把一条排队中的消息提到队首，并中断当前轮。 */
+export function promote(sessionId: string, id: number): void {
+  api.sendCommand(sessionId, { type: "promote_prompt", id }).catch(toastError);
+}
+
+/** 撤回一条还没开始跑的消息。后端删不掉（可能已经开始跑了）就只清界面。 */
+export function dropQueued(sessionId: string, id: number): void {
+  api
+    .sendCommand(sessionId, { type: "drop_prompt", id })
+    .then(() => useStore.getState().removeQueuedPrompt(id))
+    .catch((e) => {
+      useStore.getState().removeQueuedPrompt(id);
+      toastError(e);
+    });
+}
+
+/** 同一时刻只跑一次恢复：两条消息连着失败时，别各自重建一条会话。 */
+let recovering: Promise<string | null> | null = null;
+
+/**
+ * 会话任务没了之后的重建。
+ *
+ * 做法是「按 id 续接 → 历史从盘上重读 → 把还没开始跑的消息按原顺序重新投递」。
+ * 历史从盘上重读这一步顺带完成两件事：界面回到与磁盘一致的版本；后端在加载时
+ * 会修复上一轮中断留下的断口（见 core 的 `history.rs`）。
+ */
+async function recoverSession(sessionId: string): Promise<string | null> {
+  if (recovering) return recovering;
+  recovering = (async () => {
+    try {
+      const created = await api.createSession({ resume: false, resumeId: sessionId });
+      // 快照要在 beginSession **之前**、createSession **之后**取：
+      // 前者会清空排队，后者那几百毫秒里用户可能又按了发送。
+      const snapshot = useStore.getState().queued;
+      const s = useStore.getState();
+      s.beginSession(created);
+      s.restoreQueued(snapshot);
+      for (const q of snapshot) {
+        await api.sendCommand(created.session_id, {
+          type: "send_prompt",
+          text: q.text,
+          id: q.id,
+          interject: false,
+        });
+      }
+      s.setNotice("会话任务已退出，已按历史重建，排队中的消息重新投递了。");
+      return null;
+    } catch (e) {
+      // 排队**不清**：那些消息还在用户眼前（排队条里），下一次发送会再触发一次
+      // 恢复并把它们一起投出去。悄悄丢掉用户刚打的字比失败本身更糟。
+      const s = useStore.getState();
+      s.clearStreaming();
+      return `会话已结束，自动重建也失败了：${e}`;
+    } finally {
+      recovering = null;
+    }
+  })();
+  return recovering;
 }

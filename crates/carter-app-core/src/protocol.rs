@@ -59,11 +59,36 @@ pub struct AskQuestion {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Command {
-    /// 提交一条用户消息。会话正在跑时会被拒绝（先 Cancel 或等 Idle）。
+    /// 提交一条用户消息。
+    ///
+    /// 会话正在跑时**不拒绝，而是排队**：模型写完这一轮就接着处理它。这是
+    /// 「边看它干活边补充要求」必须的能力 —— 输入框在生成期间锁死，用户就只能
+    /// 等它跑完（可能好几分钟）才能说下一句。
     ///
     /// `text` 里可以带 `/命令`、`@文件`、`[img:...]` —— 展开在会话侧做，
     /// 见 `session.rs::expand_input`。
-    SendPrompt { text: String },
+    SendPrompt {
+        text: String,
+        /// 前端给这条消息编的号。`turn_started` 会原样带回，界面据此把
+        /// 「排队中」的那条挪进对话里 —— 没有它，界面只能猜哪条被接受了。
+        #[serde(default)]
+        id: Option<u64>,
+        /// 插队：中断正在跑的这一轮，让这条消息**下一个**执行。
+        #[serde(default)]
+        interject: bool,
+    },
+    /// 把已经排队的某条消息提到最前面，并中断当前轮（界面上那个「插队」按钮）。
+    PromotePrompt { id: u64 },
+    /// 撤回一条还没开始跑的消息（界面上排队条的「×」）。
+    DropPrompt { id: u64 },
+    /// 对**一条正在跑的**工具调用做操作（界面上 bash 卡片里那两颗按钮）。
+    ///
+    /// `call_id` 就是 `tool_started` 事件里那个 id。与 `Cancel` 的区别见
+    /// `tools/control.rs` 的模块头：这里只动这一条命令，不动整轮。
+    ToolAction {
+        call_id: String,
+        action: ToolActionKind,
+    },
     /// 中断当前轮。已经生成的内容保留。
     Cancel,
     /// 切换本会话使用的模型（`provider/model` 形式）。
@@ -75,6 +100,16 @@ pub enum Command {
     AnswerForm { id: u64, answers: Vec<Vec<String>> },
     /// 长任务目标（`/goal`）的操作。状态转移规则见 `goal.rs::apply_action`。
     Goal { action: GoalCommand },
+}
+
+/// 单条工具调用的操作。见 `Command::ToolAction`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolActionKind {
+    /// 杀掉这条命令，把「被中断」的结果回灌给模型，这一轮继续。
+    Interrupt,
+    /// 命令继续跑，工具立刻返回 `shell_id`，之后用 `bash_output` 读。
+    Background,
 }
 
 /// `/goal` 的具体动作。
@@ -131,7 +166,22 @@ pub enum SessionEvent {
         resumed: bool,
     },
     /// 一轮开始。
-    TurnStarted { turn: u32 },
+    ///
+    /// `prompt_id` 只在这条用户消息**刚被接受**时出现（排队队列里拿出来的那一条）；
+    /// 自动继续（`/goal`）推起来的一轮没有它——界面靠这个区分「用户说的」和
+    /// 「系统推的」，不会把排队消息算到自动继续头上。
+    TurnStarted {
+        turn: u32,
+        #[serde(default)]
+        prompt_id: Option<u64>,
+        /// 这条用户消息的**原文**（展开 `/命令`、`@文件` 之前）。
+        ///
+        /// 界面靠它画出用户气泡 —— 不能只靠 `prompt_id` 去自己的排队表里查：
+        /// 界面可能刚重连、或者用户点「撤回」的动作晚了一拍，查不到就成了一条
+        /// 没有用户发言的回答。有原文就总能画对。
+        #[serde(default)]
+        prompt: Option<String>,
+    },
     /// 思考增量。签名分片不会传到这里（对模型有用，对人没意义）。
     ThinkingDelta { text: String },
     /// 正文增量。

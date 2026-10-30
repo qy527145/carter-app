@@ -54,7 +54,9 @@
 //! carter CLI 读不到它，也不会受它影响 —— 界面上必须把这句话写出来。
 
 pub mod ask_user;
+pub mod background;
 pub mod bash;
+pub mod control;
 pub mod cwd;
 pub mod goal_update;
 pub mod grep;
@@ -77,7 +79,9 @@ use crate::app_settings::AppSettings;
 use crate::goal::GoalSignal;
 use crate::skills::Scan;
 use ask_user::{AskRequest, AskUserTool};
+use background::{BackgroundShells, BashOutputTool, KillShellTool};
 use bash::PlatformBash;
+use control::RunningTools;
 use cwd::{CwdScoped, ProjectMemoryGuard};
 use goal_update::GoalUpdateTool;
 use grep::EmbeddedGrep;
@@ -104,6 +108,15 @@ pub struct ToolBuildArgs {
     pub ask_tx: Option<mpsc::UnboundedSender<AskRequest>>,
     /// 是否挂上 `task`（派生子 agent 的入口）。侧边聊天不挂。
     pub include_task: bool,
+    /// 后台命令表。`Some` 时才会挂上 `bash_output` / `kill_shell`。
+    ///
+    /// 侧边聊天也给一份：它跑 `bash` 时同样可能起服务，没有这两个工具的话
+    /// 模型只能把命令跑成前台、把抽屉卡住。
+    pub shells: Option<Arc<BackgroundShells>>,
+    /// 后台命令的日志按会话分目录。
+    pub session_id: String,
+    /// 正在跑的工具表。界面按 `call_id` 对单条命令做「中断 / 转后台」。
+    pub running: Option<Arc<RunningTools>>,
     /// 长任务目标的信号格子。恒常传 —— `goal_update` 是恒常注册的，见 `goal_update.rs`。
     pub goal_signal: Arc<GoalSignal>,
     /// 工具调用计数。runner 靠它判断「这一轮到底动没动手」（自动继续的空转检测）。
@@ -132,9 +145,28 @@ pub fn filter_tools(full: &ToolRegistry, settings: &AppSettings) -> Vec<Arc<dyn 
 /// 那份只用来展示的 registry（`src-tauri` 的 `list_tools`）。后者此前手抄了一遍 `bash`
 /// 的构造，而设置页显示一份与真实行为对不上的说明，比不显示更坏。
 pub fn substitute(t: Arc<dyn Tool>, settings: &AppSettings, cwd: &Path) -> Arc<dyn Tool> {
+    // 只在设置页「工具」列表里用到：那里只展示名字与描述，不会真的执行 ——
+    // 于是给一个永远不会置位的取消令牌、不给后台表。
+    substitute_with(t, settings, cwd, &CancelToken::new(), None, "")
+}
+
+/// [`substitute`] 的完整版。真正装配工具池时走这条，带上取消令牌与后台命令表。
+pub fn substitute_with(
+    t: Arc<dyn Tool>,
+    settings: &AppSettings,
+    cwd: &Path,
+    cancel: &CancelToken,
+    shells: Option<&Arc<BackgroundShells>>,
+    session_id: &str,
+) -> Arc<dyn Tool> {
     match t.name() {
         // `bash` 换成跨平台实现。
-        "bash" => Arc::new(PlatformBash::new(cwd.to_path_buf())),
+        "bash" => Arc::new(PlatformBash::new(
+            cwd.to_path_buf(),
+            cancel.clone(),
+            shells.cloned(),
+            session_id,
+        )),
         // `grep` 换成内置 ripgrep 引擎（不依赖系统 `rg`），仍然走 `CwdScoped`
         // 解析相对路径。构造时把 cwd 也传给它 —— 结果里的文件路径要显示成相对路径。
         "grep" => Arc::new(CwdScoped::new(
@@ -171,6 +203,9 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
         tool_tx,
         ask_tx,
         include_task,
+        shells,
+        session_id,
+        running,
         goal_signal,
         activity,
         live,
@@ -195,18 +230,36 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
     let push = |t: Arc<dyn Tool>, tools: &mut ToolRegistry| {
         tools.push(Arc::new(
             Recorded::new(t, tool_tx.clone(), seq.clone(), activity.clone())
-                .with_live(live.clone()),
+                .with_live(live.clone())
+                .with_running(running.clone()),
         ));
     };
 
     for t in filter_tools(&full, settings) {
-        push(substitute(t, settings, &cwd), &mut tools);
+        push(
+            substitute_with(t, settings, &cwd, &cancel, shells.as_ref(), &session_id),
+            &mut tools,
+        );
+    }
+
+    // 后台命令的读取与结束。只有配了后台命令表才挂 —— 没有它的话，`bash` 的
+    // `run_in_background` 也无从谈起。
+    if let Some(shells) = &shells {
+        if settings.tool_enabled("bash_output") {
+            push(Arc::new(BashOutputTool::new(shells.clone())), &mut tools);
+        }
+        if settings.tool_enabled("kill_shell") {
+            push(Arc::new(KillShellTool::new(shells.clone())), &mut tools);
+        }
     }
 
     // 我们自己那个一次问一组问题的 ask_user。
     if let Some(ask_tx) = ask_tx {
         if settings.tool_enabled("ask_user_question") {
-            push(Arc::new(AskUserTool::new(ask_tx)), &mut tools);
+            push(
+                Arc::new(AskUserTool::new(ask_tx, cancel.clone())),
+                &mut tools,
+            );
         }
     }
 

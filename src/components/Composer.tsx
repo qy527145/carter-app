@@ -14,7 +14,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { Folder, ImagePlus, LoaderCircle, Send, Square, X } from "lucide-react";
+import { Folder, ImagePlus, ListOrdered, LoaderCircle, Send, Square, X, Zap } from "lucide-react";
 
 import {
   listCommands,
@@ -27,7 +27,7 @@ import {
 } from "../lib/api";
 import { toastError } from "../lib/toast";
 import * as ops from "../lib/sessionOps";
-import { useStore } from "../store";
+import { useStore, type QueuedPrompt } from "../store";
 
 // ---------------------------------------------------------------------------
 // 弹出菜单
@@ -217,6 +217,8 @@ export function Composer() {
   const pendingAsk = useStore((s) => s.pendingForm);
   const addUserTurn = useStore((s) => s.addUserTurn);
   const setNotice = useStore((s) => s.setNotice);
+  const queued = useStore((s) => s.queued);
+  const enqueuePrompt = useStore((s) => s.enqueuePrompt);
 
   const taRef = useRef<HTMLTextAreaElement>(null);
 
@@ -378,7 +380,14 @@ export function Composer() {
   // 发送 / 取消
   // -------------------------------------------------------------------------
 
-  const send = () => {
+  /**
+   * 发送。`interject` = 插队：中断当前这一轮，让这条消息下一个跑。
+   *
+   * 这里**不**直接往 `turns` 里塞用户气泡 —— 后端可能正在跑别的消息，气泡提前
+   * 出现会把它下面那一轮的流式输出截断成两段。真正的插入时机是 `turn_started`
+   * 带着 `prompt_id` 回来的时候（见 store 的 `applyEvent`）。
+   */
+  const send = (interject = false) => {
     const t = text.trim();
     // 打在输入框里的内置命令：**本地执行**，不进对话文本、也不发给模型。
     //
@@ -402,17 +411,18 @@ export function Composer() {
         return;
       }
     }
-    if ((!t && attachments.length === 0) || !sessionId || streaming || disabled) return;
+    if ((!t && attachments.length === 0) || !sessionId || disabled) return;
     // 图片引用拼在文本末尾：carter 在消息文本里认 `[img:...]` 这个形态。
     const payload = [t, ...attachments].filter(Boolean).join("\n");
-    // 用户消息事件不存在，本地先落一条，后端随后发 turn_started 打开助手轮。
-    addUserTurn(payload);
+    const id = nextPromptId();
+    // 挂进「排队中」：模型写这一轮时用户还能接着说，后端的队列保证顺序。
+    enqueuePrompt({ id, text: payload });
     setText("");
     setAttachments([]);
     setFileQuery(null);
     const el = taRef.current;
     if (el) el.style.height = "auto";
-    ops.send(sessionId, payload).catch((e) => setNotice(String(e)));
+    ops.send(sessionId, payload, { id, interject }).catch((e) => setNotice(String(e)));
   };
 
   const clearInput = () => {
@@ -451,10 +461,11 @@ export function Composer() {
         return;
       }
     }
-    // Enter 发送，Shift+Enter 换行。
+    // Enter 发送，Shift+Enter 换行。生成中按 Cmd/Ctrl+Enter = 插队：
+    // 中断这一轮，先处理这条。
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      send();
+      send(e.metaKey || e.ctrlKey);
     }
   };
 
@@ -476,6 +487,8 @@ export function Composer() {
             </div>
           )}
 
+          <QueueStrip queued={queued} sessionId={sessionId} />
+
           <textarea
             ref={taRef}
             rows={1}
@@ -489,7 +502,9 @@ export function Composer() {
                 ? "会话未就绪 —— 点「新对话」开始"
                 : pendingAsk
                   ? "请先回答上面的问题"
-                  : "输入消息   / 命令   @ 引用文件   可直接粘贴图片"
+                  : streaming
+                    ? "可以接着说：Enter 排队，⌘/Ctrl+Enter 插队"
+                    : "输入消息   / 命令   @ 引用文件   可直接粘贴图片"
             }
             className="max-h-48 min-h-14 w-full resize-none bg-transparent px-4 pb-1 pt-3.5 text-[15px] leading-relaxed text-ink outline-none placeholder:text-dim disabled:opacity-50"
           />
@@ -500,25 +515,26 @@ export function Composer() {
             <CwdPicker cwd={cwd} />
             {pasting && <LoaderCircle size={13} className="animate-spin text-dim" />}
             <span className="flex-1" />
-            {streaming ? (
+            {streaming && (
               <button
                 onClick={cancel}
-                title="中断这一轮"
+                title="中断这一轮（正在跑的命令会被立刻结束）"
                 className="inline-flex items-center gap-1.5 rounded-full border border-edge px-3 py-1.5 text-xs text-dim transition-colors hover:text-[var(--danger)]"
               >
                 <Square size={11} />
                 停止
               </button>
-            ) : (
-              <button
-                onClick={send}
-                disabled={!canSend}
-                title="发送"
-                className="rounded-full bg-accent p-2 text-[var(--accent-contrast)] transition-opacity hover:opacity-90 disabled:opacity-30"
-              >
-                <Send size={14} />
-              </button>
             )}
+            {/* 生成中**也**能发：默认排队，⌘/Ctrl+Enter 或按钮提示里的插队方式
+                会中断当前轮。把发送键藏起来是之前「只能干等」的原因。 */}
+            <button
+              onClick={() => send(false)}
+              disabled={!canSend}
+              title={streaming ? "排队发送（⌘/Ctrl+Enter 插队）" : "发送"}
+              className="rounded-full bg-accent p-2 text-[var(--accent-contrast)] transition-opacity hover:opacity-90 disabled:opacity-30"
+            >
+              <Send size={14} />
+            </button>
           </div>
         </div>
 
@@ -531,6 +547,69 @@ export function Composer() {
       </div>
     </div>
   );
+}
+
+// ---------------------------------------------------------------------------
+// 排队中的消息
+// ---------------------------------------------------------------------------
+
+/**
+ * 已发出、还没轮到它跑的消息。
+ *
+ * 它显示在输入框**里面**而不是对话流里：对话流里出现的东西必须是「模型已经看到
+ * 的」，否则用户会以为模型正在回复一条它根本还没收到的消息。轮到了才挪进去
+ * （`turn_started` 带 `prompt_id` 回来，见 store 的 `applyEvent`）。
+ */
+function QueueStrip({
+  queued,
+  sessionId,
+}: {
+  queued: QueuedPrompt[];
+  sessionId: string | null;
+}) {
+  if (queued.length === 0) return null;
+  return (
+    <div className="border-b border-edge/70 px-3.5 py-2">
+      <div className="mb-1 flex items-center gap-1.5 text-[10px] text-dim">
+        <ListOrdered size={11} />
+        排队中 {queued.length} 条 · 这一轮结束后依次发送
+      </div>
+      <ul className="space-y-0.5">
+        {queued.map((q) => (
+          <li
+            key={q.id}
+            className="group flex items-center gap-2 rounded px-1 py-0.5 hover:bg-base"
+          >
+            <span className="min-w-0 flex-1 truncate text-xs text-dim" title={q.text}>
+              {q.text.split("\n")[0]}
+            </span>
+            <button
+              onClick={() => sessionId && ops.promote(sessionId, q.id)}
+              title="插队：中断当前这一轮，先处理这条"
+              className="inline-flex shrink-0 items-center gap-0.5 rounded px-1.5 py-0.5 text-[11px] text-dim opacity-0 transition-opacity hover:bg-elevated hover:text-ink group-hover:opacity-100"
+            >
+              <Zap size={10} />
+              插队
+            </button>
+            <button
+              onClick={() => sessionId && ops.dropQueued(sessionId, q.id)}
+              title="撤回这条（还没开始跑）"
+              className="shrink-0 rounded p-0.5 text-dim opacity-0 transition-opacity hover:text-[var(--danger)] group-hover:opacity-100"
+            >
+              <X size={12} />
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/** 排队消息的编号。只在本进程内有效，`turn_started` 原样带回即可。 */
+let promptSeq = Date.now();
+function nextPromptId(): number {
+  promptSeq += 1;
+  return promptSeq;
 }
 
 // ---------------------------------------------------------------------------

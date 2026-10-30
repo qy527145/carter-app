@@ -184,9 +184,13 @@ fn send_command(
     }
 }
 
+/// 关闭会话，**等任务真的退出了才返回**。
+///
+/// 前端换会话的顺序是「关旧的 → 开新的」。不等旧任务退出就按 id 重开同一条
+/// 会话的话，会有两个 runner 同时往一个会话文件追加（见 `AppShell::close_session`）。
 #[tauri::command]
-fn close_session(shell: State<'_, Arc<AppShell>>, session_id: String) -> Result<(), String> {
-    shell.close_session(&session_id);
+async fn close_session(shell: State<'_, Arc<AppShell>>, session_id: String) -> Result<(), String> {
+    shell.close_session(&session_id).await;
     Ok(())
 }
 
@@ -211,10 +215,10 @@ fn fork_session(session_id: String) -> Result<String, String> {
 
 /// 删除一个会话文件。不可恢复 —— 调用方要先确认。
 #[tauri::command]
-fn delete_session(shell: State<'_, Arc<AppShell>>, session_id: String) -> Result<(), String> {
+async fn delete_session(shell: State<'_, Arc<AppShell>>, session_id: String) -> Result<(), String> {
     // 先关会话再删文件。会话任务持有同一份会话文件的 Recorder，不先关掉的话
     // 它下一轮 append 会把文件重新写出来 —— 表现为「删了又回来了」。
-    shell.close_session(&session_id);
+    shell.close_session(&session_id).await;
     // 目标与变更记录也一并清掉：那两个目录都是按会话 id 分文件的，不删就会
     // 跟着历史会话一直长。
     carter_app_core::goal::remove(&session_id);
@@ -513,6 +517,7 @@ fn list_tools(shell: State<'_, Arc<AppShell>>) -> Vec<ToolRow> {
         use carter::tools::Tool as _;
         let a = carter_app_core::tools::ask_user::AskUserTool::new(
             tokio::sync::mpsc::unbounded_channel().0,
+            carter::agent::CancelToken::new(),
         );
         rows.push(ToolRow {
             enabled: settings.tool_enabled("ask_user_question"),
@@ -522,6 +527,34 @@ fn list_tools(shell: State<'_, Arc<AppShell>>) -> Vec<ToolRow> {
             description: a.description().to_string(),
             parameters: a.parameters(),
         });
+    }
+
+    // 后台命令的两个配套工具。它们跟着 `bash` 的 `run_in_background` 一起用，
+    // 所以也要出现在开关列表里 —— 用户关掉 bash 时，这两个留着也没有意义，
+    // 但那是用户自己的选择，界面上说清楚即可。
+    {
+        use carter_app_core::tools::background::{BackgroundShells, BashOutputTool, KillShellTool};
+        let shells = BackgroundShells::new();
+        let extras: Vec<(std::sync::Arc<dyn carter::tools::Tool>, &str)> = vec![
+            (
+                std::sync::Arc::new(BashOutputTool::new(shells.clone())),
+                "读取 `bash` 以后台方式启动的命令的输出。",
+            ),
+            (
+                std::sync::Arc::new(KillShellTool::new(shells)),
+                "结束一条后台命令。",
+            ),
+        ];
+        for (t, note) in extras {
+            rows.push(ToolRow {
+                enabled: settings.tool_enabled(t.name()),
+                toggleable: true,
+                note: Some(note.to_string()),
+                name: t.name().to_string(),
+                description: t.description().to_string(),
+                parameters: t.parameters(),
+            });
+        }
     }
 
     // `task` 构造要一个 provider，这里拿不到 —— 单独补一行，标明它不可关。

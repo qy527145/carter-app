@@ -14,7 +14,9 @@ carter = "0.1.4"
 # 两个新类型共存会在类型检查上炸（同一个 crate 的两个版本是两套类型）。
 llm_adapt_core = "0.1.1"
 
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "fs"] }
+# `process` 是 bash 工具起子进程要用的；`io-util` 是前台命令的管道读取任务
+# （`AsyncReadExt`）要用的 —— 不能指望别的 crate 顺带开这两个 feature。
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "fs", "process", "io-util"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"

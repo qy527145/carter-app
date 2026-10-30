@@ -81,14 +81,24 @@ pub struct StartedSession {
 ///
 /// **必须在 tokio runtime 上下文里调用** —— 它要 spawn 会话任务。同步的 Tauri 命令
 /// 跑在主线程上、没有 runtime，会在这里拿到一个明确的错误而不是一个看不懂的 panic。
-pub fn start_session(
-    shell: Arc<AppShell>,
-    opts: SessionOptions,
-) -> carter::Result<StartedSession> {
+pub fn start_session(shell: Arc<AppShell>, opts: SessionOptions) -> carter::Result<StartedSession> {
     if tokio::runtime::Handle::try_current().is_err() {
         return Err(carter::CarterError::Config(
             "start_session 必须在 tokio runtime 内调用（Tauri 命令要写成 async fn）".into(),
         ));
+    }
+    // 同一条会话不能有两个 runner：两个 `Thread` 各带一个 `Recorder` 往同一个
+    // 文件追加，历史会错位到「无论如何都没法继续」。
+    //
+    // 正常路径上走不到这里：`close_session` 会等旧任务退出之后才返回，而前端是
+    // 「先关再开」。这条是兜底 —— 某个不响应取消的工具（MCP）把旧任务多拖了几秒时，
+    // 宁可让用户看到一句「还在收尾」，也不要把会话文件写坏。
+    if let Some(id) = opts.resume_id.as_deref() {
+        if shell.session(id).is_some() || shell.is_closing(id) {
+            return Err(carter::CarterError::Config(format!(
+                "会话 {id} 还在收尾（上一轮的命令没有响应中断），请稍后再打开。"
+            )));
+        }
     }
     let config = shell.config.load_full();
     let cache_json = fetch::read_cache()?;
@@ -116,7 +126,7 @@ pub fn start_session(
         None if opts.resume_latest => session::latest(&opts.cwd),
         None => None,
     };
-    let (thread, meta, resumed) = match existing {
+    let (mut thread, meta, resumed) = match existing {
         Some(entry) => {
             let (mut t, m) = session::load(&entry)?;
             // 续接时把用户轮序号接到历史后面。
@@ -135,6 +145,18 @@ pub fn start_session(
             (t, m, false)
         }
     };
+
+    // 上次异常退出留下的断口（模型发了 tool_use，工具没跑、也没写回 tool_result）
+    // 在这里补上。**必须在返回历史与接受新消息之前** —— 带着断口发请求，上游会
+    // 一直 400，而用户看到的是「说什么都发不出去」。
+    let repaired = crate::history::repair_dangling_tool_uses(&mut thread);
+    if !repaired.is_empty() {
+        tracing::warn!(
+            session = %meta.id,
+            calls = repaired.len(),
+            "会话历史里有未完成的工具调用，已补上「被中断」的结果"
+        );
+    }
 
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let handle = SessionHandle::new(
@@ -177,6 +199,8 @@ pub fn start_session(
         include_task: true,
         fast: None,
         fast_ref: None,
+        shells: crate::tools::background::BackgroundShells::new(),
+        running: crate::tools::control::RunningTools::new(),
     };
     // 会话文件里还没标题（`meta` 下面要整个移进 Runner，先问一句）。
     let unnamed = meta.title.is_none();
@@ -259,6 +283,8 @@ pub(crate) fn start_side(w: SideWiring, id: String, parent_id: String) -> Arc<Se
         capture: None,
         fast: None,
         fast_ref: None,
+        shells: crate::tools::background::BackgroundShells::new(),
+        running: crate::tools::control::RunningTools::new(),
     };
     let runner = Runner {
         meta: side_meta(&handle),
@@ -328,6 +354,10 @@ struct SessionCtx {
     fast: Option<CompactModel>,
     /// 上面那份是按哪个引用解析出来的 —— 用户在设置页改了副模型，下一轮要重解析。
     fast_ref: Option<String>,
+    /// 后台命令（`bash` 的 `run_in_background`）。一条会话一份，关会话时整组收掉。
+    shells: Arc<crate::tools::background::BackgroundShells>,
+    /// 正在跑的工具表：界面上的「中断命令 / 转后台」靠它定位到具体那一次调用。
+    running: Arc<crate::tools::control::RunningTools>,
 }
 
 impl SessionCtx {
@@ -575,6 +605,9 @@ impl Runner {
             }
         }
 
+        // 后台命令跟着会话走：会话没了，它们就不该继续占着端口 / CPU。
+        // 这一步要在等转发任务之前做 —— 那些子进程的日志不会再有人读。
+        self.ctx.shells.kill_all();
         if let Some(mgr) = mcp_mgr {
             mgr.shutdown().await;
         }
@@ -585,6 +618,10 @@ impl Runner {
         drop(self.ask_tx.take());
         let _ = forwarder.await;
         self.ctx.shell.sessions.remove(&session_id);
+        self.ctx.shell.mark_closed(&session_id);
+        // **最后**一句：告诉 `close_session` 那个等待方「文件与 Thread 都放掉了」。
+        // 放在 remove 之后，保证它醒来时注册表里已经没有这条会话。
+        self.ctx.handle.done.set();
     }
 
     async fn handle_command(&mut self, cmd: Command) {
@@ -622,17 +659,29 @@ impl Runner {
                     self.ctx.model = resolved.model;
                     self.ctx.provider = resolved.provider;
                     self.ctx.unsupported_server_tools = resolved.unsupported_server_tools;
-                    self.ctx.handle.model.store(Arc::new(self.ctx.model.clone()));
+                    self.ctx
+                        .handle
+                        .model
+                        .store(Arc::new(self.ctx.model.clone()));
                     self.notice(&format!("模型已切换为 {}", self.ctx.model.api_name));
                 }
                 Err(e) => self.error(&format!("切换模型失败：{e}")),
             },
-            Command::SendPrompt { text } => self.submit(text).await,
+            // 排队中的消息真正轮到它时走到这里。`interject` 在这里没有意义
+            // （已经没有正在跑的轮次可以打断了），直接当普通消息处理。
+            Command::SendPrompt { text, id, .. } => self.submit(text, id).await,
+            // 空闲时「插队」= 把那条消息挪到队首。下一轮循环就会取到它。
+            Command::PromotePrompt { id } => promote(&mut self.queued, id),
+            Command::DropPrompt { id } => drop_queued(&mut self.queued, id),
+            // 空闲时按「中断命令」= 那条命令已经结束了，什么都不用做。
+            Command::ToolAction { .. } => {}
         }
     }
 
     /// 用户发来一条消息：展开、落进历史、跑一轮，再按目标决定要不要自动继续。
-    async fn submit(&mut self, raw: String) {
+    async fn submit(&mut self, raw: String, prompt_id: Option<u64>) {
+        // 展开之后发给模型的是另一段文本，但界面上要显示用户**打的字**。
+        let echo = Some(raw.clone());
         // 热重载落点：每轮开始前重读配置与应用设置。
         // 界面上改完工具开关、换完渠道、动过 system.md，下一条消息就按新的来。
         self.ctx.refresh();
@@ -666,7 +715,7 @@ impl Runner {
             }
         }
 
-        self.run_sequence(text, git).await;
+        self.run_sequence(text, git, prompt_id, echo).await;
     }
 
     /// 目标从「不推进」变成「推进」时踢一脚：不等用户再说话，直接开跑。
@@ -675,11 +724,25 @@ impl Runner {
     /// 所以界面上呈现成「自动继续」的分隔条而不是用户气泡 —— 它确实不是用户说的。
     async fn kick_goal(&mut self) {
         let git = self.meta.git.clone();
-        self.run_sequence(goal::CONTINUE_PROMPT.to_string(), git).await;
+        self.run_sequence(goal::CONTINUE_PROMPT.to_string(), git, None, None)
+            .await;
     }
 
     /// 把一段文本作为一轮的用户输入跑完（含它引发的自动继续）。
-    async fn run_sequence(&mut self, text: String, git: Option<carter::session::GitInfo>) {
+    ///
+    /// `prompt_id` 是排队队列里那条消息的编号：`turn_started` 会原样带回，界面
+    /// 据此把「排队中」的那一条挪进对话。自动继续（`/goal`）没有编号。
+    async fn run_sequence(
+        &mut self,
+        text: String,
+        git: Option<carter::session::GitInfo>,
+        prompt_id: Option<u64>,
+        echo: Option<String>,
+    ) {
+        // 上一轮如果以「模型发完 tool_use 就被中断」收场，历史里会留一个断口。
+        // **必须在追加这条用户消息之前补上** —— 补在它之后，普通用户消息就会
+        // 插在 tool_use 与 tool_result 中间，那仍然是一份非法历史。
+        self.settle_history();
         self.thread.append_user(text.clone());
         // 标题在这一刻并行去生成，**不挡这一轮**（见 [`Runner::spawn_title`]）。
         // 放在 append 之后：carter 的 Recorder 是惰性建文件的，第一条消息落盘
@@ -693,12 +756,43 @@ impl Runner {
         self.begin_changes();
         self.emit(SessionEvent::TurnStarted {
             turn: self.thread.user_turns,
+            prompt_id,
+            prompt: echo,
         });
 
         let result = self.run_one_turn(git.clone()).await;
+        // 一轮结束立刻收口：中断留下的断口现在就补进历史（并落盘），
+        // 不必等用户下一次发消息。
+        self.settle_history();
         self.finish_changes(result.used_tools).await;
         self.drive_goal(result, git).await;
         self.emit(SessionEvent::Idle);
+    }
+
+    /// 历史自愈 + 界面收尾。
+    ///
+    /// 补上结果的那几条工具调用，界面上可能正悬着一张没有结果的卡片 ——
+    /// 这里补发一对 `tool_started` / `tool_finished` 把它画完整，否则界面显示的
+    /// 历史与磁盘上的历史会不一样（下次打开时才突然多出一张卡）。
+    fn settle_history(&mut self) {
+        let repaired = crate::history::repair_dangling_tool_uses(&mut self.thread);
+        if repaired.is_empty() {
+            return;
+        }
+        for call in repaired {
+            self.emit(SessionEvent::ToolStarted {
+                call_id: call.id.clone(),
+                name: call.name,
+                args: call.input,
+            });
+            self.emit(SessionEvent::ToolFinished {
+                call_id: call.id,
+                ok: false,
+                content: crate::history::INTERRUPTED_RESULT.to_string(),
+                elapsed_ms: 0,
+            });
+        }
+        self.ctx.handle.publish_history(&self.thread.messages);
     }
 
     /// 首轮之后并行生成会话标题。
@@ -820,6 +914,9 @@ impl Runner {
                 goal_signal: self.goal_signal.clone(),
                 activity: self.activity.clone(),
                 live: self.live(),
+                shells: Some(self.ctx.shells.clone()),
+                session_id: self.ctx.handle.id.clone(),
+                running: Some(self.ctx.running.clone()),
             },
             &self.ctx.settings,
         );
@@ -877,10 +974,41 @@ impl Runner {
                 tokio::select! {
                     res = &mut turn => break res,
                     Some(inner) = self.cmd_rx.recv() => match inner {
-                        // 生成中能**立刻**生效的三条命令。其余排队等这一轮跑完。
+                        // 生成中能**立刻**生效的几条命令。其余排队等这一轮跑完。
                         Command::Cancel => {
                             user_cancelled = true;
                             cancel.set();
+                        }
+                        // 用户又发了一条消息。默认排队（这一轮跑完就轮到它），
+                        // 勾了「插队」则立刻中断本轮、插到队首。
+                        Command::SendPrompt { text, id, interject } => {
+                            let cmd = Command::SendPrompt {
+                                text,
+                                id,
+                                interject: false,
+                            };
+                            if interject {
+                                user_cancelled = true;
+                                cancel.set();
+                                self.queued.push_front(cmd);
+                            } else {
+                                self.queued.push_back(cmd);
+                            }
+                        }
+                        // 界面上对一条**已经排进队**的消息点「插队」。
+                        Command::PromotePrompt { id } => {
+                            promote(&mut self.queued, id);
+                            user_cancelled = true;
+                            cancel.set();
+                        }
+                        Command::DropPrompt { id } => drop_queued(&mut self.queued, id),
+                        // 单条工具调用的「中断 / 转后台」。立刻生效，也不影响
+                        // 这一轮本身 —— 工具会把结果回灌给模型，模型接着往下走。
+                        Command::ToolAction { call_id, action } => {
+                            if !self.ctx.running.apply(&call_id, action) {
+                                // 找不到说明它刚好跑完了。不是错误，静默即可 ——
+                                // 用户点按钮与命令结束本来就可能撞在同一毫秒。
+                            }
                         }
                         Command::AnswerForm { id, answers } => {
                             self.ctx.handle.asks.answer(id, answers);
@@ -930,7 +1058,11 @@ impl Runner {
         if let Err(e) = &outcome {
             // 关会话造成的断流不是错误：用户本来就让这条对话结束，
             // 报一条「已取消」只会在他按下关闭之后再弹一句废话。
-            if !closed {
+            //
+            // 用户点了停止也一样：carter 在取消之后还会再发一次请求（它的循环
+            // 顶部不检查取消），那一次多半会以「请求被取消」收场 —— 把这条当成
+            // 错误弹出来，用户会以为是「停止」弄坏了什么。
+            if !closed && !user_cancelled {
                 self.error(&format!("{e}"));
             }
         }
@@ -948,7 +1080,9 @@ impl Runner {
     async fn drive_goal(&mut self, first: TurnResult, git: Option<carter::session::GitInfo>) {
         let mut result = first;
         loop {
-            let Some(mut g) = self.goal.clone() else { return };
+            let Some(mut g) = self.goal.clone() else {
+                return;
+            };
             if g.status != GoalStatus::Active {
                 return;
             }
@@ -1002,8 +1136,12 @@ impl Runner {
                     self.begin_changes();
                     self.emit(SessionEvent::TurnStarted {
                         turn: self.thread.user_turns,
+                        // 自动继续没有用户消息编号 —— 界面据此画分隔条而不是气泡。
+                        prompt_id: None,
+                        prompt: None,
                     });
                     result = self.run_one_turn(git.clone()).await;
+                    self.settle_history();
                     self.finish_changes(result.used_tools).await;
                     if self.ctx.handle.close.is_cancelled() {
                         return;
@@ -1028,7 +1166,9 @@ impl Runner {
     /// 空清单不发事件 —— 前端仍会从成功的 `write_file` / `edit_file` 参数里补，
     /// 那些落在 cwd 之外的写入（比如写 `/tmp`）监听器本来就看不见。
     async fn finish_changes(&mut self, used_tools: bool) {
-        let Some(watch) = self.changes.take() else { return };
+        let Some(watch) = self.changes.take() else {
+            return;
+        };
         // 这一轮一个工具都没调，就不可能有人动文件 —— 连那 150ms 的收尾等待一起省掉。
         if !used_tools {
             return;
@@ -1038,9 +1178,12 @@ impl Runner {
             return;
         }
         let turn = self.changes_turn;
-        if let Err(e) =
-            crate::changes::record(&self.ctx.handle.id, turn, &done.files, done.baseline.as_deref())
-        {
+        if let Err(e) = crate::changes::record(
+            &self.ctx.handle.id,
+            turn,
+            &done.files,
+            done.baseline.as_deref(),
+        ) {
             // 落不了盘只影响历史回看，实时清单照发。
             tracing::warn!("记录本轮变更文件失败：{e}");
         }
@@ -1145,11 +1288,48 @@ fn apply_goal_action(
         (Some(_), GoalCommand::Complete) => "目标已标记为完成。".to_string(),
         _ => "目标已清除。".to_string(),
     };
-    emit(
-        shell,
-        session_id,
-        SessionEvent::Notice { message },
-    );
+    emit(shell, session_id, SessionEvent::Notice { message });
+}
+
+/// 排队操作的结果必须能一眼看出来：插队要真的到队首，撤回要真的删掉，
+/// 而且都不能误伤别的命令。
+#[cfg(test)]
+mod queue_tests {
+    use super::*;
+
+    fn prompt(id: u64) -> Command {
+        Command::SendPrompt {
+            text: format!("m{id}"),
+            id: Some(id),
+            interject: false,
+        }
+    }
+
+    fn ids(q: &VecDeque<Command>) -> Vec<Option<u64>> {
+        q.iter()
+            .map(|c| match c {
+                Command::SendPrompt { id, .. } => *id,
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn promoting_moves_only_that_message_to_the_front() {
+        let mut q = VecDeque::from(vec![prompt(1), Command::Cancel, prompt(2), prompt(3)]);
+        promote(&mut q, 3);
+        assert_eq!(ids(&q), vec![Some(3), Some(1), None, Some(2)]);
+    }
+
+    #[test]
+    fn dropping_removes_exactly_one_and_is_harmless_if_unknown() {
+        let mut q = VecDeque::from(vec![prompt(1), prompt(2), prompt(3)]);
+        drop_queued(&mut q, 2);
+        assert_eq!(ids(&q), vec![Some(1), Some(3)]);
+        // 已经开始跑（或已经撤回过）的编号再点一次不该出错。
+        drop_queued(&mut q, 99);
+        assert_eq!(ids(&q), vec![Some(1), Some(3)]);
+    }
 }
 
 /// 动作在当前状态下没意义时，说清是为什么 —— 静默无事发生最难查。
@@ -1162,6 +1342,26 @@ fn goal_noop_note(action: &GoalCommand, current: Option<&Goal>) -> &'static str 
         (GoalCommand::Set { .. }, _) => "目标正文不能是空的。",
         (GoalCommand::Clear, _) => "没有可清除的目标。",
     }
+}
+
+/// 把排队中的某条用户消息提到最前面。
+///
+/// 只在队列里找 `SendPrompt`：其它命令（换模型、目标操作）没有「下一条用户输入」
+/// 的语义，把它们提到队首只会让「插队」变得莫名其妙。
+fn promote(queue: &mut VecDeque<Command>, id: u64) {
+    let pos = queue
+        .iter()
+        .position(|c| matches!(c, Command::SendPrompt { id: Some(q), .. } if *q == id));
+    if let Some(pos) = pos {
+        if let Some(cmd) = queue.remove(pos) {
+            queue.push_front(cmd);
+        }
+    }
+}
+
+/// 撤回一条还没开始跑的消息。找不到就当作已经跑了，什么都不做。
+fn drop_queued(queue: &mut VecDeque<Command>, id: u64) {
+    queue.retain(|c| !matches!(c, Command::SendPrompt { id: Some(q), .. } if *q == id));
 }
 
 /// 展开输入框里的 `/命令` 与 `@文件`。

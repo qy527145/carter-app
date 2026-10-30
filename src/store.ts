@@ -52,6 +52,13 @@ export type Item =
       /** **完整的**参数对象。差异化渲染靠它（见 components/toolcards）。 */
       args: unknown;
       result?: { ok: boolean; content: string; elapsedMs: number };
+      /**
+       * 这条调用属于哪条会话。卡片上的「中断命令 / 转后台」要按它回传 ——
+       * 侧边聊天的卡片不能用主对话的 id 去查。
+       *
+       * 历史消息里没有（那些早就跑完了，也没有按钮可点）。
+       */
+      sessionId?: string;
     }
   | { kind: "server"; rawType: string; summary: string }
   | { kind: "image"; mediaType: string; hash: string | null }
@@ -92,6 +99,15 @@ export type Conv = {
   changed: Record<number, string[]>;
 };
 
+/**
+ * 一条已经发给后端、但还没轮到它跑的消息。
+ *
+ * 它**不是**对话内容，所以不进 `turns`：后端真正开始处理它时会发
+ * `turn_started { prompt_id }`，那时才把气泡插进对话里。提前插会让正在流式输出的
+ * 那一轮被这笔用户消息截断成两段（助手轮是按「末尾」累积的）。
+ */
+export type QueuedPrompt = { id: number; text: string };
+
 /** 侧边聊天：一份 `Conv` + 它是谁（事件按 session_id 路由，见 `lib/events.ts`）。 */
 export type SideConv = Conv & {
   sessionId: string;
@@ -123,6 +139,13 @@ type Store = Conv & {
   configNonce: number;
   /** 主区显示哪个视图。默认对话。 */
   view: "chat" | "settings";
+  /**
+   * 已发出、还没开始跑的消息（后端排队中的那些）。
+   *
+   * 「生成中还能继续打字」靠它：发出去就进这里，`turn_started` 带着 `prompt_id`
+   * 回来时挪进 `turns`。换会话、重建会话都会清空。
+   */
+  queued: QueuedPrompt[];
 
   setAppInfo: (i: AppInfo) => void;
   setSettings: (s: AppSettings) => void;
@@ -132,6 +155,14 @@ type Store = Conv & {
   resetSession: () => void;
   addUserTurn: (text: string) => void;
   applyEvent: (e: SessionEvent) => void;
+  /** 记下一条已发出、等后端开始处理的消息。 */
+  enqueuePrompt: (p: QueuedPrompt) => void;
+  /** 从排队里拿掉（被撤回、或已经开始跑了）。 */
+  removeQueuedPrompt: (id: number) => void;
+  /** 会话重建之后把排队原样放回去（顺序不变）。 */
+  restoreQueued: (list: QueuedPrompt[]) => void;
+  /** 后端明确失败时的兜底：别让界面永远停在「正在生成」。 */
+  clearStreaming: () => void;
   setNotice: (m: string | null) => void;
   clearPendingForm: () => void;
   openInspector: (turn?: number | null) => void;
@@ -217,8 +248,12 @@ function fillToolResult(
   return turns;
 }
 
-/** 事件 → 一条对话状态的增量。主对话与侧边聊天共用这一份。 */
-export function reduceConv(c: Conv, e: SessionEvent): Partial<Conv> {
+/**
+ * 事件 → 一条对话状态的增量。主对话与侧边聊天共用这一份。
+ *
+ * `sessionId` 只用于给新出现的工具卡片打上归属（见 `Item` 的 tool 变体）。
+ */
+export function reduceConv(c: Conv, e: SessionEvent, sessionId?: string): Partial<Conv> {
   switch (e.type) {
     case "turn_started": {
       const last = c.turns[c.turns.length - 1];
@@ -255,6 +290,7 @@ export function reduceConv(c: Conv, e: SessionEvent): Partial<Conv> {
             callId: e.call_id,
             name: e.name,
             args: e.args,
+            sessionId,
           },
         ]),
       };
@@ -482,6 +518,7 @@ export const useStore = create<Store>((set) => ({
   settings: null,
   configNonce: 0,
   view: "chat",
+  queued: [],
 
   // 应用信息里带着设置，一起落地 —— 分开拉会让主题在首帧闪一下。
   setAppInfo: (i) => set({ appInfo: i, settings: i.settings }),
@@ -498,6 +535,9 @@ export const useStore = create<Store>((set) => ({
       model: c.model,
       cwd: c.cwd,
       ...emptyConversation,
+      // 换/重建会话时排队清空：那些消息属于原来那条会话任务，
+      // 留着它们会让界面显示一批永远不会开始跑的「排队中」。
+      queued: [],
       goal: c.goal,
       turns: historyToTurns(c.history),
       changed: changedRecord(c.changes),
@@ -518,6 +558,7 @@ export const useStore = create<Store>((set) => ({
     set({
       sessionId: null,
       ...emptyConversation,
+      queued: [],
       side: null,
       inspectorOpen: false,
       inspectorTurn: null,
@@ -539,11 +580,42 @@ export const useStore = create<Store>((set) => ({
     set((s) => {
       // `ready` 带着「会话是谁」，由这里接住；其余交给共用的 reducer。
       if (e.type === "ready") return { model: e.model, cwd: e.cwd };
-      if (e.type === "turn_usage") {
-        return { ...reduceConv(convOf(s), e), model: e.model };
+      if (e.type === "turn_started" && (e.prompt_id != null || e.prompt != null)) {
+        const q = e.prompt_id != null ? s.queued.find((x) => x.id === e.prompt_id) : undefined;
+        const queued =
+          e.prompt_id != null ? s.queued.filter((x) => x.id !== e.prompt_id) : s.queued;
+        // 轮到这条消息了：先把用户气泡插进去，再按 reducer 开助手轮。
+        // 顺序很重要 —— 反过来的话回答会压在用户那句话上面。
+        //
+        // 文本优先取排队表里的那份（它与用户点发送时看到的一模一样），
+        // 表里没有就退回后端带回来的原文：界面重连过、或「撤回」晚了一拍时，
+        // 靠它仍然能画出用户那句话。
+        const text = q?.text ?? e.prompt ?? null;
+        const conv =
+          text != null
+            ? { ...convOf(s), turns: [...s.turns, { role: "user" as const, text }] }
+            : convOf(s);
+        return { ...reduceConv(conv, e, s.sessionId ?? undefined), queued };
       }
-      return reduceConv(convOf(s), e);
+      if (e.type === "turn_usage") {
+        return { ...reduceConv(convOf(s), e, s.sessionId ?? undefined), model: e.model };
+      }
+      return reduceConv(convOf(s), e, s.sessionId ?? undefined);
     }),
+
+  enqueuePrompt: (p) =>
+    set((s) =>
+      s.queued.some((x) => x.id === p.id) ? {} : { queued: [...s.queued, p] },
+    ),
+
+  removeQueuedPrompt: (id) =>
+    set((s) => (s.queued.some((x) => x.id === id)
+      ? { queued: s.queued.filter((x) => x.id !== id) }
+      : {})),
+
+  restoreQueued: (list) => set({ queued: list }),
+
+  clearStreaming: () => set({ streaming: false }),
 
   // --- 侧边聊天 -------------------------------------------------------------
 
@@ -573,7 +645,10 @@ export const useStore = create<Store>((set) => ({
       if (e.type === "ready") {
         return { side: { ...s.side, model: e.model, cwd: e.cwd } };
       }
-      const next: SideConv = { ...s.side, ...reduceConv(s.side, e) };
+      const next: SideConv = {
+        ...s.side,
+        ...reduceConv(s.side, e, s.side.sessionId),
+      };
       if (e.type === "turn_usage") next.model = e.model;
       return { side: next };
     }),
