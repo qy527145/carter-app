@@ -1445,12 +1445,19 @@ fn switch_model(
     Ok(resolved)
 }
 
-/// 把「这条会话说的是哪个协议」告诉抓包钩子。
+/// 把「这条请求走的是哪条路线」告诉抓包钩子：协议、渠道、模型。
 ///
-/// 钩子拿不到协议（它只看得见字节），而协议是解析 provider 时才定下来的 ——
+/// 钩子拿不到这些（它只看得见最终字节），而它们是解析 provider 时才定下来的 ——
 /// 所以是「先建钩子、解析完再回填」。回填在任何请求之前完成。
+///
+/// 渠道（provider 名）必须记：同一个模型可能同时配在多个渠道上（官方源、中转、
+/// 自建镜像），事后光看 URL 未必分得出来。
 fn label_capture(hook: &crate::capture::CaptureHook, config: &Config, model: &ModelInfo) {
-    hook.set_protocol(config.provider_for(&model.provider).protocol().as_str());
+    hook.set_route(
+        config.provider_for(&model.provider).protocol().as_str(),
+        model.provider.as_str(),
+        model.key.as_str(),
+    );
 }
 
 fn emit(shell: &AppShell, session_id: &str, event: SessionEvent) {

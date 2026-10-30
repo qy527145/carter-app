@@ -828,10 +828,16 @@ export type ExchangeSummary = {
   purpose: RequestPurpose | null;
   method: string;
   url: string;
+  /** 上游渠道名；老记录没有。 */
+  channel: string | null;
+  /** 本地模型引用（`provider/model`）；老记录没有。 */
+  model: string | null;
   status: number | null;
   ttfb_ms: number | null;
   total_ms: number | null;
   frame_count: number;
+  /** 还在进行中 —— 请求已发出，可以从此刻起就显示。 */
+  in_flight: boolean;
 };
 
 export type ExchangeRecord = {
@@ -847,6 +853,10 @@ export type ExchangeRecord = {
   url: string;
   /** 这次交换说的线协议（`anthropic` / `openai_chat` / `openai_responses`）；老记录为 null。 */
   protocol: string | null;
+  /** 上游渠道名（`[providers.X]` 的 X）；老记录为 null。 */
+  channel: string | null;
+  /** 本地模型引用（`provider/model`）；老记录为 null。 */
+  model: string | null;
   /** 敏感头已在后端脱敏（authorization / x-api-key → ***），前端不要再动。 */
   request_headers: [string, string][];
   request_body: string;

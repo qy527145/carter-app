@@ -871,10 +871,16 @@ struct ExchangeSummary {
     purpose: Option<String>,
     method: String,
     url: String,
+    /// 上游渠道（`[providers.X]` 的 X）与本地模型引用。同一个模型可能配在多个
+    /// 渠道上，列表里必须能一眼分出这条走的是哪个。
+    channel: Option<String>,
+    model: Option<String>,
     status: Option<u16>,
     ttfb_ms: Option<u128>,
     total_ms: Option<u128>,
     frame_count: usize,
+    /// 还在进行中（请求已发出、响应没收完）。界面据此显示「进行中」而不是「—」。
+    in_flight: bool,
 }
 
 fn purpose_str(p: carter::provider::RequestPurpose) -> String {
@@ -888,28 +894,45 @@ fn purpose_str(p: carter::provider::RequestPurpose) -> String {
     .to_string()
 }
 
+fn summarize(r: &carter_app_core::ExchangeBrief, in_flight: bool) -> ExchangeSummary {
+    ExchangeSummary {
+        id: r.id.clone(),
+        ts: r.ts,
+        turn: r.meta.as_ref().map(|m| m.turn),
+        round: r.meta.as_ref().map(|m| m.round),
+        // 用 snake_case，与 `ExchangeRecord.meta.purpose` 的 serde 表示保持一致 ——
+        // 两处拼法不同会让前端不得不写一个归一化器，那是纯负担。
+        purpose: r.meta.as_ref().map(|m| purpose_str(m.purpose)),
+        method: r.method.clone(),
+        url: r.url.clone(),
+        channel: r.channel.clone(),
+        model: r.model.clone(),
+        status: r.status,
+        ttfb_ms: r.ttfb_ms,
+        total_ms: r.total_ms,
+        frame_count: r.frame_count,
+        in_flight,
+    }
+}
+
 #[tauri::command]
 fn list_exchanges(shell: State<'_, Arc<AppShell>>, session_id: String) -> Vec<ExchangeSummary> {
-    shell
+    // 已完成的走摘要缓存（不重复解析几 MB 的帧）、进行中的还在内存里，两者都要。
+    // 先取进行中的快照：一条交换恰好在两次读取之间收尾时，它可能同时出现两处 ——
+    // 按 id 去重。
+    let active = shell.capture.active_briefs(&session_id);
+    let active_ids: std::collections::HashSet<&str> =
+        active.iter().map(|r| r.id.as_str()).collect();
+    let mut list: Vec<ExchangeSummary> = shell
         .capture
-        .load(&session_id)
-        .into_iter()
-        .map(|r| ExchangeSummary {
-            id: r.id,
-            ts: r.ts,
-            turn: r.meta.as_ref().map(|m| m.turn),
-            round: r.meta.as_ref().map(|m| m.round),
-            // 用 snake_case，与 `ExchangeRecord.meta.purpose` 的 serde 表示保持一致 ——
-            // 两处拼法不同会让前端不得不写一个归一化器，那是纯负担。
-            purpose: r.meta.as_ref().map(|m| purpose_str(m.purpose)),
-            method: r.method,
-            url: r.url,
-            status: r.status,
-            ttfb_ms: r.ttfb_ms,
-            total_ms: r.total_ms,
-            frame_count: r.stream_frames.len(),
-        })
-        .collect()
+        .briefs(&session_id)
+        .iter()
+        .filter(|r| !active_ids.contains(r.id.as_str()))
+        .map(|r| summarize(r, false))
+        .collect();
+    // 进行中的排在最后：它们是「此刻正在发生」的，位置不该被完成顺序挤走。
+    list.extend(active.iter().map(|r| summarize(r, true)));
+    list
 }
 
 /// 取一条交换的**完整**原始报文。

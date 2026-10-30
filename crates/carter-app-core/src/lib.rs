@@ -44,7 +44,7 @@ pub mod tools;
 pub mod view;
 
 pub use app_settings::AppSettings;
-pub use capture::{CaptureHook, CaptureStore, ExchangeRecord};
+pub use capture::{CaptureHook, CaptureStore, ExchangeBrief, ExchangeRecord};
 pub use catalog::{CatalogEntry, ModelRow};
 pub use changes::{FileDiff, TurnFiles};
 pub use config_edit::{McpDraft, ModelDraft, ProviderDetail, ProviderDraft};

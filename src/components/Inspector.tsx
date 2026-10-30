@@ -184,18 +184,41 @@ function ExchangeRow({
           </span>
         )}
         <span className="ml-auto">
-          <StatusBadge status={s.status} />
+          {s.in_flight ? (
+            <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-tone-blue">
+              <LoaderCircle size={11} className="animate-spin" />
+              进行中
+            </span>
+          ) : (
+            <StatusBadge status={s.status} />
+          )}
         </span>
       </div>
       <div className="mt-1 flex items-center gap-2 text-[11px] text-dim" title="首字节 / 总耗时">
         <Clock size={11} />
         <span className="tabular-nums">
-          {fmtMs(s.ttfb_ms)} / {fmtMs(s.total_ms)}
+          {s.ttfb_ms !== null ? fmtMs(s.ttfb_ms) : s.in_flight ? "等待首字节" : "—"} /{" "}
+          {s.in_flight ? "进行中" : fmtMs(s.total_ms)}
         </span>
         {s.frame_count > 0 && (
           <span className="rounded border border-edge px-1 text-dim">{s.frame_count} 帧</span>
         )}
       </div>
+      {/* 同一个模型可能配在多个渠道上 —— 光看 URL 与请求体分不出来，渠道要单独标。 */}
+      {(s.channel || s.model) && (
+        <div className="mt-0.5 flex items-center gap-1.5 text-[10px]">
+          {s.channel && (
+            <span className="rounded bg-tone-blue-soft px-1 py-0.5 text-tone-blue" title="上游渠道">
+              {s.channel}
+            </span>
+          )}
+          {s.model && (
+            <span className="truncate mono text-dim" title={s.model}>
+              {s.model}
+            </span>
+          )}
+        </div>
+      )}
       <div className="mt-0.5 truncate mono text-[10px] text-dim/70">
         {s.method} {s.url}
       </div>
@@ -225,24 +248,32 @@ export function Inspector() {
   const [inspected, setInspected] = useState<InspectedExchange | null>(null);
   const [view, setView] = useState<View>("visual");
 
-  // 打开面板 / 换会话时拉列表。
+  // 打开面板 / 换会话时拉列表，之后**每秒刷新**：进行中的请求在请求发出的那一刻
+  // 就该出现（而不是等首字甚至等收完），完成后状态与耗时也要跟着变。
   useEffect(() => {
     if (!open || !sessionId) return;
     let cancelled = false;
     setList(null);
     setListError(null);
-    listExchanges(sessionId)
-      .then((s) => {
-        if (!cancelled) setList(s);
-      })
-      .catch((e) => {
-        if (!cancelled) {
-          setList([]);
+    const fetchList = () => {
+      listExchanges(sessionId)
+        .then((s) => {
+          if (cancelled) return;
+          setList(s);
+          setListError(null);
+        })
+        .catch((e) => {
+          if (cancelled) return;
+          // 已经拿到过列表就别清空 —— 一次轮询失败不该把面板变成空白。
+          setList((prev) => prev ?? []);
           setListError(String(e));
-        }
-      });
+        });
+    };
+    fetchList();
+    const timer = setInterval(fetchList, 1000);
     return () => {
       cancelled = true;
+      clearInterval(timer);
     };
   }, [open, sessionId]);
 
@@ -278,7 +309,9 @@ export function Inspector() {
     return () => {
       cancelled = true;
     };
-  }, [selected, sessionId, view, setNotice]);
+    // 收尾时（`total_ms` 从 null 变成数）再解一次：可视化页要从「只有请求」
+    // 补上完整的回答。
+  }, [selected, sessionId, view, record?.total_ms, setNotice]);
 
   // 选中某条时取完整记录。
   useEffect(() => {
@@ -305,6 +338,27 @@ export function Inspector() {
       cancelled = true;
     };
   }, [selected, sessionId, setNotice]);
+
+  // 进行中的交换还在长（响应体、帧数、耗时）：每秒重取一次。
+  // 收尾后 `total_ms` 有了，`live` 变假，这个 effect 自动停。
+  const live = record !== undefined && record !== null && record.total_ms === null;
+  useEffect(() => {
+    if (!live || !selected || !sessionId) return;
+    let cancelled = false;
+    const timer = setInterval(() => {
+      getExchange(sessionId, selected)
+        .then((r) => {
+          // 刚收尾那一瞬间可能两处都取不到（pending 已移除、文件还没写完）——
+          // 保留上一份，下一次轮询就补上了。
+          if (!cancelled && r) setRecord(r);
+        })
+        .catch(() => {});
+    }, 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [live, selected, sessionId]);
 
   if (!open) return null;
 
@@ -407,11 +461,31 @@ export function Inspector() {
           )}
           {record && (
             <div className="space-y-3 p-3">
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <ViewTabs value={view} onChange={setView} />
                 <span className="text-[11px] text-dim">
                   {new Date(record.ts).toLocaleString("zh-CN")}
                 </span>
+                {/* 上游渠道与模型引用：同一个模型可能配在多个渠道上，详情里也要写明。 */}
+                {record.channel && (
+                  <span
+                    className="rounded bg-tone-blue-soft px-1.5 py-0.5 text-[11px] text-tone-blue"
+                    title="上游渠道"
+                  >
+                    {record.channel}
+                  </span>
+                )}
+                {record.model && (
+                  <span className="mono text-[11px] text-dim" title="模型引用">
+                    {record.model}
+                  </span>
+                )}
+                {record.total_ms === null && (
+                  <span className="inline-flex items-center gap-1 text-[11px] text-tone-blue">
+                    <LoaderCircle size={11} className="animate-spin" />
+                    进行中
+                  </span>
+                )}
               </div>
               {view === "visual" && <VisualView rec={record} inspected={inspected} />}
               {view === "formatted" && <FormattedView rec={record} />}

@@ -442,6 +442,8 @@ mod tests {
             method: "POST".into(),
             url: "https://api.deepseek.com/v1/chat/completions".into(),
             protocol: Some(protocol.into()),
+            channel: None,
+            model: None,
             request_headers: Vec::new(),
             request_body: request.into(),
             status: Some(200),
