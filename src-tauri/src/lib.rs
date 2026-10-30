@@ -968,9 +968,12 @@ fn list_commands(cwd: Option<String>) -> Vec<carter_app_core::CommandRow> {
     carter_app_core::input::list(&cwd.map(PathBuf::from).unwrap_or_else(default_cwd))
 }
 
-/// `@` 菜单的文件列表（相对工作目录的路径）。
+/// `@` 菜单的文件/目录列表（相对工作目录的路径，目录带尾随 `/`）。
+///
+/// `async` 不是为了 await，而是让它跑在异步线程池上：不带 `/` 的查询会
+/// 遍历整棵目录树，同步命令会在主线程上做，一敲 `@` 就能把界面卡住。
 #[tauri::command]
-fn list_files(cwd: Option<String>, query: String, limit: Option<usize>) -> Vec<String> {
+async fn list_files(cwd: Option<String>, query: String, limit: Option<usize>) -> Vec<String> {
     carter_app_core::input::list_files(
         &cwd.map(PathBuf::from).unwrap_or_else(default_cwd),
         &query,

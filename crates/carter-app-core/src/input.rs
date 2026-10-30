@@ -31,8 +31,9 @@
 //!
 //! 菜单里的路径是**相对 cwd 的完整路径**，目录以 `/` 结尾。选中目录时插入的是
 //! `@src/utils/`（不带尾随空格），菜单会继续停在这个目录里，用户可以一层层往下选；
-//! 选中文件才补空格、结束这次引用。查询词就是对整条相对路径做子串匹配，所以
-//! `@src/co` 直接筛出 `src/` 下的匹配项。
+//! 选中文件才补空格、结束这次引用。`@` 后面一旦出现 `/`，查询就按路径解析：
+//! `@src/co` 只列 `cwd/src/` 下以 `co` 开头的直接子项 —— 只读这一层，既快，
+//! 也不会把别的路径里同名的那一段混进来。
 
 use std::path::{Path, PathBuf};
 
@@ -139,13 +140,86 @@ const SKIP_DIRS: &[&str] = &[
 /// 目录路径以 `/` 结尾，这样菜单能把「还能往下走」和「已经到文件了」区分开，
 /// 选中时的插入行为也不同（见 `Composer.tsx`）。
 ///
-/// 广度优先 + 跳过名单，不读 `.gitignore` —— 那要拖进 `ignore` crate 与一套
-/// 语义（嵌套 gitignore、全局 ignore、显式 include），而这里只需要「别把
-/// node_modules 列出来」。广度优先是为了让 `limit` 截断时留下的是**浅层**结果：
-/// 用户一敲 `@`，最先看到的应该是当前这一层有什么，而不是某个角落里碰巧
-/// 先被 `read_dir` 返回的深文件。
+/// 两种查询走两条路：
+///
+/// * **带 `/` 的路径式查询**（`@src/`、`@src/co`、`@/Users/me/`）只读查询里
+///   写的那**一层**目录，按名字过滤它的直接子项。这是多级 `@` 的主路径：
+///   `@bin/` 就是 `cwd/bin/` 的内容，不会因为同一个词出现在别的路径里
+///   （`go/bin/`）而混进来；也只读一个目录，打一个字不会去遍历整棵 home。
+/// * **不带 `/` 的查询**才是全树子串搜索（`@comp` 能找出 `src/components`），
+///   广度优先 + `MAX_WALK` 兜底。
+///
+/// 不读 `.gitignore` —— 那要拖进 `ignore` crate 与一套语义（嵌套 gitignore、
+/// 全局 ignore、显式 include），而这里只需要「别把 node_modules 列出来」。
 pub fn list_files(cwd: &Path, query: &str, limit: usize) -> Vec<String> {
     let q = normalized_query(query);
+    match q.rsplit_once('/') {
+        Some((dir_part, name_part)) => list_dir(cwd, &q, dir_part, name_part, limit),
+        None => list_recursive(cwd, &q, limit),
+    }
+}
+
+/// 路径式查询：只列 `dir_part` 这个目录的直接子项，按 `name_part` 过滤名字。
+fn list_dir(cwd: &Path, q: &str, dir_part: &str, name_part: &str, limit: usize) -> Vec<String> {
+    let base: PathBuf = if dir_part.is_empty() {
+        // 单独的 `/`：查文件系统根。其它空目录部分（`@/` 之外）不该出现，
+        // 因为 `normalized_query` 已经去掉了开头的 `./`。
+        if q.starts_with('/') {
+            PathBuf::from("/")
+        } else {
+            cwd.to_path_buf()
+        }
+    } else if Path::new(dir_part).is_absolute() {
+        PathBuf::from(dir_part)
+    } else {
+        cwd.join(dir_part)
+    };
+
+    let Ok(entries) = std::fs::read_dir(&base) else {
+        return Vec::new();
+    };
+    // 用户写的是相对路径时展示相对路径；写了绝对路径就把前缀保留下来，
+// 这样菜单里看到的和输入框里打的是同一种形式。
+    let relative = !dir_part.is_empty() && !Path::new(dir_part).is_absolute();
+    let needle = name_part.to_lowercase();
+    // (目录优先, 名字, 展示路径)
+    let mut rows: Vec<(bool, String, String)> = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Ok(ft) = entry.file_type() else { continue };
+        let lower = name.to_lowercase();
+        // 路径式查询按**前缀**补全，和 shell 里敲路径的直觉一致：`@bin/n`
+        // 只留 `n` 开头的那几个，不会把 `run.sh`（中间有 n）也拉进来。
+        if !needle.is_empty() && !lower.starts_with(&needle) {
+            continue;
+        }
+        if ft.is_dir() && (SKIP_DIRS.contains(&name.as_str()) || name.starts_with('.')) {
+            continue;
+        }
+        let child = entry.path();
+        let shown = if relative {
+            child.strip_prefix(cwd).map(Path::to_path_buf).unwrap_or_else(|_| child.clone())
+        } else {
+            child
+        };
+        let mut rel = shown.to_string_lossy().replace('\\', "/");
+        if ft.is_dir() {
+            rel.push('/');
+        }
+        rows.push((!ft.is_dir(), lower, rel));
+    }
+    // 目录在前，其余按字母序。
+    rows.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+    rows.into_iter().take(limit).map(|(_, _, rel)| rel).collect()
+}
+
+/// 不带 `/` 的查询：全树子串搜索。
+///
+/// 广度优先是为了让 `limit` 截断时留下的是**浅层**结果：用户一敲 `@`，最先
+/// 看到的应该是当前这一层有什么，而不是某个角落里碰巧先被 `read_dir`
+/// 返回的深文件。
+fn list_recursive(cwd: &Path, q: &str, limit: usize) -> Vec<String> {
+    let needle = q.to_lowercase();
     let mut out: Vec<String> = Vec::new();
     let mut seen = 0usize;
 
@@ -174,19 +248,13 @@ pub fn list_files(cwd: &Path, query: &str, limit: usize) -> Vec<String> {
                     continue;
                 }
                 let rel = format!("{rel}/");
-                // 用户已经打出 `@src/` 时，`src/` 自己再列一遍没有意义 —— 那会
-                // 让「回车选第一个」原地打转。跳过它，第一项就是目录里的子项。
-                let already_inside = q.ends_with('/')
-                    && q.trim_end_matches('/') == rel.trim_end_matches('/').to_lowercase();
-                // 有查询词就按子串过滤（不区分大小写）；空查询给前 limit 个，
-                // 让用户一按 `@` 就有东西可选。
-                if !already_inside && (q.is_empty() || rel.to_lowercase().contains(&q)) {
+                if needle.is_empty() || rel.to_lowercase().contains(&needle) {
                     out.push(rel);
                 }
                 queue.push_back(path);
                 continue;
             }
-            if q.is_empty() || rel.to_lowercase().contains(&q) {
+            if needle.is_empty() || rel.to_lowercase().contains(&needle) {
                 out.push(rel);
             }
         }
@@ -201,9 +269,10 @@ pub fn list_files(cwd: &Path, query: &str, limit: usize) -> Vec<String> {
     out
 }
 
-/// 查询词归一化：去空白、统一分隔符、去掉开头的 `./`。
+/// 查询词归一化：去空白、统一分隔符、去掉开头的 `./`。**不**改大小写 ——
+/// 它要拿去拼路径，大小写敏感的文件系统上改了就找不到目录。
 fn normalized_query(query: &str) -> String {
-    let q = query.trim().replace('\\', "/").to_lowercase();
+    let q = query.trim().replace('\\', "/");
     q.strip_prefix("./").unwrap_or(&q).to_string()
 }
 
@@ -541,7 +610,7 @@ mod tests {
         std::fs::write(d.join("node_modules/pkg/index.js"), "").unwrap();
         std::fs::create_dir_all(d.join(".git")).unwrap();
         std::fs::write(d.join(".git/config"), "").unwrap();
-        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::create_dir_all(d.join("src/nested")).unwrap();
         std::fs::write(d.join("src/b.rs"), "").unwrap();
 
         let all = list_files(&d, "", 50);
@@ -555,19 +624,50 @@ mod tests {
         assert_eq!(all[0], "src/", "{all:?}");
         assert_eq!(all[1], "a.rs", "{all:?}");
 
-        // 查询词按整条相对路径匹配，所以 `src/` 能筛出这一层的子项。
+        // 不带 `/`：全树子串搜索，`b.rs` 能找到深层的文件。
         let filtered = list_files(&d, "b.rs", 50);
         assert_eq!(filtered, vec!["src/b.rs".to_string()]);
-        // 打出 `src/` 后第一项应当是目录里的内容，而不是 `src/` 本身。
-        let subtree = list_files(&d, "src/", 50);
-        assert_eq!(subtree, vec!["src/b.rs".to_string()], "{subtree:?}");
-        // 不带到尾斜杠时，目录本身仍可选（选中后会插入 `@src/`）。
+        // 不带尾斜杠时，目录本身仍可选（选中后会插入 `@src/`）。
         let named = list_files(&d, "src", 50);
         assert_eq!(
             named,
-            vec!["src/".to_string(), "src/b.rs".to_string()],
+            vec!["src/".to_string(), "src/nested/".to_string(), "src/b.rs".to_string()],
             "{named:?}"
         );
+
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// 带 `/` 的查询是「进到这一层」而不是全树子串匹配：`bin/` 只列 `cwd/bin`
+    /// 的内容，别的路径里同名的那一段不该混进来。
+    #[test]
+    fn a_path_query_lists_only_that_directory() {
+        let d = tmp_dir("level");
+        std::fs::create_dir_all(d.join("bin")).unwrap();
+        std::fs::write(d.join("bin/run.sh"), "").unwrap();
+        std::fs::create_dir_all(d.join("go/bin")).unwrap();
+        std::fs::write(d.join("go/bin/wire"), "").unwrap();
+        std::fs::create_dir_all(d.join("bin/nested")).unwrap();
+        std::fs::write(d.join("bin/nested/deep.rs"), "").unwrap();
+
+        // `bin/` 就是 cwd/bin 这一层的直接子项，目录在前。
+        assert_eq!(
+            list_files(&d, "bin/", 50),
+            vec!["bin/nested/".to_string(), "bin/run.sh".to_string()],
+            "不该把 go/bin 之类混进来"
+        );
+        // 再打一个字继续筛，前缀匹配的排前面。
+        assert_eq!(
+            list_files(&d, "bin/n", 50),
+            vec!["bin/nested/".to_string()]
+        );
+        // 手打多级目录同样只读那一个目录。
+        assert_eq!(
+            list_files(&d, "bin/nested/", 50),
+            vec!["bin/nested/deep.rs".to_string()]
+        );
+        // 目录不存在时没有候选，而不是回退到全树搜索。
+        assert!(list_files(&d, "nope/x", 50).is_empty());
 
         let _ = std::fs::remove_dir_all(d);
     }
