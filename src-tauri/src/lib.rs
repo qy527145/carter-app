@@ -73,11 +73,25 @@ fn app_info(shell: State<'_, Arc<AppShell>>) -> AppInfo {
 /// 开发用：打开 WebView 的开发者工具。
 ///
 /// 应用接管右键菜单之后，默认菜单里那个「检查元素」也没了。前端只在 dev 构建里
-/// 挂这个入口（见 `src/components/ui/ContextMenu.tsx`）；release 构建没有
-/// `devtools` feature，调用它不会有任何效果。
+/// 挂这个入口（见 `src/components/ui/ContextMenu.tsx`）。
+///
+/// `WebviewWindow::open_devtools` 这个方法本身只在**开了 `devtools` feature**
+/// 的构建里存在（debug 构建默认开，release 不开）。所以这里必须按
+/// `debug_assertions` 分叉，否则 `tauri build` 会直接编译不过 —— 不是「调用
+/// 没有效果」，而是整个 release 包构建失败。
 #[tauri::command]
-fn open_devtools(webview: tauri::WebviewWindow) {
-    webview.open_devtools();
+fn open_devtools(webview: tauri::WebviewWindow) -> Result<(), String> {
+    #[cfg(debug_assertions)]
+    {
+        webview.open_devtools();
+        Ok(())
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        // 正式包里前端根本不会挂这个入口；真被调到也只回一句说明。
+        let _ = webview;
+        Err("正式包不提供开发者工具".into())
+    }
 }
 
 // ---------------------------------------------------------------------------
