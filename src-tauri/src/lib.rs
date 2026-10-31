@@ -460,6 +460,75 @@ async fn refresh_model_catalog() -> Result<usize, String> {
     catalog::refresh().await
 }
 
+/// 某个目录服务商下值得预填的几个模型（同 family 只取最新、跳过弃用与非对话模型）。
+#[tauri::command]
+fn recommended_catalog_models(
+    provider_id: String,
+) -> Result<Vec<carter_app_core::CatalogEntry>, String> {
+    catalog::recommended_models(&provider_id, 8)
+}
+
+/// 跨服务商搜目录条目（手动绑元数据时的搜索框）。
+#[tauri::command]
+fn search_catalog_models(query: String) -> Result<Vec<carter_app_core::CatalogHit>, String> {
+    catalog::search_models(&query, 40)
+}
+
+/// 一批 meta 在目录里查得到什么。查不到的位置是 `null`（不是错误）—— 编辑框据此
+/// 把那一行标成「未绑定 / meta 写错了」，而不是等保存时才炸。
+#[tauri::command]
+fn lookup_metas(metas: Vec<String>) -> Vec<Option<carter_app_core::catalog::MetaInfo>> {
+    catalog::meta_infos(metas.iter().map(String::as_str))
+}
+
+/// 渠道模板列表。界面「新建渠道」时的那一排按钮。
+#[tauri::command]
+fn list_provider_templates() -> &'static [carter_app_core::templates::ProviderTemplate] {
+    carter_app_core::templates::TEMPLATES
+}
+
+/// 这个 base_url 对应 models.dev 里的哪一家？认不出来是 `None`。
+///
+/// 界面用它决定「模型能不能直接从目录预填」，以及拉上游列表时把哪家当提示。
+/// 与真正发请求无关 —— 请求永远走配置里的 base_url。
+#[tauri::command]
+fn detect_catalog_provider(base_url: String) -> Option<String> {
+    catalog::detect_provider(&base_url)
+}
+
+/// 向渠道的上游要模型清单（`GET {base}/…/models`）并逐条对好 models.dev 元数据。
+///
+/// 密钥的三态与保存时一致：
+/// - `api_key` 非空 → 用它（用户刚敲进去的）；
+/// - 空串 + 给了 `provider` → 读配置里那个渠道已存的 key，做 `${ENV}` 展开后用；
+/// - 空串 + 没给 `provider`（新建渠道、还没存过）→ 不带鉴权直接问。
+///
+/// 「编辑已有渠道」是第二种：界面压根拿不到明文密钥（见 `ProviderDetail` 的注释），
+/// 但又必须能拉列表 —— 于是让它用磁盘上那份。
+#[tauri::command]
+async fn fetch_upstream_models(
+    kind: String,
+    base_url: String,
+    api_key: String,
+    provider: Option<String>,
+) -> Result<carter_app_core::upstream_models::UpstreamModels, String> {
+    let key = if !api_key.trim().is_empty() {
+        api_key.trim().to_string()
+    } else {
+        provider
+            .as_deref()
+            .and_then(|name| config_edit::provider_detail(name).ok())
+            .map(|d| d.api_key)
+            // 配置里存的是 `${VAR}` 字面量，发出去之前要展开 —— 与 carter 读配置时
+            // 同一套规则，否则「填了环境变量引用」的渠道在这里永远 401。
+            .map(|raw| carter::config::interpolate(&raw))
+            .unwrap_or_default()
+    };
+    carter_app_core::upstream_models::fetch_matched(&kind, &base_url, &key)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 // ---------------------------------------------------------------------------
 // 工具
 // ---------------------------------------------------------------------------
@@ -1034,6 +1103,12 @@ pub fn run() {
             set_fast_model,
             refresh_model_catalog,
             list_catalog_models,
+            recommended_catalog_models,
+            search_catalog_models,
+            lookup_metas,
+            list_provider_templates,
+            detect_catalog_provider,
+            fetch_upstream_models,
             // 工具
             list_tools,
             // 技能

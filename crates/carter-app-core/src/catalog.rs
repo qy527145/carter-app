@@ -7,6 +7,8 @@
 //! 一条解析不了**不能**让整页失败：最常见的原因是 `meta` 写错了、或者本地还没有
 //! models.dev 缓存。那种情况下把错误挂在该行上，其余行照常显示。
 
+use std::collections::{HashMap, HashSet};
+
 use serde::Serialize;
 
 use carter::config::Config;
@@ -320,9 +322,738 @@ pub fn check_metas<'a>(metas: impl IntoIterator<Item = &'a str>) -> Result<(), S
     metas.into_iter().try_for_each(|m| check_meta(&root, m))
 }
 
+// ---------------------------------------------------------------------------
+// 上游模型名 → 目录条目
+//
+// 中转站（new-api / one-api / OpenRouter）的 `/v1/models` 给出的是**上游**模型名，
+// 跟 models.dev 的 id 经常对不上：`deepseek-v4.1-flash`（目录里的 id 是
+// `deepseek-flash`）、`gpt_oss_120b`（id 是 `gpt-oss-120b`）、
+// `anthropic/claude-sonnet-4.5`（带厂商前缀、点号写法）。
+//
+// 这里做的是**纯推断**：名字对不上时给出最可能的目录条目，并标清楚这条推断有多可信
+// （见 [`MetaMatch::match_kind`]）。宁可标「不确定」，也不假装确信 —— 绑错元数据会让
+// 上下文窗口与定价全错，而且错得无声无息。
+// ---------------------------------------------------------------------------
+
+/// 一条「上游模型名 → 目录条目」的推断结果。
+#[derive(Debug, Clone, Serialize)]
+pub struct MetaMatch {
+    /// 上游给的模型名，原样。
+    pub name: String,
+    /// `models.dev` 的 `服务商/模型id`。推断不出来是 `None`，界面要让人手动绑。
+    pub meta: Option<String>,
+    /// 推断的可靠度：
+    /// - `exact` —— 名字与目录 id 一致（大小写不敏感）；
+    /// - `alias` —— 靠归一化写法或 `canonical_model_id` 对上的；
+    /// - `reseller` —— 只有转售商条目，原厂没有（价格/窗口可能和原厂不同）；
+    /// - `none` —— 没对上。
+    pub match_kind: String,
+    /// 目录里的展示名。
+    pub label: Option<String>,
+    pub context_window: Option<u64>,
+    pub deprecated: bool,
+    /// 看起来像不像对话模型。界面上「只选对话模型」那一下用它 ——
+    /// embedding / 语音 / 生图的条目混进模型列表只会占地方。
+    pub chat_capable: bool,
+}
+
+/// 目录里的一个可选项（全局搜索用，跨服务商）。
+#[derive(Debug, Clone, Serialize)]
+pub struct CatalogHit {
+    /// `服务商/模型id`，可以直接写进 meta。
+    pub meta: String,
+    pub provider: String,
+    pub id: String,
+    pub name: String,
+    pub context_window: Option<u64>,
+    pub deprecated: bool,
+}
+
+/// 目录索引：一次建好，供一轮批量匹配 / 搜索复用。
+///
+/// 缓存有近万条模型、同一模型名常常出现在几十家转售商下，所以每条都存
+/// `(服务商, id)` 而不是只存模型定义 —— 没有服务商就拼不出 meta。
+struct Index {
+    by_id: HashMap<String, Vec<(String, String)>>,
+    by_norm: HashMap<String, Vec<(String, String)>>,
+    /// 被**别家**用 `canonical_model_id` 指到过的服务商 = 原厂。
+    ///
+    /// 指向自己（`canonical_model_id = 自己/自己`）不算 —— 目录里不少转售商也这么写，
+    /// 把它们当成原厂会让同名模型挑到转售价上。
+    vendors: HashSet<String>,
+}
+
+impl Index {
+    fn build(root: &serde_json::Value) -> Self {
+        let mut idx = Index {
+            by_id: HashMap::new(),
+            by_norm: HashMap::new(),
+            vendors: HashSet::new(),
+        };
+        let Some(providers) = root.as_object() else {
+            return idx;
+        };
+        for (pid, p) in providers {
+            let Some(models) = p.get("models").and_then(|m| m.as_object()) else {
+                continue;
+            };
+            for (mid, m) in models {
+                let pair = (pid.clone(), mid.clone());
+                idx.by_id
+                    .entry(mid.to_ascii_lowercase())
+                    .or_default()
+                    .push(pair.clone());
+                idx.by_norm
+                    .entry(normalize_id(mid))
+                    .or_default()
+                    .push(pair.clone());
+                if let Some((vendor, _)) = m
+                    .get("canonical_model_id")
+                    .and_then(|v| v.as_str())
+                    .and_then(|c| c.split_once('/'))
+                    && vendor != pid
+                {
+                    idx.vendors.insert(vendor.to_string());
+                }
+            }
+        }
+        idx
+    }
+}
+
+/// 模型 id 的归一化：去掉厂商前缀、`:free` 之类的后缀，点号/下划线/`@` 一律当连字符，
+/// 小写。`gpt_oss_120b`、`openai/gpt-oss-120b`、`gpt-oss-120b` 归一到同一个键。
+///
+/// 与 cc-switch 的 `normalizeModelsDevModelId` 同规则 —— 两边对同一个名字得出不同的
+/// 判断，只会让人怀疑是不是绑错了。
+fn normalize_id(id: &str) -> String {
+    let after_slash = id.rsplit('/').next().unwrap_or(id);
+    let before_colon = after_slash.split(':').next().unwrap_or(after_slash);
+    let mut s: String = before_colon
+        .trim()
+        .chars()
+        .map(|c| {
+            if c == '@' || c == '_' || c == '.' {
+                '-'
+            } else {
+                c
+            }
+        })
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if let Some(stripped) = s.strip_suffix("[1m]") {
+        s = stripped.trim().to_string();
+    }
+    s
+}
+
+fn model_node<'a>(
+    root: &'a serde_json::Value,
+    pid: &str,
+    mid: &str,
+) -> Option<&'a serde_json::Value> {
+    root.get(pid)?.get("models")?.get(mid)
+}
+
+fn model_label(root: &serde_json::Value, pid: &str, mid: &str) -> Option<String> {
+    model_node(root, pid, mid)?
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
+fn model_context(root: &serde_json::Value, pid: &str, mid: &str) -> Option<u64> {
+    model_node(root, pid, mid)?
+        .get("limit")?
+        .get("context")?
+        .as_u64()
+}
+
+fn model_deprecated(root: &serde_json::Value, pid: &str, mid: &str) -> bool {
+    model_node(root, pid, mid)
+        .and_then(|m| m.get("status"))
+        .and_then(|v| v.as_str())
+        == Some("deprecated")
+}
+
+/// 看起来是不是一个对话模型。
+///
+/// `models.dev` 没有「这是 embedding / 语音 / 生图」这种分类字段，但模态里有：对话模型的
+/// **输出**一定含 text，而 embedding / whisper / tts / 生图要么没有 text 输出，要么名字里
+/// 明说了自己是干什么的。两层都过一遍 —— 光看名字会漏掉 `text-embedding-3-small`
+/// （输出确实是 text），光看模态会漏掉 `gpt-image-*`（输出也带 text）。
+pub fn is_chat_like(id: &str) -> bool {
+    const NON_CHAT: &[&str] = &[
+        "embed",
+        "whisper",
+        "tts",
+        "audio",
+        "asr",
+        "rerank",
+        "moderation",
+        "image",
+        "video",
+        "lyria",
+        "guard",
+        "transcribe",
+        "-ocr",
+    ];
+    let low = id.to_ascii_lowercase();
+    !NON_CHAT.iter().any(|k| low.contains(k))
+}
+
+fn chat_capable(root: &serde_json::Value, pid: &str, mid: &str, name: &str) -> bool {
+    if !is_chat_like(name) {
+        return false;
+    }
+    // 目录里有条目就按输出模态判断；没有（推断失败）时只按名字算。
+    match model_node(root, pid, mid) {
+        None => true,
+        Some(m) => {
+            let out = m
+                .get("modalities")
+                .and_then(|x| x.get("output"))
+                .and_then(|x| x.as_array());
+            match out {
+                None => true,
+                Some(list) => list.iter().any(|v| v.as_str() == Some("text")),
+            }
+        }
+    }
+}
+
+/// 从同名候选里挑一个「最该相信的」。
+///
+/// 优先级（与 cc-switch 一致）：
+/// 1. 正好来自提示的服务商（渠道的 base_url 认出来的那家）；
+/// 2. 原厂自己的条目（供应商被别的条目的 `canonical_model_id` 指到过）；
+/// 3. 按服务商名定序取第一个 —— 要的是**确定性**，不是"更对"。
+///
+/// 转售商条目「指向原厂」的情况由 [`match_one`] 在挑完之后处理：那条候选只是名字的
+/// 另一种写法，meta 该落在它指的地方。
+fn pick_candidate<'a>(
+    index: &Index,
+    cands: &'a [(String, String)],
+    hint: Option<&str>,
+) -> &'a (String, String) {
+    let hinted = hint.and_then(|h| cands.iter().find(|(p, _)| p == h));
+    if let Some(hit) = hinted {
+        return hit;
+    }
+    if let Some(best) = cands.iter().find(|(p, _)| index.vendors.contains(p)) {
+        return best;
+    }
+    &cands[0]
+}
+
+/// 一条名字的匹配。`hint` 是渠道认出来的目录服务商（可以为空）。
+fn match_one(root: &serde_json::Value, index: &Index, name: &str, hint: Option<&str>) -> MetaMatch {
+    let mut out = MetaMatch {
+        name: name.to_string(),
+        meta: None,
+        match_kind: "none".into(),
+        label: None,
+        context_window: None,
+        deprecated: false,
+        chat_capable: is_chat_like(name),
+    };
+
+    let lower = name.to_ascii_lowercase();
+    let exact_hit = index.by_id.get(&lower).map(|v| v.as_slice());
+    let norm_hit = index.by_norm.get(&normalize_id(name)).map(|v| v.as_slice());
+    let (cands, via) = match (exact_hit, norm_hit) {
+        (Some(c), _) => (c, "exact"),
+        (None, Some(c)) => (c, "alias"),
+        (None, None) => {
+            // 去掉厂商前缀再试一层：`openai/gpt-oss-120b` 在有的目录里叫
+            // `gpt-oss-120b`。只剥一层，避免 `a/b/c` 无限递归。
+            if let Some((_, tail)) = name.split_once('/') {
+                return match_one(root, index, tail, hint);
+            }
+            return out;
+        }
+    };
+
+    let (pid, mid) = pick_candidate(index, cands, hint);
+    // 转售商写法 → 改用它指向的原厂条目（`deepseek-v4.1-flash` → `deepseek-flash`）。
+    // 指过去的那条不存在时保留原样：至少元数据是这一家自己的。
+    let resolved = model_node(root, pid, mid)
+        .and_then(|v| v.get("canonical_model_id"))
+        .and_then(|v| v.as_str())
+        .and_then(|c| c.split_once('/'))
+        .filter(|(vp, vm)| model_node(root, vp, vm).is_some())
+        .map(|(vp, vm)| (vp.to_string(), vm.to_string()));
+    let (pid, mid) = resolved.unwrap_or_else(|| (pid.clone(), mid.clone()));
+
+    let reseller = !index.vendors.contains(&pid) && Some(pid.as_str()) != hint;
+    out.match_kind = if reseller {
+        "reseller".into()
+    } else {
+        via.into()
+    };
+    out.label = model_label(root, &pid, &mid).or_else(|| Some(mid.clone()));
+    out.context_window = model_context(root, &pid, &mid);
+    out.deprecated = model_deprecated(root, &pid, &mid);
+    out.chat_capable = chat_capable(root, &pid, &mid, name);
+    out.meta = Some(format!("{pid}/{mid}"));
+    out
+}
+
+/// 把一批上游模型名对上目录。`hint` 是 [`detect_provider`] 认出来的服务商。
+///
+/// 没有缓存时**不报错**，每条都返回 `meta: None` —— 界面照常能让人手写 meta。
+pub fn match_metas(names: &[String], hint: Option<&str>) -> Vec<MetaMatch> {
+    let cache = match fetch::read_cache() {
+        Ok(c) => c,
+        Err(_) => {
+            return names
+                .iter()
+                .map(|n| MetaMatch {
+                    name: n.clone(),
+                    meta: None,
+                    match_kind: "none".into(),
+                    label: None,
+                    context_window: None,
+                    deprecated: false,
+                    chat_capable: is_chat_like(n),
+                })
+                .collect();
+        }
+    };
+    let Ok(root) = parse_cache(&cache) else {
+        return Vec::new();
+    };
+    let index = Index::build(&root);
+    names
+        .iter()
+        .map(|n| match_one(&root, &index, n, hint))
+        .collect()
+}
+
+/// 跨服务商搜索模型，给「手动绑定元数据」那个搜索框用。
+///
+/// 排序：`服务商/id` 或 id 完全相等 > 前缀命中 > 包含；同组里未弃用的在前，其余按
+/// `服务商/id` 定序（要的是确定性，不是"更相关"）。空查询返回空表 —— 把近万条全
+/// 倒给下拉框没有任何用处。
+pub fn search_models(query: &str, limit: usize) -> Result<Vec<CatalogHit>, String> {
+    let cache = fetch::read_cache().map_err(|e| format!("还没有 models.dev 缓存：{e}"))?;
+    Ok(search_in(&parse_cache(&cache)?, query, limit))
+}
+
+fn search_in(root: &serde_json::Value, query: &str, limit: usize) -> Vec<CatalogHit> {
+    let q = query.trim().to_ascii_lowercase();
+    if q.is_empty() {
+        return Vec::new();
+    }
+    let mut hits: Vec<(u8, CatalogHit)> = Vec::new();
+    let Some(providers) = root.as_object() else {
+        return Vec::new();
+    };
+    for (pid, p) in providers {
+        let Some(models) = p.get("models").and_then(|m| m.as_object()) else {
+            continue;
+        };
+        for (mid, m) in models {
+            let name = m.get("name").and_then(|v| v.as_str()).unwrap_or(mid);
+            let low_id = mid.to_ascii_lowercase();
+            let low_name = name.to_ascii_lowercase();
+            let rank = if low_id == q || format!("{}/{}", pid.to_ascii_lowercase(), low_id) == q {
+                0
+            } else if low_id.starts_with(&q) || low_name.starts_with(&q) {
+                1
+            } else if low_id.contains(&q) || low_name.contains(&q) {
+                2
+            } else {
+                continue;
+            };
+            // 「包含」这一档会把 `anthropic/claude-sonnet-4-5` 这类带厂商前缀的
+            // 转售条目全捞出来（OpenRouter 一家就有 300 多条）。搜索词本身没带 `/`
+            // 时把它们压到完全命中 / 前缀命中之外，否则下拉框里全是重复项。
+            if rank == 2 && !q.contains('/') && mid.contains('/') {
+                continue;
+            }
+            hits.push((
+                rank,
+                CatalogHit {
+                    meta: format!("{pid}/{mid}"),
+                    provider: pid.clone(),
+                    id: mid.clone(),
+                    name: name.to_string(),
+                    context_window: model_context(root, pid, mid),
+                    deprecated: model_deprecated(root, pid, mid),
+                },
+            ));
+        }
+    }
+    hits.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| a.1.deprecated.cmp(&b.1.deprecated))
+            .then_with(|| a.1.meta.cmp(&b.1.meta))
+    });
+    hits.truncate(limit.clamp(1, 200));
+    hits.into_iter().map(|(_, h)| h).collect()
+}
+
+/// 一个服务商下「值得预先填进渠道」的几个模型。
+///
+/// 规则：只留对话模型、未弃用；同一 `family` 只留最新的一条。官方渠道的目录本来就按
+/// family 组织（`claude-opus` / `claude-sonnet` / `claude-haiku`），这条规则把 17 个
+/// 快照收敛成用户真正会用的那 3~5 个。
+pub fn recommended_models(provider_id: &str, limit: usize) -> Result<Vec<CatalogEntry>, String> {
+    let cache = fetch::read_cache().map_err(|e| format!("还没有 models.dev 缓存：{e}"))?;
+    Ok(recommended_in(&parse_cache(&cache)?, provider_id, limit))
+}
+
+fn recommended_in(root: &serde_json::Value, provider_id: &str, limit: usize) -> Vec<CatalogEntry> {
+    let Some(models) = root
+        .get(provider_id)
+        .and_then(|p| p.get("models"))
+        .and_then(|m| m.as_object())
+    else {
+        return Vec::new();
+    };
+
+    // family → (release_date, id)：同名家族只要最新的那条。
+    let mut best: HashMap<String, (String, String)> = HashMap::new();
+    for (mid, m) in models {
+        if model_deprecated(root, provider_id, mid) || !chat_capable(root, provider_id, mid, mid) {
+            continue;
+        }
+        let family = m
+            .get("family")
+            .and_then(|v| v.as_str())
+            .unwrap_or(mid)
+            .to_string();
+        let release = m
+            .get("release_date")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if best.get(&family).map(|(r, _)| release > *r).unwrap_or(true) {
+            best.insert(family, (release, mid.clone()));
+        }
+    }
+    let mut picked: Vec<(String, String)> = best.into_values().collect();
+    // 新的家族排在前面，同一天按 id 定序（要的是确定性）。
+    picked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    let ids: HashSet<String> = picked.into_iter().map(|(_, id)| id).collect();
+    entries_of(root, provider_id)
+        .into_iter()
+        .filter(|e| ids.contains(&e.id))
+        .take(limit.max(1))
+        .collect()
+}
+
+/// 目录条目的「可读摘要」—— 编辑框在每一行 meta 下面显示它。
+#[derive(Debug, Clone, Serialize)]
+pub struct MetaInfo {
+    pub meta: String,
+    /// 目录里的展示名，如「Claude Opus 5.5」。
+    pub label: String,
+    pub context_window: Option<u64>,
+    pub deprecated: bool,
+}
+
+/// 某个 meta 在目录里查得到吗。查不到是 `None`（不是错误）—— 界面据此把那一行
+/// 标成「未绑定 / 写错了」，而不是让保存时才炸。
+pub fn meta_info(meta: &str) -> Option<MetaInfo> {
+    let cache = fetch::read_cache().ok()?;
+    let root = parse_cache(&cache).ok()?;
+    let (pid, mid) = meta.trim().split_once('/')?;
+    // 大小写不敏感的兜底：目录 id 全小写，但用户从别处抄来的 meta 不一定。
+    let (pid, mid) = if model_node(&root, pid, mid).is_some() {
+        (pid.to_string(), mid.to_string())
+    } else {
+        let models = root.get(pid)?.get("models")?.as_object()?;
+        let hit = models.keys().find(|k| k.eq_ignore_ascii_case(mid))?.clone();
+        (pid.to_string(), hit)
+    };
+    Some(MetaInfo {
+        meta: format!("{pid}/{mid}"),
+        label: model_label(&root, &pid, &mid).unwrap_or_else(|| mid.clone()),
+        context_window: model_context(&root, &pid, &mid),
+        deprecated: model_deprecated(&root, &pid, &mid),
+    })
+}
+
+/// 批量版的 [`meta_info`]。界面一次拿一整个渠道的模型，省掉逐条往返。
+pub fn meta_infos<'a>(metas: impl IntoIterator<Item = &'a str>) -> Vec<Option<MetaInfo>> {
+    metas.into_iter().map(meta_info).collect()
+}
+
+// ---------------------------------------------------------------------------
+// 从 base_url 认服务商
+// ---------------------------------------------------------------------------
+
+/// 目录里没写 `api` 的几家官方服务商 —— 它们的端点太好认，没必要联网比对。
+const KNOWN_ENDPOINTS: &[(&str, &str)] = &[
+    ("anthropic", "api.anthropic.com"),
+    ("openai", "api.openai.com"),
+    ("google", "generativelanguage.googleapis.com"),
+    ("groq", "api.groq.com"),
+    ("xai", "api.x.ai"),
+    ("deepseek", "api.deepseek.com"),
+];
+
+/// 把一个端点归一成「域名 + 路径」，并去掉末尾的版本段与请求路径。
+///
+/// `https://openrouter.ai/api/v1` 与 `https://openrouter.ai/api` 是同一个接口 ——
+/// 用户抄文档时带不带 `/v1` 全凭运气。但 `opencode.ai/zen/v1` 与 `/zen/go/v1`
+/// 是同域名下的不同套餐，不能因为一方是另一方的前缀就混用，所以只去**末尾**那几段。
+fn endpoint_key(url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let with_scheme = if trimmed.contains("://") {
+        trimmed.to_string()
+    } else {
+        format!("https://{trimmed}")
+    };
+    let rest = with_scheme.split_once("://")?.1;
+    let (host, path) = match rest.split_once('/') {
+        Some((h, p)) => (h, p),
+        None => (rest, ""),
+    };
+    let mut segs: Vec<String> = path
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_ascii_lowercase())
+        .collect();
+    while let Some(last) = segs.last() {
+        let is_request = last == "completions" && segs.len() >= 2 && segs[segs.len() - 2] == "chat";
+        if is_request {
+            segs.truncate(segs.len() - 2);
+            continue;
+        }
+        // v1 / v4 / v1beta 这类版本段
+        let is_version = last.len() >= 2
+            && last.starts_with('v')
+            && last[1..].chars().next().is_some_and(|c| c.is_ascii_digit());
+        if is_version || last == "responses" || last == "messages" {
+            segs.pop();
+            continue;
+        }
+        break;
+    }
+    let host = host.to_ascii_lowercase();
+    Some(if segs.is_empty() {
+        host
+    } else {
+        format!("{host}/{}", segs.join("/"))
+    })
+}
+
+/// 这个渠道的 base_url 对应 models.dev 里的哪一家？认不出来是 `None`。
+///
+/// 用途是给「自动匹配模型元数据」一个提示（同样叫 `grok-4.5`，在 xAI 名下和在某家
+/// 转售商名下是两个价），不是用来决定请求发去哪 —— 请求永远走配置里的 base_url。
+pub fn detect_provider(base_url: &str) -> Option<String> {
+    let target = endpoint_key(base_url)?;
+    // 目录条目里写了 `api` 的（绝大多数）按地址认。目录里那几家官方偏偏没写，
+    // 所以下面还有一张手写的域名表 —— 没缓存时也照样认得出。
+    if let Some(root) = fetch::read_cache().ok().and_then(|c| parse_cache(&c).ok())
+        && let Some(providers) = root.as_object()
+    {
+        for (pid, p) in providers {
+            let api = p.get("api").and_then(|v| v.as_str());
+            if api.and_then(endpoint_key).as_deref() == Some(target.as_str()) {
+                return Some(pid.clone());
+            }
+        }
+    }
+    KNOWN_ENDPOINTS
+        .iter()
+        .find(|(_, host)| endpoint_key(&format!("https://{host}")).as_deref() == Some(target.as_str()))
+        .map(|(pid, _)| (*pid).to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 给测试用的目录片段：一家原厂（`deepseek`）、一家转售（`nano-gpt`，指向原厂
+    /// 条目）、一个 embedding、一个生图。形状照 models.dev 实际的字段来。
+    const MINI_CACHE: &str = r#"{
+      "deepseek": {"api":"https://api.deepseek.com","models":{
+        "deepseek-flash":{"id":"deepseek-flash","name":"DeepSeek V4.1 Flash",
+          "family":"deepseek-flash","reasoning":true,"tool_call":true,
+          "modalities":{"input":["text"],"output":["text"]},
+          "canonical_model_id":"deepseek/deepseek-v4.1-flash",
+          "release_date":"2026-10-17","limit":{"context":1048576,"output":393216}},
+        "deepseek-v4-flash":{"id":"deepseek-v4-flash","name":"DeepSeek V4 Flash",
+          "family":"deepseek-flash","status":"deprecated","tool_call":true,
+          "modalities":{"output":["text"]},
+          "canonical_model_id":"deepseek/deepseek-v4.1-flash","release_date":"2026-10-17"},
+        "deepseek-v4-pro":{"id":"deepseek-v4-pro","name":"DeepSeek V4 Pro",
+          "family":"deepseek-thinking","tool_call":true,
+          "modalities":{"output":["text"]},"release_date":"2026-08-13"}
+      }},
+      "nano-gpt": {"api":"https://nano-gpt.com/v1","models":{
+        "deepseek-v4.1-flash":{"id":"deepseek-v4.1-flash","name":"DeepSeek V4.1 Flash",
+          "tool_call":true,"modalities":{"output":["text"]},
+          "canonical_model_id":"deepseek/deepseek-flash","limit":{"context":128000}}
+      }},
+      "anthropic": {"models":{
+        "claude-opus-5-5":{"id":"claude-opus-5-5","name":"Claude Opus 5.5",
+          "family":"claude-opus","tool_call":true,"modalities":{"input":["text","image"],"output":["text"]},
+          "release_date":"2026-09-22","limit":{"context":200000}},
+        "claude-haiku-4-5":{"id":"claude-haiku-4-5","name":"Claude Haiku 4.5",
+          "family":"claude-haiku","tool_call":true,"modalities":{"output":["text"]},
+          "release_date":"2025-10-15","limit":{"context":200000}}
+      }},
+      "openai": {"api":"https://api.openai.com/v1","models":{
+        "text-embedding-3-small":{"id":"text-embedding-3-small","name":"Embedding 3 Small",
+          "tool_call":false,"modalities":{"input":["text"],"output":["text"]}},
+        "gpt-image-2":{"id":"gpt-image-2","name":"GPT Image 2",
+          "tool_call":false,"modalities":{"input":["text"],"output":["image"]}}
+      }}
+    }"#;
+
+    fn mini() -> serde_json::Value {
+        parse_cache(MINI_CACHE).unwrap()
+    }
+
+    fn index() -> Index {
+        Index::build(&mini())
+    }
+
+    /// 上游给的模型名与目录 id 一致时，要认出来并带上元数据。
+    #[test]
+    fn an_identical_name_matches_exactly() {
+        let root = mini();
+        let m = match_one(&root, &index(), "deepseek-v4-pro", None);
+        assert_eq!(m.meta.as_deref(), Some("deepseek/deepseek-v4-pro"));
+        assert_eq!(m.match_kind, "exact");
+        assert!(m.chat_capable);
+    }
+
+    /// 转售商写法（`deepseek-v4.1-flash`）要指回原厂条目 —— 否则定价会按转售商算，
+    /// 而用户配的其实是官方渠道。
+    #[test]
+    fn a_reseller_spelling_points_back_at_the_vendor_entry() {
+        let root = mini();
+        let m = match_one(&root, &index(), "deepseek-v4.1-flash", None);
+        assert_eq!(m.meta.as_deref(), Some("deepseek/deepseek-flash"));
+        assert_eq!(m.context_window, Some(1_048_576), "要拿原厂条目的窗口");
+    }
+
+    /// 写法差异（下划线 / 点号 / 厂商前缀）归一到同一个键。
+    #[test]
+    fn spelling_variants_normalise_to_the_same_entry() {
+        let root = mini();
+        let idx = index();
+        for name in [
+            "DeepSeek-V4-Pro",
+            "deepseek.v4.pro",
+            "deepseek/deepseek-v4-pro",
+        ] {
+            let m = match_one(&root, &idx, name, None);
+            assert_eq!(
+                m.meta.as_deref(),
+                Some("deepseek/deepseek-v4-pro"),
+                "name={name}"
+            );
+        }
+    }
+
+    /// 认不出来就老实说认不出来 —— 绑一个错的元数据比不绑更糟。
+    #[test]
+    fn an_unknown_name_stays_unbound() {
+        let root = mini();
+        let m = match_one(&root, &index(), "qwen-image-3.0-pro", None);
+        assert!(m.meta.is_none());
+        assert_eq!(m.match_kind, "none");
+    }
+
+    /// 有一家提示（base_url 认出来的服务商）时优先用它的条目。
+    #[test]
+    fn the_provider_hint_wins_when_the_name_exists_there() {
+        let root = mini();
+        let m = match_one(&root, &index(), "deepseek-v4.1-flash", Some("nano-gpt"));
+        // 提示的那家名下确实有这个名字 —— 用它，且它的 canonical 指回原厂。
+        assert_eq!(m.meta.as_deref(), Some("deepseek/deepseek-flash"));
+    }
+
+    /// embedding / 生图要能被认出来，好在界面上默认筛掉。
+    #[test]
+    fn non_chat_models_are_flagged() {
+        assert!(!is_chat_like("text-embedding-3-small"));
+        assert!(!is_chat_like("whisper-large-v3"));
+        assert!(!is_chat_like("gpt-image-2"));
+        assert!(is_chat_like("deepseek-v4-pro"));
+        let root = mini();
+        let idx = index();
+        assert!(!match_one(&root, &idx, "text-embedding-3-small", None).chat_capable);
+        assert!(!match_one(&root, &idx, "gpt-image-2", None).chat_capable);
+    }
+
+    /// 预填的模型列表：同 family 只要最新的那条，弃用与非对话模型不要。
+    #[test]
+    fn recommended_models_collapses_families() {
+        let root = mini();
+        let picked = recommended_in(&root, "deepseek", 10);
+        let ids: Vec<&str> = picked.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, ["deepseek-flash", "deepseek-v4-pro"]);
+        // 同 family 的弃用条目（deepseek-v4-flash）不能出现。
+        assert!(!ids.contains(&"deepseek-v4-flash"));
+
+        let anthropic = recommended_in(&root, "anthropic", 10);
+        assert_eq!(
+            anthropic.len(),
+            2,
+            "{:?}",
+            anthropic.iter().map(|e| &e.id).collect::<Vec<_>>()
+        );
+        // embedding / 生图不进推荐。
+        assert!(recommended_in(&root, "openai", 10).is_empty());
+        assert!(recommended_in(&root, "nobody", 10).is_empty());
+    }
+
+    /// 手动绑定元数据时的全局搜索：完全相等排最前，转售条目别把结果淹掉。
+    #[test]
+    fn search_ranks_exact_hits_first_and_drops_prefixed_noise() {
+        let root = mini();
+        let hits = search_in(&root, "deepseek-v4-pro", 10);
+        assert_eq!(
+            hits.first().map(|h| h.meta.as_str()),
+            Some("deepseek/deepseek-v4-pro")
+        );
+        // 搜索词不带 `/` 时，`厂商/模型` 这种转售写法只在前缀命中里出现。
+        let hits = search_in(&root, "flash", 10);
+        assert!(hits.iter().all(|h| !h.id.contains('/')), "{hits:?}");
+    }
+
+    #[test]
+    fn endpoint_keys_ignore_version_segments_but_not_real_paths() {
+        let same = [
+            ("https://api.deepseek.com", "https://api.deepseek.com/v1"),
+            ("https://openrouter.ai/api/v1", "https://openrouter.ai/api"),
+            ("https://x/v1beta/openai", "https://x/v1beta/openai/"),
+        ];
+        for (a, b) in same {
+            assert_eq!(endpoint_key(a), endpoint_key(b), "{a} vs {b}");
+        }
+        // 同域名下的不同套餐不能混为一谈。
+        assert_ne!(
+            endpoint_key("https://opencode.ai/zen/v1"),
+            endpoint_key("https://opencode.ai/zen/go/v1")
+        );
+    }
+
+    /// 没有缓存也要能认出这几家官方 —— 模板里填上密钥就该直接能用。
+    #[test]
+    fn known_official_endpoints_are_recognised_without_a_cache() {
+        assert_eq!(
+            detect_provider("https://api.anthropic.com").as_deref(),
+            Some("anthropic")
+        );
+        assert_eq!(
+            detect_provider("https://api.deepseek.com/v1").as_deref(),
+            Some("deepseek")
+        );
+        assert_eq!(detect_provider("http://192.168.31.1:3000").as_deref(), None);
+    }
 
     fn config_with(meta: &str) -> Config {
         let toml = format!(

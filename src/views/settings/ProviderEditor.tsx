@@ -1,4 +1,22 @@
-// 渠道编辑弹窗：协议、密钥、服务端工具、模型列表。
+// 渠道编辑弹窗：预设、协议、密钥、服务端工具、模型列表。
+//
+// ## 渠道模板
+//
+// 新建时先给一排「这是哪家」（Anthropic / DeepSeek / Kimi …）。选一家就把协议、
+// base_url、模型列表**一起填好** —— 用户只剩填密钥。模板表在后端
+// （`carter-app-core/src/templates.rs`），因为它要和 models.dev 的服务商 id 对齐。
+//
+// ## 模型从哪来
+//
+// 三条路，对应 `ModelPickers.tsx` 里的三个对话框：
+// 1. **从上游拉**（`GET /v1/models`）：中转站与大多数官方都支持，拉回来的是上游
+//    真实模型名，后端顺手对好了元数据。
+// 2. **从目录选**：base_url 认得出是哪家官方时，模型名与目录 id 一一对应，
+//    不用联网问。
+// 3. **手动绑**：名字对不上时，跨服务商搜一个 meta 绑到那一行上。
+//
+// `meta` 是 models.dev 的查找 id，决定上下文窗口、能力与定价。没有它模型照样能跑，
+// 只是这几栏空着 —— 所以界面上「未绑定」是提示，不是错误。
 //
 // ## 密钥的三态
 //
@@ -8,18 +26,31 @@
 // 也可能是插值后的明文）再写回去。见 core 的 `config_edit.rs`。
 
 import { useEffect, useMemo, useState } from "react";
-import { CircleCheck, Plus, TriangleAlert, X } from "lucide-react";
+import {
+  CircleCheck,
+  CloudDownload,
+  ListChecks,
+  Plus,
+  Search,
+  TriangleAlert,
+  X,
+} from "lucide-react";
 
 import {
   checkServerTools,
   deleteProvider,
+  detectCatalogProvider,
   getProviderDetail,
   listChannels,
+  listProviderTemplates,
+  recommendedCatalogModels,
   saveProvider,
+  type CatalogEntry,
   type ModelDetail,
   type ModelDraft,
   type ProviderDetail,
   type ProviderDraft,
+  type ProviderTemplate,
 } from "../../lib/api";
 import {
   PROTOCOLS,
@@ -29,15 +60,16 @@ import {
   reasoningIsCustom,
   reasoningText,
 } from "../../lib/protocols";
+import { useAsync } from "../../lib/useAsync";
 import { toastError } from "../../lib/toast";
+import { CatalogError, applyPick, blockNameFor, useCatalog } from "./CatalogPicker";
 import {
-  CatalogError,
-  CatalogPicker,
-  applyPick,
-  catalogIdOf,
-  firstLive,
-  useCatalog,
-} from "./CatalogPicker";
+  CatalogDialog,
+  MetaSearchDialog,
+  UpstreamFetchDialog,
+  metaSummary,
+  useMetaInfo,
+} from "./ModelPickers";
 import { Button, IconButton } from "../../components/ui/Button";
 import { Field, Input, Label, Switch } from "../../components/ui/Input";
 import { Banner, ConfirmDialog, Modal } from "../../components/ui/Panel";
@@ -56,7 +88,7 @@ type ModelState = {
   api_name: string;
   reasoning: string;
   reasoningCustom: boolean;
-  /** 手写 meta / api_name。渠道有模型目录时默认关着，只露一个下拉。 */
+  /** 展开手写的 meta / api_name 输入框。默认收起，只显示绑定状态。 */
   manual: boolean;
 };
 
@@ -82,6 +114,25 @@ function toDraft(m: ModelState): ModelDraft {
     api_name: m.api_name.trim() || null,
     // 自定义取值传 null —— 那是「别动这个键」的意思。
     default_reasoning: m.reasoningCustom ? null : m.reasoning,
+  };
+}
+
+/** 目录条目 → 一行模型。块名取目录 id（`.` 换成 `-`），api_name 补上真名。 */
+function rowFromEntry(provider: string, e: CatalogEntry): ModelState {
+  const picked = applyPick({ name: "", meta: "", api_name: "" }, provider, e);
+  return { ...blankModel(), ...picked };
+}
+
+/** 上游模型名 → 一行模型。块名要合法，真正下发用的名字放进 api_name。 */
+function rowFromUpstream(name: string, meta: string | null): ModelState {
+  const block = blockNameFor(name);
+  return {
+    ...blankModel(),
+    name: block,
+    api_name: block === name ? "" : name,
+    meta: meta ?? "",
+    // 没匹配到元数据就展开手写框，让人一眼看到要补什么。
+    manual: !meta,
   };
 }
 
@@ -114,6 +165,16 @@ export function ProviderEditor({
   const [unsupported, setUnsupported] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  /** 用户点过的模板（只用于高亮）。 */
+  const [templateId, setTemplateId] = useState<string | null>(null);
+  /** 当前 baseUrl 对应 models.dev 的哪家 —— 模型能不能从目录里选就看它。 */
+  const [catalogProvider, setCatalogProvider] = useState<string | null>(null);
+  /** 正在给哪一行选元数据（`null` = 没开搜索框）。 */
+  const [metaEditing, setMetaEditing] = useState<number | null>(null);
+  /** 打开「从上游拉取」/「从目录多选」。 */
+  const [picker, setPicker] = useState<"upstream" | "catalog" | null>(null);
+
+  const templates = useAsync(listProviderTemplates, []);
 
   // 编辑时拉原始配置回填。
   useEffect(() => {
@@ -153,58 +214,115 @@ export function ProviderEditor({
     };
   }, [kind, serverTools]);
 
+  // 认「这个地址是哪家」。地址留空时回落到协议预设的目录（官方渠道不填地址也认得出）；
+  // 填了地址就必须以地址为准 —— 用户完全可能把 kind=anthropic 指到中转站上，
+  // 那时用 anthropic 的目录会把中转站的模型名一个个对错。
+  useEffect(() => {
+    if (!baseUrl.trim()) {
+      setCatalogProvider(presetFor(kind)?.metaProvider || null);
+      return;
+    }
+    let cancelled = false;
+    // 每敲一个字母打一次 IPC 没必要，也避免请求乱序覆盖。
+    const timer = setTimeout(() => {
+      detectCatalogProvider(baseUrl)
+        .then((p) => !cancelled && setCatalogProvider(p))
+        .catch(() => !cancelled && setCatalogProvider(null));
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [baseUrl, kind]);
+
   const preset = presetFor(kind);
   const nameLocked = editing !== null;
-  const metaProvider = preset?.metaProvider ?? "";
-  const catalog = useCatalog(metaProvider);
+  const catalog = useCatalog(catalogProvider ?? "");
 
-  /** 这一行能不能只用下拉：有目录，且 meta 为空或就在目录里。 */
-  const pickable = (m: ModelState) => {
-    if (!catalog.entries || m.manual) return false;
-    if (!m.meta.trim()) return true;
-    const id = catalogIdOf(m.meta, metaProvider);
-    return id !== "" && catalog.entries.some((e) => e.id === id);
-  };
+  const metaMap = useMetaInfo(models.map((m) => m.meta).filter(Boolean));
 
   const patchModel = (i: number, patch: Partial<ModelState>) =>
     setModels((ms) => ms.map((x, j) => (j === i ? { ...x, ...patch } : x)));
 
-  // 新建官方渠道：渠道名跟着协议走、模型行预选目录里最新的那个 ——
-  // 用户只剩填密钥这一件事。只动还没被用户碰过的值。
+  const addRows = (rows: ModelState[]) =>
+    setModels((ms) => {
+      // 空壳行会被下面的过滤去掉；同名块也不再重复加 —— 重复的块名在 TOML 里是覆盖。
+      // `fresh` 内部也要去重：上游可能同时给出 `a.b` 与 `a-b`，块名归一后撞车。
+      const taken = new Set(ms.map((m) => m.name.trim()).filter(Boolean));
+      const fresh = rows.filter((r) => {
+        const k = r.name.trim();
+        if (!k || taken.has(k)) return false;
+        taken.add(k);
+        return true;
+      });
+      const kept = ms.filter((m) => m.name.trim() || m.meta.trim());
+      return [...kept, ...fresh];
+    });
+
+  /**
+   * 套用一个模板：协议、地址、渠道名一起填好，再把目录里的推荐模型填进列表 ——
+   * 用户只剩填密钥。模板行只在新建时出现，所以这里不用管编辑中的渠道。
+   *
+   * 渠道名只在「还是空的」或「还是上一个模板的默认名」时才换：用户自己起过名字
+   * （甚至已经改成了 `ds`）不该被覆盖。
+   */
+  const applyTemplate = async (t: ProviderTemplate) => {
+    setTemplateId(t.id);
+    const autoName = name.trim() === "" || templates.data?.some((x) => x.name === name);
+    if (autoName) setName(t.name);
+    setKind(t.kind);
+    setBaseUrl(t.base_url);
+
+    if (!t.catalog) {
+      setModels([blankModel()]);
+      return;
+    }
+    try {
+      const entries = await recommendedCatalogModels(t.catalog);
+      setModels(
+        entries.length > 0 ? entries.map((e) => rowFromEntry(t.catalog!, e)) : [blankModel()],
+      );
+    } catch {
+      // 目录还没拉过、或者缓存坏了：留一行空的，用户可以用「从上游拉取」问上游。
+      setModels([blankModel()]);
+    }
+  };
+
+  // 新建官方渠道：目录回来了、用户还没动过任何一行 —— 预选目录里最新的那个。
+  // 模板没覆盖到的（比如手动选了 kind = anthropic）走这条路。
+  useEffect(() => {
+    if (nameLocked || !catalog.entries || templateId) return;
+    const first = catalog.entries.find((e) => !e.deprecated);
+    if (!first) return;
+    setModels((ms) =>
+      ms.length === 1 && !ms[0].name.trim() && !ms[0].meta.trim()
+        ? [rowFromEntry(catalogProvider ?? "", first)]
+        : ms,
+    );
+  }, [catalog.entries, catalogProvider, nameLocked, templateId]);
+
+  // 新建时渠道名跟着协议走、换了协议就把目录预填的模型清掉。
+  // 有一行是用户手写的就整个不动。
   const changeKind = (k: string) => {
     if (!nameLocked && (name.trim() === "" || name === kind)) setName(k);
-    // 上个协议的目录里自动填的模型，换了协议就不对了 —— 清掉让下面重新预选。
-    // 有一行是用户手写的就整个不动。
+    setTemplateId(null);
     if (!nameLocked) {
       setModels((ms) =>
-        ms.every(
-          (m) =>
-            (!m.name.trim() && !m.meta.trim()) ||
-            (!m.manual && catalogIdOf(m.meta, metaProvider) !== ""),
-        )
-          ? [blankModel()]
-          : ms,
+        ms.every((m) => !m.name.trim() && !m.meta.trim()) ? [blankModel()] : ms,
       );
     }
     setKind(k);
   };
-  useEffect(() => {
-    if (nameLocked || !catalog.entries) return;
-    const first = firstLive(catalog.entries);
-    if (!first) return;
-    setModels((ms) =>
-      ms.length === 1 && !ms[0].name.trim() && !ms[0].meta.trim()
-        ? [{ ...ms[0], ...applyPick(ms[0], metaProvider, first) }]
-        : ms,
-    );
-  }, [catalog.entries, metaProvider, nameLocked]);
 
   const duplicate = !nameLocked && existing.includes(name.trim());
+
+  /** 有块名但没绑元数据的行。它们存不进配置 —— carter 解析模型要靠 meta。 */
+  const unbound = models.filter((m) => m.name.trim() && !m.meta.trim());
 
   const valid = useMemo(() => {
     if (!name.trim() || duplicate) return false;
     if (!kind.trim()) return false;
-    // 模型行允许整行留空（用户点了「加一个」还没填），但不能有半填的。
+    // 模型行允许整行留空（用户点了「添加」还没填），但不能有半填的。
     return models.every((m) => {
       const empty = !m.name.trim() && !m.meta.trim();
       return empty || (m.name.trim() !== "" && m.meta.trim() !== "");
@@ -264,7 +382,7 @@ export function ProviderEditor({
     <Modal
       title={editing ? `编辑渠道 · ${editing}` : "新建渠道"}
       onClose={() => onClose(false)}
-      width={560}
+      width={620}
       footer={
         <>
           {editing && (
@@ -290,6 +408,50 @@ export function ProviderEditor({
         <div className="mb-3">
           <Banner kind="error">{loadError}</Banner>
         </div>
+      )}
+
+      {/* 预设 ------------------------------------------------------------ */}
+      {!nameLocked && (
+        <Field label="预设" hint="选一家，协议与地址自动填好，模型也会预填">
+          <div className="flex flex-wrap gap-1.5">
+            {(templates.data ?? []).map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                title={t.note}
+                onClick={() => void applyTemplate(t)}
+                className={`rounded-md border px-2 py-1 text-xs transition-colors ${
+                  templateId === t.id
+                    ? "border-dim bg-base text-ink"
+                    : "border-edge text-dim hover:border-dim hover:text-ink"
+                }`}
+              >
+                {t.label}
+              </button>
+            ))}
+            <button
+              type="button"
+              onClick={() => {
+                setTemplateId(null);
+                setName("");
+                setKind("openai_chat");
+                setBaseUrl("");
+                setModels([blankModel()]);
+              }}
+              className={`rounded-md border border-dashed px-2 py-1 text-xs transition-colors ${
+                templateId === null
+                  ? "border-dim text-ink"
+                  : "border-edge text-dim hover:border-dim hover:text-ink"
+              }`}
+            >
+              自定义 / 中转站
+            </button>
+          </div>
+          <div className="mt-1.5 text-[11px] leading-relaxed text-dim">
+            {(templates.data ?? []).find((t) => t.id === templateId)?.note ??
+              "中转站（new-api / one-api 等）选「自定义」，填上地址后点「从上游拉取模型」。"}
+          </div>
+        </Field>
       )}
 
       <Field
@@ -357,7 +519,7 @@ export function ProviderEditor({
         hint={
           loaded?.has_api_key
             ? "已配置（留空则不改）"
-            : metaProvider
+            : catalogProvider
               ? "官方渠道填上密钥就能用；也可填 ${ENV_VAR}"
               : "可填 ${ENV_VAR}"
         }
@@ -467,51 +629,71 @@ export function ProviderEditor({
 
       {/* 模型列表 --------------------------------------------------------- */}
       <div className="mb-3 mt-5 border-t border-edge pt-4">
-        <div className="mb-2 flex items-center gap-2">
+        <div className="mb-2 flex flex-wrap items-center gap-2">
           <Label>模型</Label>
           <span className="text-[11px] text-dim">
-            {catalog.entries
-              ? "从目录里选；中转或自定义模型点「手写」"
-              : <>块名会成为模型引用 <span className="mono">渠道名/块名</span>，meta 是 models.dev 的查找 id</>}
+            {catalogProvider ? (
+              <>
+                元数据按 <span className="mono">{catalogProvider}</span> 匹配
+              </>
+            ) : (
+              <>块名会成为模型引用 <span className="mono">渠道名/块名</span>，meta 是 models.dev 的查找 id</>
+            )}
           </span>
-          <Button
-            size="sm"
-            className="ml-auto"
-            onClick={() => setModels([...models, blankModel()])}
-          >
-            <Plus size={12} />
-            添加
-          </Button>
+          <div className="ml-auto flex items-center gap-1.5">
+            <Button size="sm" onClick={() => setPicker("upstream")}>
+              <CloudDownload size={12} />
+              从上游拉取
+            </Button>
+            {catalogProvider && (
+              <Button size="sm" onClick={() => setPicker("catalog")}>
+                <ListChecks size={12} />
+                从目录选
+              </Button>
+            )}
+            <Button size="sm" onClick={() => setModels([...models, blankModel()])}>
+              <Plus size={12} />
+              添加
+            </Button>
+          </div>
         </div>
 
         <CatalogError catalog={catalog} />
 
+        {unbound.length > 0 && (
+          <div className="mb-2 flex items-start gap-2 rounded-lg border border-[var(--warn-border)] bg-[var(--warn-bg)] px-3 py-2 text-xs leading-relaxed">
+            <TriangleAlert size={13} className="mt-0.5 shrink-0 text-tone-orange" />
+            <span>
+              有 {unbound.length} 个模型没绑元数据（
+              <span className="mono">{unbound.map((m) => m.name).join("、")}</span>
+              ）。carter 要靠 meta 解析模型，保存前得给它们各绑一个 —— 名字对不上目录时，
+              用行尾的「绑元数据」搜一个。
+            </span>
+          </div>
+        )}
+
         <div className="space-y-2">
-          {models.map((m, i) =>
-            pickable(m) && catalog.entries ? (
+          {models.map((m, i) => {
+            const info = m.meta.trim() ? metaMap[m.meta.trim()] : undefined;
+            const summary = metaSummary(m.meta, info);
+            return (
               <div key={i} className="rounded-lg border border-edge bg-base p-2.5">
                 <div className="flex items-center gap-2">
-                  <CatalogPicker
-                    className="min-w-0 flex-1"
-                    entries={catalog.entries}
-                    value={catalogIdOf(m.meta, metaProvider)}
-                    onPick={(e) => patchModel(i, applyPick(m, metaProvider, e))}
+                  <Input
+                    mono
+                    value={m.name}
+                    onChange={(e) => patchModel(i, { name: e.target.value })}
+                    placeholder="块名，如 sonnet"
+                    className="py-1.5 text-xs"
                   />
-                  {m.reasoningCustom ? (
-                    <span
-                      className="w-28 shrink-0 rounded-md border border-dashed border-edge px-2 py-1.5 text-center text-[11px] text-dim"
-                      title="这个取值界面改不了，去配置文件里改"
-                    >
-                      自定义
-                    </span>
-                  ) : (
-                    <Select
-                      className="w-28 shrink-0"
-                      value={m.reasoning}
-                      onChange={(v) => patchModel(i, { reasoning: v })}
-                      options={REASONING_EFFORTS.map((r) => ({ value: r.value, label: r.label }))}
-                    />
-                  )}
+                  <Input
+                    mono
+                    value={m.api_name}
+                    onChange={(e) => patchModel(i, { api_name: e.target.value })}
+                    placeholder="下发名（留空 = 块名）"
+                    title="真正发给上游的模型名"
+                    className="py-1.5 text-xs"
+                  />
                   <IconButton
                     title="删除这个模型"
                     onClick={() => setModels(models.filter((_, j) => j !== i))}
@@ -519,101 +701,61 @@ export function ProviderEditor({
                     <X size={12} />
                   </IconButton>
                 </div>
-                <div className="mt-1.5 flex items-center gap-2 text-[11px] text-dim">
-                  <span className="min-w-0 flex-1 truncate">
-                    {m.name ? (
-                      <>
-                        引用名 <span className="mono text-ink">{(name.trim() || "渠道名") + "/" + m.name}</span>
-                      </>
-                    ) : (
-                      "选一个模型"
-                    )}
-                  </span>
-                  <button
-                    onClick={() => patchModel(i, { manual: true })}
-                    className="shrink-0 transition-colors hover:text-ink"
-                  >
-                    手写
-                  </button>
-                </div>
-              </div>
-            ) : (
-            <div key={i} className="rounded-lg border border-edge bg-base p-2.5">
-              <div className="flex items-center gap-2">
-                <Input
-                  mono
-                  value={m.name}
-                  onChange={(e) =>
-                    setModels(models.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)))
-                  }
-                  placeholder="块名，如 sonnet"
-                  className="py-1.5 text-xs"
-                />
-                {catalog.entries && (
-                  <button
-                    onClick={() =>
-                      // 手写的 meta 不在目录里就清掉，否则切回去还是显示成手写框。
-                      patchModel(i, {
-                        manual: false,
-                        meta: pickable({ ...m, manual: false }) ? m.meta : "",
-                      })
-                    }
-                    className="shrink-0 text-[11px] text-dim transition-colors hover:text-ink"
-                    title="改用目录下拉选择"
-                  >
-                    从目录选
-                  </button>
-                )}
-                <IconButton
-                  title="删除这个模型"
-                  onClick={() => setModels(models.filter((_, j) => j !== i))}
-                >
-                  <X size={12} />
-                </IconButton>
-              </div>
-              <div className="mt-1.5">
-                <Input
-                  mono
-                  value={m.meta}
-                  onChange={(e) =>
-                    setModels(models.map((x, j) => (j === i ? { ...x, meta: e.target.value } : x)))
-                  }
-                  placeholder="meta，如 anthropic/claude-sonnet-4-5"
-                  className="py-1.5 text-xs"
-                />
-              </div>
-              <div className="mt-1.5 flex gap-2">
-                <Input
-                  mono
-                  value={m.api_name ?? ""}
-                  onChange={(e) =>
-                    setModels(models.map((x, j) => (j === i ? { ...x, api_name: e.target.value } : x)))
-                  }
-                  placeholder="下发给端点的名字（留空 = 用块名）"
-                  className="flex-1 py-1.5 text-xs"
-                />
-                {m.reasoningCustom ? (
-                  // 配置里是 `{ budget = 1024 }` 之类 —— Select 表达不了，只展示。
+
+                <div className="mt-1.5 flex items-center gap-2 text-[11px]">
                   <span
-                    className="w-32 shrink-0 rounded-md border border-dashed border-edge px-2 py-1.5 text-center text-[11px] text-dim"
-                    title="这个取值界面改不了，去配置文件里改"
+                    className={`min-w-0 flex-1 truncate ${summary.warn ? "text-tone-orange" : "text-dim"}`}
+                    title={m.meta}
                   >
-                    自定义
+                    {summary.text}
+                    {m.meta.trim() && <span className="mono ml-1.5 text-dim">{m.meta}</span>}
                   </span>
-                ) : (
-                  <Select
-                    className="w-32"
-                    value={m.reasoning}
-                    onChange={(v) =>
-                      setModels(models.map((x, j) => (j === i ? { ...x, reasoning: v } : x)))
-                    }
-                    options={REASONING_EFFORTS.map((r) => ({ value: r.value, label: r.label }))}
-                  />
+                  <button
+                    onClick={() => setMetaEditing(i)}
+                    className="flex shrink-0 items-center gap-1 text-dim transition-colors hover:text-ink"
+                    title="在 models.dev 目录里搜一个元数据绑上来"
+                  >
+                    <Search size={10} />
+                    {m.meta.trim() ? "改绑定" : "绑元数据"}
+                  </button>
+                  <button
+                    onClick={() => patchModel(i, { manual: !m.manual })}
+                    className="shrink-0 text-dim transition-colors hover:text-ink"
+                    title="直接手写 meta 字符串"
+                  >
+                    {m.manual ? "收起" : "手写"}
+                  </button>
+                  {m.reasoningCustom ? (
+                    <span
+                      className="w-24 shrink-0 rounded-md border border-dashed border-edge px-2 py-0.5 text-center text-dim"
+                      title="这个取值界面改不了，去配置文件里改"
+                    >
+                      自定义
+                    </span>
+                  ) : (
+                    <Select
+                      className="w-24 shrink-0"
+                      value={m.reasoning}
+                      onChange={(v) => patchModel(i, { reasoning: v })}
+                      options={REASONING_EFFORTS.map((r) => ({ value: r.value, label: r.label }))}
+                    />
+                  )}
+                </div>
+
+                {m.manual && (
+                  <div className="mt-1.5">
+                    <Input
+                      mono
+                      value={m.meta}
+                      onChange={(e) => patchModel(i, { meta: e.target.value })}
+                      placeholder="meta，如 anthropic/claude-sonnet-4-5"
+                      className="py-1.5 text-xs"
+                    />
+                  </div>
                 )}
               </div>
-            </div>
-            ),
-          )}
+            );
+          })}
         </div>
       </div>
 
@@ -622,6 +764,49 @@ export function ProviderEditor({
         保存会即时热重载：正在跑的会话从**下一条消息**起用新配置；MCP server 是会话建立时连的，
         改了要新开一个会话。
       </div>
+
+      {metaEditing !== null && models[metaEditing] && (
+        <MetaSearchDialog
+          title="给这一行绑元数据"
+          initial={models[metaEditing].name || models[metaEditing].api_name}
+          onClose={() => setMetaEditing(null)}
+          onPick={(hit) => {
+            // 绑元数据**只换 meta**：下发名与块名说的是「发什么给上游」，与元数据无关。
+            // 只有块名还空着时才顺手填一个，让人看得出这行是哪个模型。
+            patchModel(metaEditing, {
+              name: models[metaEditing].name.trim() || blockNameFor(hit.id),
+              meta: hit.meta,
+              manual: false,
+            });
+            setMetaEditing(null);
+          }}
+        />
+      )}
+
+      {picker === "upstream" && (
+        <UpstreamFetchDialog
+          kind={kind}
+          baseUrl={baseUrl}
+          apiKey={apiKey}
+          provider={editing}
+          onClose={() => setPicker(null)}
+          onApply={(rows) => {
+            addRows(rows.map((r) => rowFromUpstream(r.name, r.meta)));
+            setPicker(null);
+          }}
+        />
+      )}
+
+      {picker === "catalog" && catalogProvider && (
+        <CatalogDialog
+          providerId={catalogProvider}
+          onClose={() => setPicker(null)}
+          onApply={(entries) => {
+            addRows(entries.map((e) => rowFromEntry(catalogProvider, e)));
+            setPicker(null);
+          }}
+        />
+      )}
 
       {confirmDelete && editing && (
         <ConfirmDialog

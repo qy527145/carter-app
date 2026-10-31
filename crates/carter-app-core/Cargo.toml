@@ -26,6 +26,8 @@ base64 = "0.22"
 notify = { workspace = true }
 # 用户在设置里写的额外忽略规则（glob）。
 globset = { workspace = true }
+# 拉上游模型清单（`GET {base}/v1/models`）。渠道编辑器里那一排「从上游获取」用它。
+reqwest = { workspace = true }
 # 内置 ripgrep：grep 工具不依赖系统的 `rg` 二进制。
 ignore = { workspace = true }
 grep-searcher = { workspace = true }

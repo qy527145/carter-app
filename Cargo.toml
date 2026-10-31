@@ -38,6 +38,10 @@ globset = "0.4"
 ignore = "0.4"
 grep-searcher = "0.1"
 grep-regex = "0.1"
+# 渠道编辑器里的「从上游拉取模型」要直接请求 `GET {base}/v1/models`。
+# 版本与 feature 跟 carter 自己那条保持一致（它已经把它带进依赖树了），
+# 免得同一个 crate 编两遍。`system-proxy` 让跑在代理后面的机器也能拉。
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "system-proxy"] }
 
 # 见 https://tauri.app/concept/size/#cargo-configuration
 [profile.release]

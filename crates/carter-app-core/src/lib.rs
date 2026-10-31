@@ -14,6 +14,8 @@
 //! * [`tools`] —— 在 carter 的装配结果之上套一层工具开关。
 //! * [`skills`] —— 技能：列举 / 查看 / 启停 / 新建 / 删除。
 //! * [`catalog`] —— 全部模型引用摊平成一张带元数据的表。
+//! * [`templates`] —— 渠道模板（官方服务商的 kind / base_url / 目录 id）。
+//! * [`upstream_models`] —— 从上游 `/v1/models` 拉模型清单并对到目录元数据上。
 //! * [`input`] —— 输入框里的斜杠命令与 `@文件` 引用。
 //! * [`images`] —— 粘贴进来的图片（复用 carter 的内容寻址图片库）。
 //! * [`inspect`] —— 抓到的报文解回 IR，供报文面板按语义渲染。
@@ -39,13 +41,15 @@ pub mod sessions;
 pub mod shell;
 pub mod side;
 pub mod skills;
+pub mod templates;
 pub mod title;
 pub mod tools;
+pub mod upstream_models;
 pub mod view;
 
 pub use app_settings::AppSettings;
 pub use capture::{CaptureHook, CaptureStore, ExchangeBrief, ExchangeRecord};
-pub use catalog::{CatalogEntry, ModelRow};
+pub use catalog::{CatalogEntry, CatalogHit, MetaMatch, ModelRow};
 pub use changes::{FileDiff, TurnFiles};
 pub use config_edit::{McpDraft, ModelDraft, ProviderDetail, ProviderDraft};
 pub use goal::{Goal, GoalStatus};

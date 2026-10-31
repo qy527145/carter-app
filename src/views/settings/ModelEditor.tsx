@@ -3,11 +3,19 @@
 // 与「渠道」页那个大编辑框的分工：那边一次管一个渠道的全部模型，这边只管一个，
 // 用的人是「我已经知道要加哪个模型」而不是「我要从头配一个渠道」。
 // 两者写的是同一段配置（`[providers.X.models.Y]`），只是入口不同。
+//
+// 所以这里的字段是同一个模型行在渠道编辑框里的那几栏：块名、下发名、meta、
+// 推理档位。meta 一样可以从目录里选、也可以在目录里搜出来绑上。
+//
+// 「这个渠道是哪家官方」由渠道列表里的 base_url 决定（而不是只看 kind）：
+// 把一个 kind=anthropic 的渠道指到中转站上时，用 anthropic 的目录会把名字逐个对错。
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { Search } from "lucide-react";
 
 import {
   deleteModel,
+  detectCatalogProvider,
   listChannels,
   saveModel,
   type ChannelRow,
@@ -25,7 +33,15 @@ import { Button } from "../../components/ui/Button";
 import { Field, Input } from "../../components/ui/Input";
 import { ConfirmDialog, Modal } from "../../components/ui/Panel";
 import { Select } from "../../components/ui/Select";
-import { CatalogError, CatalogPicker, applyPick, catalogIdOf, useCatalog } from "./CatalogPicker";
+import {
+  CatalogError,
+  CatalogPicker,
+  applyPick,
+  blockNameFor,
+  catalogIdOf,
+  useCatalog,
+} from "./CatalogPicker";
+import { MetaSearchDialog, metaSummary, useMetaInfo } from "./ModelPickers";
 
 export function ModelEditor({
   /** 给了就是在编辑这一条；`null` 是新增。 */
@@ -49,6 +65,7 @@ export function ModelEditor({
 
   const [saving, setSaving] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [searching, setSearching] = useState(false);
 
   // 渠道列表可能还没拉回来（或者编辑的渠道刚被删掉），用编辑目标兜底一个空壳，
   // 否则下拉会是空的、而当前值又不在选项里。
@@ -73,11 +90,31 @@ export function ModelEditor({
     return list;
   }, [channels.data, provider]);
 
-  // 渠道是官方的（有 models.dev 目录）就让人从目录里选，选中即填好块名 / meta / api_name。
-  const providerKind = options.find((c) => c.name === provider)?.kind ?? "";
-  const metaProvider = presetFor(providerKind)?.metaProvider ?? "";
-  const catalog = useCatalog(metaProvider);
-  const pickedId = catalogIdOf(meta, metaProvider);
+  const channel = options.find((c) => c.name === provider);
+  const providerKind = channel?.kind ?? "";
+
+  // 「这个渠道对应目录里的哪家」：有 base_url 就以它为准（认不出就是没有目录），
+  // 没填地址才回落到协议预设 —— 与渠道编辑框同一条规则。
+  const [catalogProvider, setCatalogProvider] = useState<string | null>(null);
+  useEffect(() => {
+    const baseUrl = channel?.base_url?.trim() ?? "";
+    if (!baseUrl) {
+      setCatalogProvider(presetFor(providerKind)?.metaProvider || null);
+      return;
+    }
+    let cancelled = false;
+    detectCatalogProvider(baseUrl)
+      .then((p) => !cancelled && setCatalogProvider(p))
+      .catch(() => !cancelled && setCatalogProvider(null));
+    return () => {
+      cancelled = true;
+    };
+  }, [channel?.base_url, providerKind]);
+
+  const catalog = useCatalog(catalogProvider ?? "");
+  const pickedId = catalogIdOf(meta, catalogProvider ?? "");
+  const infos = useMetaInfo(meta.trim() ? [meta.trim()] : []);
+  const summary = metaSummary(meta, meta.trim() ? infos[meta.trim()] : undefined);
 
   const valid = provider.trim() !== "" && name.trim() !== "" && meta.trim() !== "";
 
@@ -154,7 +191,7 @@ export function ModelEditor({
             entries={catalog.entries}
             value={catalog.entries.some((e) => e.id === pickedId) ? pickedId : ""}
             onPick={(e) => {
-              const next = applyPick({ name, meta, api_name: apiName }, metaProvider, e);
+              const next = applyPick({ name, meta, api_name: apiName }, catalogProvider ?? "", e);
               // 编辑时块名是这条记录的身份，不能跟着换 —— 那就靠 api_name 指到真名上。
               const block = nameLocked ? name : next.name;
               setName(block);
@@ -175,7 +212,18 @@ export function ModelEditor({
         />
       </Field>
 
-      <Field label="meta" hint="models.dev 的查找 id，决定能不能取到元数据">
+      <Field
+        label="meta"
+        hint={
+          <button
+            onClick={() => setSearching(true)}
+            className="inline-flex items-center gap-1 text-dim transition-colors hover:text-ink"
+          >
+            <Search size={10} />
+            在目录里搜
+          </button>
+        }
+      >
         <Input
           mono
           value={meta}
@@ -183,6 +231,11 @@ export function ModelEditor({
           placeholder="例如 anthropic/claude-sonnet-4-5"
         />
       </Field>
+      <div
+        className={`-mt-2 mb-3 text-[11px] ${summary.warn ? "text-tone-orange" : "text-dim"}`}
+      >
+        {summary.text}
+      </div>
 
       <Field label="下发名 api_name" hint="留空 = 用块名">
         <Input
@@ -215,6 +268,21 @@ export function ModelEditor({
       {/* 顺手把现有渠道下有哪些模型列出来 —— 免得在同一个块名上重复添加。 */}
       {editing === null && provider && (
         <ExistingModels models={options.find((c) => c.name === provider)?.models ?? []} />
+      )}
+
+      {searching && (
+        <MetaSearchDialog
+          title="在目录里搜一个 meta"
+          initial={name || apiName}
+          onClose={() => setSearching(false)}
+          onPick={(hit) => {
+            // 只换 meta（以及空着的块名）。下发名是「发什么给上游」，与元数据无关 ——
+            // 手动搜 meta 的场合恰恰是名字对不上，这时候拿目录 id 去覆盖它最容易错。
+            setName((n) => n.trim() || blockNameFor(hit.id));
+            setMeta(hit.meta);
+            setSearching(false);
+          }}
+        />
       )}
 
       {confirmDelete && editing && (

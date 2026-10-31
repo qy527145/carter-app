@@ -53,7 +53,7 @@ export function useCatalog(providerId: string): Catalog {
   return { entries, error, refreshing, refresh };
 }
 
-/** 目录里第一个没弃用的模型 —— 新建官方渠道时的默认选择。 */
+/** 目录里第一个没弃用的模型 —— 没有推荐列表时（比如只有缓存）的兜底。 */
 export function firstLive(entries: CatalogEntry[] | null): CatalogEntry | undefined {
   return entries?.find((e) => !e.deprecated) ?? entries?.[0];
 }
