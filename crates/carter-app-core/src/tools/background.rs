@@ -140,10 +140,7 @@ impl BackgroundShells {
             .stdout(Stdio::from(out))
             .stderr(Stdio::from(err));
         #[cfg(windows)]
-        {
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
+        crate::platform::hide_console_async(&mut cmd);
         // 独立进程组：`kill_shell` 与关会话时能一次收掉整棵树。
         #[cfg(unix)]
         unsafe {
@@ -326,11 +323,13 @@ pub(crate) fn kill_process_tree(pid: u32) {
     }
     #[cfg(windows)]
     {
-        let _ = std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
+        let mut cmd = std::process::Command::new("taskkill");
+        cmd.args(["/PID", &pid.to_string(), "/T", "/F"])
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+            .stderr(Stdio::null());
+        // 没有控制台的 GUI 进程起 `taskkill.exe` 也会闪一个窗口。
+        crate::platform::hide_console(&mut cmd);
+        let _ = cmd.status();
     }
 }
 

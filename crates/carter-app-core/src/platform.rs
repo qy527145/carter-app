@@ -20,6 +20,36 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+/// `CreateProcessW` 的 `CREATE_NO_WINDOW`。
+///
+/// 这是一个 GUI 进程（release 下 `windows_subsystem = "windows"`，没有控制台）。
+/// 它**没有**控制台可以继承，于是每起一个控制台程序（`git.exe`、`cmd.exe`、
+/// hook 里的 `sh -c` …），系统都会给它新开一个控制台窗口 —— 用户看到的就是
+/// 发送消息那一瞬间闪过一个黑框。带上这个 flag，控制台仍然会被创建（子进程能正常
+/// 跑、能拿到 stdin/stdout 句柄），只是不显示窗口。
+///
+/// dev 下 `cargo tauri dev` 跑的是 debug 构建，带控制台，子进程直接继承它，
+/// 所以窗口不闪 —— 这个坑只在装完的 release 包里出现。
+#[cfg(windows)]
+pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// 让一条 `std::process::Command` 不在 Windows 上弹控制台窗口。
+///
+/// 每个起子进程的地方都要过一遍 —— 漏掉一处就是在发消息时闪一次黑框。
+#[cfg(windows)]
+pub fn hide_console(cmd: &mut std::process::Command) {
+    use std::os::windows::process::CommandExt;
+    cmd.creation_flags(CREATE_NO_WINDOW);
+}
+
+/// `tokio::process::Command` 的同名版本。
+#[cfg(windows)]
+pub fn hide_console_async(cmd: &mut tokio::process::Command) {
+    // tokio 的 `creation_flags` 是固有方法，取值与 `std::process::CommandExt`
+    // 的同一个，都是直接交给 `CreateProcessW`。
+    cmd.creation_flags(CREATE_NO_WINDOW);
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Os {
     Windows,

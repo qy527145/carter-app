@@ -251,14 +251,17 @@ fn root_variants(root: &Path) -> Vec<PathBuf> {
 
 /// 跑一条 git 命令，成功则返回 stdout（去掉尾部空白）。
 fn git(cwd: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git")
-        .arg("-C")
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
         .arg(cwd)
         .args(args)
         .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
+        .stderr(Stdio::null());
+    // 轮首这几条 git 是**发消息那一刻**跑的：装好的 release 包没有控制台，
+    // 不带上这个 flag 就会连闪三个黑框。
+    #[cfg(windows)]
+    crate::platform::hide_console(&mut cmd);
+    let out = cmd.output().ok()?;
     out.status
         .success()
         .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
@@ -299,15 +302,16 @@ fn git_ignored(cwd: &Path, files: &[String]) -> HashSet<String> {
         input.push(0);
     }
 
-    let Ok(mut child) = Command::new("git")
-        .arg("-C")
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
         .arg(cwd)
         .args(["check-ignore", "--stdin", "-z"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-    else {
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    crate::platform::hide_console(&mut cmd);
+    let Ok(mut child) = cmd.spawn() else {
         return out;
     };
     if let Some(mut stdin) = child.stdin.take() {

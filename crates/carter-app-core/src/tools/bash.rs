@@ -175,10 +175,7 @@ impl Tool for PlatformBash {
             .stderr(Stdio::piped());
         // Windows 上不弹控制台窗口（否则每次 bash 都会闪一个黑框）。
         #[cfg(windows)]
-        {
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
+        crate::platform::hide_console_async(&mut cmd);
         // Unix：独立进程组，超时时能 kill 整棵树（含 `cmd & disown` 这种）。
         #[cfg(unix)]
         unsafe {
