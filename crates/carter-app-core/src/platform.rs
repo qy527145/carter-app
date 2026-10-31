@@ -184,8 +184,12 @@ fn find_posix_shell() -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.is_file())
 }
 
-/// `which`：按 PATH 找可执行文件。Windows 上还要试 PATHEXT 里的后缀。
-fn which(program: &str) -> Option<PathBuf> {
+/// 按 PATH 找一个可执行文件。Windows 上还要试 PATHEXT 里的后缀。
+///
+/// 供「这个程序在本机装了没有」这类**只探一次**的判断使用（见
+/// [`crate::changes`] 的 git 探测）。它不是通用的进程启动器 —— 真要执行时
+/// 仍然直接 `Command::new`，让系统按自己的规则解析。
+pub fn which(program: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     let exts: Vec<String> = if cfg!(windows) {
         std::env::var("PATHEXT")

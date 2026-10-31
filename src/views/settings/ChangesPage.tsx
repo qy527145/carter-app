@@ -140,7 +140,8 @@ export function ChangesPage() {
             <p>
               工作目录在 git 仓库里时，清单会尊重{" "}
               <code className="mono">.gitignore</code>（含嵌套的与全局 excludes）——
-              用 <code className="mono">git check-ignore</code> 判断，不自己实现一套。
+              装了 git 就用 <code className="mono">git check-ignore</code> 判断，
+              没装则用进程内的同一套 ripgrep 引擎，两种情况下清单一致。
             </p>
             <p>
               预览里的
@@ -150,7 +151,7 @@ export function ChangesPage() {
               <code className="mono">git diff</code> 算这一轮真正改了什么。
             </p>
             <p>
-              不是 git 仓库时，清单与文件预览仍然可用，但
+              不是 git 仓库、或者本机没装 git 时，清单与文件预览仍然可用，但
               <strong className="font-medium text-ink">没有 diff</strong> ——
               没有基线就还原不了改动前的内容。
             </p>

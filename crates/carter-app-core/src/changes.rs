@@ -14,9 +14,10 @@
 //!
 //! 1. **内置目录**（[`IGNORED_DIRS`]）：`.git`、`node_modules`、`target` 这类
 //!    几乎总是构建产物的目录。固定规则，不需要配置。
-//! 2. **`.gitignore`**：cwd 在 git 仓库里时，轮末用 `git check-ignore` 过一遍 ——
+//! 2. **`.gitignore`**：cwd 在 git 仓库里时，轮末按 `.gitignore` 过一遍 ——
 //!    `.gitignore` / `.git/info/exclude` / 全局 excludes 一并生效，连嵌套的
-//!    `.gitignore` 也算在内。不自己实现 gitignore 语义，省得和 git 对不上。
+//!    `.gitignore` 也算在内。装了 git 就交给 `git check-ignore`，省得和 git 对不上；
+//!    没装 git 则退回进程内的 `ignore` crate（见 [`git_ignored_in_process`]）。
 //! 3. **用户额外规则**（设置里的 `changes_ignore`）：每条一个 glob，相对 cwd。
 //!
 //! ## 「改了哪些片段」：按需用 git 算
@@ -44,7 +45,7 @@
 //! JSONL，**不能**往里加自己的记录类型（`RecordKind` 是封闭枚举，多一种会让整条
 //! 会话读不出来）。所以按 `goal.rs` 的形状落在 `~/.carter-app/changes/<id>.json`。
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -249,8 +250,36 @@ fn root_variants(root: &Path) -> Vec<PathBuf> {
 // git
 // ---------------------------------------------------------------------------
 
+/// 本机有没有可用的 `git`。
+///
+/// 每轮开头要跑 2~3 条 git，轮末还要一条。没装 git 时这些调用不是「慢」，而是
+/// 每次都白起一个必然失败的进程（`CreateProcessW` 找不到文件就返回）。探一次
+/// 结果缓存住，之后直接短路 —— 桌面应用里 `git` 有没有装不会中途变。
+///
+/// 只看 PATH 与 PATHEXT，不试执行：执行一次的代价远大于这个判断，而且探到的
+/// 路径可用与否在真起进程时还会再报一次错。
+fn git_available() -> bool {
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAILABLE.get_or_init(|| crate::platform::which("git").is_some())
+}
+
+/// `cwd` 在不在一个 git 仓库里（含子目录）。
+///
+/// 纯文件系统判断，不起进程。它挡在 [`git_baseline`] 前面有两个好处：
+/// 非仓库目录（家目录是最常见的 cwd）每轮省掉一条必然失败的 `git rev-parse`；
+/// `finish` 里也靠它决定要不要按 `.gitignore` 过滤。
+///
+/// `.git` 可能是目录（普通仓库）也可能是文件（worktree / submodule），所以用
+/// `exists()` 而不是 `is_dir()`。
+fn in_git_repo(cwd: &Path) -> bool {
+    cwd.ancestors().any(|d| d.join(".git").exists())
+}
+
 /// 跑一条 git 命令，成功则返回 stdout（去掉尾部空白）。
 fn git(cwd: &Path, args: &[&str]) -> Option<String> {
+    if !git_available() {
+        return None;
+    }
     let mut cmd = Command::new("git");
     cmd.arg("-C")
         .arg(cwd)
@@ -258,7 +287,7 @@ fn git(cwd: &Path, args: &[&str]) -> Option<String> {
         .stdin(Stdio::null())
         .stderr(Stdio::null());
     // 轮首这几条 git 是**发消息那一刻**跑的：装好的 release 包没有控制台，
-    // 不带上这个 flag 就会连闪三个黑框。
+    // 不带上这个 flag 就会连闪几个黑框。
     #[cfg(windows)]
     crate::platform::hide_console(&mut cmd);
     let out = cmd.output().ok()?;
@@ -273,6 +302,11 @@ fn git(cwd: &Path, args: &[&str]) -> Option<String> {
 /// 工作区、不动索引、不进 `stash list`。这是拿到「当前工作区快照」而不打扰用户
 /// 的最轻方式；自己把每个脏文件复制一份反而是更重的活。
 fn git_baseline(cwd: &Path) -> Option<String> {
+    // 不是仓库就别起进程了 —— 这条判断对「家目录当 cwd」这种最常见的用法
+    // 每轮都省一次 `git rev-parse`。
+    if !in_git_repo(cwd) || !git_available() {
+        return None;
+    }
     if git(cwd, &["rev-parse", "--is-inside-work-tree"]).as_deref() != Some("true") {
         return None;
     }
@@ -295,6 +329,11 @@ fn git_ignored(cwd: &Path, files: &[String]) -> HashSet<String> {
     let mut out = HashSet::new();
     if files.is_empty() {
         return out;
+    }
+    // 没装 git 时用进程内的 `ignore` crate 顶上 —— 语义（嵌套 .gitignore、
+    // 取反规则、全局 excludes）由它保证，与 grep 工具用的是同一套。
+    if !git_available() {
+        return git_ignored_in_process(cwd, files);
     }
     let mut input = Vec::new();
     for f in files {
@@ -327,6 +366,80 @@ fn git_ignored(cwd: &Path, files: &[String]) -> HashSet<String> {
         }
     }
     out
+}
+
+/// 没装 git 时的 `.gitignore` 过滤：用进程内的 `ignore` crate 自己算。
+///
+/// 与 grep 工具用的是同一套引擎，所以嵌套 `.gitignore`、`!` 取反、目录规则的
+/// 语义与 rg 一致。全局 excludes（`core.excludesFile` / `~/.config/git/ignore`）
+/// 也照 git 的查找顺序找一遍。
+///
+/// 与 `git check-ignore` 的差别只有一处已知的：某个目录被排除后，git 不允许
+/// 用更深的 `.gitignore` 把里面的文件重新包含回来，这里与 `ignore` crate 的
+/// `matched_path_or_any_parents` 行为一致，会允许。变更清单只是给用户看的提示，
+/// 这一点偏差比「没装 git 就完全不过滤」小得多。
+fn git_ignored_in_process(cwd: &Path, files: &[String]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    // 每个目录的 `.gitignore` 只解析一次：一次轮末常常有几十个文件落在同一批目录下。
+    let mut cache: HashMap<PathBuf, Option<ignore::gitignore::Gitignore>> = HashMap::new();
+    let global = global_gitignore(cwd);
+
+    for f in files {
+        let abs = cwd.join(f);
+        let mut ignored = false;
+        // 由深到浅：越靠近文件的 `.gitignore` 优先级越高，第一个给出结论的说了算。
+        let mut dir = abs.parent();
+        while let Some(d) = dir {
+            if !d.starts_with(cwd) {
+                break;
+            }
+            let matcher = cache.entry(d.to_path_buf()).or_insert_with(|| {
+                let path = d.join(".gitignore");
+                path.is_file()
+                    .then(|| ignore::gitignore::Gitignore::new(&path).0)
+            });
+            if let Some(m) = matcher {
+                match m.matched_path_or_any_parents(&abs, false) {
+                    ignore::Match::Ignore(_) => {
+                        ignored = true;
+                        break;
+                    }
+                    // 被更深层的 `!` 规则取反了：就地结束，不再往上问。
+                    ignore::Match::Whitelist(_) => break,
+                    ignore::Match::None => {}
+                }
+            }
+            if d == cwd {
+                break;
+            }
+            dir = d.parent();
+        }
+
+        // 全局 excludes 优先级最低，前面都没结论时才算数。
+        if !ignored && let Some(g) = &global {
+            ignored = g.matched_path_or_any_parents(&abs, false).is_ignore();
+        }
+        if ignored {
+            out.insert(f.clone());
+        }
+    }
+    out
+}
+
+/// 全局 gitignore（`core.excludesFile`，默认 `~/.config/git/ignore`），以 `cwd`
+/// 为根构建。
+///
+/// 必须按 `cwd` 建：`ignore` 的 matcher 是按「相对根」匹配的，拿
+/// `Gitignore::new(排除文件)` 得到的 matcher 根本在别的目录（`~/.config/git`），
+/// 与要匹配的路径没有公共前缀时 `matched_path_or_any_parents` 会 **panic**。
+fn global_gitignore(cwd: &Path) -> Option<ignore::gitignore::Gitignore> {
+    let path = ignore::gitignore::gitconfig_excludes_path()?;
+    if !path.is_file() {
+        return None;
+    }
+    let mut builder = ignore::gitignore::GitignoreBuilder::new(cwd);
+    builder.add(&path);
+    builder.build().ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -408,9 +521,10 @@ impl ChangeWatch {
         if !self.rules.is_empty() {
             files.retain(|p| !self.rules.matches(p));
         }
-        // `.gitignore` 只在 git 仓库里问 git。轮末一次进程，比每个事件问一次便宜，
-        // 也比自己实现（嵌套 .gitignore、全局 excludes、取反规则）不容易错。
-        if self.baseline.is_some() && !files.is_empty() {
+        // `.gitignore` 只在 git 仓库里算。轮末一次算完，比每个事件问一次便宜。
+        // 装了 git 就交给 `git check-ignore`（语义最全）；没装则退回进程内的
+        // `ignore` crate —— 否则「没装 git」会把 `*.log`、`dist/` 全塞进清单。
+        if !files.is_empty() && in_git_repo(&self.cwd) {
             let ignored = git_ignored(&self.cwd, &files);
             files.retain(|p| !ignored.contains(p));
         }
@@ -890,6 +1004,52 @@ mod tests {
         assert!(ignored.contains("src/b.log"));
         assert!(ignored.contains("build/x.js"));
         assert!(!ignored.contains("keep.txt"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 没装 git 时，`.gitignore` 的过滤由进程内的 `ignore` crate 顶上。
+    ///
+    /// 这条守的是「装了 git 的机器」与「没装的机器」在变更清单上不该有差别：
+    /// 之前没有 git 会把 `*.log`、`build/` 全列出来。
+    #[test]
+    fn in_process_gitignore_matches_what_git_would_ignore() {
+        let dir = tmp_dir("gigno");
+        std::fs::write(dir.join(".gitignore"), "*.log\nbuild/\n!keep.log\n").unwrap();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("build")).unwrap();
+        std::fs::write(dir.join("src/.gitignore"), "*.tmp\n").unwrap();
+
+        let files = vec![
+            "a.log".to_string(),
+            "src/b.log".to_string(),
+            "build/x.js".to_string(),
+            "src/c.tmp".to_string(),
+            "keep.log".to_string(),
+            "src/main.rs".to_string(),
+        ];
+        let ignored = git_ignored_in_process(&dir, &files);
+
+        assert!(ignored.contains("a.log"), "顶层的 *.log 要被忽略：{ignored:?}");
+        assert!(ignored.contains("src/b.log"), "不含 / 的规则要匹配任意层级");
+        assert!(ignored.contains("build/x.js"), "被忽略目录里的文件也算");
+        assert!(ignored.contains("src/c.tmp"), "嵌套 .gitignore 要生效");
+        assert!(!ignored.contains("keep.log"), "`!` 取反规则要生效");
+        assert!(!ignored.contains("src/main.rs"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `in_git_repo` 是挡住无谓 git 进程的那道闸，得认得出子目录与 worktree
+    /// （`.git` 是文件而不是目录）。
+    #[test]
+    fn in_git_repo_recognises_subdirectories_and_worktrees() {
+        let dir = tmp_dir("repodetect");
+        let sub = dir.join("a/b");
+        std::fs::create_dir_all(&sub).unwrap();
+        assert!(!in_git_repo(&sub), "没有 .git 就该是 false");
+
+        // worktree / submodule 的 `.git` 是文件。
+        std::fs::write(dir.join(".git"), "gitdir: /elsewhere\n").unwrap();
+        assert!(in_git_repo(&sub), "子目录要能从祖先里找到 .git");
         std::fs::remove_dir_all(&dir).ok();
     }
 
