@@ -42,6 +42,11 @@ grep-regex = "0.1"
 # 版本与 feature 跟 carter 自己那条保持一致（它已经把它带进依赖树了），
 # 免得同一个 crate 编两遍。`system-proxy` 让跑在代理后面的机器也能拉。
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "system-proxy"] }
+# 定时任务要按**本机时间**算「每天 9:00」，还要处理夏令时的跳表/回拨。
+# 手算 UTC 偏移这件事看着简单，实际是给自己埋「某天早上没跑」的坑。
+# 只开 `clock`（拿系统时区）与 `std`：serde 特性用不上，任务里的时间一律存
+# epoch 毫秒，而不是让 chrono 的类型进文件格式。
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
 # 见 https://tauri.app/concept/size/#cargo-configuration
 [profile.release]

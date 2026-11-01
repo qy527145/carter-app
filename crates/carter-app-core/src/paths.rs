@@ -175,6 +175,11 @@ pub fn prompts_dir() -> PathBuf {
     app_home().join("prompts")
 }
 
+/// 定时任务表。全局一份，不是一个会话一个文件 —— 它与会话无关，见 `schedules.rs`。
+pub fn schedules_path() -> PathBuf {
+    app_home().join("schedules.json")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

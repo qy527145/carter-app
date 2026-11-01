@@ -63,6 +63,7 @@ pub mod goal_update;
 pub mod grep;
 pub mod multi_skill;
 pub mod record;
+pub mod schedule;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -89,6 +90,7 @@ use goal_update::GoalUpdateTool;
 use grep::EmbeddedGrep;
 use multi_skill::MultiRootSkill;
 use record::{Recorded, ToolEvent};
+use schedule::ScheduleTool;
 
 /// 装配工具池需要的一整套东西。
 ///
@@ -121,6 +123,8 @@ pub struct ToolBuildArgs {
     pub running: Option<Arc<RunningTools>>,
     /// 长任务目标的信号格子。恒常传 —— `goal_update` 是恒常注册的，见 `goal_update.rs`。
     pub goal_signal: Arc<GoalSignal>,
+    /// 定时任务表。`schedule` 工具通过对话增删改它。
+    pub schedules: Arc<crate::schedules::ScheduleStore>,
     /// 工具调用计数。runner 靠它判断「这一轮到底动没动手」（自动继续的空转检测）。
     pub activity: Arc<AtomicU32>,
     /// 进行中那一轮的记录。`None` = 没人要看（侧边会话自己就不需要被别人看）。
@@ -209,6 +213,7 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
         session_id,
         running,
         goal_signal,
+        schedules,
         activity,
         live,
     } = args;
@@ -295,6 +300,15 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
     }
 
     push(Arc::new(GoalUpdateTool::new(goal_signal)), &mut tools);
+
+    // 定时任务。挂在**快照之后**：子 agent 各自建定时任务会造出一堆重复的，
+    // 与 `goal_update` 同一个理由。
+    if settings.tool_enabled("schedule") {
+        push(
+            Arc::new(ScheduleTool::new(schedules, cwd.to_string_lossy().to_string())),
+            &mut tools,
+        );
+    }
 
     tools
 }

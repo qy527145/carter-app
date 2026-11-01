@@ -111,6 +111,13 @@ export function useAppEvents() {
         useStore.getState().bumpConfig();
         return;
       }
+      if (payload.type === "schedule_fired") {
+        // 定时任务开了一条新对话。**不切过去** —— 用户可能正在读别的对话，
+        // 被强行拽走只会让人莫名。只刷新侧栏，让它出现在列表里。
+        if (payload.error) useStore.getState().setNotice(payload.error);
+        void refreshSessions();
+        return;
+      }
       if (payload.type === "session") {
         const { session_id: sid, event: e } = payload;
         // 增量进缓冲 —— 只认「确实属于当前主对话或当前侧边聊天」的，别的会话

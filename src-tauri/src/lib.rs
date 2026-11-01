@@ -487,6 +487,70 @@ fn set_compaction(
     config_edit::set_compaction_reload(shell.inner(), enabled, ratio)
 }
 
+// ---------------------------------------------------------------------------
+// 定时任务
+// ---------------------------------------------------------------------------
+
+/// 全部定时任务（停用的排在后面，其余按下次触发时间）。
+#[tauri::command]
+fn list_schedules(shell: State<'_, Arc<AppShell>>) -> Vec<carter_app_core::schedules::Schedule> {
+    shell.schedules.list()
+}
+
+/// 设置页里新建 / 编辑一条。
+///
+/// 时间是「相对现在」还是「绝对」由 `kind` 自己决定，这里只做一件事：**节奏变了**
+/// 就重算下一次（否则改完「每天 9:00」到「每天 18:00」，下次触发还停在原来的 9:00）。
+#[tauri::command]
+fn save_schedule(
+    shell: State<'_, Arc<AppShell>>,
+    schedule: carter_app_core::schedules::Schedule,
+) -> Result<(), String> {
+    let old = shell.schedules.get(&schedule.id);
+    let mut next = schedule;
+    next.name = next.name.trim().to_string();
+    next.prompt = next.prompt.trim().to_string();
+    if next.name.is_empty() {
+        return Err("名字不能为空".into());
+    }
+    if next.prompt.is_empty() {
+        return Err("到点要发的那句话不能为空".into());
+    }
+    match &old {
+        Some(o) if o.kind == next.kind => {}
+        _ => next.reschedule(),
+    }
+    // 编辑一条已经跑完的一次性任务：给它一个新时间，它会重新启用。
+    if matches!(
+        next.kind,
+        carter_app_core::schedules::ScheduleKind::Once { at_ms }
+            if at_ms <= carter_app_core::protocol::now_ms()
+    ) {
+        return Err("一次性任务的时间已经过去了，请改成将来的时间".into());
+    }
+    shell.schedules.upsert(next)
+}
+
+#[tauri::command]
+fn delete_schedule(shell: State<'_, Arc<AppShell>>, id: String) -> Result<(), String> {
+    shell.schedules.remove(&id).map(|_| ())
+}
+
+#[tauri::command]
+fn toggle_schedule(
+    shell: State<'_, Arc<AppShell>>,
+    id: String,
+    enabled: bool,
+) -> Result<Option<carter_app_core::schedules::Schedule>, String> {
+    shell.schedules.set_enabled(&id, enabled)
+}
+
+/// 「立即运行」：开一条新会话跑一次，不动它原来的节奏。
+#[tauri::command]
+async fn run_schedule(shell: State<'_, Arc<AppShell>>, id: String) -> Result<String, String> {
+    carter_app_core::schedules::fire_now(shell.inner(), &id).await
+}
+
 /// models.dev 里某个服务商下的模型（给渠道编辑框的「从目录选」下拉用）。
 #[tauri::command]
 fn list_catalog_models(
@@ -679,6 +743,24 @@ fn list_tools(shell: State<'_, Arc<AppShell>>) -> Vec<ToolRow> {
                 parameters: t.parameters(),
             });
         }
+    }
+
+    // 定时任务工具。它要一份任务表 —— 用壳里那份**同一个** `Arc`，而不是新开一个：
+    // 设置页与模型改的必须是同一份数据。
+    {
+        use carter::tools::Tool as _;
+        let t = carter_app_core::tools::schedule::ScheduleTool::new(
+            shell.schedules.clone(),
+            cwd.to_string_lossy().to_string(),
+        );
+        rows.push(ToolRow {
+            enabled: settings.tool_enabled(t.name()),
+            toggleable: true,
+            note: Some("到点自动新开一条对话".into()),
+            name: t.name().to_string(),
+            description: t.description().to_string(),
+            parameters: t.parameters(),
+        });
     }
 
     // `agent` 构造要一个 provider，这里拿不到 —— 单独补一行，标明它不可关。
@@ -1104,6 +1186,10 @@ pub fn run() {
             let shell = AppShell::new(config);
             app.manage(shell.clone());
 
+            // 定时任务的后台调度。**和窗口无关**：窗口最小化、切走都不影响它，
+            // 到点照常开一条新会话。必须在 async runtime 里起（见 `spawn_scheduler`）。
+            carter_app_core::schedules::spawn_scheduler(shell.clone());
+
             // 事件总线 → webview。一条长驻任务，AppShell 的广播接收端跟着它。
             let handle = app.handle().clone();
             let mut rx = shell.subscribe();
@@ -1158,6 +1244,12 @@ pub fn run() {
             set_fast_model,
             get_compaction,
             set_compaction,
+            // 定时任务
+            list_schedules,
+            save_schedule,
+            delete_schedule,
+            toggle_schedule,
+            run_schedule,
             refresh_model_catalog,
             list_catalog_models,
             recommended_catalog_models,

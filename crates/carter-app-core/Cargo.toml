@@ -32,6 +32,8 @@ reqwest = { workspace = true }
 ignore = { workspace = true }
 grep-searcher = { workspace = true }
 grep-regex = { workspace = true }
+# 定时任务的「每天 9:00」要按本机时间算（见 `schedules.rs`）。
+chrono = { workspace = true }
 
 # Windows 上用 MultiByteToWideChar 按 OEM 代码页解 cmd 的输出。
 # 中文环境下 `dir`/`ipconfig` 吐的是 GBK，直接 utf8_lossy 会得到一片 �。

@@ -196,6 +196,9 @@ pub struct AppShell {
     /// 原始报文仓库。放在这里而不是会话里：抓包是按会话分文件的，
     /// 但存储本身与哪个会话无关，界面要能独立地查它。
     pub capture: Arc<crate::capture::CaptureStore>,
+    /// 定时任务表。与配置分开：它由后台调度器自己写（`next_at` 每次触发都变），
+    /// 不该混进那份「界面改动 → 热重载 → 广播 `config_changed`」的流程里。
+    pub schedules: Arc<crate::schedules::ScheduleStore>,
     pub sessions: DashMap<String, Arc<SessionHandle>>,
     /// 已经发出关闭信号、但任务还没退出的会话 id。
     ///
@@ -215,6 +218,7 @@ impl AppShell {
             capture: Arc::new(crate::capture::CaptureStore::open(
                 crate::capture::CaptureStore::default_root(),
             )),
+            schedules: crate::schedules::ScheduleStore::open_default(),
             sessions: DashMap::new(),
             closing: Mutex::new(HashSet::new()),
             events,

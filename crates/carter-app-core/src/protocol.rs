@@ -160,6 +160,20 @@ pub enum AppEvent {
     ConfigChanged,
     /// 与具体会话无关的失败（命令层出错等）。
     Error { message: String },
+    /// 定时任务触发了。
+    ///
+    /// 界面收到之后要**刷新会话列表**（新开的那条对话立刻出现在侧栏里），但
+    /// 不切过去 —— 用户可能正看着另一条对话，被强行拽走只会让人莫名。想知道
+    /// 跑成什么样，点侧栏里那一条。
+    ScheduleFired {
+        schedule_id: String,
+        name: String,
+        /// 新开的会话。`None` = 连会话都没开出来（`error` 里有原因）。
+        #[serde(default)]
+        session_id: Option<String>,
+        #[serde(default)]
+        error: Option<String>,
+    },
 }
 
 /// 一个会话内的事件流。

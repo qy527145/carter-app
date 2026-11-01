@@ -1033,6 +1033,7 @@ impl Runner {
                 },
                 include_task: self.ctx.include_task,
                 goal_signal: self.goal_signal.clone(),
+                schedules: self.ctx.shell.schedules.clone(),
                 activity: self.activity.clone(),
                 live: self.live(),
                 shells: Some(self.ctx.shells.clone()),
