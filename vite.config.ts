@@ -28,7 +28,10 @@ export default defineConfig(() => ({
       : undefined,
     watch: {
       // 3. tell Vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**"],
+      //
+      // `target` 是工作区级的 cargo 产物目录，不在 `src-tauri` 下面。漏掉它，
+      // Vite 启动时要多监听几万个条目，首屏被拖慢一个数量级。
+      ignored: ["**/src-tauri/**", "**/target/**"],
     },
   },
 }));

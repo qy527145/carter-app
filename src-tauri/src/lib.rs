@@ -442,9 +442,17 @@ fn save_provider_from_detail(
 }
 
 /// 全部模型引用 + 从 models.dev 解出来的元数据。单行解析失败只标在该行上。
+///
+/// `async` + `spawn_blocking`：每个模型都要重新解析一遍 models.dev 缓存，整张表
+/// 要好几秒，而界面一启动就会调它。同步命令跑在主线程上，这几秒窗口完全没有响应。
 #[tauri::command]
-fn list_models(shell: State<'_, Arc<AppShell>>) -> Vec<carter_app_core::ModelRow> {
-    catalog::list(&shell.config.load())
+async fn list_models(
+    shell: State<'_, Arc<AppShell>>,
+) -> Result<Vec<carter_app_core::ModelRow>, String> {
+    let config = shell.config.load_full();
+    tokio::task::spawn_blocking(move || catalog::list(&config))
+        .await
+        .map_err(|e| format!("读取模型列表中断：{e}"))
 }
 
 #[tauri::command]
