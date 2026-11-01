@@ -755,7 +755,7 @@ function nextPromptId(): number {
  * 输入框右下角的上下文占用环（Claude Code / Codex 底栏那个百分比）。
  *
  * 数来自后端的 `context` 事件：历史 + 系统提示 + 工具声明的估算值，除以模型窗口。
- * 过了自动压缩触发线的一半开始变橙、过线变红；点一下就是 `/compact`。
+ * 到自动压缩触发线的 80% 开始变橙、过线变红；点一下就是 `/compact`。
  * 压缩进行中换成转圈 —— 那期间发的消息会排在压缩之后。
  */
 function ContextRing() {

@@ -129,7 +129,8 @@ function draftOf(s: Schedule | null): Draft {
       k.kind === "daily" ? `${pad(k.hour)}:${pad(k.minute)}` : "09:00",
     cwd: s.cwd,
     model: s.model ?? "",
-    enabled: s.enabled,
+    // 过期的一次性任务只能靠改时间重新用（见文件头），改了时间就是想让它再跑。
+    enabled: isSpent(s) ? true : s.enabled,
   };
 }
 
@@ -215,7 +216,7 @@ function ScheduleEditor({
         </>
       }
     >
-      <Field label="名字" hint="侧栏里那条对话会用它起标题">
+      <Field label="名字" hint="显示在任务列表里">
         <Input
           value={d.name}
           onChange={(e) => set("name", e.target.value)}
@@ -281,7 +282,7 @@ function ScheduleEditor({
           mono
           value={d.cwd}
           onChange={(e) => set("cwd", e.target.value)}
-          placeholder="C:\\work\\proj"
+          placeholder="C:\work\proj"
         />
       </Field>
 
@@ -308,7 +309,7 @@ function ScheduleEditor({
 
       <Banner kind="info">
         触发时会<strong className="font-medium">新开一条对话</strong>，不会插进你正在聊的那条。
-        触发时没人在场，所以那一轮被要求自己拿主意，不会停下来问你。
+        触发时没人在场，所以发出去的消息末尾会附一句，提醒模型别停下来提问。
       </Banner>
     </Modal>
   );
@@ -373,13 +374,13 @@ export function SchedulesPage() {
                       <Clock size={13} className="shrink-0 text-tone-blue" />
                       <span className="truncate text-sm font-medium text-ink">{s.name}</span>
                       <Badge>{kindLabel(s.kind)}</Badge>
-                      {spent && <Badge tone="orange">已跑完</Badge>}
+                      {spent && <Badge tone="orange">{s.runs > 0 ? "已跑完" : "已过期"}</Badge>}
                       {!s.enabled && !spent && <Badge tone="orange">已暂停</Badge>}
                       <span className="ml-auto flex shrink-0 items-center gap-1">
                         <Switch
                           label={`${s.enabled ? "暂停" : "启用"} ${s.name}`}
                           checked={s.enabled}
-                          disabled={busy === s.id}
+                          disabled={busy === s.id || spent}
                           onChange={(next) => {
                             setBusy(s.id);
                             toggleSchedule(s.id, next)
