@@ -518,6 +518,10 @@ export type CatalogEntry = {
   context_window: number | null;
   max_output_tokens: number | null;
   reasoning: boolean;
+  /** 能力标记，与 `ModelRow.capabilities` 同一套字符串。 */
+  capabilities: string[];
+  /** 同一系列的名字（`claude-opus` / `deepseek-v4`）。目录对话框按它分组。 */
+  family: string | null;
   deprecated: boolean;
   release_date: string | null;
 };
@@ -549,6 +553,9 @@ export type MetaMatch = {
   match_kind: "exact" | "alias" | "reseller" | "none";
   label: string | null;
   context_window: number | null;
+  max_output_tokens: number | null;
+  /** 能力标记，与 `ModelRow.capabilities` 同一套字符串。 */
+  capabilities: string[];
   deprecated: boolean;
   /** 看起来像不像对话模型（embedding / 语音 / 生图是 `false`）。 */
   chat_capable: boolean;
@@ -589,6 +596,16 @@ export type MetaInfo = {
   meta: string;
   label: string;
   context_window: number | null;
+  max_output_tokens: number | null;
+  /** 能力标记，与 `ModelRow.capabilities` 同一套字符串。 */
+  capabilities: string[];
+  /** 每百万 token 的美元价。目录条目没录 `cost` 时是 `null` —— 那不是免费。 */
+  pricing: {
+    input: number;
+    output: number;
+    cache_read: number | null;
+    cache_write: number | null;
+  } | null;
   deprecated: boolean;
 };
 
@@ -607,6 +624,9 @@ export type CatalogHit = {
   id: string;
   name: string;
   context_window: number | null;
+  max_output_tokens: number | null;
+  /** 能力标记，与 `ModelRow.capabilities` 同一套字符串。 */
+  capabilities: string[];
   deprecated: boolean;
 };
 

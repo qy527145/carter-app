@@ -220,6 +220,12 @@ pub struct CatalogEntry {
     pub context_window: Option<u64>,
     pub max_output_tokens: Option<u64>,
     pub reasoning: bool,
+    /// 能力标记，与 [`ModelRow::capabilities`] 同一套字符串。挑模型时要一眼看出
+    /// 「这个能不能看图 / 会不会思考」，光有名字只能靠猜。
+    pub capabilities: Vec<&'static str>,
+    /// 同一系列的名字（`claude-opus` / `deepseek-v4`）。目录里按它分组显示 ——
+    /// 官方目录动辄几十个快照，平铺一张表看不出谁和谁是同一代。
+    pub family: Option<String>,
     /// models.dev 标了 `status = "deprecated"`。
     pub deprecated: bool,
     pub release_date: Option<String>,
@@ -248,6 +254,8 @@ fn entries_of(root: &serde_json::Value, provider_id: &str) -> Vec<CatalogEntry> 
                 context_window: limit("context"),
                 max_output_tokens: limit("output"),
                 reasoning: m.get("reasoning").and_then(|v| v.as_bool()).unwrap_or(false),
+                capabilities: catalog_capabilities(m),
+                family: s("family"),
                 deprecated: s("status").as_deref() == Some("deprecated"),
                 release_date: s("release_date"),
             }
@@ -351,6 +359,10 @@ pub struct MetaMatch {
     /// 目录里的展示名。
     pub label: Option<String>,
     pub context_window: Option<u64>,
+    pub max_output_tokens: Option<u64>,
+    /// 能力标记，与 [`ModelRow::capabilities`] 同一套字符串。勾选时靠它区分
+    /// 「能看图的」和「只会聊天的」。
+    pub capabilities: Vec<&'static str>,
     pub deprecated: bool,
     /// 看起来像不像对话模型。界面上「只选对话模型」那一下用它 ——
     /// embedding / 语音 / 生图的条目混进模型列表只会占地方。
@@ -366,6 +378,9 @@ pub struct CatalogHit {
     pub id: String,
     pub name: String,
     pub context_window: Option<u64>,
+    pub max_output_tokens: Option<u64>,
+    /// 能力标记。搜索结果的排序不靠它，靠它是为了让人在「绑元数据」时看得出差别。
+    pub capabilities: Vec<&'static str>,
     pub deprecated: bool,
 }
 
@@ -554,6 +569,8 @@ fn match_one(root: &serde_json::Value, index: &Index, name: &str, hint: Option<&
         match_kind: "none".into(),
         label: None,
         context_window: None,
+        max_output_tokens: None,
+        capabilities: Vec::new(),
         deprecated: false,
         chat_capable: is_chat_like(name),
     };
@@ -593,6 +610,10 @@ fn match_one(root: &serde_json::Value, index: &Index, name: &str, hint: Option<&
     };
     out.label = model_label(root, &pid, &mid).or_else(|| Some(mid.clone()));
     out.context_window = model_context(root, &pid, &mid);
+    out.max_output_tokens = model_max_output(root, &pid, &mid);
+    out.capabilities = model_node(root, &pid, &mid)
+        .map(catalog_capabilities)
+        .unwrap_or_default();
     out.deprecated = model_deprecated(root, &pid, &mid);
     out.chat_capable = chat_capable(root, &pid, &mid, name);
     out.meta = Some(format!("{pid}/{mid}"));
@@ -614,6 +635,8 @@ pub fn match_metas(names: &[String], hint: Option<&str>) -> Vec<MetaMatch> {
                     match_kind: "none".into(),
                     label: None,
                     context_window: None,
+                    max_output_tokens: None,
+                    capabilities: Vec::new(),
                     deprecated: false,
                     chat_capable: is_chat_like(n),
                 })
@@ -680,6 +703,8 @@ fn search_in(root: &serde_json::Value, query: &str, limit: usize) -> Vec<Catalog
                     id: mid.clone(),
                     name: name.to_string(),
                     context_window: model_context(root, pid, mid),
+                    max_output_tokens: model_max_output(root, pid, mid),
+                    capabilities: catalog_capabilities(m),
                     deprecated: model_deprecated(root, pid, mid),
                 },
             ));
@@ -745,13 +770,105 @@ fn recommended_in(root: &serde_json::Value, provider_id: &str, limit: usize) -> 
 }
 
 /// 目录条目的「可读摘要」—— 编辑框在每一行 meta 下面显示它。
+///
+/// 能力与价格是给**绑定模型时**看的：绑 meta 这件事的意义就是让界面知道这个模型
+/// 能干什么、多贵，只给一个展示名等于没绑。
 #[derive(Debug, Clone, Serialize)]
 pub struct MetaInfo {
     pub meta: String,
     /// 目录里的展示名，如「Claude Opus 5.5」。
     pub label: String,
     pub context_window: Option<u64>,
+    pub max_output_tokens: Option<u64>,
+    /// 能力标记，与 [`ModelRow::capabilities`] 同一套字符串。
+    pub capabilities: Vec<&'static str>,
+    /// 每百万 token 的美元价。目录条目没写 `cost` 时是 `None` —— 那不一定是免费，
+    /// 更可能只是没录（本地模型、精简条目），界面不能把它显示成「免费」。
+    pub pricing: Option<PricingRow>,
     pub deprecated: bool,
+}
+
+/// 从目录条目推能力标记。
+///
+/// 规则与 carter 的 `registry/models_dev.rs` 一一对应（那边是权威）：`tool_call`
+/// → 工具；`attachment` 且输入含 image → 图片；`reasoning` → 思考；输入含 pdf →
+/// PDF；流式是默认；声明了 `cache_read` 价 → 提示缓存。这里没直接调那边的
+/// `lookup()`，是因为它只吃缓存字符串 —— 那样每个 meta 都要把整个缓存重新解析一遍。
+fn catalog_capabilities(m: &serde_json::Value) -> Vec<&'static str> {
+    let flag = |k: &str| m.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
+    let inputs: Vec<&str> = m
+        .get("modalities")
+        .and_then(|x| x.get("input"))
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+
+    let mut caps = Vec::new();
+    if flag("tool_call") {
+        caps.push("tools");
+    }
+    if flag("attachment") && inputs.contains(&"image") {
+        caps.push("vision");
+    }
+    if flag("reasoning") {
+        caps.push("thinking");
+    }
+    if inputs.contains(&"pdf") {
+        caps.push("pdf");
+    }
+    // models.dev 没有显式的 streaming 字段：现代云模型默认支持。
+    caps.push("streaming");
+    if m.get("cost")
+        .and_then(|c| c.get("cache_read"))
+        .and_then(|v| v.as_f64())
+        .is_some()
+    {
+        caps.push("prompt_cache");
+    }
+    caps
+}
+
+fn catalog_pricing(m: &serde_json::Value) -> Option<PricingRow> {
+    let cost = m.get("cost")?;
+    let f = |k: &str| cost.get(k).and_then(|v| v.as_f64());
+    // 一个价格字段都没有 = 没录价格，不是免费。
+    f("input").or_else(|| f("output"))?;
+    Some(PricingRow {
+        input: f("input").unwrap_or(0.0),
+        output: f("output").unwrap_or(0.0),
+        cache_read: f("cache_read"),
+        cache_write: f("cache_write"),
+    })
+}
+
+fn model_max_output(root: &serde_json::Value, pid: &str, mid: &str) -> Option<u64> {
+    model_node(root, pid, mid)?
+        .get("limit")?
+        .get("output")?
+        .as_u64()
+}
+
+/// 在已经解析好的缓存上查一个 meta。查不到是 `None`（不是错误）。
+fn meta_info_in(root: &serde_json::Value, meta: &str) -> Option<MetaInfo> {
+    let (pid, mid) = meta.trim().split_once('/')?;
+    // 大小写不敏感的兜底：目录 id 全小写，但用户从别处抄来的 meta 不一定。
+    let (pid, mid) = if model_node(root, pid, mid).is_some() {
+        (pid.to_string(), mid.to_string())
+    } else {
+        let models = root.get(pid)?.get("models")?.as_object()?;
+        let hit = models.keys().find(|k| k.eq_ignore_ascii_case(mid))?.clone();
+        (pid.to_string(), hit)
+    };
+    let node = model_node(root, &pid, &mid);
+    Some(MetaInfo {
+        meta: format!("{pid}/{mid}"),
+        label: model_label(root, &pid, &mid).unwrap_or_else(|| mid.clone()),
+        context_window: model_context(root, &pid, &mid),
+        max_output_tokens: model_max_output(root, &pid, &mid),
+        capabilities: node.map(catalog_capabilities).unwrap_or_default(),
+        pricing: node.and_then(catalog_pricing),
+        deprecated: model_deprecated(root, &pid, &mid),
+    })
 }
 
 /// 某个 meta 在目录里查得到吗。查不到是 `None`（不是错误）—— 界面据此把那一行
@@ -759,26 +876,18 @@ pub struct MetaInfo {
 pub fn meta_info(meta: &str) -> Option<MetaInfo> {
     let cache = fetch::read_cache().ok()?;
     let root = parse_cache(&cache).ok()?;
-    let (pid, mid) = meta.trim().split_once('/')?;
-    // 大小写不敏感的兜底：目录 id 全小写，但用户从别处抄来的 meta 不一定。
-    let (pid, mid) = if model_node(&root, pid, mid).is_some() {
-        (pid.to_string(), mid.to_string())
-    } else {
-        let models = root.get(pid)?.get("models")?.as_object()?;
-        let hit = models.keys().find(|k| k.eq_ignore_ascii_case(mid))?.clone();
-        (pid.to_string(), hit)
-    };
-    Some(MetaInfo {
-        meta: format!("{pid}/{mid}"),
-        label: model_label(&root, &pid, &mid).unwrap_or_else(|| mid.clone()),
-        context_window: model_context(&root, &pid, &mid),
-        deprecated: model_deprecated(&root, &pid, &mid),
-    })
+    meta_info_in(&root, meta)
 }
 
-/// 批量版的 [`meta_info`]。界面一次拿一整个渠道的模型，省掉逐条往返。
+/// 批量版的 [`meta_info`]。界面一次拿一整个渠道的模型，省掉逐条往返 ——
+/// 缓存也只读一次、解析一次。
 pub fn meta_infos<'a>(metas: impl IntoIterator<Item = &'a str>) -> Vec<Option<MetaInfo>> {
-    metas.into_iter().map(meta_info).collect()
+    let metas: Vec<&str> = metas.into_iter().collect();
+    let root = fetch::read_cache().ok().and_then(|c| parse_cache(&c).ok());
+    match root {
+        Some(root) => metas.iter().map(|m| meta_info_in(&root, m)).collect(),
+        None => metas.iter().map(|_| None).collect(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1172,7 +1281,11 @@ kind = "anthropic"
         serde_json::from_str(r#"{"deepseek":{"models":{
             "deepseek-flash":{"id":"deepseek-flash","name":"DeepSeek V4.1 Flash",
               "canonical_model_id":"deepseek/deepseek-v4.1-flash","reasoning":true,
-              "release_date":"2026-09-10","limit":{"context":1000000,"output":393216}},
+              "tool_call":true,"attachment":true,
+              "modalities":{"input":["text","image","pdf"]},
+              "limit":{"context":1000000,"output":393216},
+              "cost":{"input":0.28,"output":0.42,"cache_read":0.028},
+              "release_date":"2026-09-10"},
             "deepseek-v4-flash":{"id":"deepseek-v4-flash","name":"DeepSeek V4 Flash",
               "status":"deprecated","release_date":"2026-09-10"},
             "deepseek-v4-pro":{"id":"deepseek-v4-pro","name":"DeepSeek V4 Pro",
@@ -1202,5 +1315,44 @@ kind = "anthropic"
         let ids: Vec<String> = entries_of(&dev_cache(), "deepseek").into_iter().map(|e| e.id).collect();
         assert_eq!(ids, ["deepseek-flash", "deepseek-v4-pro", "deepseek-v4-flash"]);
         assert!(entries_of(&dev_cache(), "nobody").is_empty());
+    }
+
+    /// 绑 meta 的意义就是让人看见「这个模型能干什么、多贵」。摘要里只有展示名
+    /// 等于没绑 —— 能力与价格必须一起回来。
+    #[test]
+    fn a_meta_summary_carries_capabilities_and_pricing() {
+        let root = dev_cache();
+        let info = meta_info_in(&root, "deepseek/deepseek-flash").expect("能查到");
+        assert_eq!(info.label, "DeepSeek V4.1 Flash");
+        assert_eq!(info.context_window, Some(1_000_000));
+        assert_eq!(info.max_output_tokens, Some(393_216));
+        for cap in ["tools", "vision", "thinking", "pdf", "streaming", "prompt_cache"] {
+            assert!(info.capabilities.contains(&cap), "缺 {cap}：{:?}", info.capabilities);
+        }
+        assert_eq!(info.pricing.as_ref().map(|p| p.input), Some(0.28));
+        assert_eq!(info.pricing.as_ref().and_then(|p| p.cache_read), Some(0.028));
+    }
+
+    /// 没有 `cost` / 模态 / 能力字段的条目（本地模型、精简条目）不能炸，也不能
+    /// 凭空造出能力或价格：只有流式是默认的。
+    #[test]
+    fn a_bare_catalog_entry_only_gets_streaming() {
+        let root = dev_cache();
+        let info = meta_info_in(&root, "deepseek/deepseek-v4-pro").expect("能查到");
+        assert_eq!(info.capabilities, vec!["streaming"]);
+        assert!(info.pricing.is_none(), "没录价格 ≠ 免费");
+    }
+
+    /// 大小写写错的 meta 要在摘要里纠正成目录里的规范写法 —— 用户抄来的 id 常常
+    /// 是展示名的大小写。
+    #[test]
+    fn a_meta_summary_normalises_the_case() {
+        let root = dev_cache();
+        assert_eq!(
+            meta_info_in(&root, "deepseek/DeepSeek-Flash").map(|i| i.meta),
+            Some("deepseek/deepseek-flash".to_string())
+        );
+        assert!(meta_info_in(&root, "deepseek/nope").is_none());
+        assert!(meta_info_in(&root, "no-slash").is_none());
     }
 }

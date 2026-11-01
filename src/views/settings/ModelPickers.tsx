@@ -14,6 +14,8 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
+  ChevronDown,
+  ChevronRight,
   CircleAlert,
   CloudDownload,
   LoaderCircle,
@@ -33,10 +35,10 @@ import {
   type MetaInfo,
   type MetaMatch,
 } from "../../lib/api";
-import { fmtTokens } from "../../lib/format";
+import { fmtPrice, fmtTokens, capabilityLabel } from "../../lib/format";
 import { Button } from "../../components/ui/Button";
 import { Input } from "../../components/ui/Input";
-import { Modal, Spinner } from "../../components/ui/Panel";
+import { Badge, Modal, Spinner } from "../../components/ui/Panel";
 
 /** 匹配可靠度的中文标签与色调。`none` 不在这里 —— 那种行不该被默认勾上。 */
 export function matchLabel(kind: string): string {
@@ -102,6 +104,95 @@ export function metaSummary(meta: string, info: MetaInfo | null | undefined): {
   if (info.deprecated) parts.push("已弃用");
   return { text: parts.join(" · "), warn: info.deprecated };
 }
+
+/**
+ * 一行 meta 的规格摘要：展示名、上下文 / 输出窗口、实际能力、价格。
+ *
+ * 绑 meta 的全部意义就是这几项 —— 只显示一个展示名等于没绑。所以这里把能力与
+ * 价格都摆出来，让「这个模型能不能看图、会不会思考、多贵」在一行里看得见。
+ * 目录里没录的项**留白**，不猜（没便宜到可以当成免费）。
+ */
+export function MetaFacts({
+  meta,
+  info,
+  hideLabel = false,
+}: {
+  meta: string;
+  /** `undefined` = 还在查，`null` = 查不到，有值 = 目录里的摘要。 */
+  info: MetaInfo | null | undefined;
+  /** 标题已经在别处显示过（模型行）时去掉重复的展示名。 */
+  hideLabel?: boolean;
+}) {
+  const summary = metaSummary(meta, info);
+  // 未绑定 / 查不到 / 还在查：交给一句话说明，不摆空的徽章架子。
+  if (!info) {
+    return (
+      <span className={`text-[11px] ${summary.warn ? "text-tone-orange" : "text-dim"}`}>
+        {summary.text}
+      </span>
+    );
+  }
+
+  const p = info.pricing;
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-dim">
+      {!hideLabel && <span className="text-ink">{info.label}</span>}
+      {info.context_window != null && (
+        <span title="上下文窗口">
+          上下文 <span className="tabular-nums text-ink">{fmtTokens(info.context_window)}</span>
+        </span>
+      )}
+      {info.max_output_tokens != null && (
+        <span title="单次最大输出">
+          输出 <span className="tabular-nums text-ink">{fmtTokens(info.max_output_tokens)}</span>
+        </span>
+      )}
+      {p && (
+        <span title="每百万 token 的价格（输入 / 输出）">
+          <span className="text-ink">{fmtPrice(p.input)}</span>
+          <span className="text-dim/70"> / </span>
+          <span className="text-ink">{fmtPrice(p.output)}</span>
+        </span>
+      )}
+      {info.capabilities.length > 0 && (
+        <span className="flex flex-wrap gap-1">
+          {info.capabilities.map((c) => (
+            <Badge key={c}>{capabilityLabel(c)}</Badge>
+          ))}
+        </span>
+      )}
+      {info.deprecated && <span className="text-tone-orange">已弃用</span>}
+    </div>
+  );
+}
+
+/**
+ * 一排能力徽章。挑模型时的列表项用它 —— 只列名字的话，「这个能不能看图、
+ * 会不会思考」只能靠猜。
+ */
+export function CapabilityChips({ caps }: { caps: string[] }) {
+  if (caps.length === 0) return null;
+  return (
+    <span className="flex shrink-0 flex-wrap justify-end gap-1">
+      {caps.map((c) => (
+        <Badge key={c} tone={CAP_TONE[c]}>
+          {capabilityLabel(c)}
+        </Badge>
+      ))}
+    </span>
+  );
+}
+
+/**
+ * 能力的配色：思考 / 工具 / 图片各一个色，其余（流式、缓存、PDF）用中性描边 ——
+ * 前三个决定「这个模型能不能干我想要的活」，后几个是几乎所有模型都有的。
+ */
+const CAP_TONE: Record<string, "blue" | "green" | "orange" | "violet" | "pink" | undefined> = {
+  thinking: "violet",
+  tools: "blue",
+  vision: "green",
+  pdf: "pink",
+};
 
 // ---------------------------------------------------------------------------
 // 从上游拉取
@@ -219,7 +310,7 @@ export function UpstreamFetchDialog({
       ) : error ? (
         <div className="space-y-3">
           <div className="flex items-start gap-2 rounded-lg border border-[var(--error-border)] bg-[var(--error-bg)] px-3 py-2 text-xs leading-relaxed">
-            <CircleAlert size={13} className="mt-0.5 shrink-0 text-[var(--danger)]" />
+            <CircleAlert size={13} className="icon-optical shrink-0 text-[var(--danger)]" />
             <span>{error}</span>
           </div>
           <p className="text-[11px] leading-relaxed text-dim">
@@ -287,21 +378,25 @@ export function UpstreamFetchDialog({
                 <button
                   key={r.name}
                   onClick={() => toggle(i)}
-                  className="flex w-full items-start gap-2 rounded-md border border-edge bg-base px-2.5 py-1.5 text-left transition-colors hover:border-dim"
+                  className="flex w-full items-start gap-2 rounded-md bg-base px-2.5 py-1.5 text-left transition-colors hover:border-dim"
                 >
                   <input
                     type="checkbox"
                     checked={r.checked}
                     onChange={() => toggle(i)}
-                    className="mt-0.5 shrink-0"
+                    className="icon-optical shrink-0"
                   />
                   <span className="min-w-0 flex-1">
-                    <span className="mono block truncate text-xs text-ink">{r.name}</span>
-                    <span className="block truncate text-[11px] text-dim">
+                    {/* 标题优先目录展示名 —— 上游给的名字常常是 `deepseek-v4.1-flash`，
+                        「DeepSeek V4.1 Flash」好读得多；真名放第二行对照。 */}
+                    <span className="block truncate text-xs text-ink">
+                      {r.label ?? r.name}
+                    </span>
+                    <span className="mono block truncate text-[11px] text-dim">
+                      {r.name !== (r.label ?? r.name) && <>{r.name} · </>}
                       {r.meta ? (
                         <>
                           {matchLabel(r.match_kind)} · {r.meta}
-                          {r.label && r.label !== r.meta.split("/").pop() && ` · ${r.label}`}
                           {r.context_window ? ` · ${fmtTokens(r.context_window)}` : ""}
                         </>
                       ) : (
@@ -310,6 +405,7 @@ export function UpstreamFetchDialog({
                       {r.deprecated && <span className="ml-1 text-tone-orange">已弃用</span>}
                     </span>
                   </span>
+                  <CapabilityChips caps={r.capabilities} />
                 </button>
               );
             })}
@@ -329,6 +425,10 @@ export function UpstreamFetchDialog({
  *
  * 「推荐」= 后端按 family 收敛过的那几个（同家族只要最新、跳过弃用与非对话模型）——
  * 官方目录动辄几十条快照，全列出来只会让人更慢。搜索框照样能翻到全部。
+ *
+ * 列表按 family 分组（`claude-opus` / `deepseek-v4` …）：官方目录里同一代模型常常
+ * 有五六个快照，平铺一张表看不出谁和谁是一代。每行带能力徽章，够判断「这个能不能
+ * 看图 / 会不会思考」，不用再点开看。
  */
 export function CatalogDialog({
   providerId,
@@ -343,6 +443,8 @@ export function CatalogDialog({
   const [all, setAll] = useState<CatalogEntry[] | null>(null);
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [search, setSearch] = useState("");
+  const [filter, setFilter] = useState<CapFilter>("all");
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -363,11 +465,27 @@ export function CatalogDialog({
   }, [providerId]);
 
   const q = search.trim().toLowerCase();
-  const shown = q
-    ? (all ?? []).filter(
-        (e) => e.id.toLowerCase().includes(q) || e.name.toLowerCase().includes(q),
-      )
-    : recommended;
+  const shown = useMemo(() => {
+    const base = q
+      ? (all ?? []).filter(
+          (e) => e.id.toLowerCase().includes(q) || e.name.toLowerCase().includes(q),
+        )
+      : recommended;
+    return filter === "all" ? base : base.filter((e) => e.capabilities.includes(filter));
+  }, [all, recommended, q, filter]);
+
+  // 分组：family 优先，没有就按 id 的第一段。分组保持了后端给的顺序
+  // （新的在前），所以要按首次出现的位置排。
+  const groups = useMemo(() => {
+    const map = new Map<string, CatalogEntry[]>();
+    for (const e of shown) {
+      const key = e.family ?? e.id.split("-")[0];
+      const arr = map.get(key);
+      if (arr) arr.push(e);
+      else map.set(key, [e]);
+    }
+    return [...map.entries()];
+  }, [shown]);
 
   const toggle = (id: string) =>
     setPicked((p) => {
@@ -377,10 +495,23 @@ export function CatalogDialog({
       return next;
     });
 
+  /** 这一组全勾上 / 全取消。 */
+  const toggleGroup = (entries: CatalogEntry[]) => {
+    const allOn = entries.every((e) => picked.has(e.id));
+    setPicked((p) => {
+      const next = new Set(p);
+      for (const e of entries) {
+        if (allOn) next.delete(e.id);
+        else next.add(e.id);
+      }
+      return next;
+    });
+  };
+
   return (
     <Modal
       title="从目录选择模型"
-      width={580}
+      width={640}
       onClose={onClose}
       footer={
         <>
@@ -391,9 +522,7 @@ export function CatalogDialog({
           <Button
             variant="primary"
             disabled={picked.size === 0}
-            onClick={() =>
-              onApply((all ?? []).filter((e) => picked.has(e.id)))
-            }
+            onClick={() => onApply((all ?? []).filter((e) => picked.has(e.id)))}
           >
             添加 {picked.size} 个
           </Button>
@@ -408,60 +537,158 @@ export function CatalogDialog({
       ) : error ? (
         <div className="space-y-2">
           <div className="flex items-start gap-2 rounded-lg border border-[var(--error-border)] bg-[var(--error-bg)] px-3 py-2 text-xs leading-relaxed">
-            <CircleAlert size={13} className="mt-0.5 shrink-0 text-[var(--danger)]" />
+            <CircleAlert size={13} className="icon-optical shrink-0 text-[var(--danger)]" />
             <span>{error}</span>
           </div>
           <p className="text-[11px] text-dim">模型页有「刷新模型元数据」按钮，拉一次目录就好。</p>
         </div>
       ) : (
         <div className="space-y-2">
-          <div className="relative">
-            <Search size={12} className="absolute left-2 top-1/2 -translate-y-1/2 text-dim" />
-            <Input
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder={`搜索 ${providerId} 名下的全部 ${all?.length ?? 0} 个模型`}
-              className="py-1.5 pl-7 text-xs"
-            />
+          <div className="flex items-center gap-2">
+            <div className="relative min-w-0 flex-1">
+              <Search size={12} className="absolute left-2 top-1/2 -translate-y-1/2 text-dim" />
+              <Input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder={`搜索 ${providerId} 名下的全部 ${all?.length ?? 0} 个模型`}
+                className="py-1.5 pl-7 text-xs"
+              />
+            </div>
+            <Button
+              size="sm"
+              onClick={() =>
+                // 只对当前看得见的那些生效 —— 「取消全选」把搜索不到的行也清了会很意外。
+                setPicked((p) => {
+                  const next = new Set(p);
+                  const allOn = shown.every((e) => next.has(e.id));
+                  for (const e of shown) {
+                    if (allOn) next.delete(e.id);
+                    else next.add(e.id);
+                  }
+                  return next;
+                })
+              }
+            >
+              {shown.length > 0 && shown.every((e) => picked.has(e.id)) ? "取消全选" : "全选"}
+            </Button>
           </div>
+
+          {/* 按能力筛：拿到一堆名字之后，人真正想筛的是「能看图的」「能调工具的」。 */}
+          <div className="flex flex-wrap gap-1">
+            {CAP_FILTERS.map((f) => {
+              const n = (all ?? []).filter(
+                (e) => f.id === "all" || e.capabilities.includes(f.id),
+              ).length;
+              return (
+                <button
+                  key={f.id}
+                  onClick={() => setFilter(f.id)}
+                  className={`rounded-md border px-2 py-1 text-[11px] transition-colors ${
+                    filter === f.id
+                      ? "border-dim bg-base text-ink"
+                      : "border-edge text-dim hover:text-ink"
+                  }`}
+                >
+                  {f.label}{" "}
+                  <span className="tabular-nums opacity-70">{n}</span>
+                </button>
+              );
+            })}
+          </div>
+
           {!q && (
             <div className="text-[11px] text-dim">
               默认勾上的是推荐模型（每个系列取最新、已弃用与 embedding / 生图不在列）。
               搜索可以翻到全部。
             </div>
           )}
-          <div className="max-h-[45vh] space-y-1 overflow-y-auto pr-1">
-            {shown.length === 0 && (
+
+          <div className="max-h-[50vh] space-y-2 overflow-y-auto pr-1">
+            {groups.length === 0 && (
               <div className="py-6 text-center text-xs text-dim">没有匹配的模型</div>
             )}
-            {shown.map((e) => (
-              <button
-                key={e.id}
-                onClick={() => toggle(e.id)}
-                className="flex w-full items-center gap-2 rounded-md border border-edge bg-base px-2.5 py-1.5 text-left transition-colors hover:border-dim"
-              >
-                <input
-                  type="checkbox"
-                  checked={picked.has(e.id)}
-                  onChange={() => toggle(e.id)}
-                  className="shrink-0"
-                />
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate text-xs text-ink">{e.name}</span>
-                  <span className="mono block truncate text-[11px] text-dim">
-                    {e.id}
-                    {e.context_window ? ` · ${fmtTokens(e.context_window)}` : ""}
-                  </span>
-                </span>
-                {e.deprecated && <span className="shrink-0 text-[10px] text-tone-orange">已弃用</span>}
-              </button>
-            ))}
+            {groups.map(([family, entries]) => {
+              const folded = collapsed.has(family);
+              const on = entries.filter((e) => picked.has(e.id)).length;
+              return (
+                <div key={family}>
+                  <div className="flex items-center gap-1.5 border-b border-edge pb-1">
+                    <button
+                      onClick={() =>
+                        setCollapsed((s) => {
+                          const next = new Set(s);
+                          if (next.has(family)) next.delete(family);
+                          else next.add(family);
+                          return next;
+                        })
+                      }
+                      className="flex min-w-0 items-center gap-1 text-xs font-medium text-ink"
+                    >
+                      {folded ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
+                      <span className="truncate">{family}</span>
+                    </button>
+                    <span className="text-[10px] text-dim">
+                      {on > 0 ? `${on}/${entries.length}` : entries.length}
+                    </span>
+                    <button
+                      onClick={() => toggleGroup(entries)}
+                      className="ml-auto shrink-0 text-[11px] text-dim transition-colors hover:text-ink"
+                    >
+                      {on === entries.length ? "取消本组" : "全选本组"}
+                    </button>
+                  </div>
+                  {!folded && (
+                    <div className="mt-1 space-y-1">
+                      {entries.map((e) => (
+                        <button
+                          key={e.id}
+                          onClick={() => toggle(e.id)}
+                          className={`flex w-full items-center gap-2 rounded-md border px-2.5 py-1.5 text-left transition-colors ${
+                            picked.has(e.id)
+                              ? "border-dim bg-base"
+                              : "border-edge bg-base hover:border-dim"
+                          }`}
+                        >
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate text-xs text-ink">{e.name}</span>
+                            <span className="mono block truncate text-[11px] text-dim">
+                              {e.id}
+                              {e.context_window ? ` · ${fmtTokens(e.context_window)}` : ""}
+                            </span>
+                          </span>
+                          <CapabilityChips caps={e.capabilities} />
+                          {e.deprecated && (
+                            <span className="shrink-0 text-[10px] text-tone-orange">已弃用</span>
+                          )}
+                          <input
+                            type="checkbox"
+                            checked={picked.has(e.id)}
+                            onChange={() => toggle(e.id)}
+                            className="shrink-0"
+                          />
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </div>
       )}
     </Modal>
   );
 }
+
+/** 目录对话框顶部的能力筛选。`all` 之外都对应一个能力标记。 */
+type CapFilter = "all" | "vision" | "tools" | "thinking";
+
+const CAP_FILTERS: { id: CapFilter; label: string }[] = [
+  { id: "all", label: "全部" },
+  { id: "vision", label: "图片" },
+  { id: "tools", label: "工具" },
+  { id: "thinking", label: "思考" },
+];
 
 // ---------------------------------------------------------------------------
 // 手动搜 meta
@@ -539,7 +766,7 @@ export function MetaSearchDialog({
         />
       </div>
       <p className="mb-2 flex items-start gap-1.5 text-[11px] leading-relaxed text-dim">
-        <TriangleAlert size={12} className="mt-0.5 shrink-0 text-tone-orange" />
+        <TriangleAlert size={12} className="icon-optical shrink-0 text-tone-orange" />
         元数据决定上下文窗口、能力与定价。中转站的模型名往往与目录 id 不同，选对那一行
         比名字看着像更重要。
       </p>
@@ -549,7 +776,7 @@ export function MetaSearchDialog({
           <button
             key={h.meta}
             onClick={() => onPick(h)}
-            className="flex w-full items-center gap-2 rounded-md border border-edge bg-base px-2.5 py-1.5 text-left transition-colors hover:border-dim"
+            className="flex w-full items-center gap-2 rounded-md bg-base px-2.5 py-1.5 text-left transition-colors hover:border-dim"
           >
             <span className="min-w-0 flex-1">
               <span className="block truncate text-xs text-ink">{h.name}</span>
@@ -558,6 +785,7 @@ export function MetaSearchDialog({
                 {h.context_window ? ` · ${fmtTokens(h.context_window)}` : ""}
               </span>
             </span>
+            <CapabilityChips caps={h.capabilities} />
             {h.deprecated && <span className="shrink-0 text-[10px] text-tone-orange">已弃用</span>}
           </button>
         ))}

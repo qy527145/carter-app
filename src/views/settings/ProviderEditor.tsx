@@ -26,15 +26,7 @@
 // 也可能是插值后的明文）再写回去。见 core 的 `config_edit.rs`。
 
 import { useEffect, useMemo, useState } from "react";
-import {
-  CircleCheck,
-  CloudDownload,
-  ListChecks,
-  Plus,
-  Search,
-  TriangleAlert,
-  X,
-} from "lucide-react";
+import { CircleCheck, TriangleAlert, X } from "lucide-react";
 
 import {
   checkServerTools,
@@ -45,96 +37,31 @@ import {
   listProviderTemplates,
   recommendedCatalogModels,
   saveProvider,
-  type CatalogEntry,
-  type ModelDetail,
-  type ModelDraft,
   type ProviderDetail,
   type ProviderDraft,
   type ProviderTemplate,
 } from "../../lib/api";
-import {
-  PROTOCOLS,
-  REASONING_EFFORTS,
-  UNKNOWN_PROTOCOL_HINT,
-  presetFor,
-  reasoningIsCustom,
-  reasoningText,
-} from "../../lib/protocols";
+import { PROTOCOLS, UNKNOWN_PROTOCOL_HINT, presetFor } from "../../lib/protocols";
 import { useAsync } from "../../lib/useAsync";
 import { toastError } from "../../lib/toast";
-import { CatalogError, applyPick, blockNameFor, useCatalog } from "./CatalogPicker";
+import { useCatalog } from "./CatalogPicker";
 import {
   CatalogDialog,
-  MetaSearchDialog,
   UpstreamFetchDialog,
-  metaSummary,
-  useMetaInfo,
 } from "./ModelPickers";
-import { Button, IconButton } from "../../components/ui/Button";
-import { Field, Input, Label, Switch } from "../../components/ui/Input";
+import {
+  ModelList,
+  blankModel,
+  rowFromEntry,
+  rowFromUpstream,
+  toDraft,
+  toState,
+  type ModelState,
+} from "./ModelRows";
+import { Button } from "../../components/ui/Button";
+import { Field, Input, Switch } from "../../components/ui/Input";
 import { Banner, ConfirmDialog, Modal } from "../../components/ui/Panel";
 import { Select } from "../../components/ui/Select";
-
-/**
- * 模型行的编辑态。
- *
- * `reasoningCustom` 是给配置里手写的 `default_reasoning = { budget = 1024 }` 用的：
- * 那种写法界面表达不了，只能原样留着（提交时传 `null` = 不动那个键），
- * 而不是把它摊平成一个既写不回去、又看着像合法的字符串。
- */
-type ModelState = {
-  name: string;
-  meta: string;
-  api_name: string;
-  reasoning: string;
-  reasoningCustom: boolean;
-  /** 展开手写的 meta / api_name 输入框。默认收起，只显示绑定状态。 */
-  manual: boolean;
-};
-
-function blankModel(): ModelState {
-  return { name: "", meta: "", api_name: "", reasoning: "", reasoningCustom: false, manual: false };
-}
-
-function toState(m: ModelDetail): ModelState {
-  return {
-    name: m.name,
-    meta: m.meta,
-    api_name: m.api_name ?? "",
-    reasoning: reasoningText(m.default_reasoning),
-    reasoningCustom: reasoningIsCustom(m.default_reasoning),
-    manual: false,
-  };
-}
-
-function toDraft(m: ModelState): ModelDraft {
-  return {
-    name: m.name.trim(),
-    meta: m.meta.trim(),
-    api_name: m.api_name.trim() || null,
-    // 自定义取值传 null —— 那是「别动这个键」的意思。
-    default_reasoning: m.reasoningCustom ? null : m.reasoning,
-  };
-}
-
-/** 目录条目 → 一行模型。块名取目录 id（`.` 换成 `-`），api_name 补上真名。 */
-function rowFromEntry(provider: string, e: CatalogEntry): ModelState {
-  const picked = applyPick({ name: "", meta: "", api_name: "" }, provider, e);
-  return { ...blankModel(), ...picked };
-}
-
-/** 上游模型名 → 一行模型。块名要合法，真正下发用的名字放进 api_name。 */
-function rowFromUpstream(name: string, meta: string | null): ModelState {
-  const block = blockNameFor(name);
-  return {
-    ...blankModel(),
-    name: block,
-    api_name: block === name ? "" : name,
-    meta: meta ?? "",
-    // 没匹配到元数据就展开手写框，让人一眼看到要补什么。
-    manual: !meta,
-  };
-}
 
 export function ProviderEditor({
   /** `null` = 新建。 */
@@ -169,8 +96,6 @@ export function ProviderEditor({
   const [templateId, setTemplateId] = useState<string | null>(null);
   /** 当前 baseUrl 对应 models.dev 的哪家 —— 模型能不能从目录里选就看它。 */
   const [catalogProvider, setCatalogProvider] = useState<string | null>(null);
-  /** 正在给哪一行选元数据（`null` = 没开搜索框）。 */
-  const [metaEditing, setMetaEditing] = useState<number | null>(null);
   /** 打开「从上游拉取」/「从目录多选」。 */
   const [picker, setPicker] = useState<"upstream" | "catalog" | null>(null);
 
@@ -258,11 +183,6 @@ export function ProviderEditor({
   }, [alias]);
   const catalog = useCatalog(catalogProvider ?? "");
 
-  const metaMap = useMetaInfo(models.map((m) => m.meta).filter(Boolean));
-
-  const patchModel = (i: number, patch: Partial<ModelState>) =>
-    setModels((ms) => ms.map((x, j) => (j === i ? { ...x, ...patch } : x)));
-
   const addRows = (rows: ModelState[]) =>
     setModels((ms) => {
       // 空壳行会被下面的过滤去掉；同名块也不再重复加 —— 重复的块名在 TOML 里是覆盖。
@@ -334,9 +254,6 @@ export function ProviderEditor({
   };
 
   const duplicate = !nameLocked && existing.includes(name.trim());
-
-  /** 有块名但没绑元数据的行。它们存不进配置 —— carter 解析模型要靠 meta。 */
-  const unbound = models.filter((m) => m.name.trim() && !m.meta.trim());
 
   const valid = useMemo(() => {
     if (!name.trim() || duplicate) return false;
@@ -522,7 +439,7 @@ export function ProviderEditor({
         <div className="mb-3">
           <Banner kind="warn">
             <span className="flex items-start gap-2">
-              <TriangleAlert size={13} className="mt-0.5 shrink-0" />
+              <TriangleAlert size={13} className="icon-optical shrink-0" />
               {UNKNOWN_PROTOCOL_HINT}
             </span>
           </Banner>
@@ -655,160 +572,20 @@ export function ProviderEditor({
       </Field>
 
       {/* 模型列表 --------------------------------------------------------- */}
-      <div className="mb-3 mt-5 border-t border-edge pt-4">
-        <div className="mb-2 flex flex-wrap items-center gap-2">
-          <Label>模型</Label>
-          <span className="text-[11px] text-dim">
-            {catalogProvider ? (
-              <>
-                元数据按 <span className="mono">{catalogProvider}</span> 匹配
-              </>
-            ) : (
-              <>块名会成为模型引用 <span className="mono">渠道名/块名</span>，meta 是 models.dev 的查找 id</>
-            )}
-          </span>
-          <div className="ml-auto flex items-center gap-1.5">
-            <Button size="sm" onClick={() => setPicker("upstream")}>
-              <CloudDownload size={12} />
-              从上游拉取
-            </Button>
-            {catalogProvider && (
-              <Button size="sm" onClick={() => setPicker("catalog")}>
-                <ListChecks size={12} />
-                从目录选
-              </Button>
-            )}
-            <Button size="sm" onClick={() => setModels([...models, blankModel()])}>
-              <Plus size={12} />
-              添加
-            </Button>
-          </div>
-        </div>
-
-        <CatalogError catalog={catalog} />
-
-        {unbound.length > 0 && (
-          <div className="mb-2 flex items-start gap-2 rounded-lg border border-[var(--warn-border)] bg-[var(--warn-bg)] px-3 py-2 text-xs leading-relaxed">
-            <TriangleAlert size={13} className="mt-0.5 shrink-0 text-tone-orange" />
-            <span>
-              有 {unbound.length} 个模型没绑元数据（
-              <span className="mono">{unbound.map((m) => m.name).join("、")}</span>
-              ）。carter 要靠 meta 解析模型，保存前得给它们各绑一个 —— 名字对不上目录时，
-              用行尾的「绑元数据」搜一个。
-            </span>
-          </div>
-        )}
-
-        <div className="space-y-2">
-          {models.map((m, i) => {
-            const info = m.meta.trim() ? metaMap[m.meta.trim()] : undefined;
-            const summary = metaSummary(m.meta, info);
-            return (
-              <div key={i} className="rounded-lg border border-edge bg-base p-2.5">
-                <div className="flex items-center gap-2">
-                  <Input
-                    mono
-                    value={m.name}
-                    onChange={(e) => patchModel(i, { name: e.target.value })}
-                    placeholder="块名，如 sonnet"
-                    className="py-1.5 text-xs"
-                  />
-                  <Input
-                    mono
-                    value={m.api_name}
-                    onChange={(e) => patchModel(i, { api_name: e.target.value })}
-                    placeholder="下发名（留空 = 块名）"
-                    title="真正发给上游的模型名"
-                    className="py-1.5 text-xs"
-                  />
-                  <IconButton
-                    title="删除这个模型"
-                    onClick={() => setModels(models.filter((_, j) => j !== i))}
-                  >
-                    <X size={12} />
-                  </IconButton>
-                </div>
-
-                <div className="mt-1.5 flex items-center gap-2 text-[11px]">
-                  <span
-                    className={`min-w-0 flex-1 truncate ${summary.warn ? "text-tone-orange" : "text-dim"}`}
-                    title={m.meta}
-                  >
-                    {summary.text}
-                    {m.meta.trim() && <span className="mono ml-1.5 text-dim">{m.meta}</span>}
-                  </span>
-                  <button
-                    onClick={() => setMetaEditing(i)}
-                    className="flex shrink-0 items-center gap-1 text-dim transition-colors hover:text-ink"
-                    title="在 models.dev 目录里搜一个元数据绑上来"
-                  >
-                    <Search size={10} />
-                    {m.meta.trim() ? "改绑定" : "绑元数据"}
-                  </button>
-                  <button
-                    onClick={() => patchModel(i, { manual: !m.manual })}
-                    className="shrink-0 text-dim transition-colors hover:text-ink"
-                    title="直接手写 meta 字符串"
-                  >
-                    {m.manual ? "收起" : "手写"}
-                  </button>
-                  {m.reasoningCustom ? (
-                    <span
-                      className="w-24 shrink-0 rounded-md border border-dashed border-edge px-2 py-0.5 text-center text-dim"
-                      title="这个取值界面改不了，去配置文件里改"
-                    >
-                      自定义
-                    </span>
-                  ) : (
-                    <Select
-                      className="w-24 shrink-0"
-                      value={m.reasoning}
-                      onChange={(v) => patchModel(i, { reasoning: v })}
-                      options={REASONING_EFFORTS.map((r) => ({ value: r.value, label: r.label }))}
-                    />
-                  )}
-                </div>
-
-                {m.manual && (
-                  <div className="mt-1.5">
-                    <Input
-                      mono
-                      value={m.meta}
-                      onChange={(e) => patchModel(i, { meta: e.target.value })}
-                      placeholder="meta，如 anthropic/claude-sonnet-4-5"
-                      className="py-1.5 text-xs"
-                    />
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      </div>
+      <ModelList
+        models={models}
+        setModels={setModels}
+        catalogProvider={catalogProvider}
+        catalog={catalog}
+        onFetchUpstream={() => setPicker("upstream")}
+        onPickCatalog={() => setPicker("catalog")}
+      />
 
       <div className="flex items-center gap-2 text-[11px] leading-relaxed text-dim">
         <CircleCheck size={12} className="shrink-0" />
         保存会即时热重载：正在跑的会话从**下一条消息**起用新配置；MCP server 是会话建立时连的，
         改了要新开一个会话。
       </div>
-
-      {metaEditing !== null && models[metaEditing] && (
-        <MetaSearchDialog
-          title="给这一行绑元数据"
-          initial={models[metaEditing].name || models[metaEditing].api_name}
-          onClose={() => setMetaEditing(null)}
-          onPick={(hit) => {
-            // 绑元数据**只换 meta**：下发名与块名说的是「发什么给上游」，与元数据无关。
-            // 只有块名还空着时才顺手填一个，让人看得出这行是哪个模型。
-            patchModel(metaEditing, {
-              name: models[metaEditing].name.trim() || blockNameFor(hit.id),
-              meta: hit.meta,
-              manual: false,
-            });
-            setMetaEditing(null);
-          }}
-        />
-      )}
 
       {picker === "upstream" && (
         <UpstreamFetchDialog

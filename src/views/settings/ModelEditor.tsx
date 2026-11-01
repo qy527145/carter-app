@@ -41,7 +41,7 @@ import {
   catalogIdOf,
   useCatalog,
 } from "./CatalogPicker";
-import { MetaSearchDialog, metaSummary, useMetaInfo } from "./ModelPickers";
+import { MetaFacts, MetaSearchDialog, useMetaInfo } from "./ModelPickers";
 
 export function ModelEditor({
   /** 给了就是在编辑这一条；`null` 是新增。 */
@@ -114,7 +114,7 @@ export function ModelEditor({
   const catalog = useCatalog(catalogProvider ?? "");
   const pickedId = catalogIdOf(meta, catalogProvider ?? "");
   const infos = useMetaInfo(meta.trim() ? [meta.trim()] : []);
-  const summary = metaSummary(meta, meta.trim() ? infos[meta.trim()] : undefined);
+  const info = meta.trim() ? infos[meta.trim()] : undefined;
 
   const valid = provider.trim() !== "" && name.trim() !== "" && meta.trim() !== "";
 
@@ -231,10 +231,8 @@ export function ModelEditor({
           placeholder="例如 anthropic/claude-sonnet-4-5"
         />
       </Field>
-      <div
-        className={`-mt-2 mb-3 text-[11px] ${summary.warn ? "text-tone-orange" : "text-dim"}`}
-      >
-        {summary.text}
+      <div className="-mt-2 mb-3">
+        <MetaFacts meta={meta} info={info} />
       </div>
 
       <Field label="下发名 api_name" hint="留空 = 用块名">
@@ -321,7 +319,7 @@ function ExistingModels({ models }: { models: string[] }) {
     <div className="mt-1 flex flex-wrap items-center gap-1 text-[11px] text-dim">
       <span>该渠道下已有：</span>
       {models.map((n) => (
-        <span key={n} className="mono rounded border border-edge px-1.5 py-0.5">
+        <span key={n} className="mono rounded bg-bubble px-1.5 py-0.5">
           {n}
         </span>
       ))}
