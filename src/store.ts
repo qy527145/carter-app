@@ -32,6 +32,7 @@ import type {
   BlockView,
   CreatedSession,
   CreatedSide,
+  ContextView,
   GoalView,
   MessageView,
   SessionEvent,
@@ -115,6 +116,10 @@ export type Conv = {
    * 历史里那几轮随 `create_session` 带回，实时那几轮走 `files_changed` 事件。
    */
   changed: Record<number, string[]>;
+  /** 上下文占用（输入框旁的百分比环）。`null` = 后端还没报过。 */
+  context: ContextView | null;
+  /** 正在压缩上下文（环换成转圈）。 */
+  compacting: boolean;
 };
 
 /**
@@ -383,7 +388,29 @@ export function reduceConv(c: Conv, e: SessionEvent, sessionId?: string): Partia
       return { goal: e.goal };
     case "idle":
       // 一轮收尾：解除生成态，并清掉可能还悬着的提问（模型已不再等）。
-      return { streaming: false, pendingForm: null };
+      return { streaming: false, pendingForm: null, compacting: false };
+    case "context": {
+      // 压缩收尾时后端总会补发一次占用 —— 摘要没生成出来时没有 `compacted`，
+      // 转圈靠这里收。
+      const { type: _, ...context } = e;
+      return { context, compacting: false };
+    }
+    case "compact_started":
+      return { compacting: true };
+    case "compacted": {
+      // 历史被整体替换：与打开一条历史会话同一条路重建。正在跑的那一轮（一轮中途
+      // 被 carter 自己压过）已经整个在新历史里了，所以不用拼接，直接换掉。
+      //
+      // 摘要那条消息由 `historyToTurns` 标出来（续接时同样要认得出），这里只补一句
+      // 前后对比放进提示条。
+      const what = e.auto ? "上下文接近上限，已自动压缩" : "上下文已压缩";
+      return {
+        turns: historyToTurns(e.history, e.prompts),
+        changed: changedRecord(e.changes),
+        compacting: false,
+        notice: `${what}（${e.tier} 摘要）：历史约 ${e.before.toLocaleString()} → ${e.after.toLocaleString()} tokens`,
+      };
+    }
     case "notice":
       return { notice: e.message };
     case "title":
@@ -455,6 +482,14 @@ function blockText(blocks: BlockView[]): string {
 const AUTO_CONTINUE_PREFIX = "（自动继续）";
 
 /**
+ * 上下文压缩后，carter 换进历史的那条摘要消息的开头（`【历史摘要·L3】`）。
+ *
+ * 与 carter 的 `agent/context.rs::compact` 逐字对应。认出来是为了在它前面挂一句
+ * 说明 —— 否则它看上去就像模型某一轮莫名其妙地自己写了一大段总结。
+ */
+const SUMMARY_PREFIX = "【历史摘要·";
+
+/**
  * 历史消息 → UI 的轮次。
  *
  * 底座把「多条 tool_result」合成**一条 user 消息**（Anthropic 的规范形态），
@@ -509,6 +544,10 @@ export function historyToTurns(
     const items = msg.blocks
       .map(blockToItem)
       .filter((x): x is Item => x !== null);
+    const first = items[0];
+    if (first?.kind === "text" && first.text.startsWith(SUMMARY_PREFIX)) {
+      items.unshift({ kind: "note", text: "较早的对话已压缩成下面这段摘要，模型此后看到的就是它。" });
+    }
     if (items.length) {
       // `turn` 由后端算好（见 `view.rs`）—— 界面上「这条回答对应哪次请求」全靠它，
       // 少了它历史里的每条回答都没有「查看报文」入口。
@@ -563,6 +602,8 @@ const emptyConversation: Conv = {
   notice: null,
   goal: null,
   changed: {},
+  context: null,
+  compacting: false,
 };
 
 /** 主对话那部分状态（`Conv` 的字段藏在 store 里，还原出来给 reducer 用）。 */
@@ -577,6 +618,8 @@ function convOf(s: Conv): Conv {
     notice: s.notice,
     goal: s.goal,
     changed: s.changed,
+    context: s.context,
+    compacting: s.compacting,
   };
 }
 

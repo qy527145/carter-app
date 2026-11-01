@@ -55,9 +55,10 @@ pub struct CommandRow {
 /// 菜单里出现的内置命令。
 ///
 /// **只列本应用真能做到的。** carter 的 `BUILTINS` 有 15 个，其中
-/// `/compact` `/context` `/cost` `/rewind` `/skills` `/mcp` `/resume` 这些要么需要
-/// carter 的内部状态、要么在 GUI 里已经有等价入口（用量在底栏、技能与 MCP 在设置页），
-/// 这里就不列了 —— 列了却按不动，用户会以为坏了。
+/// `/context` `/cost` `/rewind` `/skills` `/mcp` `/resume` 这些要么需要 carter 的
+/// 内部状态、要么在 GUI 里已经有等价入口（用量在底栏、占用在输入框旁的百分比环、
+/// 技能与 MCP 在设置页），这里就不列了 —— 列了却按不动，用户会以为坏了。
+/// `/compact` 由会话任务执行（`Command::Compact`），所以在。
 ///
 /// 表里的每一项在前端 `Composer.tsx::runBuiltin` 都必须有落点（那边是真正执行的地方）。
 const GUI_BUILTINS: &[(&str, &str)] = &[
@@ -67,6 +68,7 @@ const GUI_BUILTINS: &[(&str, &str)] = &[
     ("fork", "从当前会话派生一个新会话"),
     ("btw", "开一个不影响主对话的侧边聊天"),
     ("goal", "设定/查看长任务目标，模型会自己接着干"),
+    ("compact", "压缩上下文：把较早的对话换成一段摘要"),
     ("export", "把当前会话导出到下载目录"),
     ("settings", "打开设置"),
     ("help", "显示可用命令"),
@@ -630,11 +632,11 @@ mod tests {
         let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
 
         // carter 的 BUILTINS 里有，但本应用做不到 / 已有等价入口 —— 不该出现。
-        for absent in ["compact", "rewind", "resume", "cost", "context", "quit"] {
+        for absent in ["rewind", "resume", "cost", "context", "quit"] {
             assert!(!names.contains(&absent), "`/{absent}` 不该出现在菜单里：{names:?}");
         }
         // 真的能执行的要在。
-        for present in ["new", "model", "cwd", "help", "goal", "btw"] {
+        for present in ["new", "model", "cwd", "help", "goal", "btw", "compact"] {
             assert!(names.contains(&present), "`/{present}` 应当在菜单里：{names:?}");
         }
         assert!(rows.iter().all(|r| r.kind == "builtin"));

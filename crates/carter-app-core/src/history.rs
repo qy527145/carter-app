@@ -258,6 +258,59 @@ pub fn retract_turn(thread: &mut Thread, turn: u32) -> Result<String, String> {
     Ok(text)
 }
 
+/// 压缩之后，旧轮次号 → 新轮次号。
+///
+/// carter 的摘要压缩把历史重排成 `[首条, 摘要, 最近 8 条]`：首条（原始任务）还是第 0 轮，
+/// 中段那些轮被摘要吃掉，最近几轮整体往前挪。轮次号是界面「重试 / 编辑」、用户原文、
+/// 变更清单共同的钥匙，所以压缩之后这三样都要按同一张表重排 —— 只改历史不改另外
+/// 两份的话，「编辑」框会回填成别的轮的原文，文件清单会挂到别的回答下面。
+///
+/// 只靠「压缩前有几轮、压缩后剩几轮、首条是不是一轮」就能算出来：被保留下来的永远是
+/// 首轮加上**最后那几轮**。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TurnRemap {
+    /// 首条消息是不是一轮用户输入（几乎总是；空历史或首条是工具结果时不是）。
+    head: bool,
+    /// 压缩前的轮数。
+    before: u32,
+    /// 压缩后的轮数。
+    after: u32,
+}
+
+impl TurnRemap {
+    /// `before` = 压缩前的轮数；`messages` = 压缩后的历史。
+    pub fn new(before: u32, messages: &[WireMessage]) -> Self {
+        Self {
+            head: messages.first().is_some_and(crate::view::is_turn_start),
+            before,
+            after: crate::view::user_turn_count(messages),
+        }
+    }
+
+    /// 压缩后的轮数（`thread.user_turns` 要改成它）。
+    pub fn after(&self) -> u32 {
+        self.after
+    }
+
+    /// 什么都没丢（只折叠了旧工具输出，或根本没压）。
+    pub fn is_identity(&self) -> bool {
+        self.after >= self.before
+    }
+
+    /// 旧轮次号 → 新轮次号。`None` = 这一轮已经被摘要吃掉了。
+    pub fn map(&self, turn: u32) -> Option<u32> {
+        if self.is_identity() {
+            return Some(turn);
+        }
+        if self.head && turn == 0 {
+            return Some(0);
+        }
+        let tail = self.after - u32::from(self.head);
+        let first_kept = self.before - tail;
+        (turn >= first_kept && turn < self.before).then(|| turn - (self.before - self.after))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -487,5 +540,62 @@ mod tests {
         ]);
         truncate_before_turn(&mut t, 6).unwrap();
         assert_eq!(t.messages.len(), 2);
+    }
+
+    fn user(text: &str) -> WireMessage {
+        WireMessage::user_text(text)
+    }
+
+    fn assistant(text: &str) -> WireMessage {
+        WireMessage::new(Role::Assistant, vec![Block::text(text)])
+    }
+
+    /// 10 轮压成「首轮 + 摘要 + 最后 3 轮」：首轮还是 0，最后 3 轮挪到 1..=3，中间的没了。
+    #[test]
+    fn compaction_keeps_the_first_turn_and_shifts_the_tail() {
+        let after = vec![
+            user("原始任务"),
+            assistant("【历史摘要·L3】…"),
+            user("第 8 轮"),
+            assistant("a"),
+            user("第 9 轮"),
+            assistant("b"),
+            user("第 10 轮"),
+            assistant("c"),
+        ];
+        let m = TurnRemap::new(10, &after);
+        assert_eq!(m.after(), 4);
+        assert_eq!(m.map(0), Some(0));
+        assert_eq!(m.map(1), None);
+        assert_eq!(m.map(6), None);
+        assert_eq!(m.map(7), Some(1));
+        assert_eq!(m.map(9), Some(3));
+        assert_eq!(m.map(10), None, "越界的轮次不该映射出来");
+    }
+
+    /// 保留窗口从一轮的中间切开（开头是工具结果）：那半截不算新的一轮，映射照样对。
+    #[test]
+    fn a_tail_that_starts_mid_turn_does_not_count_as_a_turn() {
+        let after = vec![
+            user("原始任务"),
+            assistant("【历史摘要·L2】…"),
+            WireMessage::new(Role::User, vec![tool_result("call_1")]),
+            assistant("a"),
+            user("最后一轮"),
+            assistant("b"),
+        ];
+        let m = TurnRemap::new(5, &after);
+        assert_eq!(m.after(), 2);
+        assert_eq!(m.map(4), Some(1));
+        assert_eq!(m.map(3), None);
+    }
+
+    /// 只折叠了工具输出、没有摘要：轮次一个不少，映射是恒等的。
+    #[test]
+    fn an_l1_only_compaction_is_the_identity() {
+        let after = vec![user("a"), assistant("x"), user("b"), assistant("y")];
+        let m = TurnRemap::new(2, &after);
+        assert!(m.is_identity());
+        assert_eq!(m.map(1), Some(1));
     }
 }

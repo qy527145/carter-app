@@ -8,10 +8,13 @@ import { useState } from "react";
 import { CircleAlert, Download, Pencil, Plus, Star, Zap } from "lucide-react";
 
 import {
+  getCompaction,
   listModels,
+  setCompaction,
   refreshModelCatalog,
   setDefaultModel,
   setFastModel,
+  type CompactionSettings,
   type ModelRow,
 } from "../../lib/api";
 import { capabilityLabel, fmtPrice, fmtTokens } from "../../lib/format";
@@ -19,6 +22,7 @@ import { reasoningDisplay } from "../../lib/protocols";
 import { toastError, toastOk } from "../../lib/toast";
 import { useAsync } from "../../lib/useAsync";
 import { Button, IconButton } from "../../components/ui/Button";
+import { Segmented, Switch } from "../../components/ui/Input";
 import { Badge } from "../../components/ui/Panel";
 import { AsyncBody, PageIntro } from "./AsyncBody";
 import { ModelEditor } from "./ModelEditor";
@@ -129,6 +133,63 @@ function ModelCard({
   );
 }
 
+/** 自动压缩的触发点（占上下文窗口的比例）。给几档就够，没必要做成滑杆。 */
+const RATIOS = ["0.6", "0.7", "0.75", "0.8", "0.9"] as const;
+
+/**
+ * 自动压缩：开关 + 触发比例。
+ *
+ * 放在模型页是因为它和「副模型」是一回事的两半 —— 压缩用的就是副模型；
+ * 对话输入框右下角的上下文圆环点开说明里也指到这里。
+ */
+function CompactionRow() {
+  const state = useAsync(getCompaction, []);
+  const cur = state.data;
+
+  function save(next: CompactionSettings) {
+    setCompaction(next.enabled, next.ratio)
+      .then(() => state.reload())
+      .catch(toastError);
+  }
+
+  if (!cur) return null;
+  // 配置里写了不在档位上的值（手改的）时也要能显示：补成一档。
+  const ratio = String(cur.ratio);
+  const options = (RATIOS as readonly string[]).includes(ratio)
+    ? RATIOS.map((r) => ({ id: r as string, label: `${Math.round(Number(r) * 100)}%` }))
+    : [...RATIOS, ratio]
+        .sort((a, b) => Number(a) - Number(b))
+        .map((r) => ({ id: r as string, label: `${Math.round(Number(r) * 100)}%` }));
+
+  return (
+    <div className="mb-4 rounded-xl border border-edge bg-card px-4 py-3">
+      <div className="flex items-center gap-3">
+        <span className="text-sm text-ink">自动压缩上下文</span>
+        <span className="text-xs text-dim">
+          占用超过阈值时，把较早的对话换成摘要（手动随时可用 /compact）
+        </span>
+        <span className="ml-auto">
+          <Switch
+            label="自动压缩上下文"
+            checked={cur.enabled}
+            onChange={(enabled) => save({ ...cur, enabled })}
+          />
+        </span>
+      </div>
+      {cur.enabled && (
+        <div className="mt-2 flex items-center gap-3">
+          <span className="text-xs text-dim">触发阈值</span>
+          <Segmented
+            value={ratio}
+            options={options}
+            onChange={(r) => save({ ...cur, ratio: Number(r) })}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function ModelsPage() {
   const state = useAsync(listModels, []);
   const [refreshing, setRefreshing] = useState(false);
@@ -176,6 +237,8 @@ export function ModelsPage() {
         <span className="mono">agent.fast_model</span>）只用于压缩上下文、生成标题、总结 ——
         那些活儿要的是便宜和快，不必用最强的模型。副模型没设时回落主模型。
       </PageIntro>
+
+      <CompactionRow />
 
       <div className="space-y-2">
         <AsyncBody

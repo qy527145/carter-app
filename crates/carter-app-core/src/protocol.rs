@@ -106,6 +106,11 @@ pub enum Command {
     AnswerForm { id: u64, answers: Vec<Vec<String>> },
     /// 长任务目标（`/goal`）的操作。状态转移规则见 `goal.rs::apply_action`。
     Goal { action: GoalCommand },
+    /// 手动压缩上下文（`/compact`）。
+    ///
+    /// 与自动压缩走同一个函数，区别只在目标值：手动压缩把目标定成 0，于是一定会
+    /// 走到摘要那一档（历史太短切不出中段时除外）。生成中收到会排队，这一轮跑完再压。
+    Compact,
 }
 
 /// 单条工具调用的操作。见 `Command::ToolAction`。
@@ -246,6 +251,30 @@ pub enum SessionEvent {
     /// 参数，所以 `bash`、子进程、MCP 的写入都在里面。轮末发一次，界面上挂在
     /// 这条回答的末尾。
     FilesChanged { turn: u32, files: Vec<String> },
+    /// 上下文占用（输入框旁那个百分比环）。会话就绪、每轮结束、换模型、压缩之后各发一次。
+    Context(ContextView),
+    /// 开始压缩上下文（界面上把百分比环换成转圈）。
+    CompactStarted {
+        /// `true` = 占用超过触发线自动压的；`false` = 用户点的 / 打的 `/compact`。
+        auto: bool,
+    },
+    /// 上下文压缩完了，历史被整体替换。
+    ///
+    /// 界面要拿 `history` **重建整个对话列表**（与打开一条历史会话同一条路）：压缩把
+    /// 中段换成了一条摘要，轮次号也跟着重排了 —— 只追加一个提示的话，界面上的「重试 /
+    /// 编辑」会指向已经不存在的轮次。`prompts` / `changes` 是按新轮次号重排过的那两份。
+    Compacted {
+        history: Vec<crate::view::MessageView>,
+        prompts: Vec<crate::prompts::TurnPrompt>,
+        changes: Vec<crate::changes::TurnFiles>,
+        /// 压缩前后的估算占用（只算历史消息）。
+        before: u64,
+        after: u64,
+        /// 用上了哪一档摘要：`L3`（结构化）/ `L2`（要点）。
+        tier: String,
+        /// `true` = 占用超过触发线自动压的（含 carter 在一轮中途自己压的）。
+        auto: bool,
+    },
     /// 一轮的用量与成本。
     TurnUsage {
         usage: UsageView,
@@ -261,6 +290,22 @@ pub enum SessionEvent {
     Idle,
     /// 本轮失败。不致命：会话还在，可以继续发消息。
     Error { message: String },
+}
+
+/// 上下文占用。
+///
+/// `used` 是**下一次请求**大概会带上的 token 数：历史消息 + 系统提示 + 工具声明，
+/// 按模型的 tokenizer 估算。不用上游回报的 usage —— 一轮里有好几次模型调用，
+/// carter 回报的是整轮累加值；而开了缓存之后 `input_tokens` 只是未命中的那一截。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextView {
+    pub used: u64,
+    /// 模型的上下文窗口（`ModelInfo::context_window`）。0 = 不知道。
+    pub window: u64,
+    /// 自动压缩的触发线（`window × agent.compact_threshold_ratio`）。
+    pub threshold: u64,
+    /// 自动压缩开着没有（`agent.compact_enabled`）。
+    pub auto: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

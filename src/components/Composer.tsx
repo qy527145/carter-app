@@ -14,7 +14,29 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { Folder, ImagePlus, ListOrdered, LoaderCircle, Send, Square, X, Zap } from "lucide-react";
+import {
+  CircleHelp,
+  Cpu,
+  Download,
+  File as FileIcon,
+  Folder,
+  FolderOpen,
+  GitFork,
+  ImagePlus,
+  ListOrdered,
+  LoaderCircle,
+  MessageSquarePlus,
+  MessagesSquare,
+  Send,
+  Settings,
+  Shrink,
+  Sparkles,
+  Square,
+  Target,
+  X,
+  Zap,
+  type LucideIcon,
+} from "lucide-react";
 
 import {
   listCommands,
@@ -26,14 +48,17 @@ import {
   type ModelRow,
 } from "../lib/api";
 import { toastError } from "../lib/toast";
-import { shortenPath } from "../lib/format";
+import { fmtTokens, shortenPath } from "../lib/format";
 import { displayName, modelTitle, useModelCatalog } from "../lib/modelLabel";
 import * as ops from "../lib/sessionOps";
 import { useStore, type QueuedPrompt } from "../store";
+import { Glyph } from "./toolcards/ToolCard";
 
 // ---------------------------------------------------------------------------
 // 弹出菜单
 // ---------------------------------------------------------------------------
+
+type Tone = "blue" | "green" | "orange" | "violet" | "pink";
 
 type MenuItem = {
   /** 选中后要插进文本的东西（`/name ` 或 `@path `）。 */
@@ -41,6 +66,34 @@ type MenuItem = {
   label: string;
   hint?: string;
   onPick?: () => void;
+  /** 左侧的彩色图标块。斜杠命令每条一个，`@` 引用按文件 / 目录区分。 */
+  icon?: LucideIcon;
+  tone?: Tone;
+  /** 名字用等宽字体（文件路径要对齐着看；命令名是词，不需要）。 */
+  mono?: boolean;
+  /** 右侧的小标签（「自定义」）。 */
+  badge?: string;
+};
+
+/**
+ * 内置命令各自的图标与色调。
+ *
+ * 菜单里一眼要分出「这条做什么」—— 一列 `/xxx` 纯文本只能逐字读。色调按动作的性质分：
+ * 会话类（新建、派生）蓝、上下文类（压缩、目标）紫、环境类（模型、目录）橙、
+ * 其余（导出、设置、帮助）绿。与 `GUI_BUILTINS` 同一份名单，缺了的退回通用图标。
+ */
+const COMMAND_ICONS: Record<string, { icon: LucideIcon; tone: Tone }> = {
+  new: { icon: MessageSquarePlus, tone: "blue" },
+  fork: { icon: GitFork, tone: "blue" },
+  btw: { icon: MessagesSquare, tone: "blue" },
+  side: { icon: MessagesSquare, tone: "blue" },
+  goal: { icon: Target, tone: "violet" },
+  compact: { icon: Shrink, tone: "violet" },
+  model: { icon: Cpu, tone: "orange" },
+  cwd: { icon: FolderOpen, tone: "orange" },
+  export: { icon: Download, tone: "green" },
+  settings: { icon: Settings, tone: "green" },
+  help: { icon: CircleHelp, tone: "green" },
 };
 
 function Popup({
@@ -85,10 +138,30 @@ function Popup({
             i === active ? "bg-base" : "hover:bg-ink/5"
           }`}
         >
-          <span className="mono min-w-0 flex-1 truncate text-xs text-ink">{it.label}</span>
+          {it.icon && (
+            <Glyph tone={it.tone ?? "blue"}>
+              <it.icon size={12} />
+            </Glyph>
+          )}
+          <span
+            className={`min-w-0 truncate text-xs text-ink ${
+              it.mono ? "mono flex-1" : "shrink-0 font-medium"
+            }`}
+          >
+            {it.label}
+          </span>
           {it.hint && (
-            <span className="min-w-0 max-w-[55%] shrink-0 truncate text-[11px] text-dim">
+            <span
+              className={`min-w-0 truncate text-[11px] text-dim ${
+                it.mono ? "max-w-[55%] shrink-0" : "flex-1"
+              }`}
+            >
               {it.hint}
+            </span>
+          )}
+          {it.badge && (
+            <span className="shrink-0 rounded bg-ink/5 px-1 py-px text-[10px] text-dim">
+              {it.badge}
             </span>
           )}
         </button>
@@ -299,11 +372,19 @@ export function Composer() {
     const q = text.slice(1).toLowerCase();
     return commands
       .filter((c) => c.name.toLowerCase().includes(q))
-      .map((c) => ({
-        insert: `/${c.name} `,
-        label: `/${c.name}`,
-        hint: c.description || c.argument_hint || "",
-      }));
+      .map((c) => {
+        const look = COMMAND_ICONS[c.name];
+        return {
+          insert: `/${c.name} `,
+          // 名字不带斜杠：左边的图标已经说明「这是一条命令」，再挂一个 `/` 是噪音。
+          label: c.name,
+          hint: c.description || c.argument_hint || "",
+          // 自定义命令（`~/.carter/commands/`）是展开成提示词发给模型的，统一一个图标。
+          icon: c.kind === "builtin" ? (look?.icon ?? Zap) : Sparkles,
+          tone: c.kind === "builtin" ? (look?.tone ?? "green") : "pink",
+          badge: c.kind === "builtin" ? undefined : "自定义",
+        };
+      });
   }, [text, commands]);
 
   const fileItems: MenuItem[] = useMemo(() => {
@@ -316,6 +397,9 @@ export function Composer() {
         insert: isDir ? `@${f}` : `@${f} `,
         label: f,
         hint: isDir ? "目录" : undefined,
+        icon: isDir ? Folder : FileIcon,
+        tone: isDir ? ("orange" as const) : ("blue" as const),
+        mono: true,
       };
     });
   }, [fileQuery, files]);
@@ -561,6 +645,7 @@ export function Composer() {
             <CwdPicker cwd={cwd} />
             {pasting && <LoaderCircle size={13} className="animate-spin text-dim" />}
             <span className="flex-1" />
+            <ContextRing />
             {streaming && (
               <button
                 onClick={cancel}
@@ -661,6 +746,71 @@ function nextPromptId(): number {
 // ---------------------------------------------------------------------------
 // 模型选择 / 工作目录
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// 上下文占用
+// ---------------------------------------------------------------------------
+
+/**
+ * 输入框右下角的上下文占用环（Claude Code / Codex 底栏那个百分比）。
+ *
+ * 数来自后端的 `context` 事件：历史 + 系统提示 + 工具声明的估算值，除以模型窗口。
+ * 过了自动压缩触发线的一半开始变橙、过线变红；点一下就是 `/compact`。
+ * 压缩进行中换成转圈 —— 那期间发的消息会排在压缩之后。
+ */
+function ContextRing() {
+  const context = useStore((s) => s.context);
+  const compacting = useStore((s) => s.compacting);
+  const sessionId = useStore((s) => s.sessionId);
+  if (!sessionId || !context || context.window <= 0) return null;
+
+  const ratio = Math.min(1, context.used / context.window);
+  const pct = Math.round(ratio * 100);
+  const line = context.threshold > 0 ? context.threshold / context.window : 1;
+  const color =
+    ratio >= line
+      ? "var(--danger)"
+      : ratio >= line * 0.8
+        ? "var(--tone-orange)"
+        : "var(--tone-blue)";
+  const R = 6;
+  const C = 2 * Math.PI * R;
+
+  const title = [
+    `上下文 ${pct}%：约 ${fmtTokens(context.used)} / ${fmtTokens(context.window)} tokens`,
+    context.auto
+      ? `超过 ${Math.round(line * 100)}%（${fmtTokens(context.threshold)}）时自动压缩`
+      : "自动压缩已关闭（设置 → 模型）",
+    compacting ? "正在压缩…" : "点击立即压缩（/compact）",
+  ].join("\n");
+
+  return (
+    <button
+      onClick={() => !compacting && ops.compact(sessionId)}
+      title={title}
+      className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] tabular-nums text-dim transition-colors hover:bg-ink/5 hover:text-ink"
+    >
+      {compacting ? (
+        <LoaderCircle size={14} className="animate-spin" />
+      ) : (
+        <svg width="14" height="14" viewBox="0 0 16 16" className="-rotate-90">
+          <circle cx="8" cy="8" r={R} fill="none" stroke="currentColor" strokeOpacity="0.18" strokeWidth="2.2" />
+          <circle
+            cx="8"
+            cy="8"
+            r={R}
+            fill="none"
+            stroke={color}
+            strokeWidth="2.2"
+            strokeLinecap="round"
+            strokeDasharray={`${C * ratio} ${C}`}
+          />
+        </svg>
+      )}
+      {compacting ? "压缩中" : `${pct}%`}
+    </button>
+  );
+}
 
 function ModelPicker({ modelRef }: { modelRef: string }) {
   const [open, setOpen] = useState(false);
@@ -818,6 +968,7 @@ const BUILTIN_NAMES = new Set([
   "btw",
   "side",
   "goal",
+  "compact",
   "export",
   "settings",
   "help",
@@ -888,6 +1039,15 @@ function runBuiltin(name: string, args: string, ctx: BuiltinCtx): BuiltinResult 
       return "done";
     case "goal":
       return runGoal(args, ctx);
+    case "compact": {
+      const id = useStore.getState().sessionId;
+      if (!id) ctx.setNotice("会话还没就绪");
+      else {
+        ops.compact(id);
+        if (useStore.getState().streaming) ctx.setNotice("这一轮跑完之后压缩上下文");
+      }
+      return "done";
+    }
     case "help":
       ctx.addUserTurn(HELP_TEXT);
       return "done";
@@ -961,6 +1121,7 @@ const HELP_TEXT = [
   "/btw       开一个不影响主对话的侧边聊天（可带上第一句：/btw 这个函数干嘛的）",
   "/goal      长任务目标：模型停下而目标没做完时会自动继续",
   "           /goal <目标> 设定    /goal pause | resume | done | clear",
+  "/compact   压缩上下文：较早的对话换成一段摘要（输入框右下角的百分比也能点）",
   "/export    导出当前会话到下载目录",
   "/settings  打开设置",
   "/help      显示这段说明",

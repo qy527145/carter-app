@@ -282,6 +282,20 @@ pub fn set_fast_model(doc: &mut DocumentMut, model_ref: Option<&str>) -> Result<
     Ok(())
 }
 
+/// 自动压缩（`agent.compact_enabled` / `agent.compact_threshold_ratio`）。
+///
+/// 比例收在 0.3–0.95：再低几乎每轮都在压，再高压完也装不下下一轮的输出。
+pub fn set_compaction(doc: &mut DocumentMut, enabled: bool, ratio: f64) -> Result<(), String> {
+    if !(0.3..=0.95).contains(&ratio) {
+        return Err(format!("压缩阈值 {ratio} 应在 0.3 到 0.95 之间"));
+    }
+    let agent = child_table(doc.as_table_mut(), "agent")?;
+    agent.insert("compact_enabled", value(enabled));
+    // 两位小数足够，也免得 0.7 写成 0.7000000000000001。
+    agent.insert("compact_threshold_ratio", value((ratio * 100.0).round() / 100.0));
+    Ok(())
+}
+
 pub fn set_skills_enabled(doc: &mut DocumentMut, enabled: bool) -> Result<(), String> {
     child_table(doc.as_table_mut(), "skills")?.insert("enabled", value(enabled));
     Ok(())
@@ -412,6 +426,16 @@ pub fn set_fast_model_reload(
 ) -> Result<(), String> {
     let mut doc = load_doc()?;
     set_fast_model(&mut doc, model_ref)?;
+    apply(shell, &doc)
+}
+
+pub fn set_compaction_reload(
+    shell: &crate::shell::AppShell,
+    enabled: bool,
+    ratio: f64,
+) -> Result<(), String> {
+    let mut doc = load_doc()?;
+    set_compaction(&mut doc, enabled, ratio)?;
     apply(shell, &doc)
 }
 
@@ -629,6 +653,19 @@ whatever = true
         );
         assert!(!out.contains("sk-"), "核心里不该出现任何明文密钥");
         assert!(out.contains("https://example.test"), "改过的字段要写进去");
+    }
+
+    /// 自动压缩：两个键写进 `[agent]`，越界的比例挡在外面。
+    #[test]
+    fn compaction_settings_are_written_and_range_checked() {
+        let mut d = doc();
+        set_compaction(&mut d, false, 0.8).unwrap();
+        let out = d.to_string();
+        assert!(out.contains("compact_enabled = false"), "{out}");
+        assert!(out.contains("compact_threshold_ratio = 0.8"), "{out}");
+        assert!(out.contains(r#"model = "ws/sonnet""#), "{out}");
+        assert!(set_compaction(&mut d, true, 0.1).is_err());
+        assert!(set_compaction(&mut d, true, 1.0).is_err());
     }
 
     /// 副模型：写进去、清掉，而且两件事都不动别的键。

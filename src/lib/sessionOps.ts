@@ -333,6 +333,16 @@ export function regenerate(sessionId: string, turn: number): void {
   api.sendCommand(sessionId, { type: "regenerate", turn }).catch(toastError);
 }
 
+/**
+ * 手动压缩上下文（`/compact`、点百分比环）。
+ *
+ * 生成中也可以发：后端把它排在这一轮之后。不套 `send` 的自动恢复 —— 会话任务都没了的话，
+ * 重建出来的那条会话本来就是刚读进来的，没有什么可压的。
+ */
+export function compact(sessionId: string): void {
+  api.sendCommand(sessionId, { type: "compact" }).catch(toastError);
+}
+
 /** 把一条排队中的消息提到队首，并中断当前轮。 */
 export function promote(sessionId: string, id: number): void {
   api.sendCommand(sessionId, { type: "promote_prompt", id }).catch(toastError);

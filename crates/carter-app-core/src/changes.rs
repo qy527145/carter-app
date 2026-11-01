@@ -792,6 +792,26 @@ pub fn retract(session_id: &str, turn: u32) -> Result<(), String> {
     retract_from(&file_for(session_id), turn)
 }
 
+/// 压缩之后按新轮次号重排（见 `history::TurnRemap`）。被摘要吃掉的那几轮直接丢掉。
+pub fn remap(session_id: &str, f: impl Fn(u32) -> Option<u32>) -> Result<(), String> {
+    remap_at(&file_for(session_id), f)
+}
+
+fn remap_at(path: &Path, f: impl Fn(u32) -> Option<u32>) -> Result<(), String> {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return Ok(());
+    };
+    let Ok(stored) = serde_json::from_str::<Stored>(&raw) else {
+        return Ok(());
+    };
+    let turns = stored
+        .turns
+        .into_iter()
+        .filter_map(|(turn, t)| f(turn).map(|n| (n, t)))
+        .collect();
+    write_stored(path, &Stored { turns })
+}
+
 /// fork 出来的新会话继承变更记录。`keep_before` = 只留轮次号小于它的那些。
 ///
 /// 不复制的话，新会话里那些保留下来的历史回答会**一个文件清单都没有** ——

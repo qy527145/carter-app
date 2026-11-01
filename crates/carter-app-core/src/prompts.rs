@@ -87,6 +87,24 @@ fn retract_from(path: &Path, turn: u32) -> Result<(), String> {
     write(path, &stored)
 }
 
+/// 压缩之后按新轮次号重排（见 `history::TurnRemap`）。被摘要吃掉的那几轮直接丢掉。
+pub fn remap(session_id: &str, f: impl Fn(u32) -> Option<u32>) -> Result<(), String> {
+    remap_at(&file_for(session_id), f)
+}
+
+fn remap_at(path: &Path, f: impl Fn(u32) -> Option<u32>) -> Result<(), String> {
+    let stored = read(path);
+    if stored.turns.is_empty() {
+        return Ok(());
+    }
+    let turns = stored
+        .turns
+        .into_iter()
+        .filter_map(|(turn, text)| f(turn).map(|t| (t, text)))
+        .collect();
+    write(path, &Stored { turns })
+}
+
 /// fork 出来的新会话继承原文。`keep_before` = 只留轮次号小于它的那些
 /// （分叉点之后的提问已经不在这条对话里了）。
 pub fn copy(from: &str, to: &str, keep_before: Option<u32>) -> Result<(), String> {

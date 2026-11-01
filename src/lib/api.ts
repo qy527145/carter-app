@@ -87,6 +87,28 @@ export type SessionEvent =
    */
   | { type: "files_changed"; turn: number; files: string[] }
   | { type: "turn_usage"; usage: UsageView; cost: number; model: string }
+  /** 上下文占用（输入框旁的百分比环）。就绪、每轮结束、换模型、压缩之后各来一次。 */
+  | ({ type: "context" } & ContextView)
+  /** 开始压缩上下文。`auto` = 占用超过触发线自动压的。 */
+  | { type: "compact_started"; auto: boolean }
+  /**
+   * 上下文压缩完了，历史被整体替换。
+   *
+   * 界面拿 `history` **重建整个对话**（与打开历史会话同一条路）：中段换成了摘要，
+   * 轮次号也重排了。`prompts` / `changes` 是按新轮次号重排过的那两份。
+   */
+  | {
+      type: "compacted";
+      history: MessageView[];
+      prompts: TurnPrompt[];
+      changes: TurnFiles[];
+      /** 压缩前后的估算占用（只算历史消息）。 */
+      before: number;
+      after: number;
+      /** `L3`（结构化摘要）/ `L2`（要点摘要）。 */
+      tier: string;
+      auto: boolean;
+    }
   | { type: "notice"; message: string }
   /** 会话标题自动生成好了。前端据此刷新会话列表（侧栏那一行 + 顶部标题）。 */
   | { type: "title"; title: string }
@@ -104,6 +126,20 @@ export type TodoView = {
   content: string;
   active_form: string;
   status: "pending" | "in_progress" | "completed";
+};
+
+/**
+ * 上下文占用。`used` 是下一次请求大概会带上的 token 数（历史 + 系统提示 + 工具声明，
+ * 按模型的 tokenizer 估算），不是上游回报的用量 —— 后者是整轮累加、且不含缓存命中。
+ */
+export type ContextView = {
+  used: number;
+  /** 模型的上下文窗口。0 = 不知道。 */
+  window: number;
+  /** 自动压缩的触发线（`window × agent.compact_threshold_ratio`）。 */
+  threshold: number;
+  /** 自动压缩开着没有。 */
+  auto: boolean;
 };
 
 /** 用量视图。`input_tokens` 是**未命中缓存**的输入，缓存单列 —— 界面要显示命中情况。 */
@@ -189,7 +225,9 @@ export type Command =
    */
   | { type: "answer_form"; id: number; answers: string[][] }
   /** 长任务目标（`/goal`）的操作。 */
-  | { type: "goal"; action: GoalCommand };
+  | { type: "goal"; action: GoalCommand }
+  /** 手动压缩上下文（`/compact`）。生成中发的话排队，这一轮跑完再压。 */
+  | { type: "compact" };
 
 /** `/goal` 的动作。拼写由输入框那一侧解析一次，后端只认结构化枚举。 */
 export type GoalCommand =
@@ -581,6 +619,20 @@ export function listModels(): Promise<ModelRow[]> {
  */
 export function setFastModel(modelRef: string | null): Promise<void> {
   return invoke<void>("set_fast_model", { modelRef });
+}
+
+/** 自动压缩：开关 + 触发比例（占上下文窗口的比例，0.3–0.95）。 */
+export interface CompactionSettings {
+  enabled: boolean;
+  ratio: number;
+}
+
+export function getCompaction(): Promise<CompactionSettings> {
+  return invoke<CompactionSettings>("get_compaction");
+}
+
+export function setCompaction(enabled: boolean, ratio: number): Promise<void> {
+  return invoke<void>("set_compaction", { enabled, ratio });
 }
 
 export function setDefaultModel(modelRef: string): Promise<void> {

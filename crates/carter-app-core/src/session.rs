@@ -41,7 +41,9 @@ use carter::tools::Tool;
 use crate::app_settings::AppSettings;
 use crate::changes::ChangeWatch;
 use crate::goal::{self, Goal, GoalSignal, GoalStatus, TurnOutcome};
-use crate::protocol::{AppEvent, Command, GoalCommand, GoalView, SessionEvent, TodoView, UsageView};
+use crate::protocol::{
+    AppEvent, Command, ContextView, GoalCommand, GoalView, SessionEvent, TodoView, UsageView,
+};
 use crate::shell::{AppShell, AskRegistry, SessionHandle};
 use crate::tools::ask_user::AskRequest;
 use crate::tools::build_tools;
@@ -240,6 +242,8 @@ pub fn start_session(shell: Arc<AppShell>, opts: SessionOptions) -> carter::Resu
         title_pending: !resumed && unnamed,
         changes: None,
         changes_turn: 0,
+        overhead: 0,
+        mid_compact: Arc::default(),
     };
     tokio::spawn(runner.run());
     let changes = crate::changes::load(&handle.id);
@@ -323,6 +327,8 @@ pub(crate) fn start_side(w: SideWiring, id: String, parent_id: String) -> Arc<Se
         title_pending: false,
         changes: None,
         changes_turn: 0,
+        overhead: 0,
+        mid_compact: Arc::default(),
     };
     tokio::spawn(runner.run());
     handle
@@ -517,6 +523,8 @@ struct TurnResult {
     used_tools: bool,
     /// 用户在这一轮里点过「停止」。
     user_cancelled: bool,
+    /// 这一轮开始时历史里有几轮（含这一轮自己）。见 [`Runner::after_turn`]。
+    turns_before: u32,
 }
 
 struct Runner {
@@ -546,6 +554,11 @@ struct Runner {
     /// `None` = 不在轮内（空闲时），或监听器没建起来 —— 两种情况都只是「这一轮
     /// 没有清单可列」，不该影响对话本身。
     changes: Option<ChangeWatch>,
+    /// 系统提示 + 工具声明的 token 数（见 [`Runner::measure_overhead`]）。
+    overhead: u64,
+    /// carter 在一轮**中途**自己压缩过上下文时，由 [`TxSink`] 记下用的哪一档。
+    /// 轮后据此重排轮次号、让界面重建对话（见 [`Runner::after_turn`]）。
+    mid_compact: Arc<std::sync::Mutex<Option<String>>>,
     /// 上面那个监听器对应哪一轮。
     ///
     /// 必须在轮首记下来：`carter::agent::run_turn` 一进去就把 `thread.user_turns`
@@ -599,6 +612,14 @@ impl Runner {
             cwd: self.ctx.cwd.to_string_lossy().to_string(),
             resumed: self.ctx.resumed,
         });
+
+        // 上下文占用也紧跟着发一次：百分比环要在第一条消息之前就有数（续接一条长会话时
+        // 尤其要紧 —— 用户得先知道它已经快满了）。系统提示与工具声明这时先量一遍。
+        let system = self.turn_system(self.meta.git.as_ref());
+        let tools = self.turn_tools(&system);
+        self.measure_overhead(&system, &tools);
+        drop(tools);
+        self.emit_context();
 
         // 目标状态紧跟 ready 发一次：界面上那条目标条靠它画出来。
         self.emit(SessionEvent::Goal {
@@ -708,6 +729,8 @@ impl Runner {
                         model_ref: self.ctx.model.key.clone(),
                     });
                     self.notice(&format!("模型已切换为 {}", self.ctx.model.api_name));
+                    // 窗口大小跟着模型变，百分比要重算。
+                    self.emit_context();
                 }
                 Err(e) => self.error(&format!("切换模型失败：{e}")),
             },
@@ -722,6 +745,10 @@ impl Runner {
             Command::DropPrompt { id } => drop_queued(&mut self.queued, id),
             // 空闲时按「中断命令」= 那条命令已经结束了，什么都不用做。
             Command::ToolAction { .. } => {}
+            Command::Compact => {
+                self.ctx.refresh();
+                self.compact(false).await;
+            }
         }
     }
 
@@ -861,6 +888,7 @@ impl Runner {
         // 不必等用户下一次发消息。
         self.settle_history();
         self.finish_changes(result.used_tools).await;
+        self.after_turn(&result).await;
         self.drive_goal(result, git).await;
         self.emit(SessionEvent::Idle);
     }
@@ -954,12 +982,10 @@ impl Runner {
         });
     }
 
-    /// 跑一轮：装配工具、发请求、执行工具、回灌，直到模型不再调工具。
-    ///
-    /// `git` 只有主会话有（侧边会话不重算系统提示），这里收一个 `Option` 是为了
-    /// 让两条路共用同一个函数体。
-    async fn run_one_turn(&mut self, git: Option<carter::session::GitInfo>) -> TurnResult {
-        let system = match &self.fixed_system {
+    /// 这一轮的系统提示。主会话每轮现算（技能会变、目标会变），侧边会话是固定部分
+    /// 加上主对话的最新状态。
+    fn turn_system(&self, git: Option<&carter::session::GitInfo>) -> Vec<String> {
+        match &self.fixed_system {
             Some(s) => {
                 let mut s = s.clone();
                 // 侧边会话：主对话的最新状态（含进行中的那一轮）每轮现取。
@@ -967,13 +993,15 @@ impl Runner {
                 if let Some(parent) = self.ctx.handle.parent_id.as_deref() {
                     match crate::side::parent_context(&self.ctx.shell, parent) {
                         Some(c) => s.push(c),
-                        None => s.push("## 主对话\n\n（主对话已经关闭，看不到了。）".into()),
+                        None => s.push("## 主对话
+
+（主对话已经关闭，看不到了。）".into()),
                     }
                 }
                 s
             }
             None => {
-                let mut s = self.ctx.system(git.as_ref());
+                let mut s = self.ctx.system(git);
                 // 目标段接在最后：它是最「当下」的指令，而且（将来 carter 打开
                 // cache 断点后）末段正是断点位置 —— 所以它必须是稳定的，
                 // 见 `goal.rs` 模块头。
@@ -982,18 +1010,18 @@ impl Runner {
                 }
                 s
             }
-        };
-        // 只有状态为 active 时模型才该调 goal_update。
-        self.goal_signal
-            .set_armed(self.goal.as_ref().is_some_and(|g| g.status == GoalStatus::Active));
+        }
+    }
 
-        let hooks = Arc::new(HookRegistry::from_configs(self.ctx.config.hooks.clone()));
-        let tools = build_tools(
+    /// 这一轮的工具表（工具开关、MCP、子 agent 都在这里装配）。
+    fn turn_tools(&self, system: &[String]) -> carter::tools::ToolRegistry {
+        build_tools(
             ToolBuildArgs {
                 provider: self.ctx.provider.clone(),
                 model: self.ctx.model.clone(),
                 agent_cfg: self.ctx.config.agent.clone(),
-                base_system: system.join("\n"),
+                base_system: system.join("
+"),
                 cancel: self.ctx.handle.cancel.clone(),
                 mcp_tools: self.mcp_tools.clone(),
                 cwd: self.ctx.cwd.clone(),
@@ -1015,7 +1043,36 @@ impl Runner {
                 running: Some(self.ctx.running.clone()),
             },
             &self.ctx.settings,
-        );
+        )
+    }
+
+    /// 记下「历史之外」每次请求都要带的那部分 token：系统提示 + 工具声明。
+    ///
+    /// 百分比环要的是**整个请求**的大小，只数历史会在工具很多（MCP 动辄几十个）时
+    /// 偏小一大截。这两样每轮才变一次，所以在装配时顺手量一下存起来。
+    fn measure_overhead(&mut self, system: &[String], tools: &carter::tools::ToolRegistry) {
+        let tokenizer = &self.ctx.model.tokenizer;
+        let specs = serde_json::to_string(&tools.specs()).unwrap_or_default();
+        self.overhead = carter::tokens::count_text(&system.join("
+"), tokenizer)
+            + carter::tokens::count_text(&specs, tokenizer);
+    }
+
+    /// 跑一轮：装配工具、发请求、执行工具、回灌，直到模型不再调工具。
+    ///
+    /// `git` 只有主会话有（侧边会话不重算系统提示），这里收一个 `Option` 是为了
+    /// 让两条路共用同一个函数体。
+    async fn run_one_turn(&mut self, git: Option<carter::session::GitInfo>) -> TurnResult {
+        let system = self.turn_system(git.as_ref());
+        // 只有状态为 active 时模型才该调 goal_update。
+        self.goal_signal
+            .set_armed(self.goal.as_ref().is_some_and(|g| g.status == GoalStatus::Active));
+
+        let hooks = Arc::new(HookRegistry::from_configs(self.ctx.config.hooks.clone()));
+        let tools = self.turn_tools(&system);
+        self.measure_overhead(&system, &tools);
+        // 这一轮开始时有几轮。carter 在这一轮中途自己压缩过的话，轮后要靠它重排轮次号。
+        let turns_before = crate::view::user_turn_count(&self.thread.messages);
         // 压缩用副模型（`agent.fast_model`）：压缩是"把长历史揉短"的活儿，
         // 要的是便宜和快。没配副模型就回落主模型。
         let fast = self.ctx.fast_model();
@@ -1053,6 +1110,7 @@ impl Runner {
             let mut sink = TxSink {
                 tx: self.ui_tx.clone().expect("事件通道在 run() 里建好"),
                 live: self.live(),
+                compacted: self.mid_compact.clone(),
             };
             let turn = run_turn(
                 &mut self.thread,
@@ -1166,6 +1224,7 @@ impl Runner {
             failed,
             used_tools,
             user_cancelled,
+            turns_before,
         }
     }
 
@@ -1242,9 +1301,138 @@ impl Runner {
                     if self.ctx.handle.close.is_cancelled() {
                         return;
                     }
+                    self.after_turn(&result).await;
+                    if self.ctx.handle.close.is_cancelled() {
+                        return;
+                    }
                 }
             }
         }
+    }
+
+    /// 一轮收尾时的上下文管理：
+    ///
+    /// 1. carter 在这一轮**中途**自己压过（它按未命中缓存的输入判定，开了缓存很少触发，
+    ///    但会发生）→ 轮次号重排、界面重建；
+    /// 2. 发一次最新的占用；
+    /// 3. 占用超过触发线 → 自动压缩。
+    ///
+    /// 第 3 条是自己做而不是全交给 carter 的原因：carter 拿 `usage.input_tokens` 比阈值，
+    /// 而开了 prompt caching 之后那只是**未命中缓存**的一截 —— 一条 150k 的对话，命中
+    /// 140k 的话它只看见 10k，永远不会压，直到上游报「超出上下文」。这里用的是整个
+    /// 请求的估算值，与界面上的百分比同一个数。
+    async fn after_turn(&mut self, result: &TurnResult) {
+        let mid = self.mid_compact.lock().ok().and_then(|mut t| t.take());
+        if let Some(tier) = mid {
+            let now = self.history_tokens();
+            self.apply_compaction(result.turns_before, now, now, tier, true);
+        }
+        let ctx = self.context_view();
+        self.emit(SessionEvent::Context(ctx));
+        if ctx.auto && ctx.threshold > 0 && ctx.used > ctx.threshold && !result.user_cancelled {
+            self.compact(true).await;
+        }
+    }
+
+    /// 压缩上下文。`auto` = 占用超线自动触发；否则是用户的 `/compact`。
+    ///
+    /// 两条路用同一个 carter 函数，差别只在目标值：自动压缩的目标是触发线（折叠旧工具
+    /// 输出就够的话不必摘要），手动压缩的目标是 0（用户明说了要压，一定走到摘要）。
+    async fn compact(&mut self, auto: bool) {
+        // 带着断口去摘要的话，摘要请求本身就会被上游拒掉。
+        self.settle_history();
+        let turns_before = crate::view::user_turn_count(&self.thread.messages);
+        let before = self.history_tokens();
+        let target = if auto { self.context_view().threshold } else { 0 };
+        self.emit(SessionEvent::CompactStarted { auto });
+
+        let fast = self.ctx.fast_model();
+        let cm = fast.unwrap_or_else(|| CompactModel {
+            provider: self.ctx.provider.clone(),
+            model: self.ctx.model.clone(),
+        });
+        let mut sink = CompactSink::default();
+        let res = carter::agent::context::compact(
+            &mut self.thread,
+            &*cm.provider,
+            &cm.model,
+            target.saturating_sub(self.overhead),
+            &mut sink,
+        )
+        .await;
+        let after = self.history_tokens();
+
+        match (res, sink.tier) {
+            (Err(e), _) => self.error(&format!("压缩上下文失败：{e}")),
+            (Ok(()), Some(tier)) => {
+                self.apply_compaction(turns_before, before, after, tier, auto);
+            }
+            (Ok(()), None) => {
+                // 没摘要成：要么折叠旧工具输出就够了（自动压缩），要么历史太短切不出
+                // 中段，要么摘要请求失败（carter 已降级成只折叠）。三种都要说清。
+                let msg = if let Some(why) = sink.failures.last() {
+                    format!("摘要没生成出来（{why}），只折叠了较早的工具输出：~{before} → ~{after} tokens")
+                } else if after < before {
+                    format!("已折叠较早的工具输出：~{before} → ~{after} tokens")
+                } else {
+                    "对话还很短，没有可以压缩的内容".to_string()
+                };
+                self.ctx.handle.publish_history(&self.thread.messages);
+                self.notice(&msg);
+            }
+        }
+        self.emit_context();
+    }
+
+    /// 摘要压缩之后的善后：轮次号重排（历史、用户原文、变更清单三处一致），
+    /// 发布新历史，让界面整个重建。
+    fn apply_compaction(
+        &mut self,
+        turns_before: u32,
+        before: u64,
+        after: u64,
+        tier: String,
+        auto: bool,
+    ) {
+        let remap = crate::history::TurnRemap::new(turns_before, &self.thread.messages);
+        self.thread.user_turns = remap.after();
+        let id = self.ctx.handle.id.clone();
+        if !remap.is_identity() {
+            if let Err(e) = crate::prompts::remap(&id, |t| remap.map(t)) {
+                tracing::warn!("压缩后重排用户原文失败：{e}");
+            }
+            if let Err(e) = crate::changes::remap(&id, |t| remap.map(t)) {
+                tracing::warn!("压缩后重排变更记录失败：{e}");
+            }
+        }
+        self.ctx.handle.publish_history(&self.thread.messages);
+        self.emit(SessionEvent::Compacted {
+            history: crate::view::to_views(&self.thread.messages),
+            prompts: crate::prompts::load(&id),
+            changes: crate::changes::load(&id),
+            before,
+            after,
+            tier,
+            auto,
+        });
+    }
+
+    /// 历史消息部分的估算 token 数。
+    fn history_tokens(&self) -> u64 {
+        carter::agent::context::estimate_tokens_for(&self.thread.messages, &self.ctx.model.tokenizer)
+    }
+
+    /// 当前的上下文占用（见 [`ContextView`]）。
+    fn context_view(&self) -> ContextView {
+        context_view(
+            self.history_tokens() + self.overhead,
+            self.ctx.model.context_window,
+            &self.ctx.config.agent,
+        )
+    }
+
+    fn emit_context(&self) {
+        self.emit(SessionEvent::Context(self.context_view()));
     }
 
     /// 轮首：开始监听 cwd 的文件变更。
@@ -1665,6 +1853,53 @@ fn map_ui(ev: UiEvent) -> Option<SessionEvent> {
     })
 }
 
+/// 占用 + 窗口 + 配置 → 界面上那个环要的数。
+fn context_view(used: u64, window: u32, agent: &carter::config::AgentConfig) -> ContextView {
+    let window = u64::from(window);
+    let ratio = agent.compact_threshold_ratio.clamp(0.0, 1.0);
+    ContextView {
+        used,
+        window,
+        threshold: (window as f64 * ratio) as u64,
+        auto: agent.compact_enabled && window > 0,
+    }
+}
+
+/// carter 压缩日志里「摘要成功」那一句（`[compact] L3 rolling summary applied: …`）
+/// 用的是哪一档。不是这句就返回 `None`。
+fn summary_tier(notice: &str) -> Option<String> {
+    let rest = notice.strip_prefix("[compact] ")?;
+    if !rest.contains("rolling summary applied") {
+        return None;
+    }
+    rest.split_whitespace().next().map(str::to_string)
+}
+
+/// 手动 / 自动压缩时接 carter 压缩日志的出口。
+///
+/// 那几句英文日志（`[compact] L1 elided …`）不往界面送：压完之后由
+/// [`Runner::compact`] 给一句说人话的结果。这里只从里面捞两件事 —— 摘要成没成、
+/// 没成的话为什么。
+#[derive(Default)]
+struct CompactSink {
+    tier: Option<String>,
+    failures: Vec<String>,
+}
+
+impl UiSink for CompactSink {
+    fn emit(&mut self, ev: UiEvent) {
+        let UiEvent::Notice(msg) = ev else {
+            return;
+        };
+        if let Some(tier) = summary_tier(&msg) {
+            self.tier = Some(tier);
+        } else if msg.contains("failed") || msg.contains("error") {
+            self.failures
+                .push(msg.trim_start_matches("[compact] ").to_string());
+        }
+    }
+}
+
 fn todo_view(t: &carter::tools::TodoItem) -> TodoView {
     TodoView {
         content: t.content.clone(),
@@ -1683,12 +1918,27 @@ struct TxSink {
     tx: mpsc::UnboundedSender<UiEvent>,
     /// 进行中那一轮的记录，见 `shell.rs::LiveLog`。
     live: Option<Arc<crate::shell::LiveLog>>,
+    /// carter 在一轮中途自己压缩上下文时，记下摘要用的哪一档（见 [`Runner::after_turn`]）。
+    compacted: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl UiSink for TxSink {
     fn emit(&mut self, ev: UiEvent) {
         if let (Some(live), UiEvent::AssistantTextDelta(t)) = (&self.live, &ev) {
             live.text(t);
+        }
+        if let UiEvent::Notice(msg) = &ev {
+            // carter 的压缩过程日志（英文、按档逐条）不往界面送：摘要成了的话轮后会有一条
+            // `compacted` 事件把对话整个重建，那才是用户该看到的。失败的那几句照常送。
+            if let Some(tier) = summary_tier(msg) {
+                if let Ok(mut slot) = self.compacted.lock() {
+                    *slot = Some(tier);
+                }
+                return;
+            }
+            if msg.starts_with("[compact] L0") || msg.starts_with("[compact] L1") {
+                return;
+            }
         }
         // 接收端没了说明会话正在退出，丢弃即可。
         let _ = self.tx.send(ev);

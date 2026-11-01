@@ -462,6 +462,31 @@ fn set_fast_model(
     config_edit::set_fast_model_reload(shell.inner(), model_ref.as_deref())
 }
 
+/// 自动压缩的当前设置（`agent.compact_enabled` / `agent.compact_threshold_ratio`）。
+#[derive(serde::Serialize)]
+struct CompactionSettings {
+    enabled: bool,
+    ratio: f64,
+}
+
+#[tauri::command]
+fn get_compaction(shell: State<'_, Arc<AppShell>>) -> CompactionSettings {
+    let cfg = shell.config.load();
+    CompactionSettings {
+        enabled: cfg.agent.compact_enabled,
+        ratio: cfg.agent.compact_threshold_ratio,
+    }
+}
+
+#[tauri::command]
+fn set_compaction(
+    shell: State<'_, Arc<AppShell>>,
+    enabled: bool,
+    ratio: f64,
+) -> Result<(), String> {
+    config_edit::set_compaction_reload(shell.inner(), enabled, ratio)
+}
+
 /// models.dev 里某个服务商下的模型（给渠道编辑框的「从目录选」下拉用）。
 #[tauri::command]
 fn list_catalog_models(
@@ -1131,6 +1156,8 @@ pub fn run() {
             list_models,
             set_default_model,
             set_fast_model,
+            get_compaction,
+            set_compaction,
             refresh_model_catalog,
             list_catalog_models,
             recommended_catalog_models,
