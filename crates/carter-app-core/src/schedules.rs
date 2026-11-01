@@ -501,17 +501,24 @@ fn write_file(path: &Path, list: &[Schedule]) -> Result<(), String> {
 /// 又不会让一个几乎空转的循环耗电。
 const TICK: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// 在后台跑调度。**必须在 tokio runtime 里调用。**
+/// 调度循环本体。
+///
+/// **不要直接在同步上下文里 `tokio::spawn` 它** —— Tauri 的 `setup` 跑在主线程上，
+/// 那里没有 reactor，`tokio::spawn` 会直接 panic（启动即崩，且只在真机上才看得到）。
+/// 外壳用 `tauri::async_runtime::spawn(run_scheduler(shell))` 把它送进 runtime。
+pub async fn run_scheduler(shell: Arc<crate::shell::AppShell>) {
+    let mut ticker = tokio::time::interval(TICK);
+    // 错过一拍（应用被挂起、机器睡眠）之后不要连着补跑几次，直接按现在算。
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        ticker.tick().await;
+        fire_due(&shell).await;
+    }
+}
+
+/// 在后台跑调度。**必须在 tokio runtime 里调用**（核心侧、测试用）。
 pub fn spawn_scheduler(shell: Arc<crate::shell::AppShell>) {
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(TICK);
-        // 错过一拍（应用被挂起、机器睡眠）之后不要连着补跑几次，直接按现在算。
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            ticker.tick().await;
-            fire_due(&shell).await;
-        }
-    });
+    tokio::spawn(run_scheduler(shell));
 }
 
 /// 现在就该跑的，逐条开新会话。

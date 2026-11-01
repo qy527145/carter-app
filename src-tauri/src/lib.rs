@@ -1187,8 +1187,12 @@ pub fn run() {
             app.manage(shell.clone());
 
             // 定时任务的后台调度。**和窗口无关**：窗口最小化、切走都不影响它，
-            // 到点照常开一条新会话。必须在 async runtime 里起（见 `spawn_scheduler`）。
-            carter_app_core::schedules::spawn_scheduler(shell.clone());
+            // 到点照常开一条新会话。
+            //
+            // 用 `tauri::async_runtime::spawn` 而不是核心里的 `spawn_scheduler`：
+            // `setup` 跑在主线程上，那里没有 tokio reactor，`tokio::spawn` 会直接
+            // panic（启动即崩）。Tauri 自己带一个 runtime，这就是把任务送进去的正路。
+            tauri::async_runtime::spawn(carter_app_core::schedules::run_scheduler(shell.clone()));
 
             // 事件总线 → webview。一条长驻任务，AppShell 的广播接收端跟着它。
             let handle = app.handle().clone();
