@@ -407,8 +407,61 @@ function preferPreview(html: string): boolean {
 }
 
 /**
+ * 「整页其实就一张图」时，这张图的宽高比。
+ *
+ * 模型很爱把一张 SVG 包进完整的 `<!doctype html><html><body>…` 里交出来。这种页面
+ * 只有固定高度（380）的 iframe，而图是按页面宽度铺开的 —— 950 宽的框里一张
+ * 1340×880 的图画出来有 620 高，超出的那截被裁在框外，滚也滚不到。于是**只有
+ * 全屏才看得全**，缩略图看到的是中间一条。
+ *
+ * 判据是「把 `<svg>` 拿掉之后什么都不剩」（只允许 doctype、注释、`<style>`、
+ * `<script>` 这类包装）。带标题、说明文字的真页面剩不下零，仍然按普通网页处理。
+ */
+function loneSvgRatio(html: string): number | null {
+  // **先脱包装、再找图**。反过来的话 `<style>svg{width:100%}</style>` 里的 `svg{`
+  // 会被 `<svg\b` 认成开始标签，一路吃到正文的 `</svg>`，把整个 head 连壳带肉吞掉，
+  // 剩下的碎片让页面永远判不成「只有一张图」—— 而模型恰好爱写这种样式表。
+  const bare = html
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/<!doctype[^>]*>/gi, "")
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, "")
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "")
+    // 标题是元数据不是正文：`<title>骑车的鹅</title>` 里那几个字不该把页面留下来。
+    .replace(/<title\b[^>]*>[\s\S]*?<\/title>/gi, "");
+  const m = /<svg\b[\s\S]*?<\/svg>/i.exec(bare);
+  if (!m) return null;
+  const rest = bare
+    .replace(m[0], "")
+    // 包装标签只脱壳、不动内容：真正的说明文字脱完仍在，于是判成普通网页。
+    .replace(/<\/?(?:html|head|body|meta|div|span|main|section)\b[^>]*>/gi, "")
+    .replace(/\s+/g, "");
+  return rest.length === 0 ? svgRatio(m[0]) : null;
+}
+
+/**
+ * 让页面里那张唯一的图铺满 iframe 的样式。
+ *
+ * 只靠外面把框算成同一比例还不够：图自己的 `width="1340"` 是个固定像素值，
+ * 放在 579 宽的框里照样会被裁右半边。`!important` 压过页面自带的尺寸，
+ * `preserveAspectRatio`（默认 `xMidYMid meet`）再把图完整地装进去。
+ */
+const FIT_ONE_SVG =
+  "<style>html,body{margin:0;padding:0;height:100%;overflow:hidden}" +
+  "svg{display:block;width:100%!important;height:100%!important}</style>";
+
+/** 把 [`FIT_ONE_SVG`] 塞进页面：有 `<head>` 就进 head，否则自己开一个。 */
+function fitOneSvg(html: string): string {
+  if (/<head\b[^>]*>/i.test(html)) return html.replace(/<head\b[^>]*>/i, (m) => m + FIT_ONE_SVG);
+  return FIT_ONE_SVG + html;
+}
+
+/**
  * 一段 HTML 的沙箱窗口。`FilePreview` 也复用这一个 —— 文件预览里的 `.html`
  * 与对话里的代码块要长得一样、用的是同一份沙箱策略。
+ *
+ * 整页只有一张图时（见 [`loneSvgRatio`]）框按那张图的宽高比定、居中摆放，
+ * 并给页面补一条「图铺满、页面不留边」的样式：框和图同比例、图又跟着框缩，
+ * 两处都对齐了才不会有哪一截被裁在框外。
  */
 export function HtmlFrame({
   html,
@@ -419,6 +472,28 @@ export function HtmlFrame({
   height: number;
   title: string;
 }): ReactElement {
+  const fit = useMemo(() => loneSvgRatio(html), [html]);
+  if (fit) {
+    return (
+      <div className="flex justify-center">
+        <div
+          className="overflow-hidden rounded-lg border border-edge bg-white"
+          style={{
+            // 高度封顶、宽度按比例跟；`min(100%, …)` 让窄窗口也不溢出。
+            width: `min(100%, ${Math.round(fit * height)}px)`,
+            aspectRatio: String(fit),
+          }}
+        >
+          <iframe
+            title={title}
+            srcDoc={fitOneSvg(html)}
+            sandbox={SANDBOX}
+            className="size-full border-0"
+          />
+        </div>
+      </div>
+    );
+  }
   return (
     // 白底是刻意的：生成的页面默认假设白纸，跟着应用深色走会把黑字吞掉。
     <div className="overflow-hidden rounded-lg border border-edge bg-white" style={{ height }}>
