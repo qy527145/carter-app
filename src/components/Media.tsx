@@ -24,7 +24,14 @@
 // 相对的 `<script src="./chart.js">` 在 `srcdoc` 里没有基准地址，会加载不到；这类页面
 // 用「在浏览器中打开」看原文件。图表通常自带 CDN 或全部内联，不受影响。
 
-import { useEffect, useState, type CSSProperties, type ReactElement, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useState,
+  type CSSProperties,
+  type ReactElement,
+  type ReactNode,
+} from "react";
 import { openPath, openUrl } from "@tauri-apps/plugin-opener";
 import { defaultUrlTransform } from "react-markdown";
 import { Code, ExternalLink, LoaderCircle, Maximize2 } from "lucide-react";
@@ -76,6 +83,11 @@ function baseName(p: string): string {
 /** 渲染得出来的网页 / 图 —— 工具卡片与链接处理都用这一个判据。 */
 export function isHtmlFile(p: string): boolean {
   return /\.(?:html?|svg)$/i.test(p.split(/[?#]/)[0]);
+}
+
+/** 单张矢量图：预览走 [`SvgCanvas`]，不套沙箱 iframe。 */
+export function isSvgPath(p: string): boolean {
+  return /\.svg$/i.test(p.split(/[?#]/)[0]);
 }
 
 /** 结果正文里的第一个图片库引用（`read_file` 读图时那串 `[img:…]`）。 */
@@ -415,6 +427,111 @@ export function HtmlFrame({
 }
 
 /**
+ * `svg` 代码块**不走 iframe**。
+ *
+ * 沙箱 iframe 有三处不适合画矢量图：
+ *
+ * - **它不知道自己该多大**。iframe 只能给固定高度（380），而一段 `svg` 的宽高比
+ *   是写在 `viewBox` 里的 —— 400×320 的画贴在 900×380 的白框左上角，右边和下面
+ *   是一大片空。要贴合就得先解析出比例，那 iframe 的唯一优势也没了。
+ * - **它是一整个文档**（HTML 解析器 + 样式 + 脚本引擎）。一段几十行的图从挂载到
+ *   画出来要走完整条路径，而 `<img>` 拿到的是一张「图片」。
+ * - **它默认能跑脚本**。模型生成的标记里本来就不该有脚本，但 `onload=` 这种属性
+ *   只要一个 `<img>` 就会闭嘴 —— 以图片方式加载的 SVG 不执行脚本、不加载外部资源，
+ *   比 `allow-scripts` 的沙箱更严。
+ *
+ * 代价：`<image href="…">`、外部字体在图中不会加载。画一张图用不到这些；真需要
+ * 交互的整页 HTML 仍然走 `HtmlFrame`。
+ */
+
+/** 从 `<svg>` 开标签里取出宽高比（`viewBox` 优先，其次 width/height）。 */
+function svgRatio(svg: string): number {
+  const tag = /<svg\b[^>]*>/i.exec(svg)?.[0] ?? "";
+  const vb = /viewBox\s*=\s*["']\s*([-\d.]+)[\s,]+([-\d.]+)[\s,]+([-\d.]+)[\s,]+([-\d.]+)/i.exec(tag);
+  if (vb) {
+    const w = Number(vb[3]);
+    const h = Number(vb[4]);
+    if (w > 0 && h > 0) return w / h;
+  }
+  const w = /(?:^|\s)width\s*=\s*["']([\d.]+)(?:px)?["']/i.exec(tag)?.[1];
+  const h = /(?:^|\s)height\s*=\s*["']([\d.]+)(?:px)?["']/i.exec(tag)?.[1];
+  if (w && h && Number(w) > 0 && Number(h) > 0) return Number(w) / Number(h);
+  return 1;
+}
+
+/**
+ * 套进 data URL。
+ *
+ * 少了 `xmlns` 的 `<svg>` 作为图片解码时会被当成不认识的外来元素、画出来是空白 ——
+ * 而模型写片段时经常省掉它，所以这里补一次（已经有就不动）。
+ */
+function svgDataUrl(svg: string): string {
+  const src = svg.replace(/<svg\b(?![^>]*\bxmlns\s*=)/i, '<svg xmlns="http://www.w3.org/2000/svg"');
+  // `#` 在 data URL 里是片段分隔符，不编码的话 `fill="#fff"` 会把后面全截掉。
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(src)}`;
+}
+
+/**
+ * 一张 SVG 的画布。
+ *
+ * 容器按图片自身的比例收窄、`mx-auto` 居中，并封顶高度 —— 一张方图不会撑成一条
+ * 横带，一张宽图也不会被拉高。宽度 `100%` 只在超过上限时才生效，所以小图保持
+ * 原始尺寸、不被放大糊掉。
+ */
+export function SvgCanvas({
+  svg,
+  maxHeight = 420,
+  className = "",
+}: {
+  svg: string;
+  /** 画布最高的像素数。全屏时给更大的值。 */
+  maxHeight?: number;
+  className?: string;
+}): ReactElement {
+  const ratio = useMemo(() => svgRatio(svg), [svg]);
+  const src = useMemo(() => svgDataUrl(svg), [svg]);
+  const [failed, setFailed] = useState(false);
+
+  if (failed) {
+    // 解码不了（标记坏到连图片都画不出来）时退回源码，而不是留一块空白。
+    return (
+      <div className="max-h-[26rem] overflow-auto">
+        <pre className="carter-code mono">{svg}</pre>
+      </div>
+    );
+  }
+
+  return (
+    // 白底是刻意的：生成的图按白纸配色，跟着应用深色走会把深色描边吞掉。
+    // 外面一层负责居中，里面一层按图收边 —— 小图不该左右各留半屏白。
+    <div className={`flex justify-center ${className}`}>
+      <div className="inline-flex max-w-full items-center justify-center rounded-lg border border-edge bg-white p-4">
+        <img
+          src={src}
+          alt=""
+          style={{ maxHeight, aspectRatio: String(ratio) }}
+          className="block h-auto w-auto max-w-full object-contain"
+          onError={() => setFailed(true)}
+        />
+      </div>
+    </div>
+  );
+}
+
+/**
+ * 「这段代码块已经写完整了」。
+ *
+ * 流式期间前半截是半张图，画出来只会闪；但**不必等到整条消息写完** —— 闭合标签
+ * 一出现，这一段就不会再变了（后续增量永远接在它后面，重新解析出来还是同一段
+ * 字符串），此时挂预览是安全的，而且正是用户等的那个时刻。
+ */
+function blockComplete(lang: string, src: string): boolean {
+  const t = src.trimEnd();
+  if (lang === "svg") return /<\/svg>$/i.test(t);
+  return /<\/(?:html|body)>$/i.test(t);
+}
+
+/**
  * 对话里的 HTML 卡片：预览 / 源码两个页签 + 全屏。
  *
  * 流式期间（`live`）只给源码：`srcDoc` 每来一个增量就整页重载，图表会闪成一片。
@@ -426,6 +543,7 @@ export function HtmlArtifact({
   absPath,
   live = false,
   truncated = false,
+  svg = false,
 }: {
   html: string;
   /** 显示用的名字（文件名 / 语言）。 */
@@ -434,6 +552,8 @@ export function HtmlArtifact({
   absPath?: string | null;
   live?: boolean;
   truncated?: boolean;
+  /** 内容是 `svg`：预览走 `SvgCanvas`（居中、按自身比例），不走沙箱 iframe。 */
+  svg?: boolean;
 }) {
   const [tab, setTab] = useState<"preview" | "source">(preferPreview(html) ? "preview" : "source");
   const [full, setFull] = useState(false);
@@ -473,7 +593,11 @@ export function HtmlArtifact({
         </div>
       )}
       {mode === "preview" ? (
-        <HtmlFrame html={html} height={380} title={title} />
+        svg ? (
+          <SvgCanvas svg={html} maxHeight={380} />
+        ) : (
+          <HtmlFrame html={html} height={380} title={title} />
+        )
       ) : (
         // 与正文里的代码块同一套深色样式（`.carter-code`，见 index.css）——
         // 这里可能挂在工具卡片里、不在 `.carter-md` 内，所以走独立入口。
@@ -506,7 +630,11 @@ export function HtmlArtifact({
             </>
           }
         >
-          <HtmlFrame html={html} height={Math.round(window.innerHeight * 0.66)} title={title} />
+          {svg ? (
+            <SvgCanvas svg={html} maxHeight={Math.round(window.innerHeight * 0.66)} />
+          ) : (
+            <HtmlFrame html={html} height={Math.round(window.innerHeight * 0.66)} title={title} />
+          )}
         </Modal>
       )}
     </div>
@@ -577,9 +705,16 @@ function HtmlFileModal({ path, cwd, onClose }: { path: string; cwd: string; onCl
       {error && <div className="text-xs text-[var(--danger)]">读不了这个文件：{error}</div>}
       {!state.html && !state.note && !error && <Loading />}
       {state.note && <div className="text-xs text-dim">{state.note}</div>}
-      {state.html !== null && (
-        <HtmlFrame html={state.html} height={Math.round(window.innerHeight * 0.62)} title={path} />
-      )}
+      {state.html !== null &&
+        (isSvgPath(path) ? (
+          <SvgCanvas svg={state.html} maxHeight={Math.round(window.innerHeight * 0.62)} />
+        ) : (
+          <HtmlFrame
+            html={state.html}
+            height={Math.round(window.innerHeight * 0.62)}
+            title={path}
+          />
+        ))}
     </Modal>
   );
 }
@@ -628,6 +763,7 @@ export function HtmlFilePreview({ path, cwd }: { path: string; cwd: string }) {
       title={baseName(path)}
       absPath={state.abs}
       truncated={state.truncated}
+      svg={isSvgPath(path)}
     />
   );
 }
@@ -731,14 +867,16 @@ function textOf(node: ReactNode): string {
  * 不该变成预览。
  */
 export function MarkdownPre({ children, live }: { children?: ReactNode; live: boolean }) {
-  // 还在流式生成：照旧画普通代码块。卡片外壳每来一个增量都重挂一次，比一段
-  // 正在变长的源码更晃眼，而且预览这会儿本来也开不了。
-  if (live) return <pre>{children}</pre>;
   const el = children as { props?: { className?: string; children?: ReactNode } } | null;
   const lang = /language-([\w-]+)/.exec(el?.props?.className ?? "")?.[1]?.toLowerCase();
   if (lang && RENDERABLE.has(lang)) {
     const html = textOf(el?.props?.children);
-    return <HtmlArtifact html={html} title={lang.toUpperCase()} live={false} />;
+    // 不必等整条消息写完：闭合标签一出现就挂预览（见 `blockComplete`）。这之前
+    // 照旧画普通代码块 —— 半张图画出来只会闪。`live={false}` 是给卡片本身的：
+    // 它已经稳定，页签与全屏都该能用了。
+    if (!live || blockComplete(lang, html)) {
+      return <HtmlArtifact html={html} title={lang.toUpperCase()} live={false} svg={lang === "svg"} />;
+    }
   }
   return <pre>{children}</pre>;
 }

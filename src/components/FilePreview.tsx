@@ -30,7 +30,7 @@ import { copyText } from "../lib/clipboard";
 import { fmtBytes, relTime } from "../lib/format";
 import { toastError, TOAST_MS } from "../lib/toast";
 import { useStore } from "../store";
-import { HtmlFrame, isHtmlFile } from "./Media";
+import { HtmlFrame, SvgCanvas, isHtmlFile } from "./Media";
 import { Button } from "./ui/Button";
 import { Segmented } from "./ui/Input";
 import { Modal } from "./ui/Panel";
@@ -316,11 +316,15 @@ export function FilePreviewModal({
                 </div>
               ) : null}
               {isHtmlFile(path) && htmlTab === "render" ? (
-                <HtmlFrame
-                  html={preview.content}
-                  height={Math.round(window.innerHeight * 0.5)}
-                  title={baseName(absolute)}
-                />
+                /\.svg$/i.test(path.split(/[?#]/)[0]) ? (
+                  <SvgCanvas svg={preview.content} maxHeight={Math.round(window.innerHeight * 0.5)} />
+                ) : (
+                  <HtmlFrame
+                    html={preview.content}
+                    height={Math.round(window.innerHeight * 0.5)}
+                    title={baseName(absolute)}
+                  />
+                )
               ) : (
                 <Code content={preview.content} />
               )}
