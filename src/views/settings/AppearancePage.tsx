@@ -1,11 +1,7 @@
 // 外观：主题与对话密度。
 
-import {
-  setAppSettings,
-  type ConversationMode,
-  type ThemePref,
-} from "../../lib/api";
-import { setConversationMode } from "../../lib/conversationMode";
+import { setAppSettings, type ThemePref } from "../../lib/api";
+import { ModePill } from "../../components/ModePill";
 import { toastError } from "../../lib/toast";
 import { useStore } from "../../store";
 import { Segmented } from "../../components/ui/Input";
@@ -16,11 +12,6 @@ const THEMES: { id: ThemePref; label: string }[] = [
   { id: "system", label: "跟随系统" },
   { id: "light", label: "浅色" },
   { id: "dark", label: "深色" },
-];
-
-const MODES: { id: ConversationMode; label: string }[] = [
-  { id: "detailed", label: "详细" },
-  { id: "compact", label: "精简" },
 ];
 
 export function AppearancePage() {
@@ -51,11 +42,7 @@ export function AppearancePage() {
 
       <Section title="对话密度">
         <Card>
-          <Segmented
-            value={settings.conversation_mode ?? "detailed"}
-            options={MODES}
-            onChange={setConversationMode}
-          />
+          <ModePill />
           <div className="mt-3 text-[11px] leading-relaxed text-dim">
             「精简」把思考与每一次工具调用折成一行摘要，只留正文 —— 读对话时不必
             一路划过十几张命令卡片。折起来的过程点一下就能展开，失败的调用会自动展开。

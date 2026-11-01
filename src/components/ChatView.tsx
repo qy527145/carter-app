@@ -21,11 +21,9 @@ import {
   Copy,
   FileText,
   GitBranch,
-  ListTree,
   LoaderCircle,
   Pencil,
   RotateCcw,
-  Rows3,
   ScanSearch,
   Target,
   TriangleAlert,
@@ -35,7 +33,7 @@ import {
 
 import { useStore, type Item, type Turn } from "../store";
 import { copyText } from "../lib/clipboard";
-import { setConversationMode, useConversationMode } from "../lib/conversationMode";
+import { useConversationMode } from "../lib/conversationMode";
 import { displayName, modelTitle, useModelCatalog } from "../lib/modelLabel";
 import { editPrompt, fork, regenerate } from "../lib/sessionOps";
 import { TOAST_MS } from "../lib/toast";
@@ -43,6 +41,7 @@ import { FilePreviewModal } from "./FilePreview";
 import { AskForm } from "./AskForm";
 import { Composer, MessageImages } from "./Composer";
 import { GoalBar } from "./GoalBar";
+import { ModePill } from "./ModePill";
 import { Glyph, ServerCard, ToolCard } from "./toolcards/ToolCard";
 import { IconButton } from "./ui/Button";
 import { hasSelection, useContextMenu, type MenuEntry } from "./ui/ContextMenu";
@@ -1239,36 +1238,7 @@ function NoticeBanner() {
   );
 }
 
-/**
- * 顶部的模式切换：详细 / 精简。
- *
- * 放在标题右边而不是设置页里：它不是「配置一次就不管」的东西，而是随口对话和
- * 排障之间来回切的一个视角。放进设置页，切一次得离开对话、翻两层菜单再回来。
- *
- * 带文字而不是只有图标：纯图标的开关里，用户看不出「现在是哪一档、点一下会变成
- * 哪一档」—— 这正是这个开关唯一需要说清的事。外观设置页里有同一份入口，两处
- * 读写的是同一个偏好，切一处另一处跟着变。
- */
-function ModeToggle() {
-  const mode = useConversationMode();
-  const compact = mode === "compact";
-  return (
-    <button
-      onClick={() => setConversationMode(compact ? "detailed" : "compact")}
-      title={
-        compact
-          ? "精简模式：中间过程折成一行摘要（工具照常执行）· 点一下看完整过程"
-          : "详细模式：每一次工具调用各占一张卡片 · 点一下收起中间过程"
-      }
-      className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-dim transition-colors hover:bg-ink/5 hover:text-ink"
-    >
-      {compact ? <Rows3 size={13} /> : <ListTree size={13} />}
-      {compact ? "精简" : "详细"}
-    </button>
-  );
-}
-
-/** 顶部条：当前会话标题 + 模式切换 + 打开报文面板的入口。 */
+/** 顶部条：当前会话标题 + 呈现密度 + 打开报文面板的入口。 */
 function ChatHeader() {
   const sessionId = useStore((s) => s.sessionId);
   const sessions = useStore((s) => s.sessions);
@@ -1278,8 +1248,8 @@ function ChatHeader() {
   return (
     <div className="flex h-10 shrink-0 items-center gap-2 border-b border-edge px-4">
       <span className="truncate text-sm text-dim">{title || "新对话"}</span>
-      <div className="ml-auto flex items-center gap-1">
-        <ModeToggle />
+      <div className="ml-auto flex items-center gap-2">
+        <ModePill />
         <IconButton
           disabled={!sessionId}
           onClick={() => openInspector(null)}
