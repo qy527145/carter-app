@@ -6,11 +6,12 @@
 // 所以左边是**这次会话的全部请求**，右边是选中那一条的详情。不是「一个模态看一份
 // 报文」—— 排障时要对照的是「这一轮和上一轮差在哪」，来回关开面板就没法对照了。
 //
-// ## 详情里请求与响应分块
+// ## 详情里请求与响应分页
 //
-// 「可视化 / 格式化 / 原始」三个视图都是**同一种切法**：先请求、后响应，各自成块、
-// 各自可收起。三个视图回答的是同一份东西的三个问题（语义是什么 / 结构是什么 /
-// 字节是什么），边界长得一样，切换时眼睛不用重新找位置。
+// 「可视化 / 格式化 / 原始」三个视图都是**同一种切法**：先选看请求还是响应，
+// 再用这三种方式之一去看它（与 apilot 的请求 / 响应页签 + 视图切换同一套）。
+// 请求体常常几万字、响应也可能很长，两块上下堆在一起时看响应要先滚过整个请求；
+// 分页之后切换是一次换向，而不是一次长滚动。
 //
 // ## 为什么留着抽屉而不是整屏
 //
@@ -49,12 +50,13 @@ import { IconButton } from "./ui/Button";
 import { Input } from "./ui/Input";
 import { FormattedView, RawView } from "./payload/formatted";
 import { VisualView } from "./payload/visual";
+import type { Side } from "./payload/kit";
 
 type View = "visual" | "formatted" | "raw";
 
 const VIEW_TABS: { id: View; label: string; hint: string }[] = [
   { id: "visual", label: "可视化", hint: "按语义拆开：请求参数、系统提示词、工具、上下文、回答、思考、token" },
-  { id: "formatted", label: "格式化", hint: "把请求体与响应体排成可折叠的 JSON 树" },
+  { id: "formatted", label: "格式化", hint: "把请求体或响应体排成可折叠的 JSON 树" },
   { id: "raw", label: "原始", hint: "未经任何加工的字节，用来和上游逐字节对照" },
 ];
 
@@ -75,6 +77,43 @@ function ViewTabs({ value, onChange }: { value: View; onChange: (v: View) => voi
           }`}
         >
           {t.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * 请求 / 响应。比三视图的页签**更靠外**：先决定看哪一半，再决定用哪种方式看它。
+ *
+ * 响应侧在流式进行中时挂个转圈 —— 否则切过去只看到一句「还没有响应」，
+ * 分不清是真没回还是还在等。
+ */
+function SideTabs({
+  value,
+  onChange,
+  live,
+}: {
+  value: Side;
+  onChange: (s: Side) => void;
+  live: boolean;
+}) {
+  const tabs: { id: Side; label: string }[] = [
+    { id: "request", label: "请求" },
+    { id: "response", label: "响应" },
+  ];
+  return (
+    <div className="inline-flex rounded-md bg-base p-0.5 text-xs">
+      {tabs.map((t) => (
+        <button
+          key={t.id}
+          onClick={() => onChange(t.id)}
+          className={`inline-flex items-center gap-1.5 rounded px-3 py-1 transition-colors ${
+            value === t.id ? "bg-card font-medium text-ink" : "text-dim hover:text-ink"
+          }`}
+        >
+          {t.label}
+          {t.id === "response" && live && <Spinner />}
         </button>
       ))}
     </div>
@@ -197,12 +236,19 @@ function ExchangeRow({
  * 所以这一页显示的就是模型实际收到/说出的内容。解不开时不白屏：视图顶部会把
  * 原因顶出来并指向「原始」页。
  */
-function Visual({ rec, inspected }: { rec: ExchangeRecord; inspected: InspectedExchange | null }) {
+function Visual({
+  rec,
+  inspected,
+  side,
+}: {
+  rec: ExchangeRecord;
+  inspected: InspectedExchange | null;
+  side: Side;
+}) {
   return (
     <VisualView
       inspected={inspected}
-      method={rec.method}
-      url={rec.url}
+      side={side}
       status={rec.status}
       ttfbMs={rec.ttfb_ms}
       totalMs={rec.total_ms}
@@ -221,14 +267,16 @@ function Detail({
   record,
   inspected,
   view,
+  side,
 }: {
   record: ExchangeRecord;
   inspected: InspectedExchange | null;
   view: View;
+  side: Side;
 }) {
-  if (view === "visual") return <Visual rec={record} inspected={inspected} />;
-  if (view === "formatted") return <FormattedView rec={record} />;
-  return <RawView rec={record} />;
+  if (view === "visual") return <Visual rec={record} inspected={inspected} side={side} />;
+  if (view === "formatted") return <FormattedView rec={record} side={side} />;
+  return <RawView rec={record} side={side} />;
 }
 
 // ---------------------------------------------------------------------------
@@ -257,6 +305,8 @@ export function Inspector() {
     null,
   );
   const [view, setView] = useState<View>("visual");
+  // 看哪一半。默认「请求」：打开面板时最常问的是「我到底发了什么」。
+  const [side, setSide] = useState<Side>("request");
   const [query, setQuery] = useState("");
   const detailRef = useRef<HTMLDivElement>(null);
 
@@ -376,10 +426,11 @@ export function Inspector() {
     };
   }, [selected, sessionId, view, recordVersion, setNotice]);
 
-  // 换一条请求时详情回到顶部：上一条的行位置毫无意义。
+  // 换一条请求、或换看另一半时，详情回到顶部：上一条的行位置毫无意义，
+  // 在请求里滚到一半再切响应，落在响应中间也叫人摸不着头。
   useEffect(() => {
     detailRef.current?.scrollTo({ top: 0 });
-  }, [selected]);
+  }, [selected, side]);
 
   const filtered = useMemo(() => {
     const all = list?.filter((s) => turn === null || s.turn === turn) ?? [];
@@ -538,7 +589,8 @@ export function Inspector() {
             <div className="p-4 text-sm text-dim">该报文已不存在（可能已被清理）。</div>
           )}
           {record && (
-            <div className="space-y-3 p-3">
+            <div className="space-y-2 p-3">
+              {/* 第一行：这条请求是什么（翻页、时间、渠道、模型）。 */}
               <div className="flex flex-wrap items-center gap-2">
                 <div className="flex items-center gap-0.5">
                   <IconButton
@@ -560,37 +612,50 @@ export function Inspector() {
                   </IconButton>
                 </div>
 
-                <ViewTabs value={view} onChange={setView} />
-
-                <span className="text-[11px] text-dim">
+                <span className="min-w-0 flex-1 truncate mono text-[11px] text-ink" title={record.url}>
+                  {record.method} {record.url}
+                </span>
+                <span className="shrink-0 text-[11px] tabular-nums text-dim">
                   {new Date(record.ts).toLocaleString("zh-CN")}
                 </span>
                 {/* 上游渠道与模型引用：同一个模型可能配在多个渠道上，详情里也要写明。 */}
                 {record.channel && (
                   <span
-                    className="rounded bg-tone-blue-soft px-1.5 py-0.5 text-[11px] text-tone-blue"
+                    className="shrink-0 rounded bg-tone-blue-soft px-1.5 py-0.5 text-[11px] text-tone-blue"
                     title="上游渠道"
                   >
                     {record.channel}
                   </span>
                 )}
                 {record.model && (
-                  <span className="mono text-[11px] text-dim" title="模型引用">
+                  <span className="shrink-0 mono text-[11px] text-dim" title="模型引用">
                     {record.model}
                   </span>
                 )}
                 {live && (
-                  <span className="inline-flex items-center gap-1 text-[11px] text-tone-blue">
+                  <span className="inline-flex shrink-0 items-center gap-1 text-[11px] text-tone-blue">
                     <Spinner />
                     进行中
                   </span>
                 )}
               </div>
 
+              {/* 第二行：先攒看哪一半，再看用哪种方式看；两者右侧对齐。 */}
+              <div className="flex flex-wrap items-center gap-2">
+                <SideTabs value={side} onChange={setSide} live={live} />
+                <span className="text-[11px] text-dim">
+                  {side === "request" ? "上游收到的请求" : "上游发出的响应"}
+                </span>
+                <div className="ml-auto">
+                  <ViewTabs value={view} onChange={setView} />
+                </div>
+              </div>
+
               <Detail
                 record={record}
                 inspected={inspected?.id === record.id ? inspected.value : null}
                 view={view}
+                side={side}
               />
             </div>
           )}

@@ -1,8 +1,8 @@
 // 「可视化」页：把一次交换的字节**解回 IR** 之后按语义渲染。
 //
-// 分成**请求**与**响应**两块，方向和位置都固定：看一条报文时，第一件事是分清
-// 「模型收到了什么」和「模型说出了什么」。两块各自摊开，而不是把参数、上下文、
-// 回答、用量平铺成一条长流 —— 后者一屏之内找不到边界。
+// 一次**只画一侧**：`side` 说画请求还是响应。这是「请求 / 响应」页签在视图里的
+// 落点 —— 请求常常几万字（系统提示词 + 工具 + 整段历史），响应又可能很长，
+// 两块上下堆在一起，看响应要先滚过整个请求。分成两页各自满屏，切换是一次换向。
 //
 // 数据来自后端的 `inspect_exchange`（`crates/carter-app-core/src/inspect.rs`），
 // 那里用的是与真实链路同一套 codec，所以这里显示的就是模型实际收到/说出的内容。
@@ -29,6 +29,7 @@ import {
   LongText,
   Pill,
   Section,
+  type Side,
 } from "./kit";
 
 // ---------------------------------------------------------------------------
@@ -229,8 +230,8 @@ function ResponseBlocks({
 
 export type VisualProps = {
   inspected: InspectedExchange | null;
-  method: string;
-  url: string;
+  /** 看哪一半。与「请求 / 响应」页签一致，三个视图共用同一个取值。 */
+  side: Side;
   status: number | null;
   ttfbMs: number | null;
   totalMs: number | null;
@@ -246,8 +247,7 @@ export type VisualProps = {
 
 export function VisualView({
   inspected,
-  method,
-  url,
+  side,
   status,
   ttfbMs,
   totalMs,
@@ -274,46 +274,59 @@ export function VisualView({
   const statusTone = status === null ? undefined : status >= 500 ? "bad" : status >= 400 ? "warn" : "ok";
   const respRaw = streamText || responseBody;
 
+  // 解不开时只对**解不出来的那一侧**提示：上游请求体常常不是它自己的协议
+  // （比如 Anthropic 渠道上的探测请求），请求解开了却把响应也指向「原始」页
+  // 就白吓人一跳。
+  const decodeError = (missing: boolean) =>
+    missing && inspected.decode_error ? (
+      <div className="rounded-md border border-[var(--warn-border)] bg-[var(--warn-bg)] px-2 py-1.5 text-xs text-tone-orange">
+        {inspected.decode_error}
+        <div className="mt-1 text-[11px] text-dim">
+          完整字节在「原始」页 —— 那里不做任何解释，能看到上游实际发了什么。
+        </div>
+      </div>
+    ) : null;
+
+  if (side === "request") {
+    return (
+      <div className="space-y-3">
+        {decodeError(!inspected.request)}
+        <Direction
+          label="请求"
+          // URL 已经在详情页顶部一行里了，这里不重复，换成「有多大」。
+          headline={`${fmtNumber(requestBody.length)} 字符`}
+          copy={requestBody}
+          meta={
+            <>
+              <Pill>{inspected.protocol || "未知协议"}</Pill>
+              {inspected.protocol_guessed && <Pill tone="warn">协议按 URL 猜的</Pill>}
+              {inspected.request && <Pill>{inspected.request.model}</Pill>}
+              {inspected.request && <Pill>{inspected.request.stream ? "流式" : "非流式"}</Pill>}
+            </>
+          }
+        >
+          {inspected.request ? (
+            <RequestBlocks req={inspected.request} />
+          ) : (
+            <div className="text-xs text-dim">（请求体没解出来）</div>
+          )}
+          <Section title="请求头" count={`${headers.request.length} 个`} defaultOpen={false}>
+            <HeadersTable headers={headers.request} />
+          </Section>
+        </Direction>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-3">
-      {inspected.decode_error && (
-        <div className="rounded-md border border-[var(--warn-border)] bg-[var(--warn-bg)] px-2 py-1.5 text-xs text-tone-orange">
-          {inspected.decode_error}
-          <div className="mt-1 text-[11px] text-dim">
-            完整字节在「原始」页 —— 那里不做任何解释，能看到上游实际发了什么。
-          </div>
-        </div>
-      )}
+      {/* 进行中解不出响应是正常的（还没收到），不该报错。 */}
+      {!live && decodeError(!inspected.response)}
       {streamError && (
         <div className="rounded-md border border-[var(--error-border)] bg-[var(--error-bg)] px-2 py-1.5 text-xs text-[var(--danger)]">
           流内错误：{streamError}
         </div>
       )}
-
-      <Direction
-        label="请求"
-        headline={`${method} ${url}`}
-        copy={requestBody}
-        meta={
-          <>
-            <Pill>{inspected.protocol || "未知协议"}</Pill>
-            {inspected.protocol_guessed && (
-              <Pill tone="warn">协议按 URL 猜的</Pill>
-            )}
-            {inspected.request && <Pill>{inspected.request.model}</Pill>}
-            {inspected.request && <Pill>{inspected.request.stream ? "流式" : "非流式"}</Pill>}
-          </>
-        }
-      >
-        {inspected.request ? (
-          <RequestBlocks req={inspected.request} />
-        ) : (
-          <div className="text-xs text-dim">（请求体没解出来）</div>
-        )}
-        <Section title="请求头" count={`${headers.request.length} 个`} defaultOpen={false}>
-          <HeadersTable headers={headers.request} />
-        </Section>
-      </Direction>
 
       <Direction
         label="响应"

@@ -1,4 +1,4 @@
-// 「格式化」页：请求与响应**分开**，各自摊成能读的结构化 JSON。
+// 「格式化」页：请求或响应**单独**摊成能读的结构化 JSON。
 //
 // ## 为什么不是一个 `JSON.stringify(record, null, 2)`
 //
@@ -17,7 +17,7 @@ import type { ExchangeRecord } from "../../lib/api";
 import { fmtNumber } from "../../lib/format";
 import { EventStream } from "./EventStream";
 import { JsonTree, isPlainObject } from "./JsonTree";
-import { CopyButton, Direction, HeadersTable, Pill, Section, parseJson } from "./kit";
+import { CopyButton, Direction, HeadersTable, Pill, Section, parseJson, type Side } from "./kit";
 
 /** 一段可能不是 JSON 的正文：能成树就成树，否则原样。 */
 function JsonBody({
@@ -52,36 +52,41 @@ function JsonBody({
   return <JsonTree value={parsed} defaultDepth={defaultDepth} className={maxHeight} />;
 }
 
-export function FormattedView({ rec }: { rec: ExchangeRecord }) {
+export function FormattedView({ rec, side }: { rec: ExchangeRecord; side: Side }) {
   const streaming = rec.stream_frames.length > 0;
   // 帧是原始字节块，空串拼接才等于上游实际吐出的字节流；用换行拼会凭空插入字符。
   const streamText = rec.stream_frames.join("");
-  const responseText = streaming ? streamText : rec.response_body;
 
   const statusTone =
     rec.status === null ? undefined : rec.status >= 500 ? "bad" : rec.status >= 400 ? "warn" : "ok";
 
+  if (side === "request") {
+    return (
+      <div className="space-y-3">
+        <Direction
+          label="请求"
+          // URL 在上方那一行已经有了，这里放「有多大」。
+          headline={`${fmtNumber(rec.request_body.length)} 字符`}
+          copy={rec.request_body}
+          meta={
+            <>
+              {rec.protocol && <Pill>{rec.protocol}</Pill>}
+              {rec.channel && <Pill>{rec.channel}</Pill>}
+              {rec.model && <Pill>{rec.model}</Pill>}
+            </>
+          }
+        >
+          <JsonBody text={rec.request_body} />
+          <Section title="请求头" count={`${rec.request_headers.length} 个`} defaultOpen={false}>
+            <HeadersTable headers={rec.request_headers} />
+          </Section>
+        </Direction>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-3">
-      <Direction
-        label="请求"
-        headline={`${rec.method} ${rec.url}`}
-        copy={rec.request_body}
-        meta={
-          <>
-            {rec.protocol && <Pill>{rec.protocol}</Pill>}
-            {rec.channel && <Pill>{rec.channel}</Pill>}
-            {rec.model && <Pill>{rec.model}</Pill>}
-            <Pill>{fmtNumber(rec.request_body.length)} 字符</Pill>
-          </>
-        }
-      >
-        <JsonBody text={rec.request_body} />
-        <Section title="请求头" count={`${rec.request_headers.length} 个`} defaultOpen={false}>
-          <HeadersTable headers={rec.request_headers} />
-        </Section>
-      </Direction>
-
       <Direction
         label="响应"
         headline={
@@ -89,7 +94,7 @@ export function FormattedView({ rec }: { rec: ExchangeRecord }) {
             ? `流式 · ${fmtNumber(rec.stream_frames.length)} 个字节块 · ${fmtNumber(streamText.length)} 字符`
             : `${fmtNumber(rec.response_body.length)} 字符`
         }
-        copy={responseText || undefined}
+        copy={(streaming ? streamText : rec.response_body) || undefined}
         meta={
           <>
             {rec.status !== null && <Pill tone={statusTone}>{rec.status}</Pill>}
@@ -129,28 +134,29 @@ export function FormattedView({ rec }: { rec: ExchangeRecord }) {
  * 排障时经常要拿它和上游的返回逐字节对照；格式化一旦动了空白就比较不了。
  * 所以这里只做两件事：按请求 / 响应分开、标清楚字节数。
  */
-export function RawView({ rec }: { rec: ExchangeRecord }) {
+export function RawView({ rec, side }: { rec: ExchangeRecord; side: Side }) {
   const streaming = rec.stream_frames.length > 0;
   const response = streaming ? rec.stream_frames.join("") : rec.response_body;
 
+  if (side === "request") {
+    return (
+      <div className="space-y-3">
+        <Direction
+          label="请求"
+          headline={`${fmtNumber(rec.request_body.length)} 字符`}
+          copy={rec.request_body}
+          meta={<Pill>未改动</Pill>}
+        >
+          <pre className="max-h-[56vh] overflow-auto whitespace-break-spaces rounded bg-base p-2 mono text-[11px] leading-relaxed text-ink">
+            {rec.request_body || "（空）"}
+          </pre>
+        </Direction>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-3">
-      <Direction
-        label="请求"
-        headline={`${rec.method} ${rec.url}`}
-        copy={rec.request_body}
-        meta={
-          <>
-            <Pill>{fmtNumber(rec.request_body.length)} 字符</Pill>
-            <Pill>未改动</Pill>
-          </>
-        }
-      >
-        <pre className="max-h-[46vh] overflow-auto whitespace-break-spaces rounded bg-base p-2 mono text-[11px] leading-relaxed text-ink">
-          {rec.request_body || "（空）"}
-        </pre>
-      </Direction>
-
       <Direction
         label="响应"
         headline={
@@ -172,7 +178,7 @@ export function RawView({ rec }: { rec: ExchangeRecord }) {
             流内错误：{rec.stream_error}
           </div>
         )}
-        <pre className="max-h-[46vh] overflow-auto whitespace-break-spaces rounded bg-base p-2 mono text-[11px] leading-relaxed text-ink">
+        <pre className="max-h-[56vh] overflow-auto whitespace-break-spaces rounded bg-base p-2 mono text-[11px] leading-relaxed text-ink">
           {response || "（空）"}
         </pre>
 
