@@ -63,9 +63,17 @@ export function newSession(): void {
   void replaceSession({ resume: false });
 }
 
-/** 打开一条历史会话。 */
+/**
+ * 打开一条历史会话。
+ *
+ * 点的就是**当前这条**时只切回对话视图，不重开：在设置页里点高亮那一行，
+ * 本意是「回去接着聊」，而 `replaceSession` 会把它关掉再从盘上重读 ——
+ * 正在流式输出的那一轮、排队中的消息就都没了。
+ */
 export function openSession(id: string): void {
-  useStore.getState().setView("chat");
+  const store = useStore.getState();
+  store.setView("chat");
+  if (id === store.sessionId) return;
   void replaceSession({ resume: false, resumeId: id });
 }
 

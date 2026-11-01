@@ -13,6 +13,7 @@ import { toastError } from "../../lib/toast";
 import { useAsync } from "../../lib/useAsync";
 import { SessionList } from "../../components/SessionList";
 import { openSession } from "../../lib/sessionOps";
+import { useStore } from "../../store";
 import { Button, IconButton } from "../../components/ui/Button";
 import { Input } from "../../components/ui/Input";
 import { Badge, Card } from "../../components/ui/Panel";
@@ -55,6 +56,8 @@ function SearchResults({
 
 export function SessionsPage() {
   const state = useAsync(() => listSessions(true), []);
+  // 高亮当前正开着的那条 —— 也要能从这里点它回到对话（见 `openSession`）。
+  const activeId = useStore((s) => s.sessionId);
 
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<SearchHit[] | null>(null);
@@ -159,7 +162,7 @@ export function SessionsPage() {
                   刷新
                 </Button>
               </div>
-              <SessionList sessions={sessions} activeId={null} dense={false} />
+              <SessionList sessions={sessions} activeId={activeId} dense={false} />
             </>
           )}
         </AsyncBody>

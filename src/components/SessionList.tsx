@@ -63,13 +63,13 @@ function Row({
   // 行内「更多」与右键走同一份动作 —— 两处各列一遍必然会走样
   //（比如右键多了「重命名」，按钮菜单里却没有）。
   const actions: MenuEntry[] = [];
-  if (!active) {
-    actions.push({
-      label: "打开",
-      icon: <MessageSquare size={12} />,
-      onSelect: () => ops.openSession(s.id),
-    });
-  }
+  // 当前这条也给「打开」：在设置页里点它，本意就是回到对话视图，
+  // 而不是去点一个没反应的行。
+  actions.push({
+    label: active ? "回到对话" : "打开",
+    icon: <MessageSquare size={12} />,
+    onSelect: () => ops.openSession(s.id),
+  });
   actions.push(
     { label: "重命名", icon: <Pencil size={12} />, onSelect: () => setRenaming(true) },
     "separator",
@@ -122,11 +122,12 @@ function Row({
         ) : (
           <button
             // 不用 disabled：禁用的按钮在 WebKit 里不派发鼠标事件，右键就落不到行上。
-            onClick={() => {
-              if (!active) ops.openSession(s.id);
-            }}
-            title={active ? "当前会话" : "打开这个会话"}
-            className={`min-w-0 flex-1 text-left ${active ? "cursor-default" : ""}`}
+            //
+            // 当前这条也接点击：侧栏里点它什么都不用发生（已经在对话视图），
+            // 但「会话」设置页里点它应当回到对话 —— 否则这行看起来是死的。
+            onClick={() => ops.openSession(s.id)}
+            title={active ? "当前会话 · 点击回到对话" : "打开这个会话"}
+            className="min-w-0 flex-1 text-left"
           >
             <div className="truncate text-sm text-ink">{title}</div>
             <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-dim">
