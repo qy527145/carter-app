@@ -993,9 +993,7 @@ impl Runner {
                 if let Some(parent) = self.ctx.handle.parent_id.as_deref() {
                     match crate::side::parent_context(&self.ctx.shell, parent) {
                         Some(c) => s.push(c),
-                        None => s.push("## 主对话
-
-（主对话已经关闭，看不到了。）".into()),
+                        None => s.push("## 主对话\n\n（主对话已经关闭，看不到了。）".into()),
                     }
                 }
                 s
@@ -1020,8 +1018,7 @@ impl Runner {
                 provider: self.ctx.provider.clone(),
                 model: self.ctx.model.clone(),
                 agent_cfg: self.ctx.config.agent.clone(),
-                base_system: system.join("
-"),
+                base_system: system.join("\n"),
                 cancel: self.ctx.handle.cancel.clone(),
                 mcp_tools: self.mcp_tools.clone(),
                 cwd: self.ctx.cwd.clone(),
@@ -1053,8 +1050,7 @@ impl Runner {
     fn measure_overhead(&mut self, system: &[String], tools: &carter::tools::ToolRegistry) {
         let tokenizer = &self.ctx.model.tokenizer;
         let specs = serde_json::to_string(&tools.specs()).unwrap_or_default();
-        self.overhead = carter::tokens::count_text(&system.join("
-"), tokenizer)
+        self.overhead = carter::tokens::count_text(&system.join("\n"), tokenizer)
             + carter::tokens::count_text(&specs, tokenizer);
     }
 
@@ -1810,6 +1806,9 @@ async fn forward_events(
                 }
                 Some(ToolEvent::Finished { call_id, ok, content, elapsed_ms }) => {
                     send(&shell, SessionEvent::ToolFinished { call_id, ok, content, elapsed_ms });
+                }
+                Some(ToolEvent::Agent { call_id, agents }) => {
+                    send(&shell, SessionEvent::AgentProgress { call_id, agents });
                 }
                 None => tool_open = false,
             },

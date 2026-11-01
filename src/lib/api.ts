@@ -74,6 +74,8 @@ export type SessionEvent =
       content: string;
       elapsed_ms: number;
     }
+  /** `agent` 工具里几个子 agent 的进度（整表快照，按 `call_id` 配对那张卡片）。 */
+  | { type: "agent_progress"; call_id: string; agents: AgentRun[] }
   | { type: "todo_updated"; todos: TodoView[] }
   /** 长任务目标变了（设定 / 暂停 / 恢复 / 完成 / 清除）。`null` = 已经没有目标。 */
   | { type: "goal"; goal: GoalView | null }
@@ -121,6 +123,17 @@ export type AppEvent =
   /** `~/.carter/config.toml` 被改过并已热重载，各设置页据此重拉数据。 */
   | { type: "config_changed" }
   | { type: "error"; message: string };
+
+/** `agent` 工具里一个子 agent 的当前状态。 */
+export type AgentRun = {
+  description: string;
+  status: "running" | "done" | "failed" | "cancelled";
+  steps: number;
+  /** 此刻正在跑的工具名；`null` = 在思考或已结束。 */
+  tool: string | null;
+  /** 最近一段输出（尾部截断）。 */
+  text: string;
+};
 
 export type TodoView = {
   content: string;

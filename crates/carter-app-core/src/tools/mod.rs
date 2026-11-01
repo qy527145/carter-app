@@ -5,17 +5,17 @@
 //!
 //! carter 0.1.4 的 `ToolRegistry` 是「全部常开」，`Config` 里也没有任何开关字段。
 //! 本应用不改 carter（它已经发布、CLI 也在用），而是在**装配之后**按名单挑一遍 ——
-//! `ToolRegistry::empty/push/tools` 与 `TaskTool::new` 都是 crate 公开 API，这条路成立。
+//! `ToolRegistry::empty/push/tools` 都是 crate 公开 API，这条路成立。
 //!
-//! ## 为什么 `task` 要单独重建
+//! ## 为什么不用 carter 自带的 `task`
 //!
-//! `build_tools` 产出的 `task` 工具内部握着一个「工厂闭包」，子 agent 派生时用它
-//! 重建工具池。若把 `task` 原样搬过来，那个闭包里装的还是**没过滤**的全量工具：
-//! 用户关掉 `bash`，主 agent 拿不到，子 agent 却照跑。
+//! `build_tools` 产出的 `task` 内部握着一个「工厂闭包」，子 agent 派生时用它重建
+//! 工具池。若把 `task` 原样搬过来，闭包里装的还是**没过滤**的全量工具：用户关掉
+//! `bash`，主 agent 拿不到，子 agent 却照跑。而且它在整段执行期间一个事件都不发 ——
+//! 界面上就是个转圈的卡片，跑二十分钟看不出里面有几个、到哪一步了。
 //!
-//! 所以这里重新造一个 `task`，工厂里放过滤后的快照 —— 而那份快照与主工具池
-//! **是同一份值**（见 [`filter_tools`]）。这是「关掉的工具对子 agent 同样失效」
-//! 的唯一保证，也正因为如此两条路径必须共用这一个函数的返回值。
+//! 所以换成 [`agent::AgentTool`]：一次收 `tasks: [...]` 并发派生，进度实时推给界面；
+//! 工具池直接用过滤后的快照（见 [`filter_tools`]），"关掉的工具对子 agent 同样失效"。
 //!
 //! ## 换掉 / 包住哪些实现
 //!
@@ -53,6 +53,7 @@
 //! 名单存在 `~/.carter-app/settings.json`，不是 `~/.carter/config.toml`。
 //! carter CLI 读不到它，也不会受它影响 —— 界面上必须把这句话写出来。
 
+pub mod agent;
 pub mod ask_user;
 pub mod background;
 pub mod bash;
@@ -68,7 +69,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64};
 
 use carter::agent::bootstrap::build_tools as carter_build_tools;
-use carter::agent::{CancelToken, TaskTool, ToolFactory};
+use carter::agent::CancelToken;
 use carter::config::AgentConfig;
 use carter::provider::LlmProvider;
 use carter::registry::ModelInfo;
@@ -78,6 +79,7 @@ use tokio::sync::mpsc;
 use crate::app_settings::AppSettings;
 use crate::goal::GoalSignal;
 use crate::skills::Scan;
+use agent::AgentTool;
 use ask_user::{AskRequest, AskUserTool};
 use background::{BackgroundShells, BashOutputTool, KillShellTool};
 use bash::PlatformBash;
@@ -90,7 +92,7 @@ use record::{Recorded, ToolEvent};
 
 /// 装配工具池需要的一整套东西。
 ///
-/// 打包成结构体是因为裸参数有十几个，而其中四个在重建 `task` 时要各用两次 ——
+/// 打包成结构体是因为裸参数有十几个，而其中几个装配 `agent` 时要再用一次 ——
 /// 那点位置参数摆在那里，早晚会有人传错顺序。
 pub struct ToolBuildArgs {
     pub provider: Arc<dyn LlmProvider>,
@@ -106,7 +108,7 @@ pub struct ToolBuildArgs {
     pub tool_tx: mpsc::UnboundedSender<ToolEvent>,
     /// 提问请求的出口。`None` = 不给这个会话注册 `ask_user_question`。
     pub ask_tx: Option<mpsc::UnboundedSender<AskRequest>>,
-    /// 是否挂上 `task`（派生子 agent 的入口）。侧边聊天不挂。
+    /// 是否挂上 `agent`（派生子 agent 的入口）。侧边聊天不挂。
     pub include_task: bool,
     /// 后台命令表。`Some` 时才会挂上 `bash_output` / `kill_shell`。
     ///
@@ -187,9 +189,9 @@ pub fn substitute_with(
 
 /// 装配工具池。
 ///
-/// 顺序：carter 装配 → 换实现 → 过滤 → 记录包装 → 快照 → 挂上 `task`。
-/// `task` 必须最后挂：子 agent 的工厂闭包捕获的是「此刻已有的工具」，
-/// 这个顺序就是递归守卫（工厂里不含 `task`，子 agent 不能再派生）。
+/// 顺序：carter 装配 → 换实现 → 过滤 → 记录包装 → 快照 → 挂上 `agent`。
+/// `agent` 拿到的是「此刻已有的工具」的快照，所以子 agent 那里没有 `agent`
+/// 自身 —— 这个顺序就是递归守卫。
 pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry {
     let ToolBuildArgs {
         provider,
@@ -226,6 +228,9 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
 
     let seq = Arc::new(AtomicU64::new(0));
     let mut tools = ToolRegistry::empty();
+    // `agent` 要自己发进度事件，而 `push` 闭包把这两个吃掉了 —— 先各留一份。
+    let agent_tx = tool_tx.clone();
+    let agent_activity = activity.clone();
 
     let push = |t: Arc<dyn Tool>, tools: &mut ToolRegistry| {
         tools.push(Arc::new(
@@ -263,22 +268,30 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
         }
     }
 
-    // 子 agent 工厂：产出「主 registry 中的所有工具（去掉 task）」。这个快照必须在
-    // 挂 `goal_update` **之前**取，否则子 agent 也拿到 goal_update，一次
-    // status = completed 就能把父会话的目标标完成 —— 而这种错不会报错，只会让
-    // 长任务悄悄停下。
-    let snapshot: Vec<Arc<dyn Tool>> = tools.tools().to_vec();
+    // 子 agent 的工具池：主 registry 里的全部工具，去掉 `agent`（不能再派生）与
+    // `ask_user_question`（几个子 agent 同时弹表单，人会疯）、`goal_update`（子 agent
+    // 一次 status = completed 就能把父会话的目标标完成，而这种错不报错，只会让长任务
+    // 悄悄停下）。这个快照必须在挂 `goal_update` **之前**取。
+    let snapshot: Vec<Arc<dyn Tool>> = tools
+        .tools()
+        .iter()
+        .filter(|t| !matches!(t.name(), "agent" | "ask_user_question" | "goal_update"))
+        .cloned()
+        .collect();
     if include_task {
-        let factory: ToolFactory = Arc::new(move || snapshot.clone());
-        tools.push(Arc::new(TaskTool::new(
-            provider,
-            model,
-            agent_cfg,
-            base_system,
-            cancel,
-            factory,
-            0, // 主 agent depth = 0
-        )));
+        push(
+            Arc::new(AgentTool::new(
+                provider,
+                model,
+                agent_cfg,
+                base_system,
+                cancel,
+                snapshot,
+                agent_tx,
+                agent_activity,
+            )),
+            &mut tools,
+        );
     }
 
     push(Arc::new(GoalUpdateTool::new(goal_signal)), &mut tools);

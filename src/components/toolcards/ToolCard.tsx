@@ -37,6 +37,7 @@ import {
   Search,
   Square,
   Terminal,
+  Users,
   Wrench,
   X,
 } from "lucide-react";
@@ -559,6 +560,77 @@ function TaskCard({ item }: { item: ToolItem }) {
   );
 }
 
+/**
+ * `agent`：主对话派出去的几个子 agent。
+ *
+ * 折叠时看得到每个子 agent 的标题、状态、当前工具 —— 跑十几分钟的时候，
+ * 「谁还活着、卡在哪」是唯一想看的东西。展开是「结论」：每个子 agent 最近一段
+ * 输出（尾部），以及交回来给模型的汇总。
+ */
+function AgentCard({ item }: { item: ToolItem }) {
+  const r = item.result;
+  const agents = item.agents ?? [];
+  const running = agents.filter((a) => a.status === "running").length;
+  const summary = r
+    ? running === 0
+      ? agents.length > 1
+        ? `${agents.length} 个子 agent`
+        : (agents[0]?.description ?? "子 agent")
+      : `${running} 个在跑`
+    : "派发中…";
+
+  return (
+    <Card
+      tone="violet"
+      icon={<Users size={11} />}
+      title="agent"
+      subtitle={summary}
+      status={<Status item={item} />}
+      defaultOpen={!item.result}
+      forceOpen={r ? !r.ok : false}
+    >
+      {agents.length > 0 && (
+        <ul className="mb-2 space-y-1.5">
+          {agents.map((a, i) => (
+            <li key={i} className="rounded-md bg-ink/[0.03] px-2 py-1.5">
+              <div className="flex items-center gap-1.5">
+                <AgentDot status={a.status} />
+                <span className="min-w-0 flex-1 truncate text-[11px] text-ink">
+                  {a.description}
+                </span>
+                {a.status === "running" && a.tool && (
+                  <span className="mono shrink-0 rounded bg-ink/5 px-1 text-[10px] text-dim">
+                    {a.tool}
+                  </span>
+                )}
+                {a.steps > 0 && (
+                  <span className="shrink-0 tabular-nums text-[10px] text-dim">{a.steps} 步</span>
+                )}
+              </div>
+              {a.status === "running" && a.text && (
+                <div className="mono mt-1 line-clamp-2 whitespace-pre-wrap break-all text-[10px] leading-relaxed text-dim">
+                  {a.text}
+                </div>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {r && <Output text={r.content} />}
+    </Card>
+  );
+}
+
+/** 子 agent 状态的圆点：跑着转、成了绿、挂了红、断了灰。 */
+function AgentDot({ status }: { status: string }) {
+  if (status === "running") {
+    return <LoaderCircle size={10} className="shrink-0 animate-spin text-tone-violet" />;
+  }
+  if (status === "done") return <CircleCheck size={10} className="shrink-0 text-[var(--ok)]" />;
+  if (status === "failed") return <CircleX size={10} className="shrink-0 text-[var(--danger)]" />;
+  return <Square size={9} className="shrink-0 text-dim" />;
+}
+
 /** 兜底：未知的工具也不能什么都不显示。参数原样摊开。 */
 function GenericCard({ item }: { item: ToolItem }) {
   const r = item.result;
@@ -601,6 +673,7 @@ type CardProps = { item: ToolItem; isLast?: boolean; cwd?: string };
 
 const DISPATCH: Record<string, (p: CardProps) => React.ReactElement> = {
   bash: BashCard,
+  agent: AgentCard,
   todo_write: TodoCard,
   glob: (p) => <SearchCard {...p} tone="blue" icon={<Folder size={11} />} title="glob" />,
   grep: (p) => <SearchCard {...p} tone="green" icon={<Search size={11} />} title="grep" />,

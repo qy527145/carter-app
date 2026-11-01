@@ -236,6 +236,11 @@ pub enum SessionEvent {
         content: String,
         elapsed_ms: u64,
     },
+    /// `agent` 工具里各个子 agent 的进度（整表快照）。
+    AgentProgress {
+        call_id: String,
+        agents: Vec<AgentRun>,
+    },
     /// todo 列表整表更新。用于底栏那条进度提示。
     TodoUpdated { todos: Vec<TodoView> },
     /// 长任务目标变了（设定 / 暂停 / 恢复 / 完成 / 清除）。`None` = 已经没有目标。
@@ -306,6 +311,21 @@ pub struct ContextView {
     pub threshold: u64,
     /// 自动压缩开着没有（`agent.compact_enabled`）。
     pub auto: bool,
+}
+
+/// `agent` 工具里一个子 agent 的当前状态。整表随 [`SessionEvent::AgentProgress`] 下发。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRun {
+    /// 主对话给这一行的短标题。
+    pub description: String,
+    /// `running` | `done` | `failed` | `cancelled`。
+    pub status: String,
+    /// 已经发起了几次工具调用 —— 「一条命令跑了很久」和「根本没动」能看出区别。
+    pub steps: u32,
+    /// 此刻正在跑的工具名。`None` = 在思考或已经结束。
+    pub tool: Option<String>,
+    /// 最近一段输出（尾部截断）。
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

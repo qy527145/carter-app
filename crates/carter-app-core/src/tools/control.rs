@@ -47,11 +47,18 @@ pub fn current() -> Option<Arc<ToolControl>> {
 /// 天然支持「按之前工具已经结束了」—— 置位无害。
 #[derive(Default)]
 pub struct ToolControl {
+    /// 这条调用在界面上的编号。`agent` 工具要拿它给自己的进度事件配对。
+    call_id: String,
     interrupt: CancelToken,
     background: CancelToken,
 }
 
 impl ToolControl {
+    /// 这条调用的编号（与 `tool_started` / `tool_finished` 里那个一致）。
+    pub fn call_id(&self) -> &str {
+        &self.call_id
+    }
+
     /// 等「中断这条命令」被按下。
     pub async fn interrupted(&self) {
         self.interrupt.cancelled().await
@@ -89,7 +96,10 @@ impl RunningTools {
     }
 
     fn register(&self, call_id: &str) -> Arc<ToolControl> {
-        let control = Arc::new(ToolControl::default());
+        let control = Arc::new(ToolControl {
+            call_id: call_id.to_string(),
+            ..Default::default()
+        });
         self.entries
             .lock()
             .unwrap()

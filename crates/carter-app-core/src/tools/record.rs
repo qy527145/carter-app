@@ -47,6 +47,14 @@ pub enum ToolEvent {
         content: String,
         elapsed_ms: u64,
     },
+    /// `agent` 工具里那几个子 agent 的进度（整表快照）。
+    ///
+    /// 不单独为「开始 / 结束」发事件：一张卡片上同时有好几行，整表替换比逐行增量
+    /// 简单得多，也不会在并发写时拼错。
+    Agent {
+        call_id: String,
+        agents: Vec<crate::protocol::AgentRun>,
+    },
 }
 
 /// 结果正文的上限。

@@ -37,6 +37,7 @@ import type {
   MessageView,
   SessionEvent,
   SessionRow,
+  AgentRun,
   TodoView,
   TurnFiles,
   TurnPrompt,
@@ -54,6 +55,11 @@ export type Item =
       /** **完整的**参数对象。差异化渲染靠它（见 components/toolcards）。 */
       args: unknown;
       result?: { ok: boolean; content: string; elapsedMs: number };
+      /**
+       * 只有 `agent` 工具有：它派出去的那几个子 agent 的实时状态。
+       * 整表替换，见后端 `AgentProgress`。
+       */
+      agents?: AgentRun[];
       /**
        * 这条调用属于哪条会话。卡片上的「中断命令 / 转后台」要按它回传 ——
        * 侧边聊天的卡片不能用主对话的 id 去查。
@@ -359,6 +365,14 @@ export function reduceConv(c: Conv, e: SessionEvent, sessionId?: string): Partia
           content: e.content,
           elapsedMs: e.elapsed_ms,
         }),
+      };
+    case "agent_progress":
+      return {
+        turns: withAssistant(c.turns, (items) =>
+          items.map((it) =>
+            it.kind === "tool" && it.callId === e.call_id ? { ...it, agents: e.agents } : it,
+          ),
+        ),
       };
     case "todo_updated":
       return { todos: e.todos };
