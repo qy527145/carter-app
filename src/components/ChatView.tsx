@@ -422,6 +422,10 @@ function ChangedFiles({
 }) {
   // 点开的是**现在磁盘上的内容**，不是这一轮的历史快照。
   const [preview, setPreview] = useState<string | null>(null);
+  // 默认摊开：一轮干完，用户最先想看的就是动了哪些文件。但长任务可能一次改几十上百个
+  // 文件（跑测试、装依赖），清单本身会把输入框顶到屏幕外，所以标题行就是开关，
+  // 展开时也只占一段可滚动的高度。
+  const [open, setOpen] = useState(true);
   if (files.length === 0) return null;
   const label: Record<ChangedFile["kind"], string> = {
     write: "写入",
@@ -429,33 +433,53 @@ function ChangedFiles({
     other: "变更",
   };
   return (
-    <div className="rounded-lg bg-card px-3 py-2">
-      <div className="mb-1.5 flex items-center gap-1.5 text-[11px] text-dim">
-        <Pencil size={11} />
-        本轮变更了 {files.length} 个文件
-      </div>
-      <ul className="space-y-1">
-        {files.map((f) => (
-          <li key={f.path} className="min-w-0">
-            <button
-              onClick={() => setPreview(f.path)}
-              title={`预览 ${f.path}`}
-              className="flex w-full min-w-0 cursor-pointer items-center gap-2 rounded px-1 py-0.5 text-left transition-colors hover:bg-elevated"
-            >
-              <Glyph
-                tone={f.kind === "write" ? "blue" : f.kind === "edit" ? "orange" : "violet"}
+    <div className="overflow-hidden rounded-lg bg-card">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        title={`${files.length} 个文件`}
+        className="flex w-full cursor-pointer items-center gap-1.5 px-3 py-2 text-left text-[11px] text-dim transition-colors hover:text-ink"
+      >
+        <ChevronRight
+          size={12}
+          className={`shrink-0 transition-transform ${open ? "rotate-90" : ""}`}
+        />
+        <Pencil size={11} className="shrink-0" />
+        <span className="shrink-0">本轮变更了 {files.length} 个文件</span>
+        {/* 折起来时标题行要能说明里头是什么，否则一串路径缩成一行等于什么都没说。 */}
+        {!open && (
+          <span className="mono min-w-0 flex-1 truncate text-dim/70">
+            {files
+              .slice(0, 3)
+              .map((f) => f.path)
+              .join(" · ")}
+            {files.length > 3 ? " …" : ""}
+          </span>
+        )}
+      </button>
+      <Collapse open={open}>
+        <ul className="max-h-72 space-y-1 overflow-y-auto border-t border-edge px-3 py-2">
+          {files.map((f) => (
+            <li key={f.path} className="min-w-0">
+              <button
+                onClick={() => setPreview(f.path)}
+                title={`预览 ${f.path}`}
+                className="flex w-full min-w-0 cursor-pointer items-center gap-2 rounded px-1 py-0.5 text-left transition-colors hover:bg-elevated"
               >
-                {f.kind === "edit" ? <Pencil size={11} /> : <FileText size={11} />}
-              </Glyph>
-              <span className="mono min-w-0 flex-1 truncate text-xs text-ink" title={f.path}>
-                {f.path}
-              </span>
-              {f.count > 1 && <span className="shrink-0 text-[10px] text-dim">×{f.count}</span>}
-              <span className="shrink-0 text-[10px] text-dim">{label[f.kind]}</span>
-            </button>
-          </li>
-        ))}
-      </ul>
+                <Glyph
+                  tone={f.kind === "write" ? "blue" : f.kind === "edit" ? "orange" : "violet"}
+                >
+                  {f.kind === "edit" ? <Pencil size={11} /> : <FileText size={11} />}
+                </Glyph>
+                <span className="mono min-w-0 flex-1 truncate text-xs text-ink" title={f.path}>
+                  {f.path}
+                </span>
+                {f.count > 1 && <span className="shrink-0 text-[10px] text-dim">×{f.count}</span>}
+                <span className="shrink-0 text-[10px] text-dim">{label[f.kind]}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      </Collapse>
       {preview !== null && (
         <FilePreviewModal
           path={preview}
