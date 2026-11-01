@@ -23,6 +23,11 @@ pub struct AppSettings {
     pub disabled_tools: Vec<String>,
     /// 侧栏宽度（像素）。
     pub sidebar_width: u32,
+    /// 对话主区的呈现密度：`detailed`（默认）| `compact`。
+    ///
+    /// 只影响界面，不改变发给模型的东西 —— 精简模式下工具照常执行，只是中间过程
+    /// 在对话里折成一条可展开的摘要。随时可切，来回切不碰历史。
+    pub conversation_mode: String,
     /// 额外的技能扫描**父目录**（规范化后的绝对路径）。
     ///
     /// 技能从 `~/.carter/skills` 与这些目录**取并集**，本地优先。加进来的典型是
@@ -61,6 +66,7 @@ impl Default for AppSettings {
             theme: "dark".into(),
             disabled_tools: Vec::new(),
             sidebar_width: 260,
+            conversation_mode: "detailed".into(),
             skill_roots: Vec::new(),
             ignored_skills: Vec::new(),
             changes_ignore: Vec::new(),
@@ -156,6 +162,7 @@ mod tests {
         let s: AppSettings = serde_json::from_str(r#"{"theme":"light"}"#).unwrap();
         assert_eq!(s.theme, "light");
         assert_eq!(s.sidebar_width, 260, "没写的字段取默认值");
+        assert_eq!(s.conversation_mode, "detailed", "新增的呈现密度字段要能缺省");
         assert!(s.disabled_tools.is_empty());
         assert!(s.skill_roots.is_empty(), "新增的扫描路径字段要能缺省");
         assert!(s.ignored_skills.is_empty());
@@ -208,6 +215,7 @@ mod tests {
             theme: "light".into(),
             disabled_tools: vec!["bash".into()],
             sidebar_width: 300,
+            conversation_mode: "compact".into(),
             skill_roots: vec!["C:\\scans\\claude".into()],
             ignored_skills: vec!["pdf".into()],
             changes_ignore: vec!["*.snap".into()],
@@ -218,6 +226,7 @@ mod tests {
         assert_eq!(back.theme, "light");
         assert_eq!(back.disabled_tools, vec!["bash".to_string()]);
         assert_eq!(back.sidebar_width, 300);
+        assert_eq!(back.conversation_mode, "compact");
         assert_eq!(back.skill_roots, vec!["C:\\scans\\claude".to_string()]);
         assert!(back.skill_ignored("pdf"));
         assert_eq!(back.changes_ignore, vec!["*.snap".to_string()]);

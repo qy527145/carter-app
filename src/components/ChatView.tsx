@@ -21,17 +21,21 @@ import {
   Copy,
   FileText,
   GitBranch,
+  ListTree,
   LoaderCircle,
   Pencil,
   RotateCcw,
+  Rows3,
   ScanSearch,
   Target,
   TriangleAlert,
+  Wrench,
   X,
 } from "lucide-react";
 
 import { useStore, type Item, type Turn } from "../store";
 import { copyText } from "../lib/clipboard";
+import { setConversationMode, useConversationMode } from "../lib/conversationMode";
 import { displayName, modelTitle, useModelCatalog } from "../lib/modelLabel";
 import { editPrompt, fork, regenerate } from "../lib/sessionOps";
 import { TOAST_MS } from "../lib/toast";
@@ -108,6 +112,121 @@ function ImageCard({ item }: { item: ImageItem }) {
       {item.hash && <span className="truncate text-dim/70">#{item.hash.slice(0, 12)}</span>}
     </div>
   );
+}
+
+/**
+ * 精简模式下把一段「过程」折成一行。
+ *
+ * 这里**不是**把工具卡片藏起来：整条对话里真正带信息量的是正文，思考与工具调用
+ * 属于过程记录 —— 回看时用户想读的是模型说了什么，而不是它敲了哪些命令。所以
+ * 折起来，但留着入口，展开后仍是原来那些卡片，一张不少。
+ *
+ * 两条例外，都是照搬工具卡片那边的纪律：
+ * - **失败一定展开**：出错时用户第一反应是看输出，让他再展开一次是多余的；
+ * - 跑着的调用要把当前那一步显示在标题上，否则这一轮看起来像卡住了。
+ */
+function summaryOf(items: Item[]): string[] {
+  const counts = new Map<string, number>();
+  let thinking = false;
+  let server = false;
+  let image = false;
+  for (const it of items) {
+    if (it.kind === "tool") counts.set(it.name, (counts.get(it.name) ?? 0) + 1);
+    else if (it.kind === "thinking") thinking = true;
+    else if (it.kind === "server") server = true;
+    else if (it.kind === "image") image = true;
+  }
+  const parts: string[] = [];
+  for (const [name, n] of counts) parts.push(n > 1 ? `${name} ×${n}` : name);
+  if (thinking) parts.push("思考");
+  if (server) parts.push("服务端");
+  if (image) parts.push("图片");
+  return parts;
+}
+
+/** 正在跑的那条调用的名字 —— 标题上要有东西在动，否则看起来像卡住了。 */
+function runningName(items: Item[]): string | null {
+  for (const it of items) {
+    if (it.kind === "tool" && !it.result) return it.name;
+  }
+  return null;
+}
+
+function ProcessGroup({ items }: { items: Item[] }) {
+  const failed = items.filter(
+    (i): i is Extract<Item, { kind: "tool" }> =>
+      i.kind === "tool" && i.result !== undefined && !i.result.ok,
+  );
+  const running = runningName(items);
+  const [manual, setManual] = useState<boolean | null>(null);
+  // 失败时强制展开；用户手动点过之后以用户为准（与工具卡片的开关同一套规矩）。
+  const open = manual ?? failed.length > 0;
+  const parts = summaryOf(items);
+
+  return (
+    <div className="rounded-lg bg-ink/[0.03]">
+      <button
+        onClick={() => setManual(!open)}
+        title={parts.join(" · ")}
+        className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-dim transition-colors hover:text-ink"
+      >
+        <ChevronRight
+          size={12}
+          className={`shrink-0 transition-transform ${open ? "rotate-90" : ""}`}
+        />
+        <Glyph tone={failed.length > 0 ? "orange" : "blue"}>
+          {running ? <LoaderCircle size={11} className="animate-spin" /> : <Wrench size={11} />}
+        </Glyph>
+        <span className="shrink-0">过程</span>
+        <span className="min-w-0 flex-1 truncate text-dim/80">
+          {running ? `正在 ${running}…` : parts.join(" · ")}
+        </span>
+        {failed.length > 0 && (
+          <span className="shrink-0 text-[11px] text-[var(--danger)]">
+            {failed.length} 步失败
+          </span>
+        )}
+      </button>
+      <Collapse open={open}>
+        <div className="space-y-2 border-t border-edge px-3 py-2">
+          {items.map((it, i) => (
+            <ItemView key={i} item={it} showCursor={false} isLast={i === items.length - 1} />
+          ))}
+        </div>
+      </Collapse>
+    </div>
+  );
+}
+
+/**
+ * 把一条助手轮的片段分成「正文 / 过程」两类。
+ *
+ * 正文（`text`）与系统说明（`note`）各自单独成段：前者是用户要读的东西，
+ * 后者是「上下文压缩了」这类必须看见的提示，两者都不该被折进过程里。
+ * 其余（思考、工具、服务端活动、图片块）按到达顺序并成一段过程 —— 顺序不能打乱，
+ * 那正是模型当时的思路。
+ */
+type Segment =
+  | { kind: "text"; item: Extract<Item, { kind: "text" }> }
+  | { kind: "note"; item: Extract<Item, { kind: "note" }> }
+  | { kind: "process"; items: Item[] };
+
+function segmentsOf(items: Item[]): Segment[] {
+  const out: Segment[] = [];
+  for (const item of items) {
+    if (item.kind === "text") {
+      out.push({ kind: "text", item });
+      continue;
+    }
+    if (item.kind === "note") {
+      out.push({ kind: "note", item });
+      continue;
+    }
+    const last = out[out.length - 1];
+    if (last && last.kind === "process") last.items.push(item);
+    else out.push({ kind: "process", items: [item] });
+  }
+  return out;
 }
 
 function ItemView({
@@ -464,6 +583,7 @@ function AssistantTurn({
   onFork?: () => void;
 }) {
   const openInspector = useStore((s) => s.openInspector);
+  const mode = useConversationMode();
   const menu = useContextMenu();
   const items = t.items;
   // 「复制」就地变对勾，2.5 秒后复位（与文件预览弹窗同一个节奏）。
@@ -532,6 +652,9 @@ function AssistantTurn({
     menu.open({ x: e.clientX, y: e.clientY }, entries);
   };
 
+  // 精简模式只在渲染这一层换一种切法（见 `segmentsOf`），数据与动作都不变。
+  const segs = mode === "compact" ? segmentsOf(items) : null;
+
   return (
     <div className="group/msg min-w-0 space-y-2" onContextMenu={onContextMenu}>
       {/* 自动继续的轮次：用户没说话，是长任务目标推起来的。画一条分隔说明来历 ——
@@ -556,14 +679,28 @@ function AssistantTurn({
           正在生成…
         </div>
       )}
-      {items.map((item, i) => (
-        <ItemView
-          key={i}
-          item={item}
-          isLast={i === items.length - 1}
-          showCursor={streaming && isLast && i === items.length - 1 && item.kind === "text"}
-        />
-      ))}
+      {segs
+        ? segs.map((seg, i) => {
+            const last = i === segs.length - 1;
+            if (seg.kind === "process") return <ProcessGroup key={i} items={seg.items} />;
+            // 光标只挂在正在生成的那一段正文上，与详细模式的判断口径一致。
+            return (
+              <ItemView
+                key={i}
+                item={seg.item}
+                isLast={last}
+                showCursor={streaming && isLast && last && seg.kind === "text"}
+              />
+            );
+          })
+        : items.map((item, i) => (
+            <ItemView
+              key={i}
+              item={item}
+              isLast={i === items.length - 1}
+              showCursor={streaming && isLast && i === items.length - 1 && item.kind === "text"}
+            />
+          ))}
       {changed.length > 0 && <ChangedFiles files={changed} cwd={cwd} turn={t.turn} />}
       {/* 回答下面那一行小动作。悬停才浮出来，但一直占着位置 —— 否则鼠标移上来
           的一瞬间整段对话会跳一下。一条动作都没有时整行不渲染（纯工具输出的回答
@@ -1102,7 +1239,36 @@ function NoticeBanner() {
   );
 }
 
-/** 顶部条：当前会话标题 + 打开报文面板的入口。 */
+/**
+ * 顶部的模式切换：详细 / 精简。
+ *
+ * 放在标题右边而不是设置页里：它不是「配置一次就不管」的东西，而是随口对话和
+ * 排障之间来回切的一个视角。放进设置页，切一次得离开对话、翻两层菜单再回来。
+ *
+ * 带文字而不是只有图标：纯图标的开关里，用户看不出「现在是哪一档、点一下会变成
+ * 哪一档」—— 这正是这个开关唯一需要说清的事。外观设置页里有同一份入口，两处
+ * 读写的是同一个偏好，切一处另一处跟着变。
+ */
+function ModeToggle() {
+  const mode = useConversationMode();
+  const compact = mode === "compact";
+  return (
+    <button
+      onClick={() => setConversationMode(compact ? "detailed" : "compact")}
+      title={
+        compact
+          ? "精简模式：中间过程折成一行摘要（工具照常执行）· 点一下看完整过程"
+          : "详细模式：每一次工具调用各占一张卡片 · 点一下收起中间过程"
+      }
+      className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-dim transition-colors hover:bg-ink/5 hover:text-ink"
+    >
+      {compact ? <Rows3 size={13} /> : <ListTree size={13} />}
+      {compact ? "精简" : "详细"}
+    </button>
+  );
+}
+
+/** 顶部条：当前会话标题 + 模式切换 + 打开报文面板的入口。 */
 function ChatHeader() {
   const sessionId = useStore((s) => s.sessionId);
   const sessions = useStore((s) => s.sessions);
@@ -1112,14 +1278,16 @@ function ChatHeader() {
   return (
     <div className="flex h-10 shrink-0 items-center gap-2 border-b border-edge px-4">
       <span className="truncate text-sm text-dim">{title || "新对话"}</span>
-      <IconButton
-        className="ml-auto"
-        disabled={!sessionId}
-        onClick={() => openInspector(null)}
-        title="查看本次会话抓到的 HTTP 报文"
-      >
-        <ScanSearch size={15} />
-      </IconButton>
+      <div className="ml-auto flex items-center gap-1">
+        <ModeToggle />
+        <IconButton
+          disabled={!sessionId}
+          onClick={() => openInspector(null)}
+          title="查看本次会话抓到的 HTTP 报文"
+        >
+          <ScanSearch size={15} />
+        </IconButton>
+      </div>
     </div>
   );
 }

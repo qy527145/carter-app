@@ -224,12 +224,24 @@ export type GoalView = {
 
 export type ThemePref = "system" | "light" | "dark";
 
+/**
+ * 对话主区的呈现密度。
+ *
+ * `detailed` = 现在的样子：思考、每一次工具调用都各占一张卡片；
+ * `compact` = 只留正文，中间过程折成一行可展开的摘要。
+ *
+ * **只影响界面**，不改变发给模型的东西 —— 两种模式下工具照常执行、结果照常回灌。
+ */
+export type ConversationMode = "detailed" | "compact";
+
 /** `~/.carter-app/settings.json`。**carter CLI 不读它。** */
 export type AppSettings = {
   theme: ThemePref;
   /** 不注册给模型的本地工具名。 */
   disabled_tools: string[];
   sidebar_width: number;
+  /** 对话主区的呈现密度。随时可切，来回切不碰会话历史。 */
+  conversation_mode: ConversationMode;
   /**
    * 额外的技能扫描父目录（规范化后的绝对路径）。技能从 `~/.carter/skills` 与这些目录
    * **取并集**，本地优先。改动请走 `addSkillRoot` / `removeSkillRoot` ——
