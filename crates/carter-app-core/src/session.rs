@@ -122,7 +122,7 @@ pub fn start_session(shell: Arc<AppShell>, opts: SessionOptions) -> carter::Resu
 
     // 会话文件：按 id 打开 → 续接最近的 → 起一个新的。
     let existing = match &opts.resume_id {
-        Some(id) => find_by_id(&opts.cwd, id),
+        Some(id) => find_by_id(id),
         None if opts.resume_latest => session::latest(&opts.cwd),
         None => None,
     };
@@ -158,10 +158,20 @@ pub fn start_session(shell: Arc<AppShell>, opts: SessionOptions) -> carter::Resu
         );
     }
 
+    // 工作目录以**会话文件里记的**为准，不用请求里带来的那个。
+    //
+    // 「会话」设置页会列出别的项目下的会话，点开它时工具、系统提示、git 快照都该
+    // 落在那条对话自己的目录里；用请求里的 cwd（桌面端默认是家目录）会把一条在 A
+    // 目录的对话接到 B 目录下跑。
+    let cwd = match resumed {
+        true => resumed_cwd(&meta.cwd, &opts.cwd),
+        false => opts.cwd.clone(),
+    };
+
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let handle = SessionHandle::new(
         meta.id.clone(),
-        opts.cwd.clone(),
+        cwd.clone(),
         model.clone(),
         None,
         cmd_tx,
@@ -193,7 +203,7 @@ pub fn start_session(shell: Arc<AppShell>, opts: SessionOptions) -> carter::Resu
         config,
         settings: AppSettings::load(),
         resumed,
-        cwd: opts.cwd,
+        cwd,
         unsupported_server_tools,
         capture: Some(capture_store),
         include_task: true,
@@ -1627,5 +1637,35 @@ mod tests {
             g
         };
         assert!(goal_noop_note(&GoalCommand::Resume, Some(&paused)).contains("已经在推进"));
+    }
+
+    /// 续接历史会话时按会话自己记的目录跑；目录没了就退回请求里的 cwd。
+    ///
+    /// 不这么做的话，从「会话」页点开一条别的项目下的会话，会拿家目录去当工作目录 ——
+    /// 工具、系统提示、git 快照全错位，而且界面上只表现为「工作目录跳了」。
+    #[test]
+    fn a_resumed_session_keeps_its_own_directory_and_falls_back_when_its_gone() {
+        let mine = std::env::temp_dir().join(format!(
+            "carter-app-resume-cwd-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&mine).unwrap();
+
+        let requested = std::path::Path::new("/definitely/not/here");
+        let recorded = mine.to_string_lossy().to_string();
+        assert_eq!(resumed_cwd(&recorded, requested), mine);
+
+        // 记下来的目录已经不在了：别把会话卡死，退回去继续能用。
+        let gone = mine.join("deleted-just-now");
+        assert_eq!(
+            resumed_cwd(&gone.to_string_lossy(), requested),
+            requested.to_path_buf()
+        );
+
+        std::fs::remove_dir_all(&mine).unwrap();
     }
 }

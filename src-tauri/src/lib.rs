@@ -208,10 +208,11 @@ async fn close_session(shell: State<'_, Arc<AppShell>>, session_id: String) -> R
     Ok(())
 }
 
-/// 列举会话。`all = false` 只看默认目录，`true` 跨所有项目。
+/// 列举会话。`all = false` 只看 `cwd`（不给就是默认目录），`true` 跨所有项目。
 #[tauri::command]
-fn list_sessions(all: bool) -> Vec<SessionRow> {
-    sessions::list(&default_cwd(), all)
+fn list_sessions(all: bool, cwd: Option<String>) -> Vec<SessionRow> {
+    let cwd = cwd.map(PathBuf::from).unwrap_or_else(default_cwd);
+    sessions::list(&cwd, all)
 }
 
 /// 改标题。走「追加一条 Title 记录」，所以不需要动会话文件其余部分。

@@ -197,11 +197,29 @@ export function SessionList({
   sessions,
   activeId,
   dense = true,
+  groupByTime = true,
 }: {
   sessions: SessionRow[];
   activeId: string | null;
   dense?: boolean;
+  /**
+   * 是否按时间分组。
+   *
+   * 「会话」设置页自己按目录分组（见 `SessionsPage`），里面再套一层今天/昨天
+   * 就成了两层表头 —— 所以那一处关掉。
+   */
+  groupByTime?: boolean;
 }) {
+  if (!groupByTime) {
+    return (
+      <div className="flex flex-col gap-0.5">
+        {sessions.map((s) => (
+          <Row key={s.id} s={s} active={s.id === activeId} dense={dense} />
+        ))}
+      </div>
+    );
+  }
+
   const groups = BUCKETS.map((b) => ({
     label: b,
     items: sessions.filter((s) => bucketOf(s.created_at) === b),

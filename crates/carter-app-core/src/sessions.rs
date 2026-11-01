@@ -133,6 +133,8 @@ pub struct SearchHit {
     pub id: String,
     pub title: Option<String>,
     pub model: String,
+    /// 会话所属目录。搜索是跨项目的，命中列表里得能看出这条属于哪儿。
+    pub cwd: String,
     pub created_at: u64,
     /// 命中的那一小段上下文。
     pub snippet: String,
@@ -229,6 +231,7 @@ pub fn search(query: &str) -> Vec<SearchHit> {
                 id: entry.meta.id.clone(),
                 title: entry.meta.title.clone(),
                 model: entry.meta.model.clone(),
+                cwd: entry.meta.cwd.clone(),
                 created_at: entry.meta.created_at,
                 snippet: snippet.unwrap_or_default(),
                 matches,

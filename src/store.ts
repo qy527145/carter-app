@@ -140,6 +140,13 @@ type Store = Conv & {
   /** 主区显示哪个视图。默认对话。 */
   view: "chat" | "settings";
   /**
+   * 会话列表被改过几次（新建 / 改名 / fork / 删除）。
+   *
+   * 侧栏与「会话」设置页各有一份列表（一个只含当前项目，一个跨项目），改完一边
+   * 要让另一边也跟着更新。两边都把 `refreshSessions` 作为唯一的写入口，那里把它 +1。
+   */
+  sessionsNonce: number;
+  /**
    * 已发出、还没开始跑的消息（后端排队中的那些）。
    *
    * 「生成中还能继续打字」靠它：发出去就进这里，`turn_started` 带着 `prompt_id`
@@ -519,6 +526,7 @@ export const useStore = create<Store>((set) => ({
   configNonce: 0,
   view: "chat",
   queued: [],
+  sessionsNonce: 0,
 
   // 应用信息里带着设置，一起落地 —— 分开拉会让主题在首帧闪一下。
   setAppInfo: (i) => set({ appInfo: i, settings: i.settings }),
@@ -527,7 +535,7 @@ export const useStore = create<Store>((set) => ({
 
   bumpConfig: () => set((s) => ({ configNonce: s.configNonce + 1 })),
 
-  setSessions: (sessions) => set({ sessions }),
+  setSessions: (sessions) => set((s) => ({ sessions, sessionsNonce: s.sessionsNonce + 1 })),
 
   beginSession: (c) =>
     set((s) => ({

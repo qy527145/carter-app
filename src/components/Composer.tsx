@@ -26,6 +26,7 @@ import {
   type CommandRow,
 } from "../lib/api";
 import { toastError } from "../lib/toast";
+import { shortenPath } from "../lib/format";
 import * as ops from "../lib/sessionOps";
 import { useStore, type QueuedPrompt } from "../store";
 
@@ -794,26 +795,6 @@ function CwdPicker({ cwd }: { cwd: string }) {
       <span className="mono truncate">{cwd ? shortenPath(cwd) : "选择目录"}</span>
     </button>
   );
-}
-
-/**
- * 路径过长时只留尾两段，但**保留盘符**。
- *
- * 之前是 `…/Users/xuqiao`，把 `C:\Users\xuqiao` 的盘符抹掉了 —— 看着像个 Unix
- * 路径，于是和 bash 里 `pwd` 的输出（`/c/Users/xuqiao`）对不上，让人以为两处用的
- * 不是同一个目录。显示成 `C:\…\xuqiao` 就没有这个歧义了。
- *
- * 完整路径始终在 `title` 里。
- */
-function shortenPath(p: string): string {
-  // 短路径直接全显示 —— 这最常见，也最没有歧义。
-  if (p.length <= 30) return p;
-  const win = /^[A-Za-z]:[\\/]/.test(p);
-  const sep = win ? "\\" : "/";
-  const parts = p.split(/[\\/]/).filter(Boolean);
-  if (parts.length <= 3) return p;
-  const tail = parts.slice(-2).join(sep);
-  return win ? `${parts[0]}${sep}…${sep}${tail}` : `…${sep}${tail}`;
 }
 
 // ---------------------------------------------------------------------------

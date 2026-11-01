@@ -60,6 +60,26 @@ export function fmtBytes(n: number): string {
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
+/**
+ * 路径过长时只留尾两段，但**保留盘符**。
+ *
+ * 之前是 `…/Users/xuqiao`，把 `C:\Users\xuqiao` 的盘符抹掉了 —— 看着像个 Unix
+ * 路径，于是和 bash 里 `pwd` 的输出（`/c/Users/xuqiao`）对不上，让人以为两处用的
+ * 不是同一个目录。显示成 `C:\…\xuqiao` 就没有这个歧义了。
+ *
+ * 完整路径始终在 `title` 里。
+ */
+export function shortenPath(p: string): string {
+  // 短路径直接全显示 —— 这最常见，也最没有歧义。
+  if (p.length <= 30) return p;
+  const win = /^[A-Za-z]:[\\/]/.test(p);
+  const sep = win ? "\\" : "/";
+  const parts = p.split(/[\\/]/).filter(Boolean);
+  if (parts.length <= 3) return p;
+  const tail = parts.slice(-2).join(sep);
+  return win ? `${parts[0]}${sep}…${sep}${tail}` : `…${sep}${tail}`;
+}
+
 /** 计数（字数、token、事件数）的千分位：12345 → 12,345。 */
 export function fmtNumber(n: number): string {
   return n.toLocaleString("zh-CN");

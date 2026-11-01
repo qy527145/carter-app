@@ -288,6 +288,7 @@ export type SearchHit = {
   id: string;
   title: string | null;
   model: string;
+  cwd: string;
   created_at: number;
   snippet: string;
   matches: number;
@@ -338,8 +339,14 @@ export function createSideSession(parentSessionId: string): Promise<CreatedSide>
   return invoke<CreatedSide>("create_side_session", { parentSessionId });
 }
 
-export function listSessions(all = false): Promise<SessionRow[]> {
-  return invoke<SessionRow[]>("list_sessions", { all });
+/**
+ * 列举会话。`all = false` 只看 `cwd`（不给就是默认目录 —— 家目录），`true` 跨所有项目。
+ *
+ * 侧栏要传当前会话的 cwd：桌面端没有「进程工作目录」这回事，不传就永远只列家目录
+ * 那一堆，切到别的项目之后侧栏里看到的还是原来那些会话。
+ */
+export function listSessions(all = false, cwd?: string): Promise<SessionRow[]> {
+  return invoke<SessionRow[]>("list_sessions", { all, cwd: cwd ?? null });
 }
 
 export function renameSession(sessionId: string, title: string): Promise<void> {
