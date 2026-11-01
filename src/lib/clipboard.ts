@@ -25,7 +25,7 @@ function legacyCopy(text: string): boolean {
   return ok;
 }
 
-export async function copyText(text: string, okMessage = "已复制"): Promise<boolean> {
+export async function copyText(text: string, okMessage: string | null = "已复制"): Promise<boolean> {
   try {
     if (navigator.clipboard?.writeText) {
       try {
@@ -37,7 +37,8 @@ export async function copyText(text: string, okMessage = "已复制"): Promise<b
     } else if (!legacyCopy(text)) {
       throw new Error("复制失败");
     }
-    toastOk(okMessage);
+    // `null` = 调用方自己在按钮上给了反馈（变成对勾），不用再弹一条 toast。
+    if (okMessage !== null) toastOk(okMessage);
     return true;
   } catch (e) {
     toastError(e);

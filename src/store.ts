@@ -65,7 +65,24 @@ export type Item =
   | { kind: "note"; text: string };
 
 export type Turn =
-  | { role: "user"; text: string; auto?: boolean }
+  // `turn` 是**这一轮提问**的序号（0 起）。用户气泡本身也要它 —— 回答下面的
+  // 「重试 / 编辑」与提问下面的「编辑」都要指名改哪一轮。自动继续那几轮不是用户
+  // 说的，没有气泡，也就没有这个号。
+  | {
+      role: "user";
+      text: string;
+      /**
+       * 用户**打的原文**（`/命令`、`@文件` 展开之前）。
+       *
+       * 只有本次打开会话之后发出去的消息有它 —— 历史里存的是展开后的正文，
+       * 拿它回填编辑框等于把整份文件内容摊在输入框里。用户气泡上的「编辑」
+       * 就以「有没有这个值」为准。
+       */
+      raw?: string;
+      turn?: number;
+      /** 自动继续注入的那句「继续」：不画成用户气泡，但历史里确实算一轮。 */
+      auto?: boolean;
+    }
   // `turn` 来自 `turn_started`，是「这条回答对应哪一轮请求」的钥匙 —— 报文面板
   // 靠它把助手消息筛到那次 API 调用。历史消息没有这个数（事件不回放），为 undefined。
   // `auto` = 这一轮是长任务目标自动推起来的（用户没说话），界面上画一条分隔而不是
@@ -111,7 +128,10 @@ export type QueuedPrompt = { id: number; text: string };
 /** 侧边聊天：一份 `Conv` + 它是谁（事件按 session_id 路由，见 `lib/events.ts`）。 */
 export type SideConv = Conv & {
   sessionId: string;
+  /** 真正发给上游的模型名（事件里带的就是它）。 */
   model: string;
+  /** 模型引用 `渠道/块名`。界面上的模型标签用它 —— 见 `lib/modelLabel.ts`。 */
+  modelRef: string;
   cwd: string;
   /** 从主对话继承下来的上下文（折叠着显示，默认不展开）。 */
   inheritedTurns: Turn[];
@@ -120,7 +140,10 @@ export type SideConv = Conv & {
 type Store = Conv & {
   // 会话
   sessionId: string | null;
+  /** 真正发给上游的模型名。 */
   model: string;
+  /** 模型引用 `渠道/块名`，界面上的模型标签用这一种写法（见 `lib/modelLabel.ts`）。 */
+  modelRef: string;
   cwd: string;
   /** 侧边聊天（`/btw`）。同时只开一个，`null` = 没开。 */
   side: SideConv | null;
@@ -199,6 +222,28 @@ function withAssistant(turns: Turn[], fn: (items: Item[]) => Item[]): Turn[] {
     ];
   }
   return [...turns, { role: "assistant", items: fn([]) }];
+}
+
+/**
+ * 第 `turn` 轮回答在列表里的起点（下标）；没有就是 -1。
+ *
+ * 一次用户输入可能对应**多条**助手轮（工具往返各一条，见 `historyToTurns`），
+ * 所以要从后往前找第一条 `turn` 相同的助手轮 —— 它们总是连在一起。
+ */
+function lastAssistantIndexOfTurn(turns: Turn[], turn: number): number {
+  for (let i = turns.length - 1; i >= 0; i--) {
+    const t = turns[i];
+    if (t.role === "assistant" && t.turn === turn) {
+      let j = i;
+      while (j > 0) {
+        const prev = turns[j - 1];
+        if (prev.role !== "assistant" || prev.turn !== turn) break;
+        j -= 1;
+      }
+      return j;
+    }
+  }
+  return -1;
 }
 
 /** 往末尾的 text item 追加；它已 closed 或不存在就新起一条。 */
@@ -316,6 +361,34 @@ export function reduceConv(c: Conv, e: SessionEvent, sessionId?: string): Partia
     case "files_changed":
       // 轮末一次性到达。空清单后端就不发了，这里只负责合并。
       return { changed: { ...c.changed, [e.turn]: e.files } };
+    case "turn_retracted": {
+      // 重试 / 编辑：把这一轮的回答及之后的轮次从列表里拿掉，只留那条用户气泡。
+      //
+      // 后端回退历史时保留了这一轮的用户消息（重跑要它），而紧接着的
+      // `turn_started` 不带 `prompt`，不会再画一遍 —— 所以这里**不能**连用户气泡
+      // 一起删，否则重跑时界面上那句话就没了。
+      const i = lastAssistantIndexOfTurn(c.turns, e.turn);
+      let turns = i < 0 ? c.turns : c.turns.slice(0, i);
+      // 被回退掉的那几轮的变更清单也要一起丢掉，否则它们会挂在已经不存在的回答下面。
+      const changed: Record<number, string[]> = {};
+      for (const [k, v] of Object.entries(c.changed)) {
+        if (Number(k) < e.turn) changed[Number(k)] = v;
+      }
+      // 编辑过提问的话，那条用户气泡换成新正文 —— 否则界面上留着一句已经不是
+      // 这次请求原文的话，模型重答的内容会对不上。那条气泡就是回答组前一项
+      //（用户轮本身没有轮次号，靠相邻关系认）。原文也一起换：再点一次「编辑」，
+      // 编辑框里该是刚改完的那句。
+      if (e.prompt != null) {
+        const last = turns[turns.length - 1];
+        if (last?.role === "user") {
+          turns = [
+            ...turns.slice(0, -1),
+            { ...last, text: e.prompt, raw: e.prompt },
+          ];
+        }
+      }
+      return { turns, changed };
+    }
     case "turn_usage":
       return { usage: e.usage, cost: e.cost };
     case "goal":
@@ -334,6 +407,9 @@ export function reduceConv(c: Conv, e: SessionEvent, sessionId?: string): Partia
     case "ready":
       // 模型与工作目录在 `ready` 里，但它们属于「会话是谁」而不是「对话内容」，
       // 由调用方处理（见 `applyEvent` / `beginSide`）。
+      return {};
+    case "model_changed":
+      // 同上：模型属于「会话是谁」，由 `applyEvent` 落进 store 顶层。
       return {};
   }
 }
@@ -421,7 +497,7 @@ export function historyToTurns(history: MessageView[]): Turn[] {
         pendingAuto = true;
         continue;
       }
-      turns.push({ role: "user", text });
+      turns.push({ role: "user", text, turn: msg.turn });
       continue;
     }
     if (msg.role === "system") {
@@ -513,6 +589,7 @@ function changedRecord(list: TurnFiles[]): Record<number, string[]> {
 export const useStore = create<Store>((set) => ({
   sessionId: null,
   model: "",
+  modelRef: "",
   cwd: "",
   ...emptyConversation,
   side: null,
@@ -541,6 +618,7 @@ export const useStore = create<Store>((set) => ({
     set((s) => ({
       sessionId: c.session_id,
       model: c.model,
+      modelRef: c.model_ref ?? c.model,
       cwd: c.cwd,
       ...emptyConversation,
       // 换/重建会话时排队清空：那些消息属于原来那条会话任务，
@@ -587,7 +665,13 @@ export const useStore = create<Store>((set) => ({
   applyEvent: (e) =>
     set((s) => {
       // `ready` 带着「会话是谁」，由这里接住；其余交给共用的 reducer。
-      if (e.type === "ready") return { model: e.model, cwd: e.cwd };
+      if (e.type === "ready") {
+        return { model: e.model, modelRef: e.model_ref ?? e.model, cwd: e.cwd };
+      }
+      // 换模型只动顶层那个「当前模型」标签，不碰对话内容。
+      if (e.type === "model_changed") {
+        return { model: e.model, modelRef: e.model_ref ?? e.model };
+      }
       if (e.type === "turn_started" && (e.prompt_id != null || e.prompt != null)) {
         const q = e.prompt_id != null ? s.queued.find((x) => x.id === e.prompt_id) : undefined;
         const queued =
@@ -599,12 +683,32 @@ export const useStore = create<Store>((set) => ({
         // 表里没有就退回后端带回来的原文：界面重连过、或「撤回」晚了一拍时，
         // 靠它仍然能画出用户那句话。
         const text = q?.text ?? e.prompt ?? null;
+        // 用户气泡也带上轮次号（提问下面的「编辑」要靠它指名改哪一轮），以及
+        // **用户打的原文**（编辑框回填要用它，不是展开后的正文）。
+        //
+        // 但**重跑/编辑**那一轮的气泡已经在界面上了（`turn_retracted` 交代过），
+        // 这时不能再插一条 —— 判据是「最后一条已经是同一轮的用户轮」。
+        const last = s.turns[s.turns.length - 1];
+        const reuse = last?.role === "user" && last.turn === e.turn;
         const conv =
-          text != null
-            ? { ...convOf(s), turns: [...s.turns, { role: "user" as const, text }] }
+          text != null && !reuse
+            ? {
+                ...convOf(s),
+                turns: [
+                  ...s.turns,
+                  {
+                    role: "user" as const,
+                    text,
+                    raw: e.prompt ?? undefined,
+                    turn: e.turn,
+                  },
+                ],
+              }
             : convOf(s);
         return { ...reduceConv(conv, e, s.sessionId ?? undefined), queued };
       }
+      // `turn_usage` 只带实际请求名（carter 的 `emit_usage` 手上只有它），
+      // **不覆盖** `modelRef`：那会让「渠道/显示名」在每轮结束时退回成裸名字。
       if (e.type === "turn_usage") {
         return { ...reduceConv(convOf(s), e, s.sessionId ?? undefined), model: e.model };
       }
@@ -632,6 +736,7 @@ export const useStore = create<Store>((set) => ({
       side: {
         sessionId: c.session_id,
         model: c.model,
+        modelRef: c.model_ref ?? c.model,
         cwd: c.cwd,
         ...emptyConversation,
         inheritedTurns: historyToTurns(c.inherited),
@@ -651,7 +756,23 @@ export const useStore = create<Store>((set) => ({
     set((s) => {
       if (!s.side) return {};
       if (e.type === "ready") {
-        return { side: { ...s.side, model: e.model, cwd: e.cwd } };
+        return {
+          side: {
+            ...s.side,
+            model: e.model,
+            modelRef: e.model_ref ?? e.model,
+            cwd: e.cwd,
+          },
+        };
+      }
+      if (e.type === "model_changed") {
+        return {
+          side: {
+            ...s.side,
+            model: e.model,
+            modelRef: e.model_ref ?? e.model,
+          },
+        };
       }
       const next: SideConv = {
         ...s.side,

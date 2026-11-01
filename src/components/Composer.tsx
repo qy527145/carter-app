@@ -19,14 +19,15 @@ import { Folder, ImagePlus, ListOrdered, LoaderCircle, Send, Square, X, Zap } fr
 import {
   listCommands,
   listFiles,
-  listModels,
   readImage,
   saveImage,
   sendCommand,
   type CommandRow,
+  type ModelRow,
 } from "../lib/api";
 import { toastError } from "../lib/toast";
 import { shortenPath } from "../lib/format";
+import { displayName, modelTitle, useModelCatalog } from "../lib/modelLabel";
 import * as ops from "../lib/sessionOps";
 import { useStore, type QueuedPrompt } from "../store";
 
@@ -251,7 +252,7 @@ export function Composer() {
   const streaming = useStore((s) => s.streaming);
   const sessionId = useStore((s) => s.sessionId);
   const cwd = useStore((s) => s.cwd);
-  const model = useStore((s) => s.model);
+  const modelRef = useStore((s) => s.modelRef);
   const pendingAsk = useStore((s) => s.pendingForm);
   const addUserTurn = useStore((s) => s.addUserTurn);
   const setNotice = useStore((s) => s.setNotice);
@@ -556,7 +557,7 @@ export function Composer() {
 
           {/* 输入框下的一行：模型、工作目录、发送。 */}
           <div className="flex items-center gap-2 px-2.5 pb-2">
-            <ModelPicker model={model} />
+            <ModelPicker modelRef={modelRef} />
             <CwdPicker cwd={cwd} />
             {pasting && <LoaderCircle size={13} className="animate-spin text-dim" />}
             <span className="flex-1" />
@@ -661,22 +662,11 @@ function nextPromptId(): number {
 // 模型选择 / 工作目录
 // ---------------------------------------------------------------------------
 
-function ModelPicker({ model }: { model: string }) {
+function ModelPicker({ modelRef }: { modelRef: string }) {
   const [open, setOpen] = useState(false);
-  const [models, setModels] = useState<
-    { reference: string; provider: string; api_name: string }[]
-  >([]);
+  const models = useModelCatalog();
   const sessionId = useStore((s) => s.sessionId);
   const setNotice = useStore((s) => s.setNotice);
-
-  useEffect(() => {
-    if (!open) return;
-    listModels()
-      .then((rows) =>
-        setModels(rows.map((r) => ({ reference: r.reference, provider: r.provider, api_name: r.api_name }))),
-      )
-      .catch(() => setModels([]));
-  }, [open]);
 
   const pick = (ref: string) => {
     setOpen(false);
@@ -688,7 +678,7 @@ function ModelPicker({ model }: { model: string }) {
 
   // 按渠道分组，一个渠道一段。
   const groups = useMemo(() => {
-    const m = new Map<string, typeof models>();
+    const m = new Map<string, ModelRow[]>();
     for (const x of models) {
       const arr = m.get(x.provider) ?? [];
       arr.push(x);
@@ -704,10 +694,17 @@ function ModelPicker({ model }: { model: string }) {
     <div className="relative">
       <button
         onClick={() => setOpen((o) => !o)}
-        title={model ? `当前模型 ${model}，点击切换` : "选择模型"}
-        className="mono max-w-[14rem] truncate rounded-md px-1.5 py-1 text-[11px] text-dim transition-colors hover:bg-ink/5 hover:text-ink"
+        // 平时是 `渠道/显示名`；悬停给出实际请求名与 meta —— 排查「为什么计费
+        // 不对 / 能力不对」时要的就是那两个名字。
+        title={
+          modelRef
+            ? `${modelTitle(modelRef, models)}
+点击切换模型`
+            : "选择模型"
+        }
+        className="mono max-w-[16rem] truncate rounded-md px-1.5 py-1 text-[11px] text-dim transition-colors hover:bg-ink/5 hover:text-ink"
       >
-        {model || "选择模型"}
+        {modelRef ? displayName(modelRef, models) : "选择模型"}
       </button>
 
       {open && (
@@ -715,7 +712,7 @@ function ModelPicker({ model }: { model: string }) {
           {/* 只负责「点别处关掉」的全屏遮罩，不参与定位。它在 DOM 上先于菜单，
               所以菜单（z-50 > z-40）盖在它上面，点击仍然落得到菜单项。 */}
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <ModelMenu groups={groups} current={model} onPick={pick} />
+          <ModelMenu groups={groups} current={modelRef} onPick={pick} />
         </>
       )}
     </div>
@@ -727,7 +724,7 @@ function ModelMenu({
   current,
   onPick,
 }: {
-  groups: [string, { reference: string; api_name: string }[]][];
+  groups: [string, ModelRow[]][];
   current: string;
   onPick: (ref: string) => void;
 }) {
@@ -750,13 +747,18 @@ function ModelMenu({
             <button
               key={m.reference}
               onClick={() => onPick(m.reference)}
+              title={`${m.reference}
+实际请求：${m.api_name}${m.meta ? `
+元数据：${m.meta}` : ""}`}
               className={`flex w-full items-center gap-2 px-3 py-1.5 text-left transition-colors hover:bg-ink/5 ${
                 m.reference === current ? "text-ink" : "text-dim"
               }`}
             >
               <span className="w-3 shrink-0">{m.reference === current ? "✓" : ""}</span>
-              <span className="mono min-w-0 flex-1 truncate text-xs">{m.api_name}</span>
-              <span className="mono shrink-0 text-[10px] text-dim">{m.reference}</span>
+              {/* 显示目录展示名（「Claude Opus 5.5」），块名放右边 —— 块名是
+                  配置里的身份，展示名是认得出这是哪个模型的那个名字。 */}
+              <span className="min-w-0 flex-1 truncate text-xs">{m.label ?? m.name}</span>
+              <span className="mono shrink-0 text-[10px] text-dim">{m.name}</span>
             </button>
           ))}
         </div>

@@ -91,6 +91,18 @@ pub enum Command {
     },
     /// 中断当前轮。已经生成的内容保留。
     Cancel,
+    /// 重跑某一轮用户输入（界面上回答下面的「重试」）。
+    ///
+    /// `turn` 是那一轮的序号，与 `turn_started` / 历史消息上那个数**同一个口径**。
+    /// 会话先把历史回退到这一轮之前，再把它原样重跑一遍 —— 所以这一轮之后
+    /// 的对话会一并丢掉。注意这只回滚**对话**，不动磁盘：已经改过的文件保持现状。
+    Regenerate { turn: u32 },
+    /// 改写某一轮的提问并重跑（用户气泡上的「编辑」）。
+    ///
+    /// 与 `Regenerate` 是同一条路，只是重发的正文换成了 `text` —— 所以它同样会
+    /// 丢掉这一轮之后的对话。`text` 是**用户改过之后的原文**，`/命令`、`@文件`
+    /// 仍然要展开（走 `submit`，不是直接塞进历史）。
+    EditPrompt { turn: u32, text: String },
     /// 切换本会话使用的模型（`provider/model` 形式）。
     SetModel { model: String },
     /// 回答 `ask_user_question` 提的问题。
@@ -161,9 +173,23 @@ pub enum SessionEvent {
     /// 会话就绪（刚创建或刚续接）。历史不由事件回放，走 `create_session` 的返回值。
     Ready {
         session_id: String,
+        /// 真正发给上游的模型名（`ModelInfo::api_name`）。
         model: String,
+        /// 模型引用 `渠道/显示名`。界面上一律显示这一种写法 —— `api_name` 只是
+        /// 请求里那串名字，光看它分不出用户配的哪个模型。
+        #[serde(default)]
+        model_ref: String,
         cwd: String,
         resumed: bool,
+    },
+    /// 当前模型变了（`/model` 切换）。与 `ready` 分开，是因为它不动会话的其余
+    /// 身份（cwd、历史）；界面只需要换掉「当前模型」那一处显示。
+    ModelChanged {
+        /// 真正发给上游的模型名。
+        model: String,
+        /// `渠道/显示名`，见 [`SessionEvent::Ready`] 的说明。
+        #[serde(default)]
+        model_ref: String,
     },
     /// 一轮开始。
     ///
@@ -179,6 +205,19 @@ pub enum SessionEvent {
         /// 界面靠它画出用户气泡 —— 不能只靠 `prompt_id` 去自己的排队表里查：
         /// 界面可能刚重连、或者用户点「撤回」的动作晚了一拍，查不到就成了一条
         /// 没有用户发言的回答。有原文就总能画对。
+        #[serde(default)]
+        prompt: Option<String>,
+    },
+    /// 历史被回退到第 `turn` 轮之前（用户点了「重试」或「编辑并重发」）。
+    ///
+    /// 界面收到之后要把这一轮及之后的回答从列表里拿掉 —— 事件不回放，界面自己不删
+    /// 就会与后台的历史对不上（刷新一次才「突然少了一截」）。这一轮的**用户气泡**
+    /// 要留着：紧接着来的一条 `turn_started` 不带 `prompt`，不会再画一遍。
+    ///
+    /// `prompt` 有值 = 提问被改写过了（「编辑」），界面拿它替换那条气泡的正文；
+    /// `None` = 原样重跑（「重试」），气泡不动。
+    TurnRetracted {
+        turn: u32,
         #[serde(default)]
         prompt: Option<String>,
     },

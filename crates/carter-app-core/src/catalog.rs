@@ -56,6 +56,10 @@ pub struct ModelRow {
     pub api_name: String,
     /// models.dev 的查找 id。
     pub meta: String,
+    /// 目录里的展示名（「Claude Opus 5.5」）。界面上的模型标签用它 —— 用户配的是
+    /// `opus`，请求里发的是 `claude-opus-5-5`，两者都不如这个名字好认。
+    /// 没绑 meta、或目录查不到时是 `None`，界面退回显示引用本身。
+    pub label: Option<String>,
     pub is_default: bool,
     /// 是不是**副模型**（`agent.fast_model`）：压缩上下文、生成标题、总结用的那个。
     /// 没配就是主模型自己上（`false`）。
@@ -78,6 +82,9 @@ pub struct ModelRow {
 fn resolve_one(
     config: &Config,
     cache: &Result<String, String>,
+    // 已经解析好的缓存，只用来取展示名（`label`）。解析一次给整张表用 ——
+    // 每个模型都重新解析一遍近万条的 JSON 会明显拖慢「模型」页。
+    root: Option<&serde_json::Value>,
     reasoning: &std::collections::HashMap<(String, String), serde_json::Value>,
     provider: &str,
     name: &str,
@@ -93,6 +100,7 @@ fn resolve_one(
         name: name.to_string(),
         api_name: name.to_string(),
         meta: String::new(),
+        label: None,
         is_default: reference == default_ref,
         is_fast: fast_ref == Some(reference.as_str()),
         protocol: protocol.to_string(),
@@ -116,6 +124,14 @@ fn resolve_one(
             "models.dev 缓存里没有 `{}` —— 检查 meta，或点「刷新模型元数据」",
             entry.meta
         ));
+    }
+
+    // 展示名在缓存里查得到就先填上 —— 解析失败的那一行也需要它（界面上那个
+    // 标签不能因为缓存里少了一条就退回成 `ws/sonnet` 这种内部写法）。
+    if let (Some(root), Some((pid, mid))) = (root, row.meta.split_once('/')) {
+        if let Some((pid, mid)) = canonical_key(root, pid, mid) {
+            row.label = model_label(root, &pid, &mid);
+        }
     }
 
     let cache = match cache {
@@ -148,6 +164,9 @@ fn fill(row: &mut ModelRow, info: &ModelInfo) {
 pub fn list(config: &Config) -> Vec<ModelRow> {
     // 缓存读不到不算致命：照样把模型列出来，只是元数据那几栏空着。
     let cache = fetch::read_cache().map_err(|e| e.to_string());
+    // 展示名要另外拿一份解析好的缓存：`resolve_model` 只认「这条能解析」，而
+    // 解析失败的那几行同样需要展示名（界面上的标签不能退回成 `ws/sonnet`）。
+    let root = cache.as_ref().ok().and_then(|c| parse_cache(c).ok());
     let default_ref = config.agent.model.clone();
     let fast_ref = config.agent.fast_model.clone();
     // `default_reasoning` 取配置里的**原值** —— `ModelInfo` 上那个字段已经被解析成
@@ -167,6 +186,7 @@ pub fn list(config: &Config) -> Vec<ModelRow> {
             rows.push(resolve_one(
                 config,
                 &cache,
+                root.as_ref(),
                 &reasoning,
                 pname,
                 mname,
@@ -848,17 +868,23 @@ fn model_max_output(root: &serde_json::Value, pid: &str, mid: &str) -> Option<u6
         .as_u64()
 }
 
+/// 把用户写的 `服务商/模型id` 归一成目录里**实际存在的**那个键。
+///
+/// 目录 id 全小写，但用户从别处抄来的 meta 不一定 —— 大小写写错时按不敏感再找一次。
+/// 找不到就是 `None`（写错了、或者目录里没这条）。
+fn canonical_key(root: &serde_json::Value, pid: &str, mid: &str) -> Option<(String, String)> {
+    if model_node(root, pid, mid).is_some() {
+        return Some((pid.to_string(), mid.to_string()));
+    }
+    let models = root.get(pid)?.get("models")?.as_object()?;
+    let hit = models.keys().find(|k| k.eq_ignore_ascii_case(mid))?.clone();
+    Some((pid.to_string(), hit))
+}
+
 /// 在已经解析好的缓存上查一个 meta。查不到是 `None`（不是错误）。
 fn meta_info_in(root: &serde_json::Value, meta: &str) -> Option<MetaInfo> {
     let (pid, mid) = meta.trim().split_once('/')?;
-    // 大小写不敏感的兜底：目录 id 全小写，但用户从别处抄来的 meta 不一定。
-    let (pid, mid) = if model_node(root, pid, mid).is_some() {
-        (pid.to_string(), mid.to_string())
-    } else {
-        let models = root.get(pid)?.get("models")?.as_object()?;
-        let hit = models.keys().find(|k| k.eq_ignore_ascii_case(mid))?.clone();
-        (pid.to_string(), hit)
-    };
+    let (pid, mid) = canonical_key(root, pid, mid)?;
     let node = model_node(root, &pid, &mid);
     Some(MetaInfo {
         meta: format!("{pid}/{mid}"),
@@ -1189,6 +1215,7 @@ kind = "anthropic"
         let row = resolve_one(
             &cfg,
             &cache,
+            None,
             &Default::default(),
             "ws",
             "sonnet",
@@ -1220,6 +1247,7 @@ kind = "anthropic"
         let row = resolve_one(
             &cfg,
             &cache,
+            None,
             &Default::default(),
             "ws",
             "sonnet",
@@ -1241,6 +1269,63 @@ kind = "anthropic"
         assert_eq!(row.api_name, "sonnet");
     }
 
+    /// 展示名要从目录里取：界面上那个模型标签写的应该是「Claude Sonnet 4.5」，
+    /// 而不是配置里的块名 `sonnet`，更不是请求里的 `claude-sonnet-4-5`。
+    ///
+    /// 解析失败的行同样要填 —— 名字对不上目录的原因恰恰是 meta 写错了，那时
+    /// 标签能显示对的展示名，用户才看得出「这条本来该是什么」。
+    #[test]
+    fn a_row_carries_the_catalog_label_even_when_it_cannot_resolve() {
+        let json = r#"{"anthropic":{"models":{"claude-sonnet-4-5":{
+            "id":"claude-sonnet-4-5","name":"Claude Sonnet 4.5",
+            "limit":{"context":200000,"output":64000}
+        }}}}"#;
+        let root = parse_cache(json).unwrap();
+        let cache = Ok(json.to_string());
+
+        let good = resolve_one(
+            &config_with("anthropic/claude-sonnet-4-5"),
+            &cache,
+            Some(&root),
+            &Default::default(),
+            "ws",
+            "sonnet",
+            "ws/sonnet",
+            None,
+            "anthropic",
+        );
+        assert_eq!(good.label.as_deref(), Some("Claude Sonnet 4.5"));
+
+        // 大小写写错的 meta：解析不了，但按不敏感查得到展示名。
+        let odd = resolve_one(
+            &config_with("anthropic/Claude-Sonnet-4-5"),
+            &cache,
+            Some(&root),
+            &Default::default(),
+            "ws",
+            "sonnet",
+            "ws/sonnet",
+            None,
+            "anthropic",
+        );
+        assert!(odd.error.is_some());
+        assert_eq!(odd.label.as_deref(), Some("Claude Sonnet 4.5"));
+
+        // 目录里压根没有这一条：没有展示名，界面退回显示引用本身。
+        let missing = resolve_one(
+            &config_with("anthropic/nope"),
+            &cache,
+            Some(&root),
+            &Default::default(),
+            "ws",
+            "sonnet",
+            "ws/sonnet",
+            None,
+            "anthropic",
+        );
+        assert!(missing.label.is_none());
+    }
+
     /// 一条解析不了不该影响别的行 —— 这是「单行失败不整页失败」的落点。
     #[test]
     fn a_bad_meta_only_marks_its_own_row() {
@@ -1254,6 +1339,7 @@ kind = "anthropic"
         let good = resolve_one(
             &config_with("anthropic/claude-sonnet-4-5"),
             &cache,
+            None,
             &none,
             "ws",
             "sonnet",
@@ -1264,6 +1350,7 @@ kind = "anthropic"
         let bad = resolve_one(
             &config_with("anthropic/does-not-exist"),
             &cache,
+            None,
             &none,
             "ws",
             "sonnet",

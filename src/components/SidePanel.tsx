@@ -13,6 +13,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ChevronRight, Globe, Send, Square, X } from "lucide-react";
 
+import { displayName, modelTitle, useModelCatalog } from "../lib/modelLabel";
 import * as ops from "../lib/sessionOps";
 import { useStore } from "../store";
 import { TurnList } from "./ChatView";
@@ -39,6 +40,8 @@ export function SidePanel() {
     if (side) taRef.current?.focus();
   }, [side?.sessionId]);
 
+  const models = useModelCatalog();
+
   if (!side) return null;
 
   const send = () => {
@@ -61,7 +64,11 @@ export function SidePanel() {
         <Globe size={14} className="shrink-0 text-tone-violet" />
         <span className="text-sm text-ink">侧边聊天</span>
         <span className="truncate text-[11px] text-dim">
-          继承主对话上下文 · {side.model} · 关掉即丢
+          继承主对话上下文 ·{" "}
+          <span className="mono" title={modelTitle(side.modelRef, models)}>
+            {displayName(side.modelRef, models)}
+          </span>{" "}
+          · 关掉即丢
         </span>
         <IconButton className="ml-auto" title="关闭（这条对话不会留下）" onClick={ops.closeSideChat}>
           <X size={14} />

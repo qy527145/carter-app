@@ -26,7 +26,11 @@ export async function refreshSessions(cwd?: string): Promise<void> {
   try {
     const s = useStore.getState();
     const list = await api.listSessions(false, cwd ?? (s.cwd || undefined));
-    s.setSessions(withCurrent(list, { id: s.sessionId, model: s.model, cwd: s.cwd }));
+    // 补出来那一行要按**引用**写：会话列表里显示的模型一律是 `渠道/显示名`，
+    // 用实际请求名（`claude-opus-5-5`）会与列表里其它行长得不一样。
+    s.setSessions(
+      withCurrent(list, { id: s.sessionId, model: s.modelRef, cwd: s.cwd }),
+    );
   } catch (e) {
     toastError(e);
   }
@@ -98,13 +102,21 @@ export async function rename(id: string, title: string): Promise<void> {
  *
  * carter 的 `fork` 会写出一个**自包含**的新文件（种子历史 + `forked_from` 血缘），
  * 所以这里只要把新 id 打开即可，不用管历史怎么搬。
+ *
+ * `turn` = 从这一轮之后分叉（回答下面的「从这里分叉」）：新会话只留到这一轮，
+ * 原会话一个字不动。不传就是整条复制。
  */
-export async function fork(id: string): Promise<void> {
+export async function fork(id: string, turn?: number): Promise<void> {
   try {
-    const newId = await api.forkSession(id);
+    const newId = await api.forkSession(id, turn);
     await refreshSessions();
     useStore.getState().setView("chat");
     await replaceSession({ resume: false, resumeId: newId });
+    toastOk(
+      turn === undefined
+        ? "已 fork 出一条新会话"
+        : `已从第 ${turn + 1} 轮分叉出一条新会话`,
+    );
   } catch (e) {
     toastError(e);
   }
@@ -275,6 +287,29 @@ export async function send(
 
 export async function cancel(sessionId: string): Promise<void> {
   await api.sendCommand(sessionId, { type: "cancel" });
+}
+
+/**
+ * 重跑某一轮（界面上回答下面的「重试」）。
+ *
+ * 后端把历史回退到这一轮之前再原样重发，**之后那几轮会一并丢掉** —— 界面上的确认
+ * 由调用方先问过。这里不套 `send` 的自动恢复：重建出来的会话任务并不记得「刚才
+ * 要回退到第几轮」，硬投一遍只会得到一句看不懂的失败。
+ */
+export function regenerate(sessionId: string, turn: number): void {
+  api.sendCommand(sessionId, { type: "regenerate", turn }).catch(toastError);
+}
+
+/**
+ * 改写某一轮的提问并重跑（用户气泡上的「编辑」）。
+ *
+ * 与 `regenerate` 同一条路：这一轮之后的内容都会丢掉。`text` 是用户改过的原文，
+ * 展开（`/命令`、`@文件`）由后端照常做。
+ */
+export function editPrompt(sessionId: string, turn: number, text: string): void {
+  api
+    .sendCommand(sessionId, { type: "edit_prompt", turn, text })
+    .catch(toastError);
 }
 
 /** 把一条排队中的消息提到队首，并中断当前轮。 */

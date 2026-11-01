@@ -114,6 +114,9 @@ fn set_app_settings(settings: AppSettings) -> Result<(), String> {
 struct CreatedSession {
     session_id: String,
     model: String,
+    /// 模型引用 `渠道/显示名`（配置里的写法）。界面上的模型标签用它 ——
+    /// `model` 是真正发给上游的名字，同一个名字可能挂在多个渠道上。
+    model_ref: String,
     cwd: String,
     history: Vec<MessageView>,
     /// 这条会话现有的长任务目标（`/goal`）。续接时从盘上读回来。
@@ -147,6 +150,7 @@ async fn create_session(
     Ok(CreatedSession {
         session_id: handle.id.clone(),
         model: handle.model.load().api_name.clone(),
+        model_ref: handle.model.load().key.clone(),
         cwd: handle.cwd.to_string_lossy().to_string(),
         history: started.history,
         goal: started.goal,
@@ -158,6 +162,8 @@ async fn create_session(
 struct CreatedSide {
     session_id: String,
     model: String,
+    /// 见 [`CreatedSession::model_ref`]。
+    model_ref: String,
     cwd: String,
     /// 继承下来的历史（打开那一刻的快照）。界面把它折叠在顶部，让用户知道
     /// 「这条会话看得见主对话说到哪了」。
@@ -177,6 +183,7 @@ async fn create_side_session(
     Ok(CreatedSide {
         session_id: started.handle.id.clone(),
         model: started.model,
+        model_ref: started.handle.model.load().key.clone(),
         cwd: started.cwd.to_string_lossy().to_string(),
         inherited: started.inherited,
     })
@@ -223,9 +230,12 @@ fn rename_session(session_id: String, title: String) -> Result<(), String> {
 }
 
 /// fork 一条会话，返回新会话的 id。
+///
+/// `turn` 给了就只保留到这一轮为止的历史（界面上回答下面的「从这里分叉」）；
+/// 不给 = 整条复制（会话列表里的 fork）。
 #[tauri::command]
-fn fork_session(session_id: String) -> Result<String, String> {
-    sessions::fork(&session_id)
+fn fork_session(session_id: String, turn: Option<u32>) -> Result<String, String> {
+    sessions::fork(&session_id, turn)
 }
 
 /// 删除一个会话文件。不可恢复 —— 调用方要先确认。

@@ -95,7 +95,10 @@ pub fn user_turn_count(messages: &[WireMessage]) -> u32 {
 /// 新的一轮。那不影响界面 —— 那一页渲染的是内容，不显示轮次号；按轮筛选用的是
 /// 抓包记录里 carter 自己记的 `meta.turn`。真要在那一页显示轮次号的话，
 /// 得先解决这个偏差。
-fn is_turn_start(msg: &WireMessage) -> bool {
+///
+/// 公开给 `history.rs`：重试要把历史回退到某一轮之前，靠同一个判据数轮次 ——
+/// 两边用两套判据的话，界面上的「第 N 轮」与回退点迟早对不上。
+pub(crate) fn is_turn_start(msg: &WireMessage) -> bool {
     msg.role == Role::User
         && msg.content.iter().any(|b| match b {
             Block::Text { text, .. } => !text.trim().is_empty(),

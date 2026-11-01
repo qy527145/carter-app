@@ -792,6 +792,30 @@ pub fn remove(session_id: &str) -> bool {
     std::fs::remove_file(file_for(session_id)).is_ok()
 }
 
+/// 重试：把第 `turn` 轮及之后的变更记录一起丢掉。
+///
+/// 不带的话，回退之后重跑出来的那一轮会**覆盖**自己那条记录（同一个轮次号），
+/// 但更后面那些轮次的记录会留下来 —— 界面上它们挂在已经不存在了的回答下面。
+pub fn retract(session_id: &str, turn: u32) -> Result<(), String> {
+    retract_from(&file_for(session_id), turn)
+}
+
+fn retract_from(path: &Path, turn: u32) -> Result<(), String> {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return Ok(());
+    };
+    let Ok(mut stored) = serde_json::from_str::<Stored>(&raw) else {
+        return Ok(());
+    };
+    if stored.turns.split_off(&turn).is_empty() {
+        return Ok(());
+    }
+    let json = serde_json::to_string(&stored).map_err(|e| e.to_string())?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json).map_err(|e| format!("写 {} 失败：{e}", tmp.display()))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("改名到 {} 失败：{e}", path.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -936,6 +960,27 @@ mod tests {
         // 坏文件按「没有记录」处理，不 panic。
         std::fs::write(&path, "{not json").unwrap();
         assert!(load_from(&path).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 重试回退：第 N 轮及之后的记录一起丢掉，之前的留着。
+    ///
+    /// 留着的部分是对的，没有它的话，被回退掉的回答在下一次打开会话时又会把
+    /// 文件清单挂回来 —— 挂在一段已经不存在的对话下面。
+    #[test]
+    fn retracting_a_turn_drops_it_and_everything_after() {
+        let dir = tmp_dir("retract");
+        let path = dir.join("s.json");
+        record_to(&path, 1, &["a.txt".to_string()], None).unwrap();
+        record_to(&path, 2, &["b.txt".to_string()], None).unwrap();
+        record_to(&path, 3, &["c.txt".to_string()], None).unwrap();
+
+        retract_from(&path, 2).unwrap();
+        let turns: Vec<u32> = load_from(&path).iter().map(|t| t.turn).collect();
+        assert_eq!(turns, vec![1]);
+
+        // 没有文件 / 已经是空的：不报错（重试本身不该被它挡下来）。
+        assert!(retract_from(&dir.join("nope.json"), 1).is_ok());
         std::fs::remove_dir_all(&dir).ok();
     }
 

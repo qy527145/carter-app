@@ -8,6 +8,11 @@ import { GitBranch, MessageSquare, MoreHorizontal, Pencil, Share, Trash } from "
 
 import type { SessionRow } from "../lib/api";
 import { bucketOf, fmtBytes, fullTime, relTime } from "../lib/format";
+import {
+  displayName,
+  modelTitle,
+  useModelCatalog,
+} from "../lib/modelLabel";
 import * as ops from "../lib/sessionOps";
 import { ConfirmDialog } from "./ui/Panel";
 import { IconButton } from "./ui/Button";
@@ -59,6 +64,10 @@ function Row({
   const [confirming, setConfirming] = useState(false);
   const menu = useContextMenu();
   const title = s.title || "未命名会话";
+  // 会话文件里记的是模型引用（`ds/opus`）。显示成 `渠道/显示名`，悬停给出
+  // 实际请求名与 meta —— 见 `lib/modelLabel.ts` 的说明。
+  const models = useModelCatalog();
+  const modelLabel = displayName(s.model, models);
 
   // 行内「更多」与右键走同一份动作 —— 两处各列一遍必然会走样
   //（比如右键多了「重命名」，按钮菜单里却没有）。
@@ -131,7 +140,9 @@ function Row({
           >
             <div className="truncate text-sm text-ink">{title}</div>
             <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-dim">
-              <span className="truncate">{s.model}</span>
+              <span className="truncate" title={modelTitle(s.model, models)}>
+                {modelLabel}
+              </span>
               <span>·</span>
               <span className="shrink-0" title={fullTime(s.created_at)}>
                 {relTime(s.created_at)}

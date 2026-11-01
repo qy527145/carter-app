@@ -15,12 +15,15 @@ import remarkGfm from "remark-gfm";
 import {
   Bot,
   Brain,
+  Check,
   ChevronRight,
   CircleCheck,
   Copy,
   FileText,
+  GitBranch,
   LoaderCircle,
   Pencil,
+  RotateCcw,
   ScanSearch,
   Target,
   TriangleAlert,
@@ -29,6 +32,9 @@ import {
 
 import { useStore, type Item, type Turn } from "../store";
 import { copyText } from "../lib/clipboard";
+import { displayName, modelTitle, useModelCatalog } from "../lib/modelLabel";
+import { editPrompt, fork, regenerate } from "../lib/sessionOps";
+import { TOAST_MS } from "../lib/toast";
 import { FilePreviewModal } from "./FilePreview";
 import { AskForm } from "./AskForm";
 import { Composer, MessageImages } from "./Composer";
@@ -36,7 +42,7 @@ import { GoalBar } from "./GoalBar";
 import { Glyph, ServerCard, ToolCard } from "./toolcards/ToolCard";
 import { IconButton } from "./ui/Button";
 import { hasSelection, useContextMenu, type MenuEntry } from "./ui/ContextMenu";
-import { Banner, Collapse } from "./ui/Panel";
+import { Banner, Collapse, ConfirmDialog } from "./ui/Panel";
 
 type ImageItem = Extract<Item, { kind: "image" }>;
 type AssistantTurnT = Extract<Turn, { role: "assistant" }>;
@@ -295,6 +301,25 @@ function changedFilesPerTurn(
   cwd: string,
 ): ChangedFile[][] {
   const out: ChangedFile[][] = turns.map(() => []);
+  for (const { start, end } of assistantGroups(turns)) {
+    const t = turns[start];
+    if (t.role !== "assistant") continue;
+    const items = turns
+      .slice(start, end + 1)
+      .flatMap((x) => (x.role === "assistant" ? x.items : []));
+    const watched = t.turn !== undefined ? (changedByTurn[t.turn] ?? []) : [];
+    out[end] = changedFiles(items, watched, cwd);
+  }
+  return out;
+}
+
+/**
+ * 相邻的、同号的助手轮并成一组 —— 一次用户输入一组（工具往返会把一组拆成多条）。
+ *
+ * 没有轮次号的那条（理论上只在事件竞态里出现）自己单独算一组。
+ */
+function assistantGroups(turns: Turn[]): { start: number; end: number }[] {
+  const out: { start: number; end: number }[] = [];
   let i = 0;
   while (i < turns.length) {
     const t = turns[i];
@@ -303,7 +328,6 @@ function changedFilesPerTurn(
       continue;
     }
     let j = i;
-    // 没有 turn 号（理论上只在事件竞态里出现）就不合并，按自己的 items 算。
     if (t.turn !== undefined) {
       while (j + 1 < turns.length) {
         const next = turns[j + 1];
@@ -311,19 +335,107 @@ function changedFilesPerTurn(
         j += 1;
       }
     }
-    const items = turns
-      .slice(i, j + 1)
-      .flatMap((x) => (x.role === "assistant" ? x.items : []));
-    const watched = t.turn !== undefined ? (changedByTurn[t.turn] ?? []) : [];
-    out[j] = changedFiles(items, watched, cwd);
+    out.push({ start: i, end: j });
     i = j + 1;
   }
   return out;
 }
 
+/**
+ * 「重试 / 分叉」挂在哪条助手轮上。
+ *
+ * 与文件清单同一套分组口径：一轮回答可能由多条助手轮拼成，动作的落点必须是
+ * **最后一条** —— 挂在前面的那几条上，点一下看起来只重跑了半截。
+ *
+ * 值 `true` = 后面还有对话，做这件事会先把它们丢掉，要先问一句；
+ * `false` = 只影响这一轮本身；`undefined` = 这一条上没有入口。
+ */
+function assistantActionSlots(turns: Turn[]): (boolean | undefined)[] {
+  const out = new Array<boolean | undefined>(turns.length);
+  for (const { end } of assistantGroups(turns)) {
+    const t = turns[end];
+    // 自动继续那几轮没有用户提问可重跑（真正跑的是目标引擎追加的那条「继续」），
+    // 重试它等于凭空多推一轮 —— 不给这个入口。分叉同理：它是个内部记号。
+    if (t.role !== "assistant" || t.auto) continue;
+    out[end] = end < turns.length - 1;
+  }
+  return out;
+}
+
+/**
+ * 用户气泡上的「编辑」挂在哪几条上。
+ *
+ * 只给**这次打开会话之后发出去的**那几条（`raw`）：历史里存的是展开 `/命令`、
+ * `@文件` 之后的正文，拿它回填编辑框等于把整份文件内容摊在输入框里 —— 用户改的
+ * 也不会是那个东西。宁可没有入口，也不要给一个填错了的。
+ */
+function userEditSlots(turns: Turn[]): (boolean | undefined)[] {
+  const out = new Array<boolean | undefined>(turns.length);
+  turns.forEach((t, i) => {
+    if (t.role !== "user" || !t.raw) return;
+    // 后面还有内容 = 编辑并重发会先把它们丢掉，要先问一句。
+    out[i] = i < turns.length - 1;
+  });
+  return out;
+}
+
+/**
+ * 这一条上「从这里分叉」的落点：分叉只保留到第几轮（含）。
+ *
+ * 回答上 = 从这条**回答之后**分叉（保留到这一轮）—— 最常用的一种：接着这条思路
+ * 往别的方向聊。提问上 = 从这句话**之前**分叉（保留到上一轮），也就是换一个问法
+ * 把同一件事再问一遍。第一句提问没有上一轮，切出来会是条空会话，不给入口。
+ *
+ * 流式期间整排都不给：分叉要关掉当前会话再开新的，正在跑的那一轮与排队里的消息
+ * 会跟着没掉 —— 而按钮看着只是「分一条出去」，不该有这个副作用。
+ */
+function forkTarget(
+  turn: Turn,
+  onFork: ((turn: number) => void) | undefined,
+  live: boolean,
+): (() => void) | undefined {
+  if (!onFork || !live || turn.turn === undefined) return undefined;
+  if (turn.role === "assistant") return () => onFork(turn.turn as number);
+  return turn.turn > 0 ? () => onFork((turn.turn as number) - 1) : undefined;
+}
+
 // ---------------------------------------------------------------------------
 // 轮次
 // ---------------------------------------------------------------------------
+
+/**
+ * 气泡下面那一行小按钮（复制 / 重试 / 报文）。
+ *
+ * 悬停才浮出来：静止时它不该跟正文抢注意力；但**始终占着位置**（`opacity-0`
+ * 而不是不渲染），否则鼠标移上去的一瞬间整段对话会跳一下。
+ * `focus-within` 让键盘也能把它叫出来 —— 透明不等于按不到。
+ */
+function ActionChip({
+  icon,
+  label,
+  title,
+  onClick,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  title?: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      title={title ?? label}
+      className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-dim transition-colors hover:bg-ink/5 hover:text-ink"
+    >
+      {icon}
+      {label}
+    </button>
+  );
+}
+
+/** 操作行的共同外壳：悬停/聚焦时出现。 */
+const ACTION_ROW =
+  "flex flex-wrap items-center gap-1 opacity-0 transition-opacity duration-150 group-hover/msg:opacity-100 focus-within:opacity-100";
 
 function AssistantTurn({
   turn: t,
@@ -332,6 +444,9 @@ function AssistantTurn({
   showPayload,
   changed,
   cwd,
+  onRetry,
+  retryAsks,
+  onFork,
 }: {
   turn: AssistantTurnT;
   isLast: boolean;
@@ -341,10 +456,25 @@ function AssistantTurn({
   changed: ChangedFile[];
   /** 预览文件时用来解析相对路径。 */
   cwd: string;
+  /** 重跑这一轮。不给就不画「重试」（侧边聊天、继承来的上下文）。 */
+  onRetry?: () => void;
+  /** 重试会顺带丢掉后面几轮对话 —— 点之前要先问一句。 */
+  retryAsks?: boolean;
+  /** 从这一轮之后的对话分叉出一条新会话。 */
+  onFork?: () => void;
 }) {
   const openInspector = useStore((s) => s.openInspector);
   const menu = useContextMenu();
   const items = t.items;
+  // 「复制」就地变对勾，2.5 秒后复位（与文件预览弹窗同一个节奏）。
+  const [copied, setCopied] = useState(false);
+  const [confirmingRetry, setConfirmingRetry] = useState(false);
+
+  useEffect(() => {
+    if (!copied) return;
+    const timer = setTimeout(() => setCopied(false), TOAST_MS);
+    return () => clearTimeout(timer);
+  }, [copied]);
 
   // 复制的是**正文**：思考与工具输出属于过程，不是用户想带走的那段话。
   const answer = items
@@ -352,6 +482,18 @@ function AssistantTurn({
     .map((i) => i.text)
     .join("\n\n")
     .trim();
+
+  // 重试落在这条回答上，但重跑的是**用户那一轮提问**。流式期间整排重试都由
+  // `TurnList` 收掉（见那边的注释），这里只认「有没有回调」。
+  const canRetry = onRetry !== undefined;
+  // 一条动作都没有时整行不渲染：纯工具输出的回答末尾不该留一条看不见的空白。
+  const showPayloadChip = showPayload && t.turn !== undefined;
+  const actions = !!answer || canRetry || showPayloadChip || onFork !== undefined;
+
+  const doCopy = async () => {
+    // 成功才打勾；失败时 copyText 自己会 toast。
+    if (await copyText(answer, null)) setCopied(true);
+  };
 
   const onContextMenu = (e: React.MouseEvent) => {
     // 有选中文字时让系统菜单出来：用户要的多半是「复制选中的这一段」。
@@ -362,6 +504,20 @@ function AssistantTurn({
         label: "复制回答",
         icon: <Copy size={12} />,
         onSelect: () => void copyText(answer),
+      });
+    }
+    if (canRetry) {
+      entries.push({
+        label: "重新生成",
+        icon: <RotateCcw size={12} />,
+        onSelect: () => (retryAsks ? setConfirmingRetry(true) : onRetry?.()),
+      });
+    }
+    if (onFork) {
+      entries.push({
+        label: "从这里分叉",
+        icon: <GitBranch size={12} />,
+        onSelect: onFork,
       });
     }
     if (showPayload && t.turn !== undefined) {
@@ -409,46 +565,244 @@ function AssistantTurn({
         />
       ))}
       {changed.length > 0 && <ChangedFiles files={changed} cwd={cwd} turn={t.turn} />}
-      {/* 把这条回答对回产生它的那次 API 请求。轮次号对**历史消息**也成立
-          （后端按同样口径算好，见 `view.rs`），所以切走再回来入口还在。
-          侧边聊天不给（`showPayload=false`）：它不落盘、不抓包，按主对话的轮次号
-          去开主对话的报文只会指错地方。 */}
-      {showPayload && t.turn !== undefined && items.length > 0 && (
-        <button
-          onClick={() => openInspector(t.turn ?? null)}
-          title={`查看第 ${t.turn} 轮发出的请求`}
-          className="group/msg inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-dim opacity-0 transition-opacity hover:bg-card hover:text-ink group-hover/msg:opacity-100"
-        >
-          <ScanSearch size={12} />
-          查看报文
-        </button>
+      {/* 回答下面那一行小动作。悬停才浮出来，但一直占着位置 —— 否则鼠标移上来
+          的一瞬间整段对话会跳一下。一条动作都没有时整行不渲染（纯工具输出的回答
+          不该在末尾留一条空白）。 */}
+      {actions && (
+        <div className={ACTION_ROW}>
+          {answer && (
+            <ActionChip
+              icon={copied ? <Check size={12} className="carter-pop text-[var(--ok)]" /> : <Copy size={12} />}
+              label={copied ? "已复制" : "复制"}
+              onClick={() => void doCopy()}
+            />
+          )}
+          {canRetry && (
+            <ActionChip
+              icon={<RotateCcw size={12} />}
+              label="重试"
+              title={retryAsks ? "重新生成这一轮的回复（会丢掉后面的对话）" : "重新生成这一轮的回复"}
+              onClick={() => (retryAsks ? setConfirmingRetry(true) : onRetry?.())}
+            />
+          )}
+          {onFork && (
+            <ActionChip
+              icon={<GitBranch size={12} />}
+              label="分叉"
+              title="从这条回答之后分叉出一条新会话，原来这条不受影响"
+              onClick={onFork}
+            />
+          )}
+          {/* 把这条回答对回产生它的那次 API 请求。轮次号对**历史消息**也成立
+              （后端按同样口径算好，见 `view.rs`），所以切走再回来入口还在。
+              侧边聊天不给（`showPayload=false`）：它不落盘、不抓包，按主对话的轮次号
+              去开主对话的报文只会指错地方。 */}
+          {showPayloadChip && (
+            <ActionChip
+              icon={<ScanSearch size={12} />}
+              label="报文"
+              title={`查看第 ${t.turn} 轮发出的请求`}
+              onClick={() => openInspector(t.turn ?? null)}
+            />
+          )}
+        </div>
+      )}
+      {confirmingRetry && (
+        <ConfirmDialog
+          title="重新生成这条回复？"
+          message={
+            <>
+              这一轮之后的对话会被丢掉，模型会基于同一个提问重新回答一遍。
+              <br />
+              <span className="text-dim">
+                只回滚对话，已经改过的文件、跑过的命令不会撤销。
+              </span>
+            </>
+          }
+          confirmLabel="重新生成"
+          onCancel={() => setConfirmingRetry(false)}
+          onConfirm={() => {
+            setConfirmingRetry(false);
+            onRetry?.();
+          }}
+        />
       )}
     </div>
   );
 }
 
-function UserTurn({ turn }: { turn: Extract<Turn, { role: "user" }> }) {
+function UserTurn({
+  turn,
+  onEdit,
+  editAsks,
+  onFork,
+}: {
+  turn: Extract<Turn, { role: "user" }>;
+  /** 改写这句话并重发。没有 `raw`（历史消息）时不给入口。 */
+  onEdit?: (text: string) => void;
+  /** 改写并重发会丢掉后面的对话 —— 点之前要先问一句。 */
+  editAsks?: boolean;
+  /** 从这一轮分叉出一条新会话。不给就不画。 */
+  onFork?: () => void;
+}) {
   const menu = useContextMenu();
+  // 与回答那边同一套反馈：就地变对勾，2.5 秒后复位。
+  const [copied, setCopied] = useState(false);
+  // 就地编辑：把气泡换成输入框，而不是把这句话搬回底部的输入框。搬下去的话
+  // 用户得在一屏之外改一句他要对着看的话。
+  const [draft, setDraft] = useState<string | null>(null);
+  const [confirmingEdit, setConfirmingEdit] = useState(false);
+
+  useEffect(() => {
+    if (!copied) return;
+    const timer = setTimeout(() => setCopied(false), TOAST_MS);
+    return () => clearTimeout(timer);
+  }, [copied]);
+
+  const submitEdit = (text: string) => {
+    setDraft(null);
+    onEdit?.(text);
+  };
+
+  const askThenSubmit = (text: string) => {
+    if (editAsks) {
+      setDraft(text);
+      setConfirmingEdit(true);
+    } else {
+      submitEdit(text);
+    }
+  };
+
+  const menuEntries = (): MenuEntry[] => {
+    const entries: MenuEntry[] = [
+      {
+        label: "复制消息",
+        icon: <Copy size={12} />,
+        onSelect: () => void copyText(turn.text),
+      },
+    ];
+    if (onEdit) {
+      entries.push({
+        label: "编辑并重发",
+        icon: <Pencil size={12} />,
+        onSelect: () => setDraft(turn.raw ?? turn.text),
+      });
+    }
+    if (onFork) {
+      entries.push({
+        label: "从这里分叉",
+        icon: <GitBranch size={12} />,
+        onSelect: onFork,
+      });
+    }
+    return entries;
+  };
+
   return (
     <div
-      className="flex justify-end"
+      className="group/msg flex flex-col items-end"
       onContextMenu={(e) => {
         if (hasSelection()) return;
         e.preventDefault();
-        menu.open({ x: e.clientX, y: e.clientY }, [
-          {
-            label: "复制消息",
-            icon: <Copy size={12} />,
-            onSelect: () => void copyText(turn.text),
-          },
-        ]);
+        menu.open({ x: e.clientX, y: e.clientY }, menuEntries());
       }}
     >
-      {/* 粘贴的图片在会话里存的是 `[img:...]` 引用 token，回看时要渲染回图。
-          纯文本消息走 MessageImages 的文本分支，行为与直接输出一致。 */}
-      <div className="max-w-[75%] break-words rounded-2xl bg-bubble px-3.5 py-2 text-sm leading-relaxed text-ink">
-        <MessageImages text={turn.text} />
-      </div>
+      {draft === null ? (
+        <>
+          {/* 粘贴的图片在会话里存的是 `[img:...]` 引用 token，回看时要渲染回图。
+              纯文本消息走 MessageImages 的文本分支，行为与直接输出一致。 */}
+          <div className="max-w-[75%] break-words rounded-2xl bg-bubble px-3.5 py-2 text-sm leading-relaxed text-ink">
+            <MessageImages text={turn.text} />
+          </div>
+          {/* 用户消息下面只给「复制 / 编辑」—— 重试挂在回答上（重跑的落点是模型
+              那一段），放在提问下面就变成两颗一样的东西了。 */}
+          <div className={`${ACTION_ROW} mt-1 justify-end`}>
+            <ActionChip
+              icon={copied ? <Check size={12} className="carter-pop text-[var(--ok)]" /> : <Copy size={12} />}
+              label={copied ? "已复制" : "复制"}
+              onClick={async () => {
+                if (await copyText(turn.text, null)) setCopied(true);
+              }}
+            />
+            {onEdit && (
+              <ActionChip
+                icon={<Pencil size={12} />}
+                label="编辑"
+                title="改写这句话并重新提问（会丢掉后面的对话）"
+                onClick={() => setDraft(turn.raw ?? turn.text)}
+              />
+            )}
+            {onFork && (
+              <ActionChip
+                icon={<GitBranch size={12} />}
+                label="分叉"
+                title="从这里分叉出一条新会话，原来这条不受影响"
+                onClick={onFork}
+              />
+            )}
+          </div>
+        </>
+      ) : (
+        <div className="w-full max-w-[85%] rounded-2xl bg-elevated p-2 shadow-soft">
+          <textarea
+            autoFocus
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") {
+                e.preventDefault();
+                setDraft(null);
+              }
+              // 与底部输入框一致：Enter 发送、Shift+Enter 换行。
+              if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                e.preventDefault();
+                const t = draft.trim();
+                if (t) askThenSubmit(t);
+              }
+            }}
+            rows={Math.min(8, Math.max(2, draft.split("\n").length))}
+            className="w-full resize-none bg-transparent px-1.5 py-1 text-sm leading-relaxed text-ink outline-none"
+          />
+          <div className="mt-1 flex items-center justify-end gap-1.5">
+            <span className="mr-auto text-[11px] text-dim">
+              重发会丢掉这一轮之后的对话
+            </span>
+            <button
+              onClick={() => setDraft(null)}
+              className="rounded-md px-2 py-1 text-xs text-dim transition-colors hover:bg-ink/5 hover:text-ink"
+            >
+              取消
+            </button>
+            <button
+              disabled={!draft.trim()}
+              onClick={() => askThenSubmit(draft.trim())}
+              className="rounded-md bg-accent px-2 py-1 text-xs font-medium text-[var(--accent-contrast)] transition-opacity hover:opacity-90 disabled:opacity-40"
+            >
+              重发
+            </button>
+          </div>
+        </div>
+      )}
+      {confirmingEdit && draft !== null && (
+        <ConfirmDialog
+          title="改写并重新提问？"
+          message={
+            <>
+              这一轮之后的对话会被丢掉，模型会基于改写后的提问重新回答。
+              <br />
+              <span className="text-dim">
+                只回滚对话，已经改过的文件、跑过的命令不会撤销。
+              </span>
+            </>
+          }
+          confirmLabel="重新提问"
+          onCancel={() => setConfirmingEdit(false)}
+          onConfirm={() => {
+            setConfirmingEdit(false);
+            submitEdit(draft);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -460,6 +814,11 @@ function TurnView({
   showPayload,
   changed,
   cwd,
+  onRegenerate,
+  retryAsks,
+  onEditPrompt,
+  editAsks,
+  onFork,
 }: {
   turn: Turn;
   isLast: boolean;
@@ -467,8 +826,22 @@ function TurnView({
   showPayload: boolean;
   changed: ChangedFile[];
   cwd: string;
+  onRegenerate?: () => void;
+  retryAsks?: boolean;
+  onEditPrompt?: (text: string) => void;
+  editAsks?: boolean;
+  onFork?: () => void;
 }) {
-  if (turn.role === "user") return <UserTurn turn={turn} />;
+  if (turn.role === "user") {
+    return (
+      <UserTurn
+        turn={turn}
+        onEdit={onEditPrompt}
+        editAsks={editAsks}
+        onFork={onFork}
+      />
+    );
+  }
   return (
     <AssistantTurn
       turn={turn}
@@ -477,6 +850,9 @@ function TurnView({
       showPayload={showPayload}
       changed={changed}
       cwd={cwd}
+      onRetry={onRegenerate}
+      retryAsks={retryAsks}
+      onFork={onFork}
     />
   );
 }
@@ -491,6 +867,9 @@ export function TurnList({
   showPayload = true,
   changedByTurn = {},
   cwd = "",
+  onRegenerate,
+  onEditPrompt,
+  onFork,
 }: {
   turns: Turn[];
   streaming: boolean;
@@ -500,23 +879,56 @@ export function TurnList({
   changedByTurn?: Record<number, string[]>;
   /** 用来把工具参数里的绝对路径对回监听器给的相对路径。 */
   cwd?: string;
+  /**
+   * 重跑某一轮。**只有真正跑着的那条会话才传** —— 重试要发 `regenerate` 命令，
+   * 而侧边聊天、侧边聊天里那段继承来的上下文都不该往回改。
+   */
+  onRegenerate?: (turn: number) => void;
+  /** 改写某一轮的提问并重发（参数是改写后的**原文**）。 */
+  onEditPrompt?: (turn: number, text: string) => void;
+  /** 只保留到第 `turn` 轮为止，分叉出一条新会话。 */
+  onFork?: (turn: number) => void;
 }) {
   // 挂在「这一轮用户输入的最后一条助手消息」上，而不是每条助手消息各算各的。
   const changed = changedFilesPerTurn(turns, changedByTurn, cwd);
+  // 一圈正在跑着的时候整排都不给改动：回退命令会插进队列、等这一轮跑完才生效，
+  // 那时用户多半已经忘了自己点过它，结果是一轮好好的回答被莫名其妙地撤掉。
+  const live = !streaming;
+  const slots = onRegenerate && live ? assistantActionSlots(turns) : [];
+  const edits = onEditPrompt && live ? userEditSlots(turns) : [];
 
   return (
     <div className="flex flex-col gap-6">
-      {turns.map((t, i) => (
-        <TurnView
-          key={i}
-          turn={t}
-          isLast={i === turns.length - 1}
-          streaming={streaming}
-          showPayload={showPayload}
-          changed={changed[i]}
-          cwd={cwd}
-        />
-      ))}
+      {turns.map((t, i) => {
+        const asks = slots[i];
+        const editAsks = edits[i];
+        const turn = t.turn;
+        return (
+          <TurnView
+            key={i}
+            turn={t}
+            isLast={i === turns.length - 1}
+            streaming={streaming}
+            showPayload={showPayload}
+            changed={changed[i]}
+            cwd={cwd}
+            // 没有轮次号（历史里那种极端竞态）就没法指名改哪一轮。
+            onRegenerate={
+              asks !== undefined && onRegenerate && turn !== undefined
+                ? () => onRegenerate(turn)
+                : undefined
+            }
+            retryAsks={asks}
+            onEditPrompt={
+              editAsks !== undefined && onEditPrompt && turn !== undefined
+                ? (text) => onEditPrompt(turn, text)
+                : undefined
+            }
+            editAsks={editAsks}
+            onFork={forkTarget(t, onFork, live)}
+          />
+        );
+      })}
     </div>
   );
 }
@@ -530,6 +942,7 @@ function MessageList() {
   const streaming = useStore((s) => s.streaming);
   const changed = useStore((s) => s.changed);
   const cwd = useStore((s) => s.cwd);
+  const sessionId = useStore((s) => s.sessionId);
   const scrollRef = useRef<HTMLDivElement>(null);
   // 用户往上翻时不要把他拽回底部 —— 只在「本来就在底部」时跟随。
   const stick = useRef(true);
@@ -556,6 +969,16 @@ function MessageList() {
             streaming={streaming}
             changedByTurn={changed}
             cwd={cwd}
+            // 回退与分叉都作用在**这条会话**上 —— 侧边聊天那份 TurnList 一概不传。
+            onRegenerate={
+              sessionId ? (turn) => regenerate(sessionId, turn) : undefined
+            }
+            onEditPrompt={
+              sessionId
+                ? (turn, text) => editPrompt(sessionId, turn, text)
+                : undefined
+            }
+            onFork={sessionId ? (turn) => void fork(sessionId, turn) : undefined}
           />
         )}
       </div>
@@ -564,7 +987,8 @@ function MessageList() {
 }
 
 function EmptyState() {
-  const model = useStore((s) => s.model);
+  const modelRef = useStore((s) => s.modelRef);
+  const models = useModelCatalog();
   return (
     <div className="flex flex-col items-center justify-center py-20 text-center">
       <div className="mb-5 flex size-11 items-center justify-center rounded-xl bg-ink text-[var(--accent-contrast)]">
@@ -572,9 +996,13 @@ function EmptyState() {
       </div>
       <div className="mb-1.5 text-[22px] font-semibold tracking-tight">开始一段对话</div>
       <div className="text-sm text-dim">
-        {model ? (
+        {modelRef ? (
           <>
-            当前模型 <span className="mono text-ink">{model}</span>
+            当前模型{" "}
+            {/* 悬停给出实际请求名与 meta —— 与输入框下方那处同一个写法。 */}
+            <span className="mono text-ink" title={modelTitle(modelRef, models)}>
+              {displayName(modelRef, models)}
+            </span>
           </>
         ) : (
           "发条消息就能开始。"

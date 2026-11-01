@@ -28,7 +28,16 @@ export const EVENT_NAME = "carter://event";
 
 /** 一个会话内的事件流。顺序即语义：按到达顺序把增量攒进同一个助手气泡。 */
 export type SessionEvent =
-  | { type: "ready"; session_id: string; model: string; cwd: string; resumed: boolean }
+  | {
+      type: "ready";
+      session_id: string;
+      /** 真正发给上游的模型名。 */
+      model: string;
+      /** `渠道/显示名`。界面上的模型标签一律显示这一种写法。 */
+      model_ref?: string;
+      cwd: string;
+      resumed: boolean;
+    }
   /**
    * 一轮开始。`prompt_id` 是前端在 `send_prompt` 里带的编号 —— 后端把排队里的
    * 那条消息**真正开始跑**时原样带回，界面据此把它从「排队中」挪进对话。
@@ -41,6 +50,17 @@ export type SessionEvent =
       /** 这条用户消息的原文（`/命令`、`@文件` 展开之前）。界面用它画气泡。 */
       prompt?: string | null;
     }
+  /** 当前模型变了（`/model`）。只换「当前模型」那一处显示。 */
+  | { type: "model_changed"; model: string; model_ref?: string }
+  /**
+   * 历史被回退到第 `turn` 轮之前（点了「重试」或「编辑并重发」）。
+   *
+   * 界面要把这一轮的**回答**及之后的轮次从列表里拿掉，那条用户气泡留着 ——
+   * 紧接着会来一条不带 `prompt` 的 `turn_started`，不会再画一遍。
+   *
+   * `prompt` 有值 = 提问被改写过了，界面要把那条气泡换成新正文。
+   */
+  | { type: "turn_retracted"; turn: number; prompt?: string | null }
   | { type: "thinking_delta"; text: string }
   | { type: "text_delta"; text: string }
   | { type: "text_end" }
@@ -153,6 +173,21 @@ export type Command =
    */
   | { type: "tool_action"; call_id: string; action: "interrupt" | "background" }
   | { type: "cancel" }
+  /**
+   * 重跑某一轮用户输入（回答下面的「重试」）。
+   *
+   * `turn` 与 `turn_started` / 历史消息上的轮次号同一口径。会话把历史回退到这一轮
+   * 之前再原样重跑 —— 之后那几轮会一并丢掉。**只回滚对话，不动磁盘。**
+   */
+  | { type: "regenerate"; turn: number }
+  /**
+   * 改写某一轮的提问并重跑（用户气泡上的「编辑」）。
+   *
+   * 与 `regenerate` 同一条路（回退到这一轮之前、丢掉后面几轮，**只回滚对话、
+   * 不动磁盘**），只是重发的正文换成 `text`。`text` 是用户改过的原文，后端照常
+   * 展开 `/命令`、`@文件`。
+   */
+  | { type: "edit_prompt"; turn: number; text: string }
   | { type: "set_model"; model: string }
   /**
    * 回答 `ask_user_question` 提的问题。
@@ -255,7 +290,10 @@ export type TurnFiles = {
 
 export type CreatedSession = {
   session_id: string;
+  /** 真正发给上游的模型名。 */
   model: string;
+  /** 模型引用 `渠道/显示名`。界面上的模型标签一律显示这一种写法。 */
+  model_ref?: string;
   cwd: string;
   history: MessageView[];
   /** 这条会话现有的长任务目标。 */
@@ -268,6 +306,8 @@ export type CreatedSession = {
 export type CreatedSide = {
   session_id: string;
   model: string;
+  /** 见 `CreatedSession.model_ref`。 */
+  model_ref?: string;
   cwd: string;
   /** 继承下来的历史（打开那一刻的快照；模型那边每轮现取最新的）。 */
   inherited: MessageView[];
@@ -354,8 +394,14 @@ export function renameSession(sessionId: string, title: string): Promise<void> {
 }
 
 /** fork 一条会话，返回新会话的 id。 */
-export function forkSession(sessionId: string): Promise<string> {
-  return invoke<string>("fork_session", { sessionId });
+/**
+ * fork 一条会话，返回新会话的 id。
+ *
+ * `turn` 给了就只保留到这一轮为止的历史（回答下面的「从这里分叉」）。
+ * 不给 = 整条复制。
+ */
+export function forkSession(sessionId: string, turn?: number): Promise<string> {
+  return invoke<string>("fork_session", { sessionId, turn: turn ?? null });
 }
 
 /** 删除一个会话文件。不可恢复 —— 调用方必须先确认。 */
@@ -445,6 +491,12 @@ export type ModelRow = {
   name: string;
   api_name: string;
   meta: string;
+  /**
+   * models.dev 目录里的展示名（「Claude Opus 5.5」）。界面上的模型标签用它 ——
+   * 用户配的是 `opus`、请求里发的是 `claude-opus-5-5`，都不如这个名字好认。
+   * 没绑 meta 或目录里查不到时是 `null`，那时退回显示引用本身。
+   */
+  label: string | null;
   is_default: boolean;
   /** 是不是副模型（`agent.fast_model`）：压缩上下文、生成标题用的那个。 */
   is_fast: boolean;

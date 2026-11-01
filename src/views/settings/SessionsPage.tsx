@@ -12,6 +12,7 @@ import { Folder, Search, X } from "lucide-react";
 
 import { listSessions, searchSessions, type SearchHit, type SessionRow } from "../../lib/api";
 import { fmtBytes, fullTime, relTime, shortenPath } from "../../lib/format";
+import { displayName, modelTitle, useModelCatalog } from "../../lib/modelLabel";
 import { toastError } from "../../lib/toast";
 import { useAsync } from "../../lib/useAsync";
 import { SessionList } from "../../components/SessionList";
@@ -55,6 +56,7 @@ function SearchResults({
   onOpen: (id: string) => void;
   onClear: () => void;
 }) {
+  const models = useModelCatalog();
   return (
     <div className="space-y-2">
       <div className="flex items-center gap-2 text-xs text-dim">
@@ -74,7 +76,9 @@ function SearchResults({
           </div>
           <div className="text-xs leading-relaxed text-dim">{h.snippet}</div>
           <div className="mono flex items-center gap-1.5 truncate text-[10px] text-dim/70">
-            <span className="truncate">{h.model}</span>
+            <span className="truncate" title={modelTitle(h.model, models)}>
+              {displayName(h.model, models)}
+            </span>
             <span>·</span>
             <span className="truncate" title={h.cwd}>
               {shortenPath(h.cwd)}

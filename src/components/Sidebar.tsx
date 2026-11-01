@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 
 import { setAppSettings, type AppSettings, type ThemePref } from "../lib/api";
+import { modelSearchText, useModelCatalog } from "../lib/modelLabel";
 import { newSession } from "../lib/sessionOps";
 import { SessionList } from "./SessionList";
 import { Button } from "./ui/Button";
@@ -111,12 +112,15 @@ export function Sidebar() {
     saveWidth(width);
   }, [width, saveWidth]);
 
+  const models = useModelCatalog();
   const q = query.trim().toLowerCase();
+  // 模型的三种写法都能搜到（引用 / 展示名 / 实际名）—— 用户记得住的往往不是
+  // 配置里那个块名。
   const shown = q
     ? sessions.filter(
         (s) =>
           (s.title ?? "").toLowerCase().includes(q) ||
-          s.model.toLowerCase().includes(q),
+          modelSearchText(s.model, models).includes(q),
       )
     : sessions;
 
