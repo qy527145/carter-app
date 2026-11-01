@@ -3,6 +3,9 @@
 // 竖排而不是横向页签：设置项会越来越多（渠道 / 模型 / 工具 / 技能 / MCP / 会话 /
 // 外观 / 关于），横向排到第七个就开始换行或需要横向滚动，而竖排永远只是变长。
 // 参考实现（kalo / deepseek-harness）都用这一种。
+//
+// 导航列用 `bg-sidebar`（整套色阶里最深的一档），选中项用 `bg-ink/10` 提亮 ——
+// 明暗两个主题下「选中 = 比周围亮」的关系一致，不需要分隔线。
 
 import { useState } from "react";
 import {
@@ -46,7 +49,7 @@ export function SettingsPage() {
 
   return (
     <div className="flex min-h-0 flex-1">
-      <nav className="flex w-44 shrink-0 flex-col border-r border-edge bg-card/40">
+      <nav className="flex w-44 shrink-0 flex-col bg-sidebar">
         <div className="px-4 pb-1 pt-4 text-[11px] font-medium uppercase tracking-wider text-dim">
           设置
         </div>
@@ -57,8 +60,8 @@ export function SettingsPage() {
               onClick={() => setTab(t.id)}
               className={`flex items-center gap-2 rounded-md px-3 py-1.5 text-left text-sm transition-colors ${
                 tab === t.id
-                  ? "bg-base font-medium text-ink"
-                  : "text-dim hover:bg-base/60 hover:text-ink"
+                  ? "bg-ink/10 font-medium text-ink"
+                  : "text-dim hover:bg-ink/5 hover:text-ink"
               }`}
             >
               <t.icon size={14} />

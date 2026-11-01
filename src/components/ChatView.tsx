@@ -36,7 +36,7 @@ import { GoalBar } from "./GoalBar";
 import { Glyph, ServerCard, ToolCard } from "./toolcards/ToolCard";
 import { IconButton } from "./ui/Button";
 import { hasSelection, useContextMenu, type MenuEntry } from "./ui/ContextMenu";
-import { Banner } from "./ui/Panel";
+import { Banner, Collapse } from "./ui/Panel";
 
 type ImageItem = Extract<Item, { kind: "image" }>;
 type AssistantTurnT = Extract<Turn, { role: "assistant" }>;
@@ -54,10 +54,17 @@ function MarkdownText({ text }: { text: string }) {
 }
 
 function ThinkingBlock({ text, hasSignature }: { text: string; hasSignature?: boolean }) {
+  const [open, setOpen] = useState(false);
   return (
-    <details className="group rounded-lg border border-edge bg-card/50">
-      <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-1.5 text-xs text-dim transition-colors hover:text-ink">
-        <ChevronRight size={12} className="transition-transform group-open:rotate-90" />
+    <div className="rounded-lg bg-ink/[0.03]">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-dim transition-colors hover:text-ink"
+      >
+        <ChevronRight
+          size={12}
+          className={`shrink-0 transition-transform ${open ? "rotate-90" : ""}`}
+        />
         <Glyph tone="violet">
           <Brain size={11} />
         </Glyph>
@@ -68,11 +75,13 @@ function ThinkingBlock({ text, hasSignature }: { text: string; hasSignature?: bo
             无签名 · 历史消息无法原样回传
           </span>
         )}
-      </summary>
-      <div className="whitespace-pre-wrap border-t border-edge px-3 py-2 text-xs leading-relaxed text-dim">
-        {text}
-      </div>
-    </details>
+      </button>
+      <Collapse open={open}>
+        <div className="whitespace-pre-wrap border-t border-edge px-3 py-2 text-xs leading-relaxed text-dim">
+          {text}
+        </div>
+      </Collapse>
+    </div>
   );
 }
 
@@ -85,7 +94,7 @@ function ThinkingBlock({ text, hasSignature }: { text: string; hasSignature?: bo
  */
 function ImageCard({ item }: { item: ImageItem }) {
   return (
-    <div className="flex items-center gap-2 rounded-lg border border-edge bg-card px-3 py-2 text-xs text-dim">
+    <div className="flex items-center gap-2 rounded-lg bg-card px-3 py-2 text-xs text-dim">
       <Glyph tone="pink">
         <FileText size={11} />
       </Glyph>
@@ -109,7 +118,10 @@ function ItemView({
       return <ThinkingBlock text={item.text} hasSignature={item.hasSignature} />;
     case "text":
       return (
-        <div className="text-sm text-ink">
+        // 流式时给整段文字一个「墨落纸」的落定动画（见 index.css 的 carter-bloom）。
+        // 只在正在生成的这一段上挂 —— 历史消息静默出现，不该一条条播动画。
+        // 同一段后续增量复用同一个 DOM 元素，不会每帧重播。
+        <div className={`text-sm text-ink ${showCursor ? "carter-bloom" : ""}`}>
           <MarkdownText text={item.text} />
           {showCursor && <span className="carter-cursor">▍</span>}
         </div>
@@ -228,7 +240,7 @@ function ChangedFiles({
     other: "变更",
   };
   return (
-    <div className="rounded-lg border border-edge bg-card px-3 py-2">
+    <div className="rounded-lg bg-card px-3 py-2">
       <div className="mb-1.5 flex items-center gap-1.5 text-[11px] text-dim">
         <Pencil size={11} />
         本轮变更了 {files.length} 个文件
@@ -611,7 +623,7 @@ function TodoPanel() {
   const done = todos.filter((t) => t.status === "completed").length;
 
   return (
-    <div className="border-t border-edge bg-sidebar px-4 py-2">
+    <div className="border-t border-edge bg-card px-4 py-2">
       <div className="mx-auto flex max-w-3xl items-start gap-2">
         <div className="min-w-0 flex-1 space-y-1">
           <div className="flex items-center gap-2 text-[10px] text-dim">
@@ -621,7 +633,10 @@ function TodoPanel() {
           {todos.map((t, i) => (
             <div key={i} className="flex items-center gap-2 text-xs">
               {t.status === "completed" ? (
-                <CircleCheck size={13} className="shrink-0 text-[var(--ok)]" />
+                <CircleCheck
+                  size={13}
+                  className="carter-pop shrink-0 text-[var(--ok)]"
+                />
               ) : t.status === "in_progress" ? (
                 <LoaderCircle size={13} className="shrink-0 animate-spin text-tone-blue" />
               ) : (
@@ -650,7 +665,7 @@ function NoticeBanner() {
       <div className="mx-auto max-w-3xl">
         <Banner kind="warn" onClose={() => setNotice(null)}>
           <div className="flex items-start gap-2">
-            <TriangleAlert size={14} className="mt-0.5 shrink-0" />
+            <TriangleAlert size={14} className="icon-optical shrink-0" />
             <span className="whitespace-pre-wrap break-words">{notice}</span>
           </div>
         </Banner>

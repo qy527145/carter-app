@@ -15,10 +15,11 @@ import { toastError } from "../../lib/toast";
 import { useAsync } from "../../lib/useAsync";
 import { useStore } from "../../store";
 import { Switch } from "../../components/ui/Input";
-import { Banner, Card } from "../../components/ui/Panel";
+import { Banner, Card, Collapse } from "../../components/ui/Panel";
 import { AsyncBody, PageIntro } from "./AsyncBody";
 
 function ToolItem({ t, onToggle }: { t: ToolRow; onToggle: (v: boolean) => void }) {
+  const [open, setOpen] = useState(false);
   return (
     <Card className="space-y-2">
       <div className="flex items-center gap-2">
@@ -35,15 +36,23 @@ function ToolItem({ t, onToggle }: { t: ToolRow; onToggle: (v: boolean) => void 
       <div className="text-xs leading-relaxed text-dim">{t.description || "（无描述）"}</div>
 
       {t.parameters != null && (
-        <details className="group border-t border-edge pt-2">
-          <summary className="flex cursor-pointer list-none items-center gap-1.5 text-[11px] text-dim transition-colors hover:text-ink">
-            <ChevronRight size={11} className="transition-transform group-open:rotate-90" />
+        <div className="border-t border-edge pt-2">
+          <button
+            onClick={() => setOpen((o) => !o)}
+            className="flex w-full items-center gap-1.5 text-left text-[11px] text-dim transition-colors hover:text-ink"
+          >
+            <ChevronRight
+              size={11}
+              className={`shrink-0 transition-transform ${open ? "rotate-90" : ""}`}
+            />
             参数（JSON Schema）
-          </summary>
-          <pre className="mono mt-2 max-h-72 overflow-auto rounded-md bg-base p-2 text-[11px] leading-relaxed text-ink">
-            {JSON.stringify(t.parameters, null, 2)}
-          </pre>
-        </details>
+          </button>
+          <Collapse open={open}>
+            <pre className="mono mt-2 max-h-72 overflow-auto rounded-md bg-base p-2 text-[11px] leading-relaxed text-ink">
+              {JSON.stringify(t.parameters, null, 2)}
+            </pre>
+          </Collapse>
+        </div>
       )}
     </Card>
   );

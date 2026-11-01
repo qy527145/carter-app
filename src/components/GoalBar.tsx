@@ -53,9 +53,9 @@ export function GoalBar() {
   return (
     <div className="shrink-0 px-4 pt-2">
       <div
-        className={`mx-auto flex max-w-3xl items-start gap-2 rounded-xl border border-edge px-3 py-2 ${t.bg}`}
+        className={`mx-auto flex max-w-3xl items-start gap-2 rounded-xl px-3 py-2 ${t.bg}`}
       >
-        <Icon size={14} className={`mt-0.5 shrink-0 ${t.cls}`} />
+        <Icon size={14} className={`icon-optical shrink-0 ${t.cls}`} />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 text-[11px] text-dim">
             <span className={t.cls}>目标 · {goal.status_label}</span>
@@ -72,11 +72,11 @@ export function GoalBar() {
                   if (e.key === "Enter") submit();
                   if (e.key === "Escape") setEditing(false);
                 }}
-                className="min-w-0 flex-1 rounded border border-edge bg-base px-2 py-1 text-xs text-ink outline-none"
+                className="carter-field min-w-0 flex-1 rounded border border-edge bg-base px-2 py-1 text-xs text-ink outline-none"
               />
               <button
                 onClick={submit}
-                className="rounded border border-edge px-2 py-1 text-[11px] text-dim hover:text-ink"
+                className="rounded bg-bubble px-2 py-1 text-[11px] text-dim hover:text-ink"
               >
                 保存
               </button>

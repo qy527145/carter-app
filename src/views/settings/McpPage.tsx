@@ -164,7 +164,7 @@ function McpEditor({
               onChange={(e) => setArgs(e.target.value)}
               rows={3}
               placeholder={"-y\n@modelcontextprotocol/server-filesystem"}
-              className="mono w-full resize-y rounded-md border border-edge bg-base px-3 py-2 text-sm text-ink outline-none transition-colors placeholder:text-dim focus:border-dim"
+              className="carter-field mono w-full resize-y rounded-md border border-edge bg-base px-3 py-2 text-sm text-ink outline-none transition-[border-color,box-shadow] placeholder:text-dim"
             />
           </Field>
           <Field label="环境变量 env" hint="键值对">

@@ -41,7 +41,7 @@ function InlineRename({
         }
         if (e.key === "Escape") onCancel();
       }}
-      className="min-w-0 flex-1 rounded border border-dim bg-base px-1.5 py-0.5 text-sm outline-none"
+      className="carter-field min-w-0 flex-1 rounded border border-dim bg-base px-1.5 py-0.5 text-sm outline-none"
     />
   );
 }
@@ -108,7 +108,7 @@ function Row({
         }}
         className={`group relative flex items-center gap-1 rounded-md ${
           dense ? "px-2 py-1.5" : "px-3 py-2"
-        } ${active ? "bg-card" : "hover:bg-card"}`}
+        } ${active ? "bg-ink/10" : "hover:bg-ink/5"}`}
       >
         {renaming ? (
           <InlineRename

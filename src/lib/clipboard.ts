@@ -4,6 +4,9 @@
 // 而 `navigator.clipboard` 在 WKWebView 的两种构建（dev 的 http://localhost 与
 // 打包后的 tauri://localhost）里都算安全上下文。仍保留 execCommand 兜底：
 // 某些 WebView 版本在窗口失焦后会拒绝 clipboard API，而菜单项点击本身是用户手势。
+//
+// 返回 `boolean` 而不是抛异常：调用方要用它决定「按钮就地变成对勾」还是
+// 「什么都不变」——失败时已经统一 toast 过了，抛出去反而每处都得再包一层。
 
 import { toastError, toastOk } from "./toast";
 
@@ -22,7 +25,7 @@ function legacyCopy(text: string): boolean {
   return ok;
 }
 
-export async function copyText(text: string, okMessage = "已复制"): Promise<void> {
+export async function copyText(text: string, okMessage = "已复制"): Promise<boolean> {
   try {
     if (navigator.clipboard?.writeText) {
       try {
@@ -35,7 +38,9 @@ export async function copyText(text: string, okMessage = "已复制"): Promise<v
       throw new Error("复制失败");
     }
     toastOk(okMessage);
+    return true;
   } catch (e) {
     toastError(e);
+    return false;
   }
 }

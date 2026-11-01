@@ -51,10 +51,10 @@ function ThemeToggle() {
           title={t.label}
           aria-label={t.label}
           onClick={() => pick(t.id)}
-          className={`flex flex-1 items-center justify-center rounded-md border py-1.5 transition-colors ${
+          className={`flex flex-1 items-center justify-center rounded-md py-1.5 transition-colors ${
             settings.theme === t.id
-              ? "border-dim bg-base text-ink"
-              : "border-edge text-dim hover:text-ink"
+              ? "bg-ink/10 text-ink"
+              : "text-dim hover:bg-ink/5 hover:text-ink"
           }`}
         >
           <t.icon size={13} />
@@ -178,7 +178,7 @@ export function Sidebar() {
           <button
             onClick={() => setView("settings")}
             className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors ${
-              view === "settings" ? "bg-card font-medium text-ink" : "text-dim hover:bg-card"
+              view === "settings" ? "bg-ink/10 font-medium text-ink" : "text-dim hover:bg-ink/5"
             }`}
           >
             <SettingsIcon size={14} />
@@ -195,7 +195,7 @@ export function Sidebar() {
         onPointerUp={onDragEnd}
         // 双击复位到默认宽度 —— 拖窄了想调回来时不用瞄着拖。
         onDoubleClick={() => saveWidth(260)}
-        className="w-1 shrink-0 cursor-col-resize transition-colors hover:bg-edge"
+        className="w-1 shrink-0 cursor-col-resize transition-colors hover:bg-edge-strong"
       />
     </>
   );

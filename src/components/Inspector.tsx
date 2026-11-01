@@ -41,7 +41,7 @@ const VIEW_TABS: { id: View; label: string }[] = [
 
 function ViewTabs({ value, onChange }: { value: View; onChange: (v: View) => void }) {
   return (
-    <div className="inline-flex rounded-md border border-edge bg-base p-0.5 text-xs">
+    <div className="inline-flex rounded-md bg-base p-0.5 text-xs">
       {VIEW_TABS.map((t) => (
         <button
           key={t.id}
@@ -126,7 +126,7 @@ function RawView({ rec }: { rec: ExchangeRecord }) {
     <div className="space-y-3">
       <div>
         <div className="mb-1 text-[11px] text-dim">请求体（原样）</div>
-        <pre className="max-h-[40vh] overflow-auto whitespace-pre-wrap rounded-md border border-edge bg-base p-2 mono text-[11px] leading-relaxed text-ink">
+        <pre className="max-h-[40vh] overflow-auto whitespace-pre-wrap rounded-md bg-base p-2 mono text-[11px] leading-relaxed text-ink">
           {rec.request_body || "（空）"}
         </pre>
       </div>
@@ -134,7 +134,7 @@ function RawView({ rec }: { rec: ExchangeRecord }) {
         <div className="mb-1 text-[11px] text-dim">
           {streaming ? "流式响应原始字节（按到达顺序原样拼接）" : "响应体（原样）"}
         </div>
-        <pre className="max-h-[40vh] overflow-auto whitespace-pre-wrap rounded-md border border-edge bg-base p-2 mono text-[11px] leading-relaxed text-ink">
+        <pre className="max-h-[40vh] overflow-auto whitespace-pre-wrap rounded-md bg-base p-2 mono text-[11px] leading-relaxed text-ink">
           {response || "（空）"}
         </pre>
       </div>
@@ -171,7 +171,7 @@ function ExchangeRow({
     <button
       onClick={onClick}
       className={`w-full border-b border-edge px-3 py-2 text-left transition-colors ${
-        active ? "bg-card" : "hover:bg-base"
+        active ? "bg-ink/10" : "hover:bg-ink/5"
       }`}
     >
       <div className="flex items-center gap-2">
@@ -201,7 +201,7 @@ function ExchangeRow({
           {s.in_flight ? "进行中" : fmtMs(s.total_ms)}
         </span>
         {s.frame_count > 0 && (
-          <span className="rounded border border-edge px-1 text-dim">{s.frame_count} 帧</span>
+          <span className="rounded bg-bubble px-1 text-dim">{s.frame_count} 帧</span>
         )}
       </div>
       {/* 同一个模型可能配在多个渠道上 —— 光看 URL 与请求体分不出来，渠道要单独标。 */}
@@ -376,7 +376,7 @@ export function Inspector() {
           <button
             onClick={() => setInspectorTurn(null)}
             title="清除筛选"
-            className="inline-flex items-center gap-1 rounded-full border border-edge px-2 py-0.5 text-[11px] text-dim transition-colors hover:text-ink"
+            className="inline-flex items-center gap-1 rounded-full bg-bubble px-2 py-0.5 text-[11px] text-dim transition-colors hover:text-ink"
           >
             <X size={11} />
             清除筛选 · 只看第 {turn} 轮

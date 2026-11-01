@@ -100,7 +100,7 @@ export function AboutPage() {
               /* 打不开浏览器不是错误 */
             })
           }
-          className="inline-flex items-center gap-1.5 rounded-md border border-edge px-3 py-1.5 text-sm text-dim transition-colors hover:text-ink"
+          className="inline-flex items-center gap-1.5 rounded-md bg-ink/5 px-3 py-1.5 text-sm text-dim transition-colors hover:bg-ink/10 hover:text-ink"
         >
           <ExternalLink size={13} />
           carter 仓库

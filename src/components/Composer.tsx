@@ -64,7 +64,7 @@ function Popup({
   return (
     <div
       ref={ref}
-      className="absolute bottom-full left-0 z-30 mb-2 max-h-64 w-[22rem] max-w-full overflow-y-auto rounded-lg border border-edge bg-card py-1 shadow-lift"
+      className="absolute bottom-full left-0 z-30 mb-2 max-h-64 w-[22rem] max-w-full overflow-y-auto rounded-lg bg-card py-1 shadow-lift"
     >
       <div className="px-3 pb-1 pt-1.5 text-[10px] font-medium uppercase tracking-wider text-dim">
         {title}
@@ -80,7 +80,7 @@ function Popup({
             onPick(it);
           }}
           className={`flex w-full items-center gap-2 px-3 py-1.5 text-left transition-colors ${
-            i === active ? "bg-base" : "hover:bg-base"
+            i === active ? "bg-base" : "hover:bg-ink/5"
           }`}
         >
           <span className="mono min-w-0 flex-1 truncate text-xs text-ink">{it.label}</span>
@@ -113,7 +113,7 @@ function Thumb({ token, onRemove }: { token: string; onRemove: () => void }) {
   }, [token]);
 
   return (
-    <div className="group relative size-14 shrink-0 overflow-hidden rounded-md border border-edge bg-base">
+    <div className="group relative size-14 shrink-0 overflow-hidden rounded-md bg-base">
       {url ? (
         <img src={url} alt="已粘贴的图片" className="size-full object-cover" />
       ) : (
@@ -191,7 +191,7 @@ function InlineImage({ token }: { token: string }) {
     <img
       src={url}
       alt="粘贴的图片"
-      className="my-1.5 block max-h-64 max-w-full rounded-lg border border-edge object-contain"
+      className="my-1.5 block max-h-64 max-w-full rounded-lg object-contain"
     />
   );
 }
@@ -515,7 +515,10 @@ export function Composer() {
   return (
     <div className="shrink-0 px-4 pb-4 pt-1">
       <div className="relative mx-auto max-w-3xl">
-        <div className="rounded-2xl border border-edge bg-elevated shadow-soft transition-shadow focus-within:shadow-lift">
+        {/* 输入卡片：没有描边，全身分只靠底色的明度差（elevated 比 base 暗一档）。
+            焦点是两圈咬合环，见 index.css 的 .focus-ring-bite —— 比「阴影变大」
+            明确得多，而且在暗色下也成立（暗色里阴影本来就看不见）。 */}
+        <div className="focus-ring-bite rounded-2xl bg-elevated shadow-soft">
           {attachments.length > 0 && (
             <div className="flex flex-wrap gap-2 px-3.5 pt-3">
               {attachments.map((t) => (
@@ -560,7 +563,7 @@ export function Composer() {
               <button
                 onClick={cancel}
                 title="中断这一轮（正在跑的命令会被立刻结束）"
-                className="inline-flex items-center gap-1.5 rounded-full border border-edge px-3 py-1.5 text-xs text-dim transition-colors hover:text-[var(--danger)]"
+                className="inline-flex items-center gap-1.5 rounded-full bg-bubble px-3 py-1.5 text-xs text-dim transition-colors hover:text-[var(--danger)]"
               >
                 <Square size={11} />
                 停止
@@ -619,7 +622,7 @@ function QueueStrip({
         {queued.map((q) => (
           <li
             key={q.id}
-            className="group flex items-center gap-2 rounded px-1 py-0.5 hover:bg-base"
+            className="group flex items-center gap-2 rounded px-1 py-0.5 hover:bg-ink/5"
           >
             <span className="min-w-0 flex-1 truncate text-xs text-dim" title={q.text}>
               {q.text.split("\n")[0]}
@@ -701,7 +704,7 @@ function ModelPicker({ model }: { model: string }) {
       <button
         onClick={() => setOpen((o) => !o)}
         title={model ? `当前模型 ${model}，点击切换` : "选择模型"}
-        className="mono max-w-[14rem] truncate rounded-md px-1.5 py-1 text-[11px] text-dim transition-colors hover:bg-base hover:text-ink"
+        className="mono max-w-[14rem] truncate rounded-md px-1.5 py-1 text-[11px] text-dim transition-colors hover:bg-ink/5 hover:text-ink"
       >
         {model || "选择模型"}
       </button>
@@ -732,7 +735,7 @@ function ModelMenu({
     <div
       ref={ref}
       onClick={(e) => e.stopPropagation()}
-      className="absolute bottom-full left-0 z-50 mb-2 max-h-80 w-72 overflow-y-auto rounded-lg border border-edge bg-card py-1 shadow-lift"
+      className="absolute bottom-full left-0 z-50 mb-2 max-h-80 w-72 overflow-y-auto rounded-lg bg-card py-1 shadow-lift"
     >
       {groups.length === 0 && (
         <div className="px-3 py-2 text-xs text-dim">没有可用的模型，先去「设置 → 渠道」配一个。</div>
@@ -746,7 +749,7 @@ function ModelMenu({
             <button
               key={m.reference}
               onClick={() => onPick(m.reference)}
-              className={`flex w-full items-center gap-2 px-3 py-1.5 text-left transition-colors hover:bg-base ${
+              className={`flex w-full items-center gap-2 px-3 py-1.5 text-left transition-colors hover:bg-ink/5 ${
                 m.reference === current ? "text-ink" : "text-dim"
               }`}
             >
@@ -785,7 +788,7 @@ function CwdPicker({ cwd }: { cwd: string }) {
       onClick={pick}
       disabled={busy}
       title={cwd ? `${cwd}\n点击切换（会新开一个会话）` : "选择工作目录"}
-      className="flex min-w-0 max-w-[20rem] items-center gap-1.5 rounded-md px-1.5 py-1 text-[11px] text-dim transition-colors hover:bg-base hover:text-ink disabled:opacity-50"
+      className="flex min-w-0 max-w-[20rem] items-center gap-1.5 rounded-md px-1.5 py-1 text-[11px] text-dim transition-colors hover:bg-ink/5 hover:text-ink disabled:opacity-50"
     >
       {busy ? <LoaderCircle size={11} className="animate-spin" /> : <Folder size={11} className="shrink-0" />}
       <span className="mono truncate">{cwd ? shortenPath(cwd) : "选择目录"}</span>

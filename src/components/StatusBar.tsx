@@ -22,7 +22,7 @@ export function StatusBar() {
   const cost = useStore((s) => s.cost);
 
   return (
-    <div className="flex h-7 shrink-0 items-center gap-3 overflow-hidden border-t border-edge bg-sidebar px-4 text-[11px]">
+    <div className="flex h-7 shrink-0 items-center gap-3 overflow-hidden border-t border-edge bg-card px-4 text-[11px]">
       {usage ? (
         <span className="flex shrink-0 items-center gap-3">
           <Stat label="输入" value={usage.input_tokens} />

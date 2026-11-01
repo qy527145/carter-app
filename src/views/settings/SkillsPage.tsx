@@ -300,7 +300,7 @@ function ScanRootsCard({
               title="恢复使用"
               disabled={busy}
               onClick={() => onUnignore(n)}
-              className="mono inline-flex items-center gap-1 rounded border border-edge px-1.5 py-0.5 text-[10px] text-dim transition-colors hover:text-ink disabled:opacity-50"
+              className="mono inline-flex items-center gap-1 rounded bg-bubble px-1.5 py-0.5 text-[10px] text-dim transition-colors hover:text-ink disabled:opacity-50"
             >
               {n}
               <X size={9} />

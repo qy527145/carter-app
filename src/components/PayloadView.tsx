@@ -56,10 +56,10 @@ function Section({
 }) {
   const [open, setOpen] = useState(defaultOpen);
   return (
-    <div className="overflow-hidden rounded-md border border-edge">
+    <div className="overflow-hidden rounded-md border border-edge-strong/60">
       <button
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs font-medium text-ink transition-colors hover:bg-base"
+        className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs font-medium text-ink transition-colors hover:bg-ink/5"
       >
         {open ? (
           <ChevronDown size={13} className="shrink-0 text-dim" />
@@ -93,7 +93,7 @@ function LongText({
   return (
     <div className="space-y-1">
       <pre
-        className={`max-h-72 overflow-auto whitespace-pre-wrap break-words rounded border border-edge bg-base p-2 mono text-[11px] leading-relaxed text-ink ${className}`}
+        className={`max-h-72 overflow-auto whitespace-pre-wrap break-words rounded bg-base p-2 mono text-[11px] leading-relaxed text-ink ${className}`}
       >
         {expanded || !tooLong ? text : `${text.slice(0, limit)}…`}
       </pre>
@@ -122,7 +122,7 @@ export function JsonOrRaw({ text, label }: { text: string; label?: string }) {
       {!pretty && label && (
         <div className="text-[11px] text-dim">{label}</div>
       )}
-      <pre className="max-h-[50vh] overflow-auto whitespace-pre-wrap break-all rounded border border-edge bg-base p-2 mono text-[11px] leading-relaxed text-ink">
+      <pre className="max-h-[50vh] overflow-auto whitespace-pre-wrap break-all rounded bg-base p-2 mono text-[11px] leading-relaxed text-ink">
         {pretty ?? (text.trim() ? text : "（空）")}
       </pre>
     </div>
@@ -146,7 +146,7 @@ function Chips({ items }: { items: { key: string; value: string }[] }) {
       {items.map(({ key, value }) => (
         <span
           key={key}
-          className="rounded border border-edge bg-base px-1.5 py-0.5 mono text-[11px]"
+          className="rounded bg-base px-1.5 py-0.5 mono text-[11px]"
         >
           <span className="text-dim">{key}=</span>
           <span className="text-ink">{value}</span>
@@ -176,7 +176,7 @@ function ToolCallBlock({ name, args }: { name: string; args: string }) {
     /* 不是合法 JSON 就原样显示 —— 那本身就是要看的东西。 */
   }
   return (
-    <div className="rounded border border-edge bg-card p-2">
+    <div className="rounded bg-card p-2">
       <div className="mb-1 flex items-center gap-1.5">
         <Wrench size={12} className="shrink-0 text-tone-blue" />
         <span className="mono text-xs text-ink">{name}</span>
@@ -214,7 +214,7 @@ function BlockRenderer({ block }: { block: BlockView }) {
 
     case "tool_result":
       return (
-        <div className="rounded border border-edge bg-card p-2">
+        <div className="rounded bg-card p-2">
           <div className="mb-1 flex items-center gap-1.5 text-[11px]">
             <span className="mono text-dim">结果 → {block.tool_use_id}</span>
             {block.is_error && (
@@ -229,10 +229,10 @@ function BlockRenderer({ block }: { block: BlockView }) {
 
     case "server_activity":
       return (
-        <div className="rounded border border-dashed border-edge bg-card/50 p-2">
+        <div className="rounded border border-dashed border-edge bg-ink/[0.03] p-2">
           <div className="flex items-center gap-1.5">
             <span className="mono text-[11px] text-ink">{block.raw_type}</span>
-            <span className="rounded border border-edge px-1 text-[10px] text-dim">
+            <span className="rounded bg-bubble px-1 text-[10px] text-dim">
               服务端活动
             </span>
           </div>
@@ -269,15 +269,15 @@ function BlockList({ blocks }: { blocks: BlockView[] }) {
 function MessageCard({ msg, index }: { msg: MessageView; index: number }) {
   const [open, setOpen] = useState(false);
   return (
-    <div className="overflow-hidden rounded border border-edge">
+    <div className="overflow-hidden rounded border border-edge-strong/60">
       <button
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-start gap-2 px-2 py-1.5 text-left transition-colors hover:bg-base"
+        className="flex w-full items-start gap-2 px-2 py-1.5 text-left transition-colors hover:bg-ink/5"
       >
         {open ? (
-          <ChevronDown size={13} className="mt-0.5 shrink-0 text-dim" />
+          <ChevronDown size={13} className="icon-optical shrink-0 text-dim" />
         ) : (
-          <ChevronRight size={13} className="mt-0.5 shrink-0 text-dim" />
+          <ChevronRight size={13} className="icon-optical shrink-0 text-dim" />
         )}
         <span className="w-6 shrink-0 mono text-[11px] text-dim">#{index}</span>
         <span className={`w-16 shrink-0 mono text-xs ${ROLE_STYLE[msg.role] ?? ""}`}>
@@ -328,10 +328,10 @@ function summarize(msg: MessageView): string {
 function ToolCard({ tool }: { tool: InspectedTool }) {
   const [open, setOpen] = useState(false);
   return (
-    <div className="overflow-hidden rounded border border-edge">
+    <div className="overflow-hidden rounded border border-edge-strong/60">
       <button
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-2 px-2 py-1.5 text-left transition-colors hover:bg-base"
+        className="flex w-full items-center gap-2 px-2 py-1.5 text-left transition-colors hover:bg-ink/5"
       >
         {open ? (
           <ChevronDown size={13} className="shrink-0 text-dim" />
@@ -341,7 +341,7 @@ function ToolCard({ tool }: { tool: InspectedTool }) {
         <Wrench size={12} className="shrink-0 text-tone-blue" />
         <span className="mono text-xs text-ink">{tool.name}</span>
         {tool.server_side && (
-          <span className="rounded border border-edge px-1 text-[10px] text-dim">
+          <span className="rounded bg-bubble px-1 text-[10px] text-dim">
             厂商执行
           </span>
         )}
@@ -395,7 +395,7 @@ function RequestBlocks({ req }: { req: InspectedRequest }) {
         <Section title="其它字段" count={`${req.extra_keys.length} 个（协议原生、未建模）`} defaultOpen={false}>
           <div className="flex flex-wrap gap-1.5">
             {req.extra_keys.map((k) => (
-              <span key={k} className="rounded border border-edge bg-base px-1.5 py-0.5 mono text-[11px] text-ink">
+              <span key={k} className="rounded bg-base px-1.5 py-0.5 mono text-[11px] text-ink">
                 {k}
               </span>
             ))}
@@ -469,7 +469,7 @@ function StreamSummary({ stats }: { stats: StreamStats }) {
       <span className="tabular-nums">{stats.events} 个 SSE 事件</span>
       <span className="tabular-nums">· {stats.frames} 个网络字节块</span>
       {stats.event_kinds.slice(0, 4).map((k) => (
-        <span key={k.name} className="rounded border border-edge px-1 mono">
+        <span key={k.name} className="rounded bg-bubble px-1 mono">
           {k.name} × {k.count}
         </span>
       ))}
@@ -568,7 +568,7 @@ function SseEvents({ raw }: { raw: string }) {
   return (
     <div className="space-y-2">
       {shown.map((ev, i) => (
-        <div key={i} className="overflow-hidden rounded border border-edge">
+        <div key={i} className="overflow-hidden rounded border border-edge-strong/60">
           <EventHeader index={i + 1} name={ev.name} fragment={ev.fragment} />
           <pre className="max-h-60 overflow-auto whitespace-pre-wrap break-all p-2 mono text-[11px] leading-relaxed text-ink">
             {tryPretty(ev.data) ?? ev.data}
@@ -606,7 +606,7 @@ function ResponseBlocks({
         {resp ? <BlockList blocks={resp.blocks} /> : <div className="text-xs text-dim">（没有解析出内容）</div>}
         <StreamSummary stats={stats} />
         {resp && resp.usage && (
-          <div className="rounded border border-edge bg-base p-2">
+          <div className="rounded bg-base p-2">
             <div className="mb-1.5 text-[11px] font-medium text-dim">Token 消耗</div>
             <UsagePanel usage={resp.usage} />
           </div>
@@ -649,7 +649,7 @@ function Summary({
   return (
     <div className="space-y-1.5">
       <div className="flex flex-wrap items-center gap-2">
-        <span className="rounded border border-edge px-1.5 py-0.5 mono text-[11px] text-ink">
+        <span className="rounded bg-bubble px-1.5 py-0.5 mono text-[11px] text-ink">
           {method}
         </span>
         <span className="break-all mono text-xs text-ink">{url}</span>
@@ -730,7 +730,7 @@ export function PayloadView({
 export function HeadersTable({ headers }: { headers: [string, string][] }) {
   if (headers.length === 0) return <div className="text-xs text-dim">（无）</div>;
   return (
-    <div className="overflow-hidden rounded border border-edge">
+    <div className="overflow-hidden rounded border border-edge-strong/60">
       <table className="w-full border-collapse text-xs">
         <tbody>
           {headers.map(([k, v], i) => (
@@ -773,7 +773,7 @@ export function FormattedView({ rec }: { rec: ExchangeRecord }) {
       <section className="space-y-1.5">
         <div className="flex flex-wrap items-center gap-2">
           <h3 className="text-xs font-semibold text-dim">请求</h3>
-          <span className="rounded border border-edge px-1.5 py-0.5 mono text-[11px] text-ink">
+          <span className="rounded bg-bubble px-1.5 py-0.5 mono text-[11px] text-ink">
             {rec.method}
           </span>
           <span className="break-all mono text-[11px] text-dim">{rec.url}</span>

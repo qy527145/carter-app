@@ -11,17 +11,19 @@
 //    「看一眼就关」的临时视图，盖在上面更符合直觉。
 
 import { useEffect, useRef, useState } from "react";
-import { Globe, Send, Square, X } from "lucide-react";
+import { ChevronRight, Globe, Send, Square, X } from "lucide-react";
 
 import * as ops from "../lib/sessionOps";
 import { useStore } from "../store";
 import { TurnList } from "./ChatView";
 import { IconButton } from "./ui/Button";
+import { Collapse } from "./ui/Panel";
 
 export function SidePanel() {
   const side = useStore((s) => s.side);
   const addSideUserTurn = useStore((s) => s.addSideUserTurn);
   const [text, setText] = useState("");
+  const [inheritedOpen, setInheritedOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
   const taRef = useRef<HTMLTextAreaElement>(null);
@@ -84,19 +86,30 @@ export function SidePanel() {
         {/* 继承的上下文默认**折叠**：展开着会把侧边那几句对话顶到屏幕外，
             而用户打开抽屉要看的是自己刚问的那句。 */}
         {side.inheritedTurns.length > 0 && (
-          <details className="mb-4 rounded-lg border border-edge bg-card/40">
-            <summary className="cursor-pointer list-none px-3 py-1.5 text-[11px] text-dim">
-              打开时主对话的上下文（{side.inheritedTurns.length} 条）· 提问时会读最新进展
-            </summary>
-            <div className="border-t border-edge px-3 py-3 opacity-70">
-              <TurnList
-                turns={side.inheritedTurns}
-                streaming={false}
-                showPayload={false}
-                cwd={side.cwd}
+          <div className="mb-4 rounded-lg bg-ink/[0.03]">
+            <button
+              onClick={() => setInheritedOpen((o) => !o)}
+              className="flex w-full items-center gap-1.5 px-3 py-1.5 text-left text-[11px] text-dim transition-colors hover:text-ink"
+            >
+              <ChevronRight
+                size={11}
+                className={`shrink-0 transition-transform ${inheritedOpen ? "rotate-90" : ""}`}
               />
-            </div>
-          </details>
+              <span className="min-w-0 flex-1">
+                打开时主对话的上下文（{side.inheritedTurns.length} 条）· 提问时会读最新进展
+              </span>
+            </button>
+            <Collapse open={inheritedOpen}>
+              <div className="border-t border-edge px-3 py-3 opacity-70">
+                <TurnList
+                  turns={side.inheritedTurns}
+                  streaming={false}
+                  showPayload={false}
+                  cwd={side.cwd}
+                />
+              </div>
+            </Collapse>
+          </div>
         )}
 
         {side.turns.length === 0 && side.streaming && (
@@ -112,7 +125,7 @@ export function SidePanel() {
       </div>
 
       <div className="shrink-0 border-t border-edge p-2.5">
-        <div className="rounded-xl border border-edge bg-elevated">
+        <div className="focus-ring-bite rounded-xl bg-elevated shadow-soft">
           <textarea
             ref={taRef}
             rows={1}
@@ -137,7 +150,7 @@ export function SidePanel() {
               <button
                 onClick={cancel}
                 title="中断这一轮"
-                className="inline-flex items-center gap-1.5 rounded-full border border-edge px-2.5 py-1 text-[11px] text-dim transition-colors hover:text-[var(--danger)]"
+                className="inline-flex items-center gap-1.5 rounded-full bg-bubble px-2.5 py-1 text-[11px] text-dim transition-colors hover:text-[var(--danger)]"
               >
                 <Square size={10} />
                 停止

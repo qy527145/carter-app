@@ -43,6 +43,7 @@ import {
 
 import { sendCommand } from "../../lib/api";
 import { toastError } from "../../lib/toast";
+import { Collapse } from "../ui/Panel";
 import type { Item } from "../../store";
 
 export type ToolItem = Extract<Item, { kind: "tool" }>;
@@ -129,11 +130,11 @@ function Card({
   );
 
   return (
-    <div className="overflow-hidden rounded-lg border border-edge bg-card">
+    <div className="overflow-hidden rounded-lg bg-card">
       {collapsible && hasBody ? (
         <button
           onClick={() => setManual(!expanded)}
-          className="flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-base"
+          className="flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-ink/5"
         >
           {head}
         </button>
@@ -143,8 +144,12 @@ function Card({
       {preview != null && (
         <div className="border-t border-edge bg-base px-3 py-2">{preview}</div>
       )}
-      {expanded && hasBody && (
-        <div className="border-t border-edge bg-base px-3 py-2">{children}</div>
+      {/* 用 Collapse 而不是条件挂载：流里工具卡片挨得密，展开一次跳几百像素、
+          滚动位置会跟着乱跳；而且收起再展开时输出的滚动位置该还在原处。 */}
+      {hasBody && (
+        <Collapse open={expanded}>
+          <div className="border-t border-edge bg-base px-3 py-2">{children}</div>
+        </Collapse>
       )}
     </div>
   );
@@ -257,7 +262,7 @@ function BashCard({ item }: { item: ToolItem }) {
               <button
                 onClick={() => act("interrupt")}
                 title="只结束这条命令；模型会拿到「已中断」的结果继续往下走"
-                className="inline-flex items-center gap-1 rounded border border-edge px-1.5 py-0.5 text-[11px] text-dim transition-colors hover:border-[var(--danger)] hover:text-[var(--danger)]"
+                className="inline-flex items-center gap-1 rounded bg-bubble px-1.5 py-0.5 text-[11px] text-dim transition-colors hover:text-[var(--danger)]"
               >
                 <Square size={10} />
                 中断命令
@@ -265,7 +270,7 @@ function BashCard({ item }: { item: ToolItem }) {
               <button
                 onClick={() => act("background")}
                 title="命令继续跑，工具立刻返回 shell_id；之后模型用 bash_output 读输出"
-                className="inline-flex items-center gap-1 rounded border border-edge px-1.5 py-0.5 text-[11px] text-dim transition-colors hover:border-tone-blue hover:text-tone-blue"
+                className="inline-flex items-center gap-1 rounded bg-bubble px-1.5 py-0.5 text-[11px] text-dim transition-colors hover:text-tone-blue"
               >
                 <ArrowDownToLine size={10} />
                 转后台
@@ -318,14 +323,14 @@ function TodoCard({ item, isLast = true }: { item: ToolItem; isLast?: boolean })
           {todos.map((t, i) => (
             <li key={i} className="flex items-start gap-2 text-[12px] leading-relaxed">
               {t.status === "completed" ? (
-                <CircleCheck size={13} className="mt-0.5 shrink-0 text-[var(--ok)]" />
+                <CircleCheck size={13} className="icon-optical shrink-0 text-[var(--ok)]" />
               ) : t.status === "in_progress" ? (
                 <LoaderCircle
                   size={13}
-                  className={`mt-0.5 shrink-0 text-tone-blue ${running ? "animate-spin" : ""}`}
+                  className={`icon-optical shrink-0 text-tone-blue ${running ? "animate-spin" : ""}`}
                 />
               ) : (
-                <span className="mt-0.5 inline-block size-3 shrink-0 rounded-full border border-edge" />
+                <span className="icon-optical inline-block size-3 shrink-0 rounded-full border border-edge" />
               )}
               <span
                 className={
@@ -421,13 +426,13 @@ function EditCard({ item }: { item: ToolItem }) {
         <Output text={r?.content ?? ""} />
       ) : (
         <div className="space-y-1.5">
-          <div className="rounded border border-edge bg-[var(--error-bg)] px-2 py-1">
+          <div className="rounded border border-[var(--error-border)] bg-[var(--error-bg)] px-2 py-1">
             <div className="mb-0.5 text-[10px] text-dim">替换前</div>
             <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all text-[11px] leading-relaxed text-ink">
               {oldStr || "（空）"}
             </pre>
           </div>
-          <div className="rounded border border-edge bg-[var(--ok)]/10 px-2 py-1">
+          <div className="rounded bg-[var(--ok)]/10 px-2 py-1">
             <div className="mb-0.5 text-[10px] text-dim">替换后</div>
             <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all text-[11px] leading-relaxed text-ink">
               {newStr || "（空）"}
@@ -610,13 +615,13 @@ export function ServerCard({
   item: Extract<Item, { kind: "server" }>;
 }) {
   return (
-    <div className="rounded-lg border border-dashed border-edge bg-card/50 px-3 py-2">
+    <div className="rounded-lg border border-dashed border-edge bg-ink/[0.03] px-3 py-2">
       <div className="flex items-center gap-2">
         <Glyph tone="orange">
           <Globe size={11} />
         </Glyph>
         <span className="mono text-xs text-ink">{item.rawType}</span>
-        <span className="rounded border border-edge px-1.5 py-0.5 text-[10px] text-dim">
+        <span className="rounded bg-bubble px-1.5 py-0.5 text-[10px] text-dim">
           服务端活动
         </span>
       </div>

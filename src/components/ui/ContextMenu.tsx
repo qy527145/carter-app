@@ -236,7 +236,7 @@ function Menu({
           top: pos?.top ?? y,
           visibility: pos ? "visible" : "hidden",
         }}
-        className="carter-menu fixed z-50 min-w-44 rounded-lg border border-edge bg-card py-1 shadow-lift outline-none"
+        className="carter-menu fixed z-50 min-w-44 rounded-lg bg-card py-1 shadow-lift outline-none"
       >
         {entries.map((entry, i) =>
           entry === "separator" ? (
@@ -252,7 +252,7 @@ function Menu({
                 onClose();
                 entry.onSelect();
               }}
-              className={`flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs transition-colors outline-none hover:bg-base focus:bg-base disabled:cursor-not-allowed disabled:opacity-40 ${
+              className={`flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs transition-colors outline-none hover:bg-ink/5 focus:bg-ink/5 disabled:cursor-not-allowed disabled:opacity-40 ${
                 entry.danger
                   ? "text-dim hover:text-[var(--danger)] focus:text-[var(--danger)]"
                   : "text-ink"

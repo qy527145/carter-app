@@ -70,7 +70,7 @@ function ChannelCard({ c, onEdit }: { c: ChannelRow; onEdit: () => void }) {
           静默丢弃会让用户以为联网搜索开着，而模型一个结果都拿不到。 */}
       {c.unsupported_server_tools.length > 0 && (
         <div className="flex items-start gap-1.5 rounded-md border border-[var(--warn-border)] bg-[var(--warn-bg)] px-2 py-1.5 text-[11px] leading-relaxed">
-          <AlertTriangle size={12} className="mt-0.5 shrink-0 text-tone-orange" />
+          <AlertTriangle size={12} className="icon-optical shrink-0 text-tone-orange" />
           <span>
             声明了 <span className="mono">{c.unsupported_server_tools.join("、")}</span>，但{" "}
             <span className="mono">{c.protocol}</span> 没有对应物，
@@ -85,7 +85,7 @@ function ChannelCard({ c, onEdit }: { c: ChannelRow; onEdit: () => void }) {
 /** 三协议对照。解释了「为什么这个渠道的 web_search 不生效」。 */
 function ProtocolNotes() {
   return (
-    <div className="rounded-xl border border-edge bg-card p-4">
+    <div className="rounded-xl bg-card p-4">
       <div className="mb-2 text-sm font-medium">三种线协议</div>
       <div className="space-y-2 text-[11px] leading-relaxed text-dim">
         <div>

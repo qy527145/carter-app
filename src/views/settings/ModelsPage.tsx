@@ -70,7 +70,7 @@ function ModelCard({
       {m.error ? (
         // 单行解析失败不能让整页失败：把它挂在这一行上，其余行照常显示。
         <div className="mt-2 flex items-start gap-1.5 rounded-md border border-[var(--warn-border)] bg-[var(--warn-bg)] px-2 py-1.5 text-[11px] leading-relaxed">
-          <CircleAlert size={12} className="mt-0.5 shrink-0 text-tone-orange" />
+          <CircleAlert size={12} className="icon-optical shrink-0 text-tone-orange" />
           <span>{m.error}</span>
         </div>
       ) : (

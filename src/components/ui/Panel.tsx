@@ -3,7 +3,7 @@
 // 这些是全应用反复出现的那几个形状，集中在这里是为了让「一个面板长什么样」
 // 只有一处定义 —— 以前散在各个页里，同样的卡片在三个文件里是三种写法。
 
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { LoaderCircle, X } from "lucide-react";
 
 // ---------------------------------------------------------------------------
@@ -34,14 +34,16 @@ export function Modal({
 
   return (
     <div
-      className="fixed inset-0 z-40 flex items-center justify-center bg-black/50"
+      className="carter-modal-scrim fixed inset-0 z-40 flex items-center justify-center bg-black/50"
       onClick={onClose}
     >
       <div
         // 面板内的点击不该冒泡到背板上去（否则在输入框里选中文字、拖到边缘松手就关了）。
         onClick={(e) => e.stopPropagation()}
         style={{ width }}
-        className="flex max-h-[85vh] max-w-[92vw] flex-col rounded-xl border border-edge bg-card p-5 shadow-2xl"
+        // 比 base 亮一档：模态是「浮在最上面」的那一层，去掉边框之后
+        // 全靠这个明度差和背板拉开。里面的 Card 比它略暗一档，仍然分得清。
+        className="carter-modal-body flex max-h-[85vh] max-w-[92vw] flex-col rounded-xl bg-elevated p-5 shadow-2xl"
       >
         <h2 className="mb-4 text-base font-semibold">{title}</h2>
         <div className="min-h-0 flex-1 overflow-y-auto pr-1">{children}</div>
@@ -75,7 +77,7 @@ export function ConfirmDialog({
       <div className="mt-4 flex justify-end gap-2">
         <button
           onClick={onCancel}
-          className="rounded-md border border-edge px-3 py-1.5 text-sm text-dim transition-colors hover:text-ink"
+          className="rounded-md bg-ink/5 px-3 py-1.5 text-sm text-dim transition-colors hover:bg-ink/10 hover:text-ink"
         >
           取消
         </button>
@@ -125,7 +127,14 @@ export function Section({
   );
 }
 
-/** 一张卡片。给了 `onClick` 就渲染成 button（能聚焦、能用键盘触发）。 */
+/**
+ * 一张卡片。
+ *
+ * **没有边框** —— 它和所在的底永远跨一档明度（见 index.css 的色阶说明）。
+ * 需要「占位/可添加」语义时才用 `dashed`，那是唯一一个虚线边框仍有意义的场景：
+ * 虚线说的是「这里还空着」，不是「这里开始了一块」。给了 `onClick` 就渲染成
+ * button（能聚焦、能用键盘触发）。
+ */
 export function Card({
   children,
   className = "",
@@ -137,10 +146,10 @@ export function Card({
   dashed?: boolean;
   onClick?: () => void;
 }) {
-  const cls = `rounded-xl border ${
-    dashed ? "border-dashed border-edge" : "border-edge bg-card"
+  const cls = `rounded-xl ${
+    dashed ? "border border-dashed border-edge" : "bg-card"
   } px-4 py-3 text-left ${
-    onClick ? "w-full transition-colors hover:border-dim" : ""
+    onClick ? "w-full cursor-pointer transition-colors hover:bg-ink/[0.03]" : ""
   } ${className}`;
 
   if (onClick) {
@@ -151,6 +160,46 @@ export function Card({
     );
   }
   return <div className={cls}>{children}</div>;
+}
+
+// ---------------------------------------------------------------------------
+// 折叠
+// ---------------------------------------------------------------------------
+
+/**
+ * 可折叠区段。
+ *
+ * 高度过渡走 CSS Grid 的 `0fr → 1fr`（见 index.css 的 `.carter-collapse`），
+ * **不测高、不动画 max-height**。两个附带的好处：
+ *
+ * - 展开过的内容不再卸载 —— 日志折起来再展开，内部滚动位置还在；
+ * - 收起时内层 `visibility: hidden`，里面的按钮不会被 Tab 到。
+ *
+ * 但**没展开过的内容不挂载**：长会话里几十张工具卡片各带着一大段输出，
+ * 全都预先渲染一遍是白烧内存。第一次展开时才建，之后一直留着。
+ *
+ * 用它替代原生 `<details>`：`<details>` 的展开是瞬变的，而且做不到
+ * 「首次展开有动画 + 收起后保留滚动位置」这两条。
+ */
+export function Collapse({
+  open,
+  children,
+  className = "",
+}: {
+  open: boolean;
+  children: ReactNode;
+  className?: string;
+}) {
+  // 一旦展开过就一直挂着（用 ref 而不是 state：这只是一次性开关，
+  // 不该为了它多跑一轮渲染）。
+  const mounted = useRef(false);
+  if (open) mounted.current = true;
+
+  return (
+    <div className={`carter-collapse ${className}`} data-open={open} aria-hidden={!open}>
+      <div>{mounted.current ? children : null}</div>
+    </div>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -183,7 +232,7 @@ export function Badge({
     return (
       <span
         title={title}
-        className="shrink-0 rounded border border-edge px-1.5 py-0.5 text-[10px] text-dim"
+        className="shrink-0 rounded bg-bubble px-1.5 py-0.5 text-[10px] text-dim"
       >
         {children}
       </span>

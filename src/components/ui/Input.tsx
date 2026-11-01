@@ -1,7 +1,8 @@
 // 表单控件：输入框、多行输入、开关、勾选。
 //
-// 焦点样式统一是 `focus:border-dim` —— 不用 focus ring。环在浅色主题下会跟
-// 半透明边框打架，而边框变深已经足够说明焦点在哪。
+// 焦点样式统一是 `.carter-field`（见 index.css）—— 不用 outline 环，也不用
+// 把边框整个换成实色：环是「双环」，内圈压深描边、外圈淡淡铺开，靠近时是
+// 一圈咬住边缘的暗环。单纯把边框从 7% 透明度跳到实色太跳，会抢走内容本身。
 
 import type {
   InputHTMLAttributes,
@@ -11,8 +12,8 @@ import type {
 } from "react";
 
 const FIELD_BASE =
-  "w-full rounded-md border border-edge bg-base px-3 py-2 text-sm text-ink " +
-  "placeholder:text-dim outline-none transition-colors focus:border-dim " +
+  "carter-field w-full rounded-md border border-edge bg-base px-3 py-2 text-sm text-ink " +
+  "placeholder:text-dim outline-none transition-[border-color,box-shadow] " +
   "disabled:cursor-not-allowed disabled:opacity-50";
 
 type InputProps = InputHTMLAttributes<HTMLInputElement> & { mono?: boolean };
@@ -54,12 +55,14 @@ export function Switch({
       aria-label={label}
       disabled={disabled}
       onClick={() => onChange(!checked)}
-      className={`relative inline-flex h-[18px] w-[32px] shrink-0 items-center rounded-full border transition-colors outline-none disabled:cursor-not-allowed disabled:opacity-40 ${
-        checked ? "border-transparent bg-accent" : "border-edge bg-base"
+      className={`relative inline-flex h-[18px] w-[32px] shrink-0 items-center rounded-full transition-colors outline-none disabled:cursor-not-allowed disabled:opacity-40 ${
+        checked ? "bg-accent" : "bg-bubble"
       }`}
     >
+      {/* 滑块用欠阻尼缓动（到位后微微过冲再落定）—— 这是全应用里少数几个
+          「事情办成了」的小反馈，Q 一下不轻浮。开关轨道本身不用，那会显得黏。 */}
       <span
-        className={`block h-3 w-3 rounded-full transition-transform ${
+        className={`block h-3 w-3 rounded-full transition-transform duration-200 ease-[cubic-bezier(0.34,1.56,0.64,1)] ${
           checked
             ? "translate-x-[16px] bg-[var(--accent-contrast)]"
             : "translate-x-[2px] bg-dim"
@@ -86,10 +89,10 @@ export function Segmented<T extends string>({
           key={o.id}
           type="button"
           onClick={() => onChange(o.id)}
-          className={`rounded-md border px-3 py-1.5 text-sm transition-colors ${
+          className={`rounded-md px-3 py-1.5 text-sm transition-colors ${
             value === o.id
-              ? "border-dim bg-base text-ink"
-              : "border-edge text-dim hover:text-ink"
+              ? "bg-ink/10 font-medium text-ink"
+              : "text-dim hover:bg-ink/5 hover:text-ink"
           }`}
         >
           {o.label}

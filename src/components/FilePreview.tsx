@@ -11,6 +11,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
+  Check,
   Copy,
   ExternalLink,
   FileText,
@@ -27,7 +28,7 @@ import {
 } from "../lib/api";
 import { copyText } from "../lib/clipboard";
 import { fmtBytes, relTime } from "../lib/format";
-import { toastError } from "../lib/toast";
+import { toastError, TOAST_MS } from "../lib/toast";
 import { useStore } from "../store";
 import { Button } from "./ui/Button";
 import { Segmented } from "./ui/Input";
@@ -55,7 +56,7 @@ function Notice({ kind, children }: { kind?: "warn" | "error"; children: React.R
   const icon = kind === "error" ? "text-[var(--danger)]" : "text-tone-orange";
   return (
     <div className={`mb-2 flex items-start gap-2 rounded-lg border px-3 py-2 text-xs leading-relaxed ${tone}`}>
-      <TriangleAlert size={13} className={`mt-0.5 shrink-0 ${icon}`} />
+      <TriangleAlert size={13} className={`icon-optical shrink-0 ${icon}`} />
       <div className="min-w-0 flex-1">{children}</div>
     </div>
   );
@@ -69,7 +70,7 @@ function Code({ content }: { content: string }) {
   }, [content]);
 
   return (
-    <div className="max-h-[58vh] overflow-auto rounded-lg border border-edge bg-card">
+    <div className="max-h-[58vh] overflow-auto rounded-lg bg-card">
       <div className="flex min-w-full">
         <pre className="mono shrink-0 select-none border-r border-edge px-2 py-2 text-right text-[11px] leading-[1.65] text-dim/60">
           {numbers}
@@ -86,7 +87,7 @@ function Code({ content }: { content: string }) {
 function DiffCode({ text }: { text: string }) {
   const lines = useMemo(() => text.split("\n"), [text]);
   return (
-    <div className="max-h-[58vh] overflow-auto rounded-lg border border-edge bg-card">
+    <div className="max-h-[58vh] overflow-auto rounded-lg bg-card">
       <pre className="mono min-w-full whitespace-pre py-2 text-[11px] leading-[1.65]">
         {lines.map((line, i) => {
           const cls =
@@ -127,6 +128,15 @@ export function FilePreviewModal({
   const [error, setError] = useState<string | null>(null);
   const [diff, setDiff] = useState<FileDiff | null>(null);
   const [tab, setTab] = useState<"diff" | "file">("diff");
+  // 「复制内容」按一下就变对勾，2.5 秒后自己复位。比弹一条 toast 克制 ——
+  // 反馈发生在手指落下的那个点上，不用把视线挪到右上角。
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    if (!copied) return;
+    const t = setTimeout(() => setCopied(false), TOAST_MS);
+    return () => clearTimeout(t);
+  }, [copied]);
 
   useEffect(() => {
     let cancelled = false;
@@ -197,9 +207,19 @@ export function FilePreviewModal({
       footer={
         <>
           {copyable && (
-            <Button size="sm" onClick={() => void copyText(copyable)}>
-              <Copy size={12} />
-              复制内容
+            <Button
+              size="sm"
+              onClick={async () => {
+                // 成功才打勾；失败时 copyText 自己会 toast。
+                if (await copyText(copyable, "已复制")) setCopied(true);
+              }}
+            >
+              {copied ? (
+                <Check size={12} className="carter-pop text-[var(--ok)]" />
+              ) : (
+                <Copy size={12} />
+              )}
+              {copied ? "已复制" : "复制内容"}
             </Button>
           )}
           {exists && (
@@ -264,7 +284,7 @@ export function FilePreviewModal({
       )}
 
       {tab === "diff" && diff?.kind === "empty" && (
-        <div className="flex items-center gap-2 rounded-lg border border-edge bg-card px-3 py-4 text-sm text-dim">
+        <div className="flex items-center gap-2 rounded-lg bg-card px-3 py-4 text-sm text-dim">
           这一轮相对轮首没有差异（可能改完又改回去了）。
         </div>
       )}
@@ -282,7 +302,7 @@ export function FilePreviewModal({
           {preview?.kind === "image" && (
             <>
               <Meta preview={preview} />
-              <div className="flex justify-center rounded-lg border border-edge bg-card p-3">
+              <div className="flex justify-center rounded-lg bg-card p-3">
                 <img
                   src={preview.data_url}
                   alt={baseName(preview.path)}
@@ -295,7 +315,7 @@ export function FilePreviewModal({
           {preview?.kind === "binary" && (
             <>
               <Meta preview={preview} />
-              <div className="flex items-center gap-2 rounded-lg border border-edge bg-card px-3 py-4 text-sm text-dim">
+              <div className="flex items-center gap-2 rounded-lg bg-card px-3 py-4 text-sm text-dim">
                 <FileText size={15} />
                 这是二进制文件，没法在这里预览。
               </div>
@@ -303,7 +323,7 @@ export function FilePreviewModal({
           )}
 
           {preview?.kind === "dir" && (
-            <div className="flex items-center gap-2 rounded-lg border border-edge bg-card px-3 py-4 text-sm text-dim">
+            <div className="flex items-center gap-2 rounded-lg bg-card px-3 py-4 text-sm text-dim">
               <FolderOpen size={15} />
               这是一个目录。
             </div>

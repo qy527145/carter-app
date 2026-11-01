@@ -40,7 +40,7 @@ export function AskForm() {
 
   return (
     <div className="px-4 pb-2">
-      <div className="mx-auto max-w-3xl rounded-xl border border-edge bg-elevated p-3 shadow-soft">
+      <div className="mx-auto max-w-3xl rounded-xl bg-elevated p-3 shadow-soft">
         <div className="mb-2.5 flex items-center gap-2 text-xs text-dim">
           {submitting ? (
             <LoaderCircle size={13} className="animate-spin" />
@@ -102,7 +102,7 @@ function QuestionSet({
           <div key={qi}>
             <div className="mb-1.5 flex items-baseline gap-2">
               {q.header && (
-                <span className="shrink-0 rounded border border-edge px-1.5 py-0.5 text-[10px] text-dim">
+                <span className="shrink-0 rounded bg-bubble px-1.5 py-0.5 text-[10px] text-dim">
                   {q.header}
                 </span>
               )}
@@ -150,7 +150,7 @@ function QuestionSet({
               value={free[qi]}
               onChange={(e) => setFreeAt(qi, e.target.value)}
               placeholder={q.options.length > 0 ? "或直接输入回答…" : "输入回答…"}
-              className="w-full rounded-md border border-edge bg-base px-3 py-1.5 text-xs text-ink outline-none transition-colors placeholder:text-dim focus:border-dim"
+              className="carter-field w-full rounded-md border border-edge bg-base px-3 py-1.5 text-xs text-ink outline-none transition-[border-color,box-shadow] placeholder:text-dim"
             />
           </div>
         ))}
@@ -167,7 +167,7 @@ function QuestionSet({
         {/* 全部跳过也是合法选择 —— 模型那边会拿到「用户跳过了」并继续。 */}
         <button
           onClick={() => onSubmit(questions.map(() => []))}
-          className="rounded-md border border-edge px-3 py-1.5 text-sm text-dim transition-colors hover:text-ink"
+          className="rounded-md bg-ink/5 px-3 py-1.5 text-sm text-dim transition-colors hover:bg-ink/10 hover:text-ink"
         >
           跳过
         </button>

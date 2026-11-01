@@ -11,8 +11,12 @@
    --------------------------------------------------------------------------
    一套近无彩的底色 + 一组只用于**图标底衬**的 tone 色。这是整套观感的关键：
    accent 是近黑/近白而不是某个品牌色，所以主按钮永远是黑白；彩色只出现在
-   小面积图标底衬与状态点上。半透明边框承担全部分隔职责（bg-card 与 --bg
-   在浅色下几乎同值，靠边框分开）。
+   小面积图标底衬与状态点上。
+
+   分隔**不靠边框**：四级底色相邻两档差 2%~4% 明度，任何「一块东西放在某个底上」
+   都至少跨了一档。真正用边框的只剩三类 —— 滚动区域与固定栏的交界
+   （界面上必须有一条硬线标出「这里开始滚」）、banner 的状态色、以及聚焦态。
+   `.border-edge` 仍保留给这三类，不要再往卡片上补。
 
    下面两段是**运行时**变量（会被 .dark 覆盖），所以上面的 @theme inline
    引用它们时不能是 @theme —— 非 inline 形式会把 var() 引用折进去，
@@ -22,14 +26,20 @@
 :root {
   color-scheme: light;
 
-  --bg: #ffffff;
-  --bg-sidebar: #f7f7f5;
-  --bg-card: #f7f7f5;
-  /* 比 --bg 高一层：输入卡片、首屏入口卡。浅色下是「白上白」，
-     靠边框 + 阴影把它托起来。 */
+  /* 四级底色，相邻两档只差 2%~4% 的明度 —— 分隔靠这个色阶，不靠描边。
+     两个主题下**明度顺序一致**：sidebar（坑）< base（地面）< card < elevated。
+     这样「浮起来」在深色和浅色里是同一个方向，而且任何一块东西放在任何一层上
+     都至少跨了一档，不需要再补一条 1px 线。 */
+  --bg: #f5f5f3;
+  --bg-sidebar: #efefec;
+  --bg-card: #fcfcfb;
   --bg-elevated: #ffffff;
-  --bubble: #f0f0ed;
+  --bubble: #e9e9e5;
   --border: rgba(0, 0, 0, 0.07);
+  /* 需要「比 hairline 重一档」的地方：清单分隔、表格、聚焦态。 */
+  --border-strong: rgba(0, 0, 0, 0.16);
+  /* 聚焦外环：低透明度，只负责「有一圈」，不负责「有多亮」。 */
+  --focus-ring: rgba(0, 0, 0, 0.07);
 
   --text: #1a1a1a;
   --text-dim: #6b6b6b;
@@ -62,13 +72,16 @@
 .dark {
   color-scheme: dark;
 
+  /* 深色下同一套顺序：sidebar 最深，elevated 最亮 —— 阴影在这里做不了托举的活，
+     「浮起来」只能靠把亮度提上去。 */
   --bg: #171717;
-  --bg-sidebar: #1e1e1e;
-  --bg-card: #212121;
-  /* 深色下阴影做不了托举的活，靠把亮度提上去。 */
-  --bg-elevated: #262626;
-  --bubble: #2b2b2b;
+  --bg-sidebar: #131312;
+  --bg-card: #1f1f1e;
+  --bg-elevated: #262625;
+  --bubble: #2b2b2a;
   --border: rgba(255, 255, 255, 0.09);
+  --border-strong: rgba(255, 255, 255, 0.22);
+  --focus-ring: rgba(255, 255, 255, 0.1);
 
   --text: #ececec;
   --text-dim: #9b9b9b;
@@ -105,6 +118,7 @@
   --color-elevated: var(--bg-elevated);
   --color-bubble: var(--bubble);
   --color-edge: var(--border);
+  --color-edge-strong: var(--border-strong);
   --color-ink: var(--text);
   --color-dim: var(--text-dim);
   --color-accent: var(--accent);
@@ -166,11 +180,64 @@ body {
   color: var(--text);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+  /* 界面上的数字一律等宽：用量、成本、耗时、计数每几十毫秒变一次，
+     比例数字会让那一行左右抖。正文在 .carter-md 里改回比例数字。 */
+  font-variant-numeric: tabular-nums;
+  /* 防止中文段落末尾掉一个孤立的标点/短词到下一行。中文收益有限，
+     但对夹在里面的西文条目是实打实的。 */
+  text-wrap: pretty;
+}
+
+/* 键盘焦点必须是**看得见**的。全站的按钮都写了 outline-none 用来掐掉
+   浏览器那圈默认蓝环，那就得自己补一圈回来，否则 Tab 走一遍设置页
+   完全不知道焦点在哪。鼠标点击不触发（:focus-visible 只在键盘/辅助设备时亮）。
+
+   输入类控件不在这一条里 —— 它们有自己的 `.carter-field` 咬合环，再叠一圈
+   outline 就是三重线。 */
+:where(button, a, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--text-dim);
+  outline-offset: 1px;
+}
+
+/* ==========================================================================
+   「咬合」聚焦环
+   --------------------------------------------------------------------------
+   输入处**不出现 outline**，焦点靠两圈 box-shadow：内圈 1px 贴着边缘把描边
+   压实，外圈 3px 低透明度铺开。比单纯加深边框多一层层次，且暗色下同样成立 ——
+   阴影在这套 token 里不是「浮起」的装饰，是焦点指示。
+   ========================================================================== */
+
+/* 表单控件：边框常驻（它同时承担「这里能输入」的说明），焦点只加环。 */
+.carter-field:focus {
+  border-color: var(--border-strong);
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+
+/* 输入卡片：本身没有边框色变化，一切都压在环上。
+   末尾接上 `--shadow-soft` —— 聚焦时不该顺手把卡片原有的那层柔光弄丢，
+   那会让它看起来「陷下去」了一下。 */
+.focus-ring-bite:focus-within {
+  box-shadow:
+    0 0 0 1px var(--border-strong),
+    0 0 0 4px var(--focus-ring),
+    var(--shadow-soft);
 }
 
 /* 机器味的东西一律等宽：路径、模型 id、API key、工具参数。散文不等宽。 */
 .mono {
   font-family: var(--font-mono);
+}
+
+/**
+ * 行内图标的视觉居中对齐。
+ *
+ * 图标与**多行**文字并排时，`items-center` 会把它对到整块文字的中间 ——
+ * 而眼睛看的是第一行。之前各处用 `mt-0.5`（2px）手拍，换字号就对不上。
+ * 这里用相对字号的一点点下沉（0.0625em = 14px 下 0.875px），小字号和大字号
+ * 共用同一条规则。
+ */
+.icon-optical {
+  translate: 0 0.0625em;
 }
 
 /* ==========================================================================
@@ -216,6 +283,29 @@ body {
   margin-left: 1px;
   color: var(--text-dim);
   animation: carter-blink 1s step-end infinite;
+}
+
+/* 「墨落纸」：一段文字出现时从淡、微虚焦落到清晰。
+   作用是让新出现的一整段有落定感，而不是硬蹦出来。
+
+   为什么是**整段**而不是逐字：正文是 react-markdown 全量重渲染的，逐字就得
+   在每个增量帧里重建整棵 DOM，且会打断 markdown 的行内解析。逐字的代价
+   （每次 delta 拆字、排队、重新挂载）远大于它的观感收益，还会把流式拖成慢动作。
+   合并帧（见 lib/events.ts）已经保证了字是成串落定的。 */
+@keyframes carter-bloom {
+  from {
+    opacity: 0.5;
+    filter: blur(4px);
+    transform: translateY(1px);
+  }
+  to {
+    opacity: 1;
+    filter: none;
+    transform: none;
+  }
+}
+.carter-bloom {
+  animation: carter-bloom 260ms cubic-bezier(0.215, 0.61, 0.355, 1) both;
 }
 
 /* 「正在运行」的三点。 */
@@ -264,11 +354,101 @@ body {
   animation: carter-menu-in 90ms ease-out;
 }
 
+/* 模态：背板淡入 + 面板从 96% 回到原位。比菜单慢一档 —— 它是「进入一个状态」，
+   不是「点开一个列表」。 */
+@keyframes carter-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes carter-modal-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96) translateY(4px);
+  }
+}
+.carter-modal-scrim {
+  animation: carter-fade-in 120ms ease-out;
+}
+.carter-modal-body {
+  animation: carter-modal-in 160ms cubic-bezier(0.215, 0.61, 0.355, 1);
+}
+
+/* toast：从右上角滑进来，不用缩放 —— 它是「一条通知」，不是一块面板。 */
+@keyframes carter-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+}
+.carter-toast {
+  animation: carter-toast-in 140ms cubic-bezier(0.215, 0.61, 0.355, 1);
+}
+
+/* 欠阻尼（会微微过冲再落定）：只给「事情办成了」这种小反馈用 —— 开关滑块、
+   待办打勾。拖拽、菜单这类「立刻要用」的东西一律不用它。 */
+@keyframes carter-pop {
+  0% {
+    transform: scale(0.7);
+  }
+  60% {
+    transform: scale(1.08);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+.carter-pop {
+  animation: carter-pop 240ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* ==========================================================================
+   可折叠区段
+   --------------------------------------------------------------------------
+   Grid 的 `0fr → 1fr`。**不用** max-height 也不用 JS 量高：那一刻的真实高度
+   只有浏览器知道，量出来的数一旦和实际内容差一点，缓动就会在末尾突然卡一下。
+   `1fr` 是「内容想要多高就多高」，过渡天然是准的。
+
+   两条必须的约束：
+   1. 内层要 `min-height: 0`，否则 `1fr` 的下限是 auto，收起时收不干净；
+   2. 收起时内层 `visibility: hidden`（延迟到过渡结束），否则里面的按钮和链接
+      仍然能被 Tab 到 —— 看得见的地方没有，焦点却跑进去了。
+   ========================================================================== */
+
+.carter-collapse {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition:
+    grid-template-rows 220ms cubic-bezier(0.215, 0.61, 0.355, 1),
+    visibility 0s linear 220ms;
+  visibility: hidden;
+}
+.carter-collapse[data-open="true"] {
+  grid-template-rows: 1fr;
+  transition:
+    grid-template-rows 220ms cubic-bezier(0.215, 0.61, 0.355, 1),
+    visibility 0s linear 0s;
+  visibility: visible;
+}
+.carter-collapse > * {
+  min-height: 0;
+  overflow: hidden;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .carter-cursor,
   .carter-dots > span,
-  .carter-menu {
+  .carter-bloom,
+  .carter-menu,
+  .carter-modal-scrim,
+  .carter-modal-body,
+  .carter-toast,
+  .carter-pop {
     animation: none;
+  }
+  .carter-collapse,
+  .carter-collapse[data-open="true"] {
+    transition: none;
   }
 }
 
@@ -285,6 +465,10 @@ body {
 .carter-md {
   line-height: 1.7;
   word-break: break-word;
+  /* 正文里的数字用比例字形 —— body 上那圈 tabular-nums 是给界面计数的，
+     读文章时等宽数字反而显得字距发松。 */
+  font-variant-numeric: normal;
+  text-wrap: pretty;
 }
 .carter-md > :first-child {
   margin-top: 0;
@@ -302,6 +486,9 @@ body {
   margin: 1em 0 0.5em;
   font-weight: 600;
   line-height: 1.3;
+  /* 标题短，`balance` 能把两行的长度匀开 —— 这是 `pretty` 在中文里
+     唯一真看得出效果的地方。 */
+  text-wrap: balance;
 }
 .carter-md h1 {
   font-size: 1.35em;

@@ -5,9 +5,11 @@ import { X } from "lucide-react";
 import { useToastStore, type ToastKind } from "../../lib/toast";
 
 const KIND_CLASS: Record<ToastKind, string> = {
-  info: "border-edge bg-card",
-  warn: "border-[var(--warn-border)] bg-[var(--warn-bg)]",
-  error: "border-[var(--error-border)] bg-[var(--error-bg)]",
+  // info 不是「没有状态」，它是底色上浮起来的一层：给底色而不是描边，
+  // 和全站去边框的方向一致。
+  info: "bg-elevated",
+  warn: "border border-[var(--warn-border)] bg-[var(--warn-bg)]",
+  error: "border border-[var(--error-border)] bg-[var(--error-bg)]",
 };
 
 export function ToastContainer() {
@@ -21,7 +23,7 @@ export function ToastContainer() {
       {toasts.map((t) => (
         <div
           key={t.id}
-          className={`pointer-events-auto flex items-start gap-2 rounded-lg border px-3 py-2 text-xs leading-relaxed shadow-lift ${KIND_CLASS[t.kind]}`}
+          className={`carter-toast pointer-events-auto flex items-start gap-2 rounded-lg px-3 py-2 text-xs leading-relaxed shadow-lift ${KIND_CLASS[t.kind]}`}
         >
           <span className="min-w-0 flex-1 break-words">{t.message}</span>
           <button

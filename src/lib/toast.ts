@@ -22,16 +22,24 @@ type ToastStore = {
 
 let nextId = 0;
 
+/**
+ * toast 自己消失的时长。
+ *
+ * 「已复制」在按钮上变成对勾、然后自己复位的时长也用它：同一个应用里两种
+ * 「反馈自己消失」的节奏，用户会觉得哪里不对但说不清。
+ */
+export const TOAST_MS = 2500;
+
 export const useToastStore = create<ToastStore>((set) => ({
   toasts: [],
   push: (message, kind = "info") => {
     const id = nextId++;
     set((s) => ({ toasts: [...s.toasts, { id, kind, message }] }));
-    // 3 秒后自己消失。不提供手动延长 —— 需要留住的东西该用 notice 或页面内的
+    // 到点自己消失。不提供手动延长 —— 需要留住的东西该用 notice 或页面内的
     // 错误块，而不是一个更持久的 toast。
     setTimeout(() => {
       set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }));
-    }, 3000);
+    }, TOAST_MS);
   },
   dismiss: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
 }));

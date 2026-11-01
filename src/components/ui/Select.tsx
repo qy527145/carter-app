@@ -59,7 +59,7 @@ export function Select({
         type="button"
         disabled={disabled}
         onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center gap-2 rounded-md border border-edge bg-base px-3 py-2 text-left text-sm text-ink outline-none transition-colors hover:border-dim focus:border-dim disabled:cursor-not-allowed disabled:opacity-50"
+        className="carter-field flex w-full items-center gap-2 rounded-md border border-edge bg-base px-3 py-2 text-left text-sm text-ink outline-none transition-[border-color,box-shadow] disabled:cursor-not-allowed disabled:opacity-50"
       >
         <span className={`min-w-0 flex-1 truncate ${current ? "" : "text-dim"}`}>
           {current?.label ?? current?.value ?? placeholder}
@@ -68,7 +68,7 @@ export function Select({
       </button>
 
       {open && (
-        <div className="absolute left-0 top-[calc(100%+4px)] z-50 max-h-72 w-full overflow-y-auto rounded-lg border border-edge bg-card py-1 shadow-lift">
+        <div className="absolute left-0 top-[calc(100%+4px)] z-50 max-h-72 w-full overflow-y-auto rounded-lg bg-card py-1 shadow-lift">
           {options.map((o) => (
             <button
               key={o.value}
@@ -77,7 +77,7 @@ export function Select({
                 onChange(o.value);
                 setOpen(false);
               }}
-              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs text-ink hover:bg-base"
+              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs text-ink hover:bg-ink/5"
             >
               <span className="w-3 shrink-0 text-accent">
                 {o.value === value && <Check size={12} />}

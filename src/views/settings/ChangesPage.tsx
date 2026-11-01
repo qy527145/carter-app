@@ -110,7 +110,7 @@ export function ChangesPage() {
                   <div className="mb-1 text-[11px] text-dim">目录（任意层级）</div>
                   <div className="flex flex-wrap gap-1">
                     {r.dirs.map((d) => (
-                      <span key={d} className="mono rounded border border-edge px-1.5 py-0.5 text-[11px] text-ink">
+                      <span key={d} className="mono rounded bg-bubble px-1.5 py-0.5 text-[11px] text-ink">
                         {d}
                       </span>
                     ))}
@@ -121,7 +121,7 @@ export function ChangesPage() {
                     <div className="mb-1 text-[11px] text-dim">文件名</div>
                     <div className="flex flex-wrap gap-1">
                       {r.files.map((f) => (
-                        <span key={f} className="mono rounded border border-edge px-1.5 py-0.5 text-[11px] text-ink">
+                        <span key={f} className="mono rounded bg-bubble px-1.5 py-0.5 text-[11px] text-ink">
                           {f}
                         </span>
                       ))}
