@@ -27,6 +27,7 @@
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
   type CSSProperties,
   type ReactElement,
@@ -34,13 +35,13 @@ import {
 } from "react";
 import { openPath, openUrl } from "@tauri-apps/plugin-opener";
 import { defaultUrlTransform } from "react-markdown";
-import { Code, ExternalLink, LoaderCircle, Maximize2 } from "lucide-react";
+import { ChevronRight, Code, ExternalLink, LoaderCircle, Maximize2 } from "lucide-react";
 
 import { previewFile, readImage } from "../lib/api";
 import { toastError } from "../lib/toast";
 import { IconButton } from "./ui/Button";
 import { Segmented } from "./ui/Input";
-import { Modal } from "./ui/Panel";
+import { Collapse, Modal } from "./ui/Panel";
 
 // ---------------------------------------------------------------------------
 // 地址
@@ -532,6 +533,55 @@ function blockComplete(lang: string, src: string): boolean {
 }
 
 /**
+ * 还在写的 `html` / `svg` 代码块。
+ *
+ * 流式期间那段源码是**正在生长的半张图**：铺在正文里会占掉大半屏，而且没有任何
+ * 一个时刻值得去读它 —— 用户要的是画出来的东西。所以收成一行状态条（和「思考」
+ * 同一个形状）：转圈、语言、已经生成多少行。点开才看源码，并且贴着最新一行滚，
+ * 想盯着变化的人也能看。
+ *
+ * 不平铺预览：每次增量重画一遍就是闪。闭合标签到了自然换成 [`HtmlArtifact`]，
+ * 那才是「画好了」的时刻（见 `blockComplete`）。
+ */
+function StreamingArtifact({ lang, src }: { lang: string; src: string }) {
+  const [open, setOpen] = useState(false);
+  const box = useRef<HTMLDivElement>(null);
+  const lines = useMemo(() => src.split("\n").length, [src]);
+
+  // 展开着的时候跟着长：新来的字留在视野里，不用手动往下拖。
+  useEffect(() => {
+    if (!open) return;
+    const el = box.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [open, src]);
+
+  return (
+    <div className="my-3 overflow-hidden rounded-lg bg-card">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full items-center gap-2 px-2 py-1.5 text-left text-[11px] text-dim transition-colors hover:text-ink"
+      >
+        <ChevronRight
+          size={12}
+          className={`shrink-0 transition-transform ${open ? "rotate-90" : ""}`}
+        />
+        <Code size={12} className="shrink-0 text-tone-violet" />
+        <span className="mono shrink-0">{lang.toUpperCase()}</span>
+        <span className="min-w-0 flex-1 truncate">{lines} 行</span>
+        <LoaderCircle size={11} className="shrink-0 animate-spin" />
+        <span className="shrink-0">生成中…</span>
+      </button>
+      <Collapse open={open}>
+        {/* 与源码页签同一套深色样式（`.carter-code`）；高度封顶，页脚不能一直长。 */}
+        <div ref={box} className="max-h-[16rem] overflow-auto border-t border-edge">
+          <pre className="carter-code mono">{src}</pre>
+        </div>
+      </Collapse>
+    </div>
+  );
+}
+
+/**
  * 对话里的 HTML 卡片：预览 / 源码两个页签 + 全屏。
  *
  * 流式期间（`live`）只给源码：`srcDoc` 每来一个增量就整页重载，图表会闪成一片。
@@ -872,11 +922,12 @@ export function MarkdownPre({ children, live }: { children?: ReactNode; live: bo
   if (lang && RENDERABLE.has(lang)) {
     const html = textOf(el?.props?.children);
     // 不必等整条消息写完：闭合标签一出现就挂预览（见 `blockComplete`）。这之前
-    // 照旧画普通代码块 —— 半张图画出来只会闪。`live={false}` 是给卡片本身的：
-    // 它已经稳定，页签与全屏都该能用了。
+    // 是一行折叠的状态条（见 `StreamingArtifact`）—— 半张图铺在正文里只会占地方
+    // 和闪。`live={false}` 是给卡片本身的：它已经稳定，页签与全屏都该能用了。
     if (!live || blockComplete(lang, html)) {
       return <HtmlArtifact html={html} title={lang.toUpperCase()} live={false} svg={lang === "svg"} />;
     }
+    return <StreamingArtifact lang={lang} src={html} />;
   }
   return <pre>{children}</pre>;
 }
