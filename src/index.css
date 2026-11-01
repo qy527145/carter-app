@@ -540,8 +540,11 @@ body {
   border-radius: 5px;
 }
 
-/* 代码块：固定 GitHub-dark，不看主题。 */
-.carter-md pre {
+/* 代码块：固定 GitHub-dark，不看主题。
+   `.carter-code` 是同一套观感的独立入口 —— 工具卡片里的源码页签不在 `.carter-md`
+   里，套不上上面那条后代选择器，但两边该长得一模一样。 */
+.carter-md pre,
+.carter-code {
   margin: 0.7em 0;
   padding: 0.8em 0.9em;
   overflow-x: auto;

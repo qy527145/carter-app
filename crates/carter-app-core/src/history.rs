@@ -158,20 +158,26 @@ pub fn interrupted_note() -> &'static str {
     INTERRUPTED_RESULT
 }
 
-/// 只留到第 `turn` 轮**为止**（含这一轮的回答），之后的全部丢掉。
+/// 只保留第 `turn` 轮**之前**的历史（不含这一轮），后面的全部丢掉。
 ///
-/// 与 [`retract_turn`] 差一轮：那个是「这一轮要重跑，所以切在它之前」，这个是
-/// 「从这里往后分叉，所以这一轮要留住」。同样写一条 `Compacted` 快照落盘。
+/// 分叉与「编辑历史消息」共用它：
+/// * 从某条回答之后分叉 → 保留到 `turn + 1`；
+/// * 改写某句话再问 → 保留到 `turn`（这句话本身要换掉）。
 ///
-/// 找不到这一轮时什么都不做（fork 出来的那份已经有别的轮次了，硬切只会切坏它）。
-pub fn truncate_after_turn(thread: &mut Thread, turn: u32) -> Result<(), String> {
+/// `turn` 是 0 时截成空历史 —— 那是「同一句话重新开一条对话」，是合法用法。
+/// 越界（已经是这么短了）时什么都不做。
+///
+/// 会话文件只能追加，所以截断靠一条 `Compacted` 快照整体替换（与 `/clear`、
+/// 上下文压缩同一条路）。它写在新文件上：调用方 fork 出来的是一份自包含副本，
+/// 原会话一个字都不会被动到。
+pub fn truncate_before_turn(thread: &mut Thread, turn: u32) -> Result<(), String> {
     let mut seen = 0u32;
     let mut cut = thread.messages.len();
     for (i, msg) in thread.messages.iter().enumerate() {
         if !crate::view::is_turn_start(msg) {
             continue;
         }
-        if seen > turn {
+        if seen == turn {
             cut = i;
             break;
         }
@@ -181,7 +187,7 @@ pub fn truncate_after_turn(thread: &mut Thread, turn: u32) -> Result<(), String>
         return Ok(());
     }
     thread.messages.truncate(cut);
-    thread.user_turns = turn + 1;
+    thread.user_turns = turn;
     if let Some(rec) = thread.recorder() {
         rec.record(carter::session::RecordKind::Compacted {
             tier: "fork".into(),
@@ -435,7 +441,7 @@ mod tests {
         assert_eq!(t.messages.len(), 2);
     }
 
-    /// 分叉截断与重试截断差一轮：分叉要**留住**这一轮的提问与回答。
+    /// 分叉截断：`turn + 1` = 留住这一轮的提问与回答。
     #[test]
     fn truncating_after_a_turn_keeps_that_turn() {
         let mut t = thread(vec![
@@ -446,11 +452,30 @@ mod tests {
             WireMessage::user_text("第三问"),
             WireMessage::new(Role::Assistant, vec![Block::text("第三答")]),
         ]);
-        truncate_after_turn(&mut t, 1).unwrap();
+        truncate_before_turn(&mut t, 2).unwrap();
         assert_eq!(t.messages.len(), 4);
         assert_eq!(t.messages[3].concat_text(), "第二答");
         // 新的轮次数要接上：从这条会话继续提问时不能与已有的轮次撞号。
         assert_eq!(t.user_turns, 2);
+    }
+
+    /// 「改写这句话再问」：切在这一轮之前，这句话本身要换掉。
+    #[test]
+    fn truncating_before_a_turn_drops_that_turn() {
+        let mut t = thread(vec![
+            WireMessage::user_text("第一问"),
+            WireMessage::new(Role::Assistant, vec![Block::text("第一答")]),
+            WireMessage::user_text("第二问"),
+            WireMessage::new(Role::Assistant, vec![Block::text("第二答")]),
+        ]);
+        truncate_before_turn(&mut t, 1).unwrap();
+        assert_eq!(t.messages.len(), 2);
+        assert_eq!(t.messages[0].concat_text(), "第一问");
+        assert_eq!(t.user_turns, 1);
+        // 第 0 轮之前是空历史 —— 合法，不是错误。
+        truncate_before_turn(&mut t, 0).unwrap();
+        assert!(t.messages.is_empty());
+        assert_eq!(t.user_turns, 0);
     }
 
     /// 已经是最后 (或更短) 的一轮：什么都不切，也不报错。
@@ -460,7 +485,7 @@ mod tests {
             WireMessage::user_text("只有一问"),
             WireMessage::new(Role::Assistant, vec![Block::text("答")]),
         ]);
-        truncate_after_turn(&mut t, 5).unwrap();
+        truncate_before_turn(&mut t, 6).unwrap();
         assert_eq!(t.messages.len(), 2);
     }
 }

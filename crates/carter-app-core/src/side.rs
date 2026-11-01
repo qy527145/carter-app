@@ -303,6 +303,8 @@ fn side_system(
     // 「分支 / commit」不影响问答。
     let mut system =
         carter::prompt::assemble_system(config, cwd, &model.key, None, &skill_metas, true);
+    // 侧边抽屉里同样是图形界面 —— 「能直接给图 / 给网页」这条能力说明一样成立。
+    system.push(crate::session::GUI_INSTRUCTIONS.to_string());
     system.push(SIDE_INSTRUCTIONS.to_string());
     system
 }

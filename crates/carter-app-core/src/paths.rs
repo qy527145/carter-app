@@ -166,6 +166,15 @@ pub fn changes_dir() -> PathBuf {
     app_home().join("changes")
 }
 
+/// 用户**打的原文**（`/命令`、`@文件` 展开之前）的存放目录：一个会话一个文件。
+///
+/// 与 `changes/` 同形同理由。会话文件里存的是**展开之后**的正文（几百行文件内容
+/// 也可能在里面），拿它回填「编辑」框等于把整份文件摊在输入框里 —— 用户改的
+/// 绝不会是那个东西。原文只服务界面，同样不能进 carter 的记录格式。
+pub fn prompts_dir() -> PathBuf {
+    app_home().join("prompts")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

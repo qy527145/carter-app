@@ -11,6 +11,7 @@
 //! * [`config_edit`] —— 界面里改 `~/.carter/config.toml`（保真写回）。
 //! * [`app_settings`] —— 应用私有的界面设置（主题、工具开关）。
 //! * [`sessions`] —— 对话管理：重命名 / fork / 删除 / 搜索 / 导出。
+//! * [`prompts`] —— 用户打的原文（展开之前）按轮存档，供「编辑」回填。
 //! * [`tools`] —— 在 carter 的装配结果之上套一层工具开关。
 //! * [`skills`] —— 技能：列举 / 查看 / 启停 / 新建 / 删除。
 //! * [`catalog`] —— 全部模型引用摊平成一张带元数据的表。
@@ -35,6 +36,7 @@ pub mod input;
 pub mod paths;
 pub mod platform;
 pub mod preview;
+pub mod prompts;
 pub mod protocol;
 pub mod session;
 pub mod sessions;

@@ -9,7 +9,7 @@
 // 只有用户消息给一个气泡。工具与思考是嵌在其中的卡片 —— 它们是流程的一部分，
 // 不该跟正文抢同一层视觉重量。
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -38,6 +38,7 @@ import { displayName, modelTitle, useModelCatalog } from "../lib/modelLabel";
 import { editPrompt, fork, regenerate } from "../lib/sessionOps";
 import { TOAST_MS } from "../lib/toast";
 import { FilePreviewModal } from "./FilePreview";
+import { MarkdownImage, MarkdownLink, MarkdownPre, transformMarkdownUrl } from "./Media";
 import { AskForm } from "./AskForm";
 import { Composer, MessageImages } from "./Composer";
 import { GoalBar } from "./GoalBar";
@@ -54,10 +55,63 @@ type AssistantTurnT = Extract<Turn, { role: "assistant" }>;
 // 片段渲染
 // ---------------------------------------------------------------------------
 
-function MarkdownText({ text }: { text: string }) {
+/**
+ * 正文里 `[img:<hash>.<ext>]` 的引用换成 markdown 图片。
+ *
+ * 这些 token 来自 `read_file` 读图与粘贴的图 —— 模型自己也会把它写进正文（工具描述
+ * 里就教了它「可直接嵌入回答」）。原样显示是一串看不懂的 hash，换成图片才对得上
+ * 那句话的意思。地址走 `carter-img:` 这个私有协议，由 `img` 组件去图片库取字节
+ * （见 `Media.tsx`）。
+ *
+ * 代码块与行内代码里**不换**：那些地方写的是「这个 token 长什么样」，
+ * 换掉就成了把示例篡改成一句 markdown —— 用户复制出去的东西也跟着变了。
+ */
+function inlineImageTokens(text: string): string {
+  const IMG = /\[img:([0-9a-fA-F]+\.[A-Za-z0-9]+)\]/g;
+  const CODE = /```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`/g;
+  let out = "";
+  let last = 0;
+  for (let m = CODE.exec(text); m; m = CODE.exec(text)) {
+    out += text.slice(last, m.index).replace(IMG, (_s, id: string) => `![图片](carter-img:${id})`);
+    out += m[0];
+    last = m.index + m[0].length;
+  }
+  return out + text.slice(last).replace(IMG, (_s, id: string) => `![图片](carter-img:${id})`);
+}
+
+/**
+ * 助手正文。`live` = 这一段还在流式生成。
+ *
+ * 流式时不渲染 HTML 预览（每来一个增量 `srcDoc` 就整页重载，图表会闪），
+ * 这一条由 `Media.tsx` 里的 `HtmlArtifact` 自己处理。
+ */
+function MarkdownText({ text, cwd, live }: { text: string; cwd: string; live: boolean }) {
+  const md = useMemo(() => inlineImageTokens(text), [text]);
+  const components = useMemo(
+    () => ({
+      img: (props: { src?: string; alt?: string }) => (
+        <MarkdownImage src={props.src ?? ""} alt={props.alt} cwd={cwd} />
+      ),
+      a: (props: { href?: string; children?: React.ReactNode }) => (
+        <MarkdownLink href={props.href} cwd={cwd}>
+          {props.children}
+        </MarkdownLink>
+      ),
+      pre: (props: { children?: React.ReactNode }) => (
+        <MarkdownPre live={live}>{props.children}</MarkdownPre>
+      ),
+    }),
+    [cwd, live],
+  );
   return (
     <div className="carter-md">
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        urlTransform={transformMarkdownUrl}
+        components={components}
+      >
+        {md}
+      </ReactMarkdown>
     </div>
   );
 }
@@ -151,7 +205,7 @@ function runningName(items: Item[]): string | null {
   return null;
 }
 
-function ProcessGroup({ items }: { items: Item[] }) {
+function ProcessGroup({ items, cwd }: { items: Item[]; cwd: string }) {
   const failed = items.filter(
     (i): i is Extract<Item, { kind: "tool" }> =>
       i.kind === "tool" && i.result !== undefined && !i.result.ok,
@@ -189,7 +243,13 @@ function ProcessGroup({ items }: { items: Item[] }) {
       <Collapse open={open}>
         <div className="space-y-2 border-t border-edge px-3 py-2">
           {items.map((it, i) => (
-            <ItemView key={i} item={it} showCursor={false} isLast={i === items.length - 1} />
+            <ItemView
+              key={i}
+              item={it}
+              cwd={cwd}
+              showCursor={false}
+              isLast={i === items.length - 1}
+            />
           ))}
         </div>
       </Collapse>
@@ -232,10 +292,13 @@ function ItemView({
   item,
   showCursor,
   isLast,
+  cwd,
 }: {
   item: Item;
   showCursor: boolean;
   isLast: boolean;
+  /** 解析正文里的相对图片路径、判断本地链接用。 */
+  cwd: string;
 }) {
   switch (item.kind) {
     case "thinking":
@@ -246,14 +309,16 @@ function ItemView({
         // 只在正在生成的这一段上挂 —— 历史消息静默出现，不该一条条播动画。
         // 同一段后续增量复用同一个 DOM 元素，不会每帧重播。
         <div className={`text-sm text-ink ${showCursor ? "carter-bloom" : ""}`}>
-          <MarkdownText text={item.text} />
+          {/* showCursor 只挂在正在生成的那一段上：同一件事也是「这段还在写」的判据，
+              内联的 HTML 预览等它写完再挂载，否则每个增量都会把 iframe 重载一次。 */}
+          <MarkdownText text={item.text} cwd={cwd} live={showCursor} />
           {showCursor && <span className="carter-cursor">▍</span>}
         </div>
       );
     // 按名字分派到各自的呈现。所有工具共用一种卡片是之前数据不够的产物，
     // 不是设计选择 —— 见 toolcards/ToolCard.tsx 的模块头。
     case "tool":
-      return <ToolCard item={item} isLast={isLast} />;
+      return <ToolCard item={item} isLast={isLast} cwd={cwd} />;
     case "server":
       return <ServerCard item={item} />;
     case "image":
@@ -681,12 +746,14 @@ function AssistantTurn({
       {segs
         ? segs.map((seg, i) => {
             const last = i === segs.length - 1;
-            if (seg.kind === "process") return <ProcessGroup key={i} items={seg.items} />;
+            if (seg.kind === "process")
+              return <ProcessGroup key={i} items={seg.items} cwd={cwd} />;
             // 光标只挂在正在生成的那一段正文上，与详细模式的判断口径一致。
             return (
               <ItemView
                 key={i}
                 item={seg.item}
+                cwd={cwd}
                 isLast={last}
                 showCursor={streaming && isLast && last && seg.kind === "text"}
               />
@@ -696,6 +763,7 @@ function AssistantTurn({
             <ItemView
               key={i}
               item={item}
+              cwd={cwd}
               isLast={i === items.length - 1}
               showCursor={streaming && isLast && i === items.length - 1 && item.kind === "text"}
             />

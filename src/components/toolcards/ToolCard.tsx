@@ -43,6 +43,7 @@ import {
 
 import { sendCommand } from "../../lib/api";
 import { toastError } from "../../lib/toast";
+import { HtmlFilePreview, StoredImage, imageTokenIn, looksLikeHtml } from "../Media";
 import { Collapse } from "../ui/Panel";
 import type { Item } from "../../store";
 
@@ -372,17 +373,25 @@ function FileCard({
   tone,
   icon,
   title,
+  cwd = "",
+  render = false,
 }: {
   item: ToolItem;
   tone: keyof typeof GLYPH;
   icon: React.ReactNode;
   title: string;
+  /** 会话工作目录。写了 HTML 时用它把相对路径对回磁盘上的文件。 */
+  cwd?: string;
+  /** 这个工具写出来的是不是可以直接渲染的东西（见 `HtmlFilePreview`）。 */
+  render?: boolean;
 }) {
   const path = str(item.args, "path") ?? str(item.args, "file_path") ?? "";
   const r = item.result;
   // `write_file` 的结果只有一句「wrote N bytes to X」—— 那正是要说的事，
   // 但它前面还有一行路径，显示出来意义不大。
   const body = r ? r.content.replace(/^exit_code=\d+\n/, "") : "";
+  // 只有真写成功了才渲染 —— 报错的调用底下那张卡片会去读一个可能根本不存在的文件。
+  const showHtml = render && r?.ok && path !== "" && looksLikeHtml(path);
 
   return (
     <Card
@@ -391,12 +400,14 @@ function FileCard({
       title={title}
       subtitle={path ? tail(path) : undefined}
       status={<Status item={item} />}
-      defaultOpen={false}
+      // 一份刚写出来的网页，默认就该让人看见 —— 那是这次调用的全部意义。
+      defaultOpen={showHtml}
       forceOpen={r ? !r.ok : false}
     >
       <div className="mono mb-1 break-all text-[11px] text-dim" title={path}>
         {path}
       </div>
+      {showHtml && <HtmlFilePreview path={path} cwd={cwd} />}
       {body && <Output text={body} />}
     </Card>
   );
@@ -495,6 +506,9 @@ function ReadCard({ item }: { item: ToolItem }) {
   const r = item.result;
   const body = r?.content ?? "";
   const lineCount = body ? body.split("\n").length : 0;
+  // `read_file` 读到图片时，结果就是 `[img:<hash>.<ext>]` 加一行说明。那串 token
+  // 对人有意义的形态是图本身 —— 原样显示等于什么都没给。
+  const image = r?.ok ? imageTokenIn(body) : null;
 
   return (
     <Card
@@ -510,13 +524,14 @@ function ReadCard({ item }: { item: ToolItem }) {
           <Status item={item} />
         </>
       }
-      defaultOpen={false}
+      defaultOpen={image !== null}
       forceOpen={r ? !r.ok : false}
     >
       <div className="mono mb-1 break-all text-[11px] text-dim" title={path}>
         {path}
       </div>
-      {body && <Output text={body} />}
+      {image && <StoredImage token={image} alt={path ? tail(path, 1) : "图片"} />}
+      {body && !image && <Output text={body} />}
     </Card>
   );
 }
@@ -582,7 +597,7 @@ function summarize(args: unknown): string {
 // 分派
 // ---------------------------------------------------------------------------
 
-type CardProps = { item: ToolItem; isLast?: boolean };
+type CardProps = { item: ToolItem; isLast?: boolean; cwd?: string };
 
 const DISPATCH: Record<string, (p: CardProps) => React.ReactElement> = {
   bash: BashCard,
@@ -592,7 +607,7 @@ const DISPATCH: Record<string, (p: CardProps) => React.ReactElement> = {
   read_file: ReadCard,
   edit_file: EditCard,
   write_file: (p) => (
-    <FileCard {...p} tone="orange" icon={<Pencil size={11} />} title="write_file" />
+    <FileCard {...p} tone="orange" icon={<Pencil size={11} />} title="write_file" render />
   ),
   save_memory: (p) => (
     <FileCard {...p} tone="pink" icon={<FileText size={11} />} title="save_memory" />
@@ -603,9 +618,9 @@ const DISPATCH: Record<string, (p: CardProps) => React.ReactElement> = {
   ),
 };
 
-export function ToolCard({ item, isLast }: CardProps) {
+export function ToolCard({ item, isLast, cwd }: CardProps) {
   const Impl = DISPATCH[item.name] ?? GenericCard;
-  return <Impl item={item} isLast={isLast} />;
+  return <Impl item={item} isLast={isLast} cwd={cwd} />;
 }
 
 /** 服务端工具活动（web_search 等）。本地没执行过，长得必须和本地工具不一样。 */

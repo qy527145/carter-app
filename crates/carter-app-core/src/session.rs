@@ -75,6 +75,11 @@ pub struct StartedSession {
     /// 与 `goal` 同理：这些数据只存在应用私有目录里，不能回放成事件，所以随
     /// `create_session` 一次性带回；实时那几轮走 `files_changed` 事件。
     pub changes: Vec<crate::changes::TurnFiles>,
+    /// 历史里每一轮用户**打的原文**（`/命令`、`@文件` 展开之前，见 `prompts.rs`）。
+    ///
+    /// 界面拿它回填「编辑」框 —— 会话文件里存的是展开后的正文，回填进去等于把
+    /// 整份文件内容摊在输入框里。同上：只存在应用私有目录，随历史一起带回。
+    pub prompts: Vec<crate::prompts::TurnPrompt>,
 }
 
 /// 新建 / 续接一个会话。返回的句柄立即可以投递命令。
@@ -238,11 +243,13 @@ pub fn start_session(shell: Arc<AppShell>, opts: SessionOptions) -> carter::Resu
     };
     tokio::spawn(runner.run());
     let changes = crate::changes::load(&handle.id);
+    let prompts = crate::prompts::load(&handle.id);
     Ok(StartedSession {
         handle,
         history,
         goal: goal_view,
         changes,
+        prompts,
     })
 }
 
@@ -467,16 +474,36 @@ impl SessionCtx {
         } else {
             Vec::new()
         };
-        carter::prompt::assemble_system(
+        let mut system = carter::prompt::assemble_system(
             &self.config,
             &self.cwd,
             &self.model.key,
             git,
             &skill_metas,
             true,
-        )
+        );
+        system.push(GUI_INSTRUCTIONS.to_string());
+        system
     }
 }
+
+/// 告诉模型「这个界面能直接看见东西」。
+///
+/// 不给这段说明，模型只会把图存下来、把 HTML 写进文件，然后说一句「已生成，你去
+/// 打开看看」—— 而界面上本来就是能直接看的（见 `src/components/Media.tsx`）。
+/// 终端里那套「用户只看得到你的文本输出」的旧假设，在这里不成立。
+///
+/// 刻意写得短：这是一条**能力**说明，不是风格指令，每轮都随系统提示发出去。
+pub(crate) const GUI_INSTRUCTIONS: &str = "\
+## 这个界面能直接看见图与网页
+
+用户用的是桌面图形界面，不是终端 —— 下面这些写了就**直接显示出来**，不要只说「已生成」：
+
+- `![](相对或绝对路径)`：本地图片（png/jpg/gif/webp/bmp/svg）按会话工作目录解析，
+  点击可放大。`read_file` 读到的图片会给出 `[img:…]` 引用，也能直接写进正文。
+- 用 ```html 或 ```svg 包起来的代码块会渲染成**可预览的页面**（预览 / 源码两个页签），
+  所以图表、报告这类东西直接以 HTML 给出即可，不必先写文件再让用户自己去打开。
+- 相对路径的链接按同一个工作目录解析；本地 `.html` 链接点了会就地渲染。";
 
 // ---------------------------------------------------------------------------
 // 运行器
@@ -748,8 +775,19 @@ impl Runner {
             },
         };
         // 变更清单按轮存着，一起退 —— 否则被回退掉的那些回答的文件清单会留下来。
+        // 重跑出来的那一轮会重新记自己那条（同一个轮次号）。
         if let Err(e) = crate::changes::retract(&self.ctx.handle.id, turn) {
             tracing::warn!("回退轮次变更记录失败：{e}");
+        }
+        // 原文只退这一轮**之后**的：原样重跑要留着这一轮的原文（「编辑」框还得
+        // 能回填），只有改写过的才换成新句子。
+        if let Err(e) = crate::prompts::retract(&self.ctx.handle.id, turn + 1) {
+            tracing::warn!("回退用户原文失败：{e}");
+        }
+        if let Some(raw) = echo_prompt.as_deref() {
+            if let Err(e) = crate::prompts::record(&self.ctx.handle.id, turn, raw) {
+                tracing::warn!("记录用户原文失败：{e}");
+            }
         }
         self.ctx.handle.publish_history(&self.thread.messages);
         // 改写过的提问要把新正文带给界面（那条气泡要跟着变）；原样重跑不用。
@@ -838,6 +876,15 @@ impl Runner {
         // 「用户提了什么要求」（之后的进展由 `live` 补上）。
         self.ctx.handle.publish_history(&self.thread.messages);
         self.begin_changes();
+        // 用户**打的原文**按轮存一份：会话文件里是展开后的正文（`@文件` 的内容
+        // 也可能在里面），拿它回填「编辑」框等于把整份文件摊在输入框里。
+        // 自动继续推起来的那一轮没有原文（`echo` 是 `None`），本来也不给它编辑。
+        if let Some(raw) = echo.as_deref() {
+            if let Err(e) = crate::prompts::record(&self.ctx.handle.id, self.thread.user_turns, raw)
+            {
+                tracing::warn!("记录用户原文失败：{e}");
+            }
+        }
         self.emit(SessionEvent::TurnStarted {
             turn: self.thread.user_turns,
             prompt_id,

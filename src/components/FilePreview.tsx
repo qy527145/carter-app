@@ -30,6 +30,7 @@ import { copyText } from "../lib/clipboard";
 import { fmtBytes, relTime } from "../lib/format";
 import { toastError, TOAST_MS } from "../lib/toast";
 import { useStore } from "../store";
+import { HtmlFrame, isHtmlFile } from "./Media";
 import { Button } from "./ui/Button";
 import { Segmented } from "./ui/Input";
 import { Modal } from "./ui/Panel";
@@ -128,6 +129,9 @@ export function FilePreviewModal({
   const [error, setError] = useState<string | null>(null);
   const [diff, setDiff] = useState<FileDiff | null>(null);
   const [tab, setTab] = useState<"diff" | "file">("diff");
+  // 网页文件在「当前内容」下再分预览 / 源码两页。默认渲染 —— 点开一个 `.html`
+  // 想看的通常不是那屏标签。（`HtmlFrame` 的沙箱说明见 `Media.tsx`。）
+  const [htmlTab, setHtmlTab] = useState<"render" | "source">("render");
   // 「复制内容」按一下就变对勾，2.5 秒后自己复位。比弹一条 toast 克制 ——
   // 反馈发生在手指落下的那个点上，不用把视线挪到右上角。
   const [copied, setCopied] = useState(false);
@@ -142,6 +146,8 @@ export function FilePreviewModal({
     let cancelled = false;
     setPreview(null);
     setError(null);
+    // 换一个文件回到「预览」：上一个是网页、换成一个网页之后该是渲染而不是源码。
+    setHtmlTab("render");
     previewFile(cwd || null, path)
       .then((r) => {
         if (!cancelled) setPreview(r);
@@ -295,7 +301,29 @@ export function FilePreviewModal({
             <>
               <Meta preview={preview} />
               {preview.truncated && <Notice>文件较大，这里只显示开头 256 KB。</Notice>}
-              <Code content={preview.content} />
+              {/* 网页文件默认给渲染后的样子 —— 点开一个 `.html` 想看的通常不是源码。
+                  源码仍然要能翻，所以是两个页签而不是二选一。 */}
+              {isHtmlFile(path) ? (
+                <div className="mb-3">
+                  <Segmented
+                    value={htmlTab}
+                    onChange={setHtmlTab}
+                    options={[
+                      { id: "render", label: "预览" },
+                      { id: "source", label: "源码" },
+                    ]}
+                  />
+                </div>
+              ) : null}
+              {isHtmlFile(path) && htmlTab === "render" ? (
+                <HtmlFrame
+                  html={preview.content}
+                  height={Math.round(window.innerHeight * 0.5)}
+                  title={baseName(absolute)}
+                />
+              ) : (
+                <Code content={preview.content} />
+              )}
             </>
           )}
 

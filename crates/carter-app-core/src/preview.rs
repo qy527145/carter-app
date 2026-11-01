@@ -89,6 +89,9 @@ fn image_mime(ext: &str) -> Option<&'static str> {
         "bmp" => "image/bmp",
         "ico" => "image/x-icon",
         "avif" => "image/avif",
+        // SVG 是文本，但它在 `<img>` 里只会被渲染成图（不会执行里面的脚本），
+        // 所以和别的图片走同一条路 —— 模型画的图不少是 SVG。
+        "svg" => "image/svg+xml",
         _ => return None,
     })
 }
@@ -282,6 +285,14 @@ mod tests {
                 assert!(data_url.starts_with("data:image/png;base64,"));
             }
             other => panic!("应当是图片：{other:?}"),
+        }
+        // SVG 也按图片走（模型画的图不少是 SVG，把它当文本显示等于只给源码）。
+        std::fs::write(dir.join("b.svg"), "<svg xmlns=\"http://www.w3.org/2000/svg\"/>").unwrap();
+        match preview(&dir, "b.svg") {
+            FilePreview::Image { data_url, .. } => {
+                assert!(data_url.starts_with("data:image/svg+xml;base64,"));
+            }
+            other => panic!("SVG 应当也按图片走：{other:?}"),
         }
         std::fs::remove_dir_all(&dir).ok();
     }

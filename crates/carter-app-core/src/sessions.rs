@@ -103,29 +103,46 @@ pub fn auto_title_allowed(existing: Option<&str>) -> bool {
 
 /// fork 一条会话。返回新会话的 id。
 ///
-/// `turn` 给了就**只留到这一轮为止**的历史（界面上回答下面的「从这里分叉」）：
+/// `turn` 给了就**只保留到这一轮为止**的历史（界面上回答下面的「从这里分叉」）：
 /// 先照常 fork 出一份自包含的新文件，再按同一套折叠方式截断它 —— 新会话从那一刻
 /// 接着聊，原来那条一个字都不动。
+///
+/// 截断点之后的数据（按轮的文件清单、用户打的原文）也一起跟着截：它们按会话 id
+/// 存在应用私有目录里，不复制的话，保留下来的那些回答在界面上会突然没有文件清单，
+/// 历史提问也没有原文可回填「编辑」框。
 pub fn fork(id: &str, turn: Option<u32>) -> Result<String, String> {
     let entry = find(id).ok_or_else(|| format!("找不到会话 {id}"))?;
     if !entry.path.exists() {
         return Err("这条会话还没有任何消息，无法 fork".into());
     }
     let (_, meta) = carter::session::fork(&entry).map_err(|e| format!("fork 失败：{e}"))?;
-    if let Some(turn) = turn {
-        truncate_forked(&meta.id, turn)?;
+    // 「保留到第 `turn` 轮为止」= 截到 `turn + 1`；整条复制时不截。
+    let keep_before = turn.map(|t| t.saturating_add(1));
+    let copied = (|| -> Result<(), String> {
+        crate::changes::copy(id, &meta.id, keep_before)?;
+        crate::prompts::copy(id, &meta.id, keep_before)?;
+        if let Some(cut) = keep_before {
+            truncate_forked(&meta.id, cut)?;
+        }
+        Ok(())
+    })();
+    if let Err(e) = copied {
+        // 半成品要清掉：一条只有一半历史、也没有变更记录的新会话留着，用户点开时
+        // 看到的是「少了一截的对话」，比 fork 失败本身更难理解。
+        let _ = delete(&meta.id);
+        return Err(e);
     }
     Ok(meta.id)
 }
 
-/// 把刚 fork 出来的那条截到第 `turn` 轮**之后**（保留这一轮的回答）。
+/// 把刚 fork 出来的那条截到第 `turn` 轮**之前**（不含这一轮）。
 ///
-/// 走的是 `history::truncate_after_turn` + 一条 `Compacted` 快照：会话文件只能追加，
+/// 走的是 `history::truncate_before_turn` + 一条 `Compacted` 快照：会话文件只能追加，
 /// 要「删掉后半截」就只能靠快照整体替换（与 `/clear`、重试同一条路）。
 fn truncate_forked(id: &str, turn: u32) -> Result<(), String> {
     let entry = find(id).ok_or_else(|| format!("找不到新会话 {id}"))?;
     let (mut thread, _) = carter::session::load(&entry).map_err(|e| format!("打开新会话失败：{e}"))?;
-    crate::history::truncate_after_turn(&mut thread, turn)?;
+    crate::history::truncate_before_turn(&mut thread, turn)?;
     Ok(())
 }
 

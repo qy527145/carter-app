@@ -776,15 +776,7 @@ fn record_to(path: &Path, turn: u32, files: &[String], baseline: Option<&str>) -
     stored
         .turns
         .insert(turn, StoredTurn::from_parts(files, baseline));
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("建目录失败：{e}"))?;
-    }
-    let json = serde_json::to_string(&stored).map_err(|e| e.to_string())?;
-    // 先写临时文件再改名：中途断电不能留下半截 JSON（与 `goal.rs::save_to` 同理）。
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json).map_err(|e| format!("写 {} 失败：{e}", tmp.display()))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("改名到 {} 失败：{e}", path.display()))
+    write_stored(path, &stored)
 }
 
 /// 会话被删时一并清掉。不删的话这个目录会跟着历史会话一直长。
@@ -800,6 +792,39 @@ pub fn retract(session_id: &str, turn: u32) -> Result<(), String> {
     retract_from(&file_for(session_id), turn)
 }
 
+/// fork 出来的新会话继承变更记录。`keep_before` = 只留轮次号小于它的那些。
+///
+/// 不复制的话，新会话里那些保留下来的历史回答会**一个文件清单都没有** ——
+/// 而分叉恰恰发生在用户刚看到「本轮改了这几个文件」的时候，那行突然消失最像丢数据。
+pub fn copy(from: &str, to: &str, keep_before: Option<u32>) -> Result<(), String> {
+    copy_between(&file_for(from), &file_for(to), keep_before)
+}
+
+fn copy_between(from: &Path, to: &Path, keep_before: Option<u32>) -> Result<(), String> {
+    let mut stored = match std::fs::read_to_string(from) {
+        Ok(raw) => serde_json::from_str::<Stored>(&raw).unwrap_or_default(),
+        Err(_) => return Ok(()),
+    };
+    if let Some(cut) = keep_before {
+        stored.turns.split_off(&cut);
+    }
+    if stored.turns.is_empty() {
+        return Ok(());
+    }
+    write_stored(to, &stored)
+}
+
+fn write_stored(path: &Path, stored: &Stored) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("建目录失败：{e}"))?;
+    }
+    let json = serde_json::to_string(stored).map_err(|e| e.to_string())?;
+    // 先写临时文件再改名：中途断电不能留下半截 JSON（与 `goal.rs::save_to` 同理）。
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json).map_err(|e| format!("写 {} 失败：{e}", tmp.display()))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("改名到 {} 失败：{e}", path.display()))
+}
+
 fn retract_from(path: &Path, turn: u32) -> Result<(), String> {
     let Ok(raw) = std::fs::read_to_string(path) else {
         return Ok(());
@@ -810,10 +835,7 @@ fn retract_from(path: &Path, turn: u32) -> Result<(), String> {
     if stored.turns.split_off(&turn).is_empty() {
         return Ok(());
     }
-    let json = serde_json::to_string(&stored).map_err(|e| e.to_string())?;
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json).map_err(|e| format!("写 {} 失败：{e}", tmp.display()))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("改名到 {} 失败：{e}", path.display()))
+    write_stored(path, &stored)
 }
 
 #[cfg(test)]

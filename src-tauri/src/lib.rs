@@ -123,6 +123,8 @@ struct CreatedSession {
     goal: Option<carter_app_core::GoalView>,
     /// 历史里每一轮实际改过的文件。事件不回放，所以随历史一起带回。
     changes: Vec<carter_app_core::TurnFiles>,
+    /// 历史里每一轮用户打的原文（展开之前）。界面拿它回填「编辑」框。
+    prompts: Vec<carter_app_core::prompts::TurnPrompt>,
 }
 
 /// 新建或续接一个会话，并把已有历史一并带回。
@@ -155,6 +157,7 @@ async fn create_session(
         history: started.history,
         goal: started.goal,
         changes: started.changes,
+        prompts: started.prompts,
     })
 }
 
@@ -865,9 +868,15 @@ fn save_image(data: String, ext: Option<String>) -> Result<String, String> {
 }
 
 /// 把一条图片引用读成 data URL 供界面显示。读不到返回 null（文件被清理过等）。
+///
+/// 与 [`preview_file`] 同理走 `spawn_blocking`：对话正文里每张图都会调它，同步跑在
+/// 主线程上会把界面卡住。
 #[tauri::command]
-fn read_image(token: String) -> Option<String> {
-    carter_app_core::images::read_image(&token)
+async fn read_image(token: String) -> Option<String> {
+    tokio::task::spawn_blocking(move || carter_app_core::images::read_image(&token))
+        .await
+        .ok()
+        .flatten()
 }
 
 /// 文件预览：点击「本轮变更的文件」里的一行时打开。
@@ -875,12 +884,20 @@ fn read_image(token: String) -> Option<String> {
 /// 读的是**现在磁盘上的内容**，不是历史快照 —— 预览要回答的是「它现在什么样」。
 /// 返回的是可渲染的形状（文本 / 图片 data URL / 二进制 / 消失 / 读失败），
 /// 前端不需要自己判断文件类型。
+///
+/// `async` + `spawn_blocking`：对话正文里的图片也走这一条（见 `src/components/Media.tsx`），
+/// 而一张图要读盘 + base64（可以到十几 MB）。同步命令跑在主线程上，几张图就能把整个
+/// 界面卡住。
 #[tauri::command]
-fn preview_file(cwd: Option<String>, path: String) -> carter_app_core::FilePreview {
-    carter_app_core::preview::preview(
-        &cwd.map(PathBuf::from).unwrap_or_else(default_cwd),
-        &path,
-    )
+async fn preview_file(cwd: Option<String>, path: String) -> carter_app_core::FilePreview {
+    let cwd = cwd.map(PathBuf::from).unwrap_or_else(default_cwd);
+    let fallback = path.clone();
+    tokio::task::spawn_blocking(move || carter_app_core::preview::preview(&cwd, &path))
+        .await
+        .unwrap_or_else(|e| carter_app_core::FilePreview::Error {
+            path: fallback,
+            message: format!("读取中断：{e}"),
+        })
 }
 
 /// 「本轮变更的文件」的固定忽略名单，给设置页展示用。
