@@ -103,20 +103,53 @@ export async function rename(id: string, title: string): Promise<void> {
  * carter 的 `fork` 会写出一个**自包含**的新文件（种子历史 + `forked_from` 血缘），
  * 所以这里只要把新 id 打开即可，不用管历史怎么搬。
  *
- * `turn` = 从这一轮之后分叉（回答下面的「从这里分叉」）：新会话只留到这一轮，
- * 原会话一个字不动。不传就是整条复制。
+ * `keepBefore` = 只保留第几轮**之前**的历史（不含该轮）。回答下面的「从这里分叉」
+ * 传 `turn + 1`；提问下面的「编辑并重发」走 [`editInFork`]。不传就是整条复制。
  */
-export async function fork(id: string, turn?: number): Promise<void> {
+export async function fork(id: string, keepBefore?: number): Promise<void> {
+  try {
+    const newId = await api.forkSession(id, keepBefore);
+    await refreshSessions();
+    useStore.getState().setView("chat");
+    await replaceSession({ resume: false, resumeId: newId });
+    toastOk(
+      keepBefore === undefined
+        ? "已 fork 出一条新会话"
+        : `已从第 ${keepBefore} 轮分叉出一条新会话`,
+    );
+  } catch (e) {
+    toastError(e);
+  }
+}
+
+/**
+ * 改写第 `turn` 轮那句提问，在新分叉出来的一条会话里重发。
+ *
+ * 这就是「编辑历史消息」的实现 —— **原会话一个字都不动**：改过去的对话本来就与
+ * 原来那句提问对不上，塞回同一份历史只会让它自相矛盾。新会话截到这一句之前，
+ * 再把改写后的句子发进去；模型看到的就是「从这句开始的另一个走向」。
+ *
+ * 失败只留一句 toast：新会话没建起来时用户手上还是原来那条，没有任何东西被改坏。
+ */
+export async function editInFork(
+  id: string,
+  turn: number,
+  text: string,
+): Promise<void> {
+  const ask = text.trim();
+  if (!ask) return;
   try {
     const newId = await api.forkSession(id, turn);
     await refreshSessions();
     useStore.getState().setView("chat");
     await replaceSession({ resume: false, resumeId: newId });
-    toastOk(
-      turn === undefined
-        ? "已 fork 出一条新会话"
-        : `已从第 ${turn + 1} 轮分叉出一条新会话`,
-    );
+    const sid = useStore.getState().sessionId;
+    if (!sid) return;
+    // 这里**不**自己插用户气泡：新会话是空闲的，`turn_started` 会带着原文回来
+    // （没有排队编号，靠 `prompt` 画气泡），由事件那一侧统一落地 —— 自己先插一条
+    // 会在事件到达时多画一遍。
+    await send(sid, ask);
+    toastOk("已从改写后的提问分叉出一条新会话");
   } catch (e) {
     toastError(e);
   }
@@ -298,18 +331,6 @@ export async function cancel(sessionId: string): Promise<void> {
  */
 export function regenerate(sessionId: string, turn: number): void {
   api.sendCommand(sessionId, { type: "regenerate", turn }).catch(toastError);
-}
-
-/**
- * 改写某一轮的提问并重跑（用户气泡上的「编辑」）。
- *
- * 与 `regenerate` 同一条路：这一轮之后的内容都会丢掉。`text` 是用户改过的原文，
- * 展开（`/命令`、`@文件`）由后端照常做。
- */
-export function editPrompt(sessionId: string, turn: number, text: string): void {
-  api
-    .sendCommand(sessionId, { type: "edit_prompt", turn, text })
-    .catch(toastError);
 }
 
 /** 把一条排队中的消息提到队首，并中断当前轮。 */

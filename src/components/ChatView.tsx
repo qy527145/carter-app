@@ -35,7 +35,7 @@ import { useStore, type Item, type Turn } from "../store";
 import { copyText } from "../lib/clipboard";
 import { useConversationMode } from "../lib/conversationMode";
 import { displayName, modelTitle, useModelCatalog } from "../lib/modelLabel";
-import { editPrompt, fork, regenerate } from "../lib/sessionOps";
+import { editInFork, fork, regenerate } from "../lib/sessionOps";
 import { TOAST_MS } from "../lib/toast";
 import { FilePreviewModal } from "./FilePreview";
 import { MarkdownImage, MarkdownLink, MarkdownPre, transformMarkdownUrl } from "./Media";
@@ -570,40 +570,22 @@ function assistantActionSlots(turns: Turn[]): (boolean | undefined)[] {
 }
 
 /**
- * 用户气泡上的「编辑」挂在哪几条上。
+ * 这一条上「从这里分叉」的落点：分叉保留第几轮**之前**的历史（`keepBefore`）。
  *
- * 只给**这次打开会话之后发出去的**那几条（`raw`）：历史里存的是展开 `/命令`、
- * `@文件` 之后的正文，拿它回填编辑框等于把整份文件内容摊在输入框里 —— 用户改的
- * 也不会是那个东西。宁可没有入口，也不要给一个填错了的。
- */
-function userEditSlots(turns: Turn[]): (boolean | undefined)[] {
-  const out = new Array<boolean | undefined>(turns.length);
-  turns.forEach((t, i) => {
-    if (t.role !== "user" || !t.raw) return;
-    // 后面还有内容 = 编辑并重发会先把它们丢掉，要先问一句。
-    out[i] = i < turns.length - 1;
-  });
-  return out;
-}
-
-/**
- * 这一条上「从这里分叉」的落点：分叉只保留到第几轮（含）。
- *
- * 回答上 = 从这条**回答之后**分叉（保留到这一轮）—— 最常用的一种：接着这条思路
- * 往别的方向聊。提问上 = 从这句话**之前**分叉（保留到上一轮），也就是换一个问法
- * 把同一件事再问一遍。第一句提问没有上一轮，切出来会是条空会话，不给入口。
- *
- * 流式期间整排都不给：分叉要关掉当前会话再开新的，正在跑的那一轮与排队里的消息
- * 会跟着没掉 —— 而按钮看着只是「分一条出去」，不该有这个副作用。
+ * 回答上 = 从这条**回答之后**分叉（保留这一轮，`turn + 1`）—— 最常用的一种：接着
+ * 这条思路往别的方向聊。提问上 = 从这句话**之前**分叉（`turn`），也就是换一个问法
+ * 把同一件事再问一遍。第一句提问之前什么都没有，切出来会是条空会话，不给入口
+ * （想改第一句就点「编辑」—— 那会把改写后的句子直接发进新会话）。
  */
 function forkTarget(
   turn: Turn,
-  onFork: ((turn: number) => void) | undefined,
+  onFork: ((keepBefore: number) => void) | undefined,
   live: boolean,
 ): (() => void) | undefined {
   if (!onFork || !live || turn.turn === undefined) return undefined;
-  if (turn.role === "assistant") return () => onFork(turn.turn as number);
-  return turn.turn > 0 ? () => onFork((turn.turn as number) - 1) : undefined;
+  const n = turn.turn;
+  if (turn.role === "assistant") return () => onFork(n + 1);
+  return n > 0 ? () => onFork(n) : undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -862,15 +844,16 @@ function AssistantTurn({
 function UserTurn({
   turn,
   onEdit,
-  editAsks,
   onFork,
 }: {
   turn: Extract<Turn, { role: "user" }>;
-  /** 改写这句话并重发。没有 `raw`（历史消息）时不给入口。 */
+  /**
+   * 改写这句话，并从这句之前分叉出一条新会话重新提问。
+   *
+   * 只给听得出是哪一轮的（`turn` 有值）的条目 —— 没有轮次号就没法指名从哪儿分。
+   */
   onEdit?: (text: string) => void;
-  /** 改写并重发会丢掉后面的对话 —— 点之前要先问一句。 */
-  editAsks?: boolean;
-  /** 从这一轮分叉出一条新会话。不给就不画。 */
+  /** 从这一轮之前分叉出一条新会话（不改提问）。 */
   onFork?: () => void;
 }) {
   const menu = useContextMenu();
@@ -879,7 +862,6 @@ function UserTurn({
   // 就地编辑：把气泡换成输入框，而不是把这句话搬回底部的输入框。搬下去的话
   // 用户得在一屏之外改一句他要对着看的话。
   const [draft, setDraft] = useState<string | null>(null);
-  const [confirmingEdit, setConfirmingEdit] = useState(false);
 
   useEffect(() => {
     if (!copied) return;
@@ -892,14 +874,10 @@ function UserTurn({
     onEdit?.(text);
   };
 
-  const askThenSubmit = (text: string) => {
-    if (editAsks) {
-      setDraft(text);
-      setConfirmingEdit(true);
-    } else {
-      submitEdit(text);
-    }
-  };
+  // 改写框的初值：有原文用原文，没有就退回气泡里显示的那段。历史里存的是
+  // `@文件` 展开之后的正文，拿它回填有时会长得吓人 —— 但那是用户**看得见**的
+  // 那句话，总好过给一个空框让他重打。
+  const draftSeed = turn.raw ?? turn.text;
 
   const menuEntries = (): MenuEntry[] => {
     const entries: MenuEntry[] = [
@@ -913,7 +891,7 @@ function UserTurn({
       entries.push({
         label: "编辑并重发",
         icon: <Pencil size={12} />,
-        onSelect: () => setDraft(turn.raw ?? turn.text),
+        onSelect: () => setDraft(draftSeed),
       });
     }
     if (onFork) {
@@ -956,15 +934,15 @@ function UserTurn({
               <ActionChip
                 icon={<Pencil size={12} />}
                 label="编辑"
-                title="改写这句话并重新提问（会丢掉后面的对话）"
-                onClick={() => setDraft(turn.raw ?? turn.text)}
+                title="改写这句话，从这一句之前分叉出一条新会话重问（原来这条不受影响）"
+                onClick={() => setDraft(draftSeed)}
               />
             )}
             {onFork && (
               <ActionChip
                 icon={<GitBranch size={12} />}
                 label="分叉"
-                title="从这里分叉出一条新会话，原来这条不受影响"
+                title="从这句话之前分叉出一条新会话，原来这条不受影响"
                 onClick={onFork}
               />
             )}
@@ -985,7 +963,7 @@ function UserTurn({
               if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
                 e.preventDefault();
                 const t = draft.trim();
-                if (t) askThenSubmit(t);
+                if (t) submitEdit(t);
               }
             }}
             rows={Math.min(8, Math.max(2, draft.split("\n").length))}
@@ -993,7 +971,7 @@ function UserTurn({
           />
           <div className="mt-1 flex items-center justify-end gap-1.5">
             <span className="mr-auto text-[11px] text-dim">
-              重发会丢掉这一轮之后的对话
+              会从这句开一条新分支，原来这条不受影响
             </span>
             <button
               onClick={() => setDraft(null)}
@@ -1003,33 +981,13 @@ function UserTurn({
             </button>
             <button
               disabled={!draft.trim()}
-              onClick={() => askThenSubmit(draft.trim())}
+              onClick={() => submitEdit(draft.trim())}
               className="rounded-md bg-accent px-2 py-1 text-xs font-medium text-[var(--accent-contrast)] transition-opacity hover:opacity-90 disabled:opacity-40"
             >
               重发
             </button>
           </div>
         </div>
-      )}
-      {confirmingEdit && draft !== null && (
-        <ConfirmDialog
-          title="改写并重新提问？"
-          message={
-            <>
-              这一轮之后的对话会被丢掉，模型会基于改写后的提问重新回答。
-              <br />
-              <span className="text-dim">
-                只回滚对话，已经改过的文件、跑过的命令不会撤销。
-              </span>
-            </>
-          }
-          confirmLabel="重新提问"
-          onCancel={() => setConfirmingEdit(false)}
-          onConfirm={() => {
-            setConfirmingEdit(false);
-            submitEdit(draft);
-          }}
-        />
       )}
     </div>
   );
@@ -1045,7 +1003,6 @@ function TurnView({
   onRegenerate,
   retryAsks,
   onEditPrompt,
-  editAsks,
   onFork,
 }: {
   turn: Turn;
@@ -1057,18 +1014,10 @@ function TurnView({
   onRegenerate?: () => void;
   retryAsks?: boolean;
   onEditPrompt?: (text: string) => void;
-  editAsks?: boolean;
   onFork?: () => void;
 }) {
   if (turn.role === "user") {
-    return (
-      <UserTurn
-        turn={turn}
-        onEdit={onEditPrompt}
-        editAsks={editAsks}
-        onFork={onFork}
-      />
-    );
+    return <UserTurn turn={turn} onEdit={onEditPrompt} onFork={onFork} />;
   }
   return (
     <AssistantTurn
@@ -1112,24 +1061,26 @@ export function TurnList({
    * 而侧边聊天、侧边聊天里那段继承来的上下文都不该往回改。
    */
   onRegenerate?: (turn: number) => void;
-  /** 改写某一轮的提问并重发（参数是改写后的**原文**）。 */
+  /**
+   * 改写第 `turn` 轮的提问（参数是改写后的**原文**）。实现上是从这一句之前
+   * 分叉一条新会话再发出去（见 `sessionOps.editInFork`），原会话一个字不动。
+   */
   onEditPrompt?: (turn: number, text: string) => void;
-  /** 只保留到第 `turn` 轮为止，分叉出一条新会话。 */
-  onFork?: (turn: number) => void;
+  /** 只保留第 `keepBefore` 轮之前的历史，分叉出一条新会话。 */
+  onFork?: (keepBefore: number) => void;
 }) {
   // 挂在「这一轮用户输入的最后一条助手消息」上，而不是每条助手消息各算各的。
   const changed = changedFilesPerTurn(turns, changedByTurn, cwd);
-  // 一圈正在跑着的时候整排都不给改动：回退命令会插进队列、等这一轮跑完才生效，
-  // 那时用户多半已经忘了自己点过它，结果是一轮好好的回答被莫名其妙地撤掉。
+  // 一圈正在跑着的时候整排都不给改动：重试会插进队列、等这一轮跑完才生效，那时
+  // 用户多半已经忘了自己点过它；分叉 / 编辑要关掉当前会话再开新的，正在跑的那一轮
+  // 与排队里的消息会跟着没掉 —— 按钮看着只是「分一条出去」，不该有这个副作用。
   const live = !streaming;
   const slots = onRegenerate && live ? assistantActionSlots(turns) : [];
-  const edits = onEditPrompt && live ? userEditSlots(turns) : [];
 
   return (
     <div className="flex flex-col gap-6">
       {turns.map((t, i) => {
         const asks = slots[i];
-        const editAsks = edits[i];
         const turn = t.turn;
         return (
           <TurnView
@@ -1147,12 +1098,13 @@ export function TurnList({
                 : undefined
             }
             retryAsks={asks}
+            // 历史里的提问也能改：改完是**另开一条分支**，不碰这条对话，所以
+            // 不需要「后面的会被丢掉」那种确认。
             onEditPrompt={
-              editAsks !== undefined && onEditPrompt && turn !== undefined
+              live && t.role === "user" && onEditPrompt && turn !== undefined
                 ? (text) => onEditPrompt(turn, text)
                 : undefined
             }
-            editAsks={editAsks}
             onFork={forkTarget(t, onFork, live)}
           />
         );
@@ -1201,12 +1153,13 @@ function MessageList() {
             onRegenerate={
               sessionId ? (turn) => regenerate(sessionId, turn) : undefined
             }
+            // 改写提问 = 从那句之前分叉出新会话再发出去，原会话不动。
             onEditPrompt={
               sessionId
-                ? (turn, text) => editPrompt(sessionId, turn, text)
+                ? (turn, text) => void editInFork(sessionId, turn, text)
                 : undefined
             }
-            onFork={sessionId ? (turn) => void fork(sessionId, turn) : undefined}
+            onFork={sessionId ? (keep) => void fork(sessionId, keep) : undefined}
           />
         )}
       </div>

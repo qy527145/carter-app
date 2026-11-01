@@ -97,12 +97,6 @@ pub enum Command {
     /// 会话先把历史回退到这一轮之前，再把它原样重跑一遍 —— 所以这一轮之后
     /// 的对话会一并丢掉。注意这只回滚**对话**，不动磁盘：已经改过的文件保持现状。
     Regenerate { turn: u32 },
-    /// 改写某一轮的提问并重跑（用户气泡上的「编辑」）。
-    ///
-    /// 与 `Regenerate` 是同一条路，只是重发的正文换成了 `text` —— 所以它同样会
-    /// 丢掉这一轮之后的对话。`text` 是**用户改过之后的原文**，`/命令`、`@文件`
-    /// 仍然要展开（走 `submit`，不是直接塞进历史）。
-    EditPrompt { turn: u32, text: String },
     /// 切换本会话使用的模型（`provider/model` 形式）。
     SetModel { model: String },
     /// 回答 `ask_user_question` 提的问题。
@@ -208,19 +202,14 @@ pub enum SessionEvent {
         #[serde(default)]
         prompt: Option<String>,
     },
-    /// 历史被回退到第 `turn` 轮之前（用户点了「重试」或「编辑并重发」）。
+    /// 历史被回退到第 `turn` 轮之前（用户点了「重试」）。
     ///
     /// 界面收到之后要把这一轮及之后的回答从列表里拿掉 —— 事件不回放，界面自己不删
     /// 就会与后台的历史对不上（刷新一次才「突然少了一截」）。这一轮的**用户气泡**
     /// 要留着：紧接着来的一条 `turn_started` 不带 `prompt`，不会再画一遍。
     ///
-    /// `prompt` 有值 = 提问被改写过了（「编辑」），界面拿它替换那条气泡的正文；
-    /// `None` = 原样重跑（「重试」），气泡不动。
-    TurnRetracted {
-        turn: u32,
-        #[serde(default)]
-        prompt: Option<String>,
-    },
+    /// 改写提问不走这里：它开一条新分支（见 `sessions::fork`），原会话一个字不动。
+    TurnRetracted { turn: u32 },
     /// 思考增量。签名分片不会传到这里（对模型有用，对人没意义）。
     ThinkingDelta { text: String },
     /// 正文增量。

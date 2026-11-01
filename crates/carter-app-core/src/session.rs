@@ -714,15 +714,9 @@ impl Runner {
             // 排队中的消息真正轮到它时走到这里。`interject` 在这里没有意义
             // （已经没有正在跑的轮次可以打断了），直接当普通消息处理。
             Command::SendPrompt { text, id, .. } => self.submit(text, id).await,
-            Command::Regenerate { turn } => {
-                // 历史里存的是展开后的正文，原样重发 —— 不再过一次展开，
-                // 否则 `@文件` 的内容会被贴第二遍。
-                self.rewind_turn(turn, None).await;
-            }
-            Command::EditPrompt { turn, text } => {
-                // 这是用户**新打的字**，照常展开（`/命令`、`@文件`、图片引用）。
-                self.rewind_turn(turn, Some(text)).await;
-            }
+            // 历史里存的是展开后的正文，原样重发 —— 不再过一次展开，
+            // 否则 `@文件` 的内容会被贴第二遍。
+            Command::Regenerate { turn } => self.regenerate(turn).await,
             // 空闲时「插队」= 把那条消息挪到队首。下一轮循环就会取到它。
             Command::PromotePrompt { id } => promote(&mut self.queued, id),
             Command::DropPrompt { id } => drop_queued(&mut self.queued, id),
@@ -731,20 +725,20 @@ impl Runner {
         }
     }
 
-    /// 回退到某一轮之前再重跑它 —— 「重试」与「编辑并重发」共用这一段。
-    ///
-    /// `replacement` 是用户改写后的**原文**（未展开）；`None` = 原样重跑。
-    /// 两条路的差别只有一处：原样重跑直接用历史里那段（已经展开过），改写过的
-    /// 则要重新走一遍 `expand_input`。
+    /// 重试：历史回退到这一轮之前，把它原样再发一遍。
     ///
     /// **只回滚对话，不动磁盘**。文件已经改过、命令已经跑过的事不会撤销 ——
     /// 界面上那句确认里也这么说，用户想要的是「让它重来一遍」，不是「把世界推回去」
     /// （后者是 carter 的 `/rewind`，走的是另一套检查点）。
     ///
+    /// **改写提问不走这里**：那是开一条新分支（见 `sessions::fork`），原会话
+    /// 一个字都不动 —— 改写过的对话本来就与原来那句提问对不上，塞回同一份历史
+    /// 只会让它自相矛盾。
+    ///
     /// 回退与重发是同一件事的两半：中间不插任何 `Idle`，否则界面会先看到一路空下去、
     /// 再慢慢长出来。`TurnRetracted` 紧跟着的不带 `prompt` 的 `turn_started`
     /// 复用的是界面上原本那条用户气泡。
-    async fn rewind_turn(&mut self, turn: u32, replacement: Option<String>) {
+    async fn regenerate(&mut self, turn: u32) {
         let git = self.meta.git.clone();
         // 上一轮可能有悬空的 tool_use；回退前先收口，免得把断口留在截断点之前。
         self.settle_history();
@@ -755,49 +749,20 @@ impl Runner {
                 return;
             }
         };
-        // 改写后的提问要重新展开，再落进历史（下面 `run_sequence` 会 append）。
-        // 展开失败不吞掉这条：按原文发出去，并说清发生了什么（与 `submit` 同一套）。
-        // 克隆一份留给事件：`replacement` 下面会被 move 进 `text`。
-        let echo_prompt = replacement.clone();
-        let text = match replacement {
-            None => stored,
-            Some(raw) => match expand_input(&self.ctx.cwd, &raw) {
-                Ok((expanded, note)) => {
-                    if let Some(note) = note {
-                        self.notice(&note);
-                    }
-                    expanded
-                }
-                Err(e) => {
-                    self.notice(&format!("{e}（已按原文发送）"));
-                    raw
-                }
-            },
-        };
         // 变更清单按轮存着，一起退 —— 否则被回退掉的那些回答的文件清单会留下来。
         // 重跑出来的那一轮会重新记自己那条（同一个轮次号）。
         if let Err(e) = crate::changes::retract(&self.ctx.handle.id, turn) {
             tracing::warn!("回退轮次变更记录失败：{e}");
         }
-        // 原文只退这一轮**之后**的：原样重跑要留着这一轮的原文（「编辑」框还得
-        // 能回填），只有改写过的才换成新句子。
+        // 原文只退这一轮**之后**的：这一轮的原文要留着（「编辑」框还得能回填）。
         if let Err(e) = crate::prompts::retract(&self.ctx.handle.id, turn + 1) {
             tracing::warn!("回退用户原文失败：{e}");
         }
-        if let Some(raw) = echo_prompt.as_deref() {
-            if let Err(e) = crate::prompts::record(&self.ctx.handle.id, turn, raw) {
-                tracing::warn!("记录用户原文失败：{e}");
-            }
-        }
         self.ctx.handle.publish_history(&self.thread.messages);
-        // 改写过的提问要把新正文带给界面（那条气泡要跟着变）；原样重跑不用。
-        self.emit(SessionEvent::TurnRetracted {
-            turn,
-            prompt: echo_prompt,
-        });
+        self.emit(SessionEvent::TurnRetracted { turn });
         // `echo` 一律给 `None`：这一轮的用户气泡界面上已经有了，`TurnRetracted`
-        // 刚刚交代过它该是什么样 —— 再带一次 `prompt` 会多画一条。
-        self.run_sequence(text, git, None, None).await;
+        // 刚刚交代过它 —— 再带一次 `prompt` 会多画一条。
+        self.run_sequence(stored, git, None, None).await;
     }
 
     /// 用户发来一条消息：展开、落进历史、跑一轮，再按目标决定要不要自动继续。

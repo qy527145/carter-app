@@ -103,21 +103,24 @@ pub fn auto_title_allowed(existing: Option<&str>) -> bool {
 
 /// fork 一条会话。返回新会话的 id。
 ///
-/// `turn` 给了就**只保留到这一轮为止**的历史（界面上回答下面的「从这里分叉」）：
-/// 先照常 fork 出一份自包含的新文件，再按同一套折叠方式截断它 —— 新会话从那一刻
-/// 接着聊，原来那条一个字都不动。
+/// `keep_before` 是**保留到第几轮之前**（不含该轮；`None` = 整条复制）：
 ///
-/// 截断点之后的数据（按轮的文件清单、用户打的原文）也一起跟着截：它们按会话 id
-/// 存在应用私有目录里，不复制的话，保留下来的那些回答在界面上会突然没有文件清单，
-/// 历史提问也没有原文可回填「编辑」框。
-pub fn fork(id: &str, turn: Option<u32>) -> Result<String, String> {
+/// * 从某条回答之后分叉 → 传 `turn + 1`（留住这一轮）；
+/// * 从某句提问之前分叉 → 传 `turn`（这句话本身不要）；
+/// * 改写某句提问再问 → 同样传 `turn`，再把改写后的句子发进新会话（见前端
+///   `sessionOps.editInFork`）—— 这就是「编辑历史消息」的实现：**开一条新分支**，
+///   原来那条一个字都不动。
+///
+/// 先照常 fork 出一份自包含的新文件，再按同一套折叠方式截断它；截断点之后的数据
+/// （按轮的文件清单、用户打的原文）也一起跟着截 —— 它们按会话 id 存在应用私有
+/// 目录里，不复制的话，保留下来的那些回答在界面上会突然没有文件清单，历史提问
+/// 也没有原文可回填「编辑」框。
+pub fn fork(id: &str, keep_before: Option<u32>) -> Result<String, String> {
     let entry = find(id).ok_or_else(|| format!("找不到会话 {id}"))?;
     if !entry.path.exists() {
         return Err("这条会话还没有任何消息，无法 fork".into());
     }
     let (_, meta) = carter::session::fork(&entry).map_err(|e| format!("fork 失败：{e}"))?;
-    // 「保留到第 `turn` 轮为止」= 截到 `turn + 1`；整条复制时不截。
-    let keep_before = turn.map(|t| t.saturating_add(1));
     let copied = (|| -> Result<(), String> {
         crate::changes::copy(id, &meta.id, keep_before)?;
         crate::prompts::copy(id, &meta.id, keep_before)?;

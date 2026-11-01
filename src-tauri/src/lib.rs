@@ -234,11 +234,12 @@ fn rename_session(session_id: String, title: String) -> Result<(), String> {
 
 /// fork 一条会话，返回新会话的 id。
 ///
-/// `turn` 给了就只保留到这一轮为止的历史（界面上回答下面的「从这里分叉」）；
-/// 不给 = 整条复制（会话列表里的 fork）。
+/// `keep_before` = 只保留第几轮**之前**的历史（不含该轮）；不给 = 整条复制
+/// （会话列表里的 fork）。界面上的两处入口：从某条回答之后分叉传 `turn + 1`，
+/// 改写某句提问再问传 `turn`（新会话开好后前端会把改写后的句子发进去）。
 #[tauri::command]
-fn fork_session(session_id: String, turn: Option<u32>) -> Result<String, String> {
-    sessions::fork(&session_id, turn)
+fn fork_session(session_id: String, keep_before: Option<u32>) -> Result<String, String> {
+    sessions::fork(&session_id, keep_before)
 }
 
 /// 删除一个会话文件。不可恢复 —— 调用方要先确认。
@@ -251,6 +252,7 @@ async fn delete_session(shell: State<'_, Arc<AppShell>>, session_id: String) -> 
     // 跟着历史会话一直长。
     carter_app_core::goal::remove(&session_id);
     carter_app_core::changes::remove(&session_id);
+    carter_app_core::prompts::remove(&session_id);
     sessions::delete(&session_id)
 }
 

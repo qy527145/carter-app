@@ -53,14 +53,14 @@ export type SessionEvent =
   /** 当前模型变了（`/model`）。只换「当前模型」那一处显示。 */
   | { type: "model_changed"; model: string; model_ref?: string }
   /**
-   * 历史被回退到第 `turn` 轮之前（点了「重试」或「编辑并重发」）。
+   * 历史被回退到第 `turn` 轮之前（点了「重试」）。
    *
    * 界面要把这一轮的**回答**及之后的轮次从列表里拿掉，那条用户气泡留着 ——
    * 紧接着会来一条不带 `prompt` 的 `turn_started`，不会再画一遍。
    *
-   * `prompt` 有值 = 提问被改写过了，界面要把那条气泡换成新正文。
+   * 改写提问不走这里：它开一条新分支（`forkSession`），原会话一个字不动。
    */
-  | { type: "turn_retracted"; turn: number; prompt?: string | null }
+  | { type: "turn_retracted"; turn: number }
   | { type: "thinking_delta"; text: string }
   | { type: "text_delta"; text: string }
   | { type: "text_end" }
@@ -180,14 +180,6 @@ export type Command =
    * 之前再原样重跑 —— 之后那几轮会一并丢掉。**只回滚对话，不动磁盘。**
    */
   | { type: "regenerate"; turn: number }
-  /**
-   * 改写某一轮的提问并重跑（用户气泡上的「编辑」）。
-   *
-   * 与 `regenerate` 同一条路（回退到这一轮之前、丢掉后面几轮，**只回滚对话、
-   * 不动磁盘**），只是重发的正文换成 `text`。`text` 是用户改过的原文，后端照常
-   * 展开 `/命令`、`@文件`。
-   */
-  | { type: "edit_prompt"; turn: number; text: string }
   | { type: "set_model"; model: string }
   /**
    * 回答 `ask_user_question` 提的问题。
@@ -300,6 +292,12 @@ export type TurnFiles = {
   files: string[];
 };
 
+/** 历史里某一轮用户**打的原文**（`/命令`、`@文件` 展开之前）。 */
+export type TurnPrompt = {
+  turn: number;
+  text: string;
+};
+
 export type CreatedSession = {
   session_id: string;
   /** 真正发给上游的模型名。 */
@@ -312,6 +310,11 @@ export type CreatedSession = {
   goal: GoalView | null;
   /** 历史里每一轮实际改过的文件。事件不回放，所以随历史一起带回。 */
   changes: TurnFiles[];
+  /**
+   * 历史里每一轮用户打的原文。界面拿它回填「编辑」框 ——
+   * 会话文件里存的是展开后的正文，回填进去等于把整份文件内容摊在输入框里。
+   */
+  prompts?: TurnPrompt[];
 };
 
 /** 侧边聊天（`/btw`）：继承主会话上下文、不落盘、关掉即丢。 */
@@ -409,11 +412,14 @@ export function renameSession(sessionId: string, title: string): Promise<void> {
 /**
  * fork 一条会话，返回新会话的 id。
  *
- * `turn` 给了就只保留到这一轮为止的历史（回答下面的「从这里分叉」）。
- * 不给 = 整条复制。
+ * `keepBefore` = 只保留第几轮**之前**的历史（不含该轮）。从某条回答之后分叉传
+ * `turn + 1`；改写某句提问再问传 `turn`。不给 = 整条复制。
  */
-export function forkSession(sessionId: string, turn?: number): Promise<string> {
-  return invoke<string>("fork_session", { sessionId, turn: turn ?? null });
+export function forkSession(sessionId: string, keepBefore?: number): Promise<string> {
+  return invoke<string>("fork_session", {
+    sessionId,
+    keepBefore: keepBefore ?? null,
+  });
 }
 
 /** 删除一个会话文件。不可恢复 —— 调用方必须先确认。 */

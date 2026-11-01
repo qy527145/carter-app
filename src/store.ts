@@ -38,6 +38,7 @@ import type {
   SessionRow,
   TodoView,
   TurnFiles,
+  TurnPrompt,
   UsageView,
 } from "./lib/api";
 
@@ -72,11 +73,11 @@ export type Turn =
       role: "user";
       text: string;
       /**
-       * 用户**打的原文**（`/命令`、`@文件` 展开之前）。
+       * 用户**打的原文**（`/命令`、`@文件` 展开之前）。「编辑」框用它回填。
        *
-       * 只有本次打开会话之后发出去的消息有它 —— 历史里存的是展开后的正文，
-       * 拿它回填编辑框等于把整份文件内容摊在输入框里。用户气泡上的「编辑」
-       * 就以「有没有这个值」为准。
+       * 实时那几轮来自 `turn_started.prompt`，历史那几轮来自后端按轮存的
+       * `prompts`（见 `prompts.rs`）。没有它时（这份存档出现之前录下的会话）回填
+       * 退回 `text` —— 历史里存的是展开后的正文，可能带着整份文件内容。
        */
       raw?: string;
       turn?: number;
@@ -362,30 +363,17 @@ export function reduceConv(c: Conv, e: SessionEvent, sessionId?: string): Partia
       // 轮末一次性到达。空清单后端就不发了，这里只负责合并。
       return { changed: { ...c.changed, [e.turn]: e.files } };
     case "turn_retracted": {
-      // 重试 / 编辑：把这一轮的回答及之后的轮次从列表里拿掉，只留那条用户气泡。
+      // 重试：把这一轮的回答及之后的轮次从列表里拿掉，只留那条用户气泡。
       //
       // 后端回退历史时保留了这一轮的用户消息（重跑要它），而紧接着的
       // `turn_started` 不带 `prompt`，不会再画一遍 —— 所以这里**不能**连用户气泡
       // 一起删，否则重跑时界面上那句话就没了。
       const i = lastAssistantIndexOfTurn(c.turns, e.turn);
-      let turns = i < 0 ? c.turns : c.turns.slice(0, i);
+      const turns = i < 0 ? c.turns : c.turns.slice(0, i);
       // 被回退掉的那几轮的变更清单也要一起丢掉，否则它们会挂在已经不存在的回答下面。
       const changed: Record<number, string[]> = {};
       for (const [k, v] of Object.entries(c.changed)) {
         if (Number(k) < e.turn) changed[Number(k)] = v;
-      }
-      // 编辑过提问的话，那条用户气泡换成新正文 —— 否则界面上留着一句已经不是
-      // 这次请求原文的话，模型重答的内容会对不上。那条气泡就是回答组前一项
-      //（用户轮本身没有轮次号，靠相邻关系认）。原文也一起换：再点一次「编辑」，
-      // 编辑框里该是刚改完的那句。
-      if (e.prompt != null) {
-        const last = turns[turns.length - 1];
-        if (last?.role === "user") {
-          turns = [
-            ...turns.slice(0, -1),
-            { ...last, text: e.prompt, raw: e.prompt },
-          ];
-        }
       }
       return { turns, changed };
     }
@@ -472,8 +460,16 @@ const AUTO_CONTINUE_PREFIX = "（自动继续）";
  * 底座把「多条 tool_result」合成**一条 user 消息**（Anthropic 的规范形态），
  * 所以 user 消息里可能夹着工具结果块 —— 那些要回填到前面助手轮的工具卡片上，
  * 而不是渲染成一个右对齐的用户气泡。
+ *
+ * `prompts` 是后端按轮存下的**用户原文**（`/命令`、`@文件` 展开之前）。历史里
+ * 那一段是展开后的正文，直接拿来回填「编辑」框等于把整份文件摊进去 —— 查得到
+ * 原文就挂在 `raw` 上，查不到时「编辑」退回气泡里显示的那段（见 `UserTurn`）。
  */
-export function historyToTurns(history: MessageView[]): Turn[] {
+export function historyToTurns(
+  history: MessageView[],
+  prompts: TurnPrompt[] = [],
+): Turn[] {
+  const rawOf = new Map(prompts.map((p) => [p.turn, p.text]));
   let turns: Turn[] = [];
   // 上一条用户消息是「自动继续」的注入 → 接下来的助手轮是目标模式推起来的。
   let pendingAuto = false;
@@ -497,7 +493,12 @@ export function historyToTurns(history: MessageView[]): Turn[] {
         pendingAuto = true;
         continue;
       }
-      turns.push({ role: "user", text, turn: msg.turn });
+      turns.push({
+        role: "user",
+        text,
+        turn: msg.turn,
+        raw: msg.turn !== undefined ? rawOf.get(msg.turn) : undefined,
+      });
       continue;
     }
     if (msg.role === "system") {
@@ -625,7 +626,7 @@ export const useStore = create<Store>((set) => ({
       // 留着它们会让界面显示一批永远不会开始跑的「排队中」。
       queued: [],
       goal: c.goal,
-      turns: historyToTurns(c.history),
+      turns: historyToTurns(c.history, c.prompts),
       changed: changedRecord(c.changes),
       sessions: withCurrent(s.sessions, {
         id: c.session_id,
