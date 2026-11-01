@@ -237,6 +237,25 @@ export function ProviderEditor({
 
   const preset = presetFor(kind);
   const nameLocked = editing !== null;
+
+  // 旧配置里可能写着别名 kind（`deepseek` 之类）。下拉只列三种线协议，所以要把
+  // 当前这个别名单独塞进去 —— 否则选择框会显示成占位符，看着像配置丢了。
+  const alias = preset && preset.kind !== preset.protocol ? preset : undefined;
+  const protocolOptions = useMemo(() => {
+    const opts = PROTOCOLS.map((p) => ({
+      value: p.kind,
+      label: p.label,
+      hint: p.kind,
+    }));
+    if (alias) {
+      opts.push({
+        value: alias.kind,
+        label: `${alias.label}（别名）`,
+        hint: `${alias.kind} → ${alias.protocol}`,
+      });
+    }
+    return opts;
+  }, [alias]);
   const catalog = useCatalog(catalogProvider ?? "");
 
   const metaMap = useMetaInfo(models.map((m) => m.meta).filter(Boolean));
@@ -477,20 +496,28 @@ export function ProviderEditor({
         label="协议"
         hint={
           preset
-            ? `走 ${preset.protocol}`
+            ? preset.kind === preset.protocol
+              ? `carter 走 ${preset.protocol}`
+              : `${preset.label} 是别名，carter 按 ${preset.protocol} 处理`
             : "carter 不认识这个 Kind，按 Chat Completions 处理"
         }
       >
         <Select
           value={kind}
           onChange={changeKind}
-          options={PROTOCOLS.map((p) => ({
-            value: p.kind,
-            label: p.label,
-            hint: p.kind,
-          }))}
+          options={protocolOptions}
         />
       </Field>
+      {alias && (
+        <div className="mb-3">
+          <Banner kind="info">
+            这个渠道的 <span className="mono">kind = {alias.kind}</span>{" "}
+            是 carter 的别名，实际走{" "}
+            <span className="mono">{alias.protocol}</span>。留着也能用；改成上面的线协议
+            并填好地址，配置会更直白。
+          </Banner>
+        </div>
+      )}
       {!preset && kind.trim() !== "" && (
         <div className="mb-3">
           <Banner kind="warn">
