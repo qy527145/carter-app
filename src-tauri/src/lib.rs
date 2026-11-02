@@ -267,6 +267,24 @@ async fn delete_session(shell: State<'_, Arc<AppShell>>, session_id: String) -> 
     sessions::delete(&session_id)
 }
 
+/// 删除某个目录（项目）下的**全部**会话。不可恢复 —— 调用方要先确认。
+///
+/// 只删会话记录，不碰项目目录本身。逐条走与 `delete_session` 相同的收尾：先关掉
+/// 还在跑的（否则它下一轮 append 会把文件写回来），再清目标 / 变更 / 原文记录。
+/// 返回删掉的条数。
+#[tauri::command]
+async fn delete_project(shell: State<'_, Arc<AppShell>>, cwd: String) -> Result<usize, String> {
+    let ids = sessions::ids_in(&cwd);
+    for id in &ids {
+        shell.close_session(id).await;
+        carter_app_core::goal::remove(id);
+        carter_app_core::changes::remove(id);
+        carter_app_core::prompts::remove(id);
+        sessions::delete(id)?;
+    }
+    Ok(ids.len())
+}
+
 /// 全文搜索所有会话。
 #[tauri::command]
 fn search_sessions(query: String) -> Vec<carter_app_core::SearchHit> {
@@ -1299,6 +1317,7 @@ pub fn run() {
             rename_session,
             fork_session,
             delete_session,
+            delete_project,
             search_sessions,
             export_session,
             // 渠道 / 模型 / 协议

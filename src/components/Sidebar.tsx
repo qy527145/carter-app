@@ -15,15 +15,17 @@ import {
   Search,
   Settings as SettingsIcon,
   Sun,
+  Trash,
 } from "lucide-react";
 
 import { setAppSettings, type AppSettings, type SessionRow, type ThemePref } from "../lib/api";
 import { baseName } from "../lib/format";
 import { modelSearchText, useModelCatalog } from "../lib/modelLabel";
-import { newSession, startInDirectory } from "../lib/sessionOps";
+import { newSession, removeProject, startInDirectory } from "../lib/sessionOps";
 import { groupByProject, SessionList } from "./SessionList";
 import { Button, IconButton } from "./ui/Button";
 import { Input } from "./ui/Input";
+import { ConfirmDialog } from "./ui/Panel";
 import { useStore } from "../store";
 
 const THEMES: { id: ThemePref; label: string; icon: typeof Sun }[] = [
@@ -95,6 +97,8 @@ function ProjectGroups({
   }, [currentCwd]);
 
   const setView = useStore((s) => s.setView);
+  // 待确认删除的那一组。
+  const [deleting, setDeleting] = useState<{ cwd: string; count: number } | null>(null);
   const groups = groupByProject(sessions);
   const toggle = (cwd: string) =>
     setExpanded((prev) => {
@@ -114,7 +118,7 @@ function ProjectGroups({
         return (
           <div key={g.cwd}>
             {/* 标题行拆成两个按钮：折叠与新建是两件事，按钮也不能套按钮。 */}
-            <div className="flex items-center rounded-md transition-colors hover:bg-ink/5">
+            <div className="group/project flex items-center rounded-md transition-colors hover:bg-ink/5">
               <button
                 onClick={() => toggle(g.cwd)}
                 title={gone ? `${g.cwd}（目录已不存在）` : g.cwd}
@@ -147,6 +151,15 @@ function ProjectGroups({
               >
                 <Plus size={12} />
               </IconButton>
+              {/* 删除是低频又危险的动作，悬停才露出来，免得与「+」挨着被误点。 */}
+              <IconButton
+                title={`删除 ${g.cwd} 下的全部 ${g.sessions.length} 条会话`}
+                aria-label="删除此项目的全部会话"
+                onClick={() => setDeleting({ cwd: g.cwd, count: g.sessions.length })}
+                className="hidden p-1 hover:text-[var(--danger)] group-hover/project:inline-flex"
+              >
+                <Trash size={12} />
+              </IconButton>
             </div>
             {open && (
               <div className="pl-2">
@@ -161,6 +174,29 @@ function ProjectGroups({
           </div>
         );
       })}
+
+      {deleting && (
+        <ConfirmDialog
+          title="删除项目的全部会话"
+          danger
+          confirmLabel={`删除 ${deleting.count} 条会话`}
+          message={
+            <>
+              将删除 <span className="mono text-ink">{deleting.cwd}</span> 下的全部{" "}
+              {deleting.count} 条会话，包括它们的对话历史。
+              <br />
+              项目目录本身和里面的文件不受影响；会话记录会从磁盘上直接删掉，
+              <strong className="font-medium">不可恢复</strong>。
+            </>
+          }
+          onCancel={() => setDeleting(null)}
+          onConfirm={() => {
+            const cwd = deleting.cwd;
+            setDeleting(null);
+            void removeProject(cwd);
+          }}
+        />
+      )}
     </div>
   );
 }

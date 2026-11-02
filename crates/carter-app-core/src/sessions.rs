@@ -67,6 +67,18 @@ pub fn list(cwd: &Path, all: bool) -> Vec<SessionRow> {
     carter::session::list(cwd, all).iter().map(row).collect()
 }
 
+/// 某个工作目录下全部会话的 id（按会话文件里记的 `cwd` 精确匹配）。
+///
+/// 按 `cwd` 字段而不是 `projects/<键>/` 目录来认：键是 cwd 的有损转写（`Kotei_Code`
+/// 与 `Kotei-Code` 落在同一个键下），按目录删会误伤另一个项目。
+pub fn ids_in(cwd: &str) -> Vec<String> {
+    carter::session::list(Path::new("."), true)
+        .into_iter()
+        .filter(|e| e.meta.cwd == cwd)
+        .map(|e| e.meta.id)
+        .collect()
+}
+
 /// 按 id 找会话，**跨所有项目**。
 ///
 /// 刻意不接受 cwd：会话 id 是 uuid，全局唯一，而界面上能点到的会话就应该能操作 ——

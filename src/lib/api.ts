@@ -491,6 +491,11 @@ export function deleteSession(sessionId: string): Promise<void> {
   return invoke<void>("delete_session", { sessionId });
 }
 
+/** 删除某个目录下的全部会话，返回删掉的条数。不碰目录本身。 */
+export function deleteProject(cwd: string): Promise<number> {
+  return invoke<number>("delete_project", { cwd });
+}
+
 export function searchSessions(query: string): Promise<SearchHit[]> {
   return invoke<SearchHit[]>("search_sessions", { query });
 }

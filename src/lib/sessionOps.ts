@@ -192,6 +192,29 @@ export async function remove(id: string): Promise<void> {
   }
 }
 
+/**
+ * 删除某个目录（项目）下的全部会话。不可恢复 —— 调用方必须先确认。
+ *
+ * 当前打开的会话在这个目录里时，与删单条一样把界面上的它也关掉。
+ */
+export async function removeProject(cwd: string): Promise<void> {
+  const store = useStore.getState();
+  try {
+    const n = await api.deleteProject(cwd);
+    if (store.cwd === cwd && store.sessionId) {
+      // 后端已经关掉了它，这里只收拾界面。
+      useStore.getState().resetSession();
+      useStore.getState().setNotice("当前会话所在的项目已删除，请点「新对话」继续。");
+    }
+    await refreshSessions();
+    toastOk(`已删除 ${n} 条会话`);
+  } catch (e) {
+    toastError(e);
+    // 删到一半失败时列表已经变了，照样刷新。
+    await refreshSessions();
+  }
+}
+
 /** 导出到下载目录，成功后把路径告诉用户 —— 否则他得自己去猜文件在哪。 */
 export async function export_(id: string, format: "markdown" | "json"): Promise<void> {
   try {
