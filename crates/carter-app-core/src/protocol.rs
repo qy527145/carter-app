@@ -357,9 +357,12 @@ pub enum SessionEvent {
 
 /// 上下文占用。
 ///
-/// `used` 是**下一次请求**大概会带上的 token 数：历史消息 + 系统提示 + 工具声明，
-/// 按模型的 tokenizer 估算。不用上游回报的 usage —— 一轮里有好几次模型调用，
-/// carter 回报的是整轮累加值；而开了缓存之后 `input_tokens` 只是未命中的那一截。
+/// `used` 以**最近一次主对话请求**上游回报的 usage 为准：完整输入（未命中 + 缓存读写）
+/// 加这次的输出 —— 输出会进历史，下一次请求就要带上它。每次主对话请求收到 usage
+/// 就刷新一次（见 `session.rs::ContextTap`），压缩 / 摘要请求不算。
+///
+/// 还没有回报时（刚打开、刚压缩完、刚回退）才退回估算：历史 + 系统提示 + 工具声明，
+/// 按模型的 tokenizer 数。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextView {
     pub used: u64,

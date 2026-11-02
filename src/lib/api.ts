@@ -102,7 +102,7 @@ export type SessionEvent =
   /** 变更条被清空：从第 `since` 轮起重新统计。 */
   | { type: "changes_cleared"; since: number }
   | { type: "turn_usage"; usage: UsageView; cost: number; model: string }
-  /** 上下文占用（输入框旁的百分比环）。就绪、每轮结束、换模型、压缩之后各来一次。 */
+  /** 上下文占用（输入框旁的百分比环）。就绪、每次主对话请求、每轮结束、换模型、压缩之后各来一次。 */
   | ({ type: "context" } & ContextView)
   /** 开始压缩上下文。`auto` = 占用超过触发线自动压的。 */
   | { type: "compact_started"; auto: boolean }
@@ -172,8 +172,8 @@ export type TodoView = {
 };
 
 /**
- * 上下文占用。`used` 是下一次请求大概会带上的 token 数（历史 + 系统提示 + 工具声明，
- * 按模型的 tokenizer 估算），不是上游回报的用量 —— 后者是整轮累加、且不含缓存命中。
+ * 上下文占用。`used` 以最近一次主对话请求上游回报的 usage 为准（完整输入 + 输出）；
+ * 还没有回报时（刚打开、刚压缩完）退回本地估算（历史 + 系统提示 + 工具声明）。
  */
 export type ContextView = {
   used: number;

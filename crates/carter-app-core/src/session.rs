@@ -25,7 +25,7 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -255,6 +255,7 @@ pub fn start_session(shell: Arc<AppShell>, opts: SessionOptions) -> carter::Resu
         changes: None,
         changes_turn: 0,
         overhead: 0,
+        reported: Arc::default(),
         mid_compact: Arc::default(),
     };
     tokio::spawn(runner.run());
@@ -342,6 +343,7 @@ pub(crate) fn start_side(w: SideWiring, id: String, parent_id: String) -> Arc<Se
         changes: None,
         changes_turn: 0,
         overhead: 0,
+        reported: Arc::default(),
         mid_compact: Arc::default(),
     };
     tokio::spawn(runner.run());
@@ -576,6 +578,9 @@ struct Runner {
     changes: Option<ChangeWatch>,
     /// 系统提示 + 工具声明的 token 数（见 [`Runner::measure_overhead`]）。
     overhead: u64,
+    /// 最近一次主对话请求、上游回报的上下文占用（见 [`ContextTap`]）。0 = 还没有
+    /// （刚打开 / 刚续接，或历史刚被改写过），这时百分比环回落到估算值。
+    reported: Arc<AtomicU64>,
     /// carter 在一轮**中途**自己压缩过上下文时，由 [`TxSink`] 记下用的哪一档。
     /// 轮后据此重排轮次号、让界面重建对话（见 [`Runner::after_turn`]）。
     mid_compact: Arc<std::sync::Mutex<Option<String>>>,
@@ -806,6 +811,7 @@ impl Runner {
                 return;
             }
         };
+        self.forget_reported();
         // 变更清单按轮存着，一起退 —— 否则被回退掉的那些回答的文件清单会留下来。
         // 重跑出来的那一轮会重新记自己那条（同一个轮次号）。
         if let Err(e) = crate::changes::retract(&self.ctx.handle.id, turn) {
@@ -835,6 +841,7 @@ impl Runner {
             self.error(&e);
             return;
         }
+        self.forget_reported();
         // 这一轮自己的变更清单与原文都留着（前面几次往返改过的文件还算这一轮的），
         // 只退后面的。
         let id = self.ctx.handle.id.clone();
@@ -1184,9 +1191,16 @@ impl Runner {
                 live: self.live(),
                 compacted: self.mid_compact.clone(),
             };
+            let tap = ContextTap {
+                inner: self.ctx.provider.clone(),
+                shell: self.ctx.shell.clone(),
+                session_id: self.ctx.handle.id.clone(),
+                window: self.ctx.model.context_window,
+                reported: self.reported.clone(),
+            };
             let turn = run_turn(
                 &mut self.thread,
-                &*self.ctx.provider,
+                &tap,
                 &self.ctx.model,
                 &self.ctx.config.agent,
                 &run_opts,
@@ -1454,6 +1468,7 @@ impl Runner {
         )
         .await;
         let after = self.history_tokens();
+        self.forget_reported();
 
         match (res, sink.tier) {
             (Err(e), _) => self.error(&format!("压缩上下文失败：{e}")),
@@ -1517,12 +1532,25 @@ impl Runner {
     }
 
     /// 当前的上下文占用（见 [`ContextView`]）。
+    ///
+    /// 以上游回报的为准；还没有回报（刚打开、刚压缩完）时才用估算。
     fn context_view(&self) -> ContextView {
+        let reported = self.reported.load(Ordering::Relaxed);
         context_view(
-            self.history_tokens() + self.overhead,
+            if reported > 0 {
+                reported
+            } else {
+                self.history_tokens() + self.overhead
+            },
             self.ctx.model.context_window,
             &self.ctx.config.agent,
         )
+    }
+
+    /// 历史被我们自己改写过（压缩、回退）：上游上次回报的占用不再对得上，
+    /// 回落到估算，直到下一次主对话请求带回新数。
+    fn forget_reported(&self) {
+        self.reported.store(0, Ordering::Relaxed);
     }
 
     fn emit_context(&self) {
@@ -2007,6 +2035,64 @@ fn todo_view(t: &carter::tools::TodoItem) -> TodoView {
             carter::tools::TodoStatus::Completed => "completed",
         }
         .to_string(),
+    }
+}
+
+/// 套在主模型 provider 外面，**每次主对话请求**收到上游的 usage 就刷新一次百分比环。
+///
+/// 一轮里工具回灌会让模型被调好几次，只在轮末刷新的话，一条长任务跑上十几分钟
+/// 环都纹丝不动。carter 的 `TurnUsage` 又是整轮累加的，拿它算占用会越算越大 ——
+/// 所以在流上直接看每一次请求自己的 usage。
+///
+/// 只套在 `run_turn` 的主 provider 上：压缩走 `compact_model`、子 agent 走它们
+/// 自己的线程，都不经过这里，它们的 usage 不会把环带歪。
+struct ContextTap {
+    inner: Arc<dyn carter::provider::LlmProvider>,
+    shell: Arc<AppShell>,
+    session_id: String,
+    window: u32,
+    reported: Arc<AtomicU64>,
+}
+
+#[async_trait::async_trait]
+impl carter::provider::LlmProvider for ContextTap {
+    async fn stream(
+        &self,
+        req: carter::provider::ChatRequest,
+    ) -> carter::Result<carter::provider::EventStream> {
+        use futures::StreamExt;
+        use carter::provider::{RequestPurpose, StreamChunk, Usage};
+
+        let stream = self.inner.stream(req.clone()).await?;
+        if req.wire.meta.purpose != RequestPurpose::MainTurn {
+            return Ok(stream);
+        }
+        let shell = self.shell.clone();
+        let session_id = self.session_id.clone();
+        let window = self.window;
+        let reported = self.reported.clone();
+        // usage 常被拆成几帧下发（Claude 的 `message_start` 给输入、`message_delta`
+        // 给输出），按非零覆盖合并，每来一帧就按合并后的数刷新。
+        let mut usage = Usage::default();
+        Ok(Box::pin(stream.map(move |chunk| {
+            if let Ok(StreamChunk::Usage { usage: u }) = &chunk {
+                usage.merge_non_zero(u);
+                // 这次请求的完整输入（含缓存命中与写入）+ 这次的输出 ——
+                // 输出会进历史，下一次请求就要带上它。
+                let used = u64::from(usage.total_input_billed())
+                    + u64::from(usage.output_tokens);
+                if used > 0 {
+                    reported.store(used, Ordering::Relaxed);
+                    let config = shell.config.load();
+                    emit(
+                        &shell,
+                        &session_id,
+                        SessionEvent::Context(context_view(used, window, &config.agent)),
+                    );
+                }
+            }
+            chunk
+        })))
     }
 }
 
