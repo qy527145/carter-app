@@ -98,6 +98,8 @@ mod tests {
         let local = dir.join("skills");
         std::fs::create_dir_all(&local).unwrap();
         Scan {
+            project_enabled: None,
+            project_disabled: None,
             local_enabled: local,
             local_disabled: dir.join("skills.disabled"),
             externals: vec![dir.join("ext")],
@@ -152,6 +154,8 @@ mod tests {
     #[tokio::test]
     async fn a_missing_name_is_an_error_not_a_lookup() {
         let t = MultiRootSkill::new(Scan {
+            project_enabled: None,
+            project_disabled: None,
             local_enabled: std::path::PathBuf::from("/definitely/not/here/skills"),
             local_disabled: std::path::PathBuf::from("/definitely/not/here/skills.disabled"),
             externals: vec![],

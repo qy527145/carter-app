@@ -474,9 +474,15 @@ impl SessionCtx {
     ///
     /// 技能读的是 `self.settings`（每轮 [`SessionCtx::refresh`] 重读一遍）—— 用户在技能页
     /// 加了扫描路径，**下一轮就生效**，不需要重开会话。
+    ///
+    /// 项目级技能由会话的 cwd 定位：同一个设置在别的项目里打开的会话看到的是那个项目
+    /// 的 `.carter/skills`，所以这里**必须**带上 cwd，不能复用一份全局扫描。
     fn system(&self, git: Option<&carter::session::GitInfo>) -> Vec<String> {
         let skill_metas = if self.config.skills.enabled {
-            crate::skills::union_metas(&crate::skills::Scan::from_settings(&self.settings))
+            crate::skills::union_metas(&crate::skills::Scan::from_settings_at(
+                &self.settings,
+                Some(&self.cwd),
+            ))
         } else {
             Vec::new()
         };

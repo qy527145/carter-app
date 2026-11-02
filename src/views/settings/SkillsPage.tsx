@@ -4,15 +4,19 @@
 //
 // carter 的 `parse_skill_md` 只认 frontmatter 的 name / description / allowed-tools，
 // 多写一个 `enabled: false` 会被当成未知键**静默忽略**，技能照样加载。
-// 所以单技能启停落在文件系统上：目录在 `~/.carter/skills/` 与
-// `~/.carter/skills.disabled/` 之间搬（后端 `skills.rs` 做的）。页面上要说清这一点，
+// 所以单技能启停落在文件系统上：目录在 `skills/` 与 `skills.disabled/` 之间搬
+// （后端 `skills.rs` 做的，项目级与用户级各一套）。页面上要说清这一点，
 // 否则用户去文件管理器里会找不到自己刚停用的技能。
 //
-// ## 外部扫描路径：取并集，但那里只能看和忽略
+// ## 三类来源：项目 → 用户 → 外部，取并集
 //
-// 除了 `~/.carter/skills`，还能加别的技能父目录 —— Claude Code 的 `~/.claude/skills`、
-// Codex 的 `~/.codex/skills`，或任意自定义路径。加进来之后**取并集**：本地优先，
-// 按名字去重、先出现者胜。
+// * 项目级 `<会话 cwd>/.carter/skills`：从 cwd 往上找最近的 `.carter/skills`，
+//   找不到就把 cwd 自己当成项目根。跟着会话走，优先级最高。
+// * 用户级 `~/.carter/skills`：本应用自己的目录。
+// * 外部扫描路径：还能加别的技能父目录 —— Claude Code 的 `~/.claude/skills`、
+//   Codex 的 `~/.codex/skills`，或任意自定义路径。
+//
+// 三者**取并集**、按名字去重、先出现者胜。项目级与用户级都可写；外部根只读。
 //
 // 列表**不去重**：被同名技能挡住的那一行也列出来并标明是谁挡的。藏起来的话，用户就
 // 看不出「我 Codex 里那个技能为什么不生效」—— 而那正是最需要解释的状态。
@@ -40,25 +44,40 @@ import {
   type AppSettings,
   type SkillListing,
   type SkillRoot,
+  type SkillRootKind,
   type SkillRow,
 } from "../../lib/api";
 import { toastError, toastOk } from "../../lib/toast";
 import { useAsync } from "../../lib/useAsync";
 import { useStore } from "../../store";
 import { Button, IconButton } from "../../components/ui/Button";
-import { Field, Input, Switch, Textarea } from "../../components/ui/Input";
+import { Field, Input, Segmented, Switch, Textarea } from "../../components/ui/Input";
 import { Badge, Banner, Card, ConfirmDialog, Modal } from "../../components/ui/Panel";
 import { AsyncBody, PageIntro } from "./AsyncBody";
 
-/** 技能编辑弹窗：frontmatter 的三个键 + 正文。只服务本地技能。 */
+/** 技能编辑弹窗：frontmatter 的三个键 + 正文。只服务可写的根（项目 / 用户）。 */
 function SkillEditor({
   editing,
+  targets,
+  cwd,
   onClose,
 }: {
   /** `null` = 新建。 */
   editing: SkillRow | null;
+  /**
+   * 新建时可选的落点。只有用户目录时不给选择 —— 编辑已有技能时跟着它现在所在的
+   * 目录走，不需要问。
+   */
+  targets: { path: string; label: string }[];
+  /** 当前会话的 cwd：项目级根靠它定位。 */
+  cwd: string | null;
   onClose: (changed: boolean) => void;
 }) {
+  const [target, setTarget] = useState(targets[0]?.path ?? "");
+  // 列表可能比弹窗晚回来（从别处点开）：落点补一次默认值。
+  useEffect(() => {
+    if (!editing && !target && targets.length > 0) setTarget(targets[0].path);
+  }, [editing, target, targets]);
   const [name, setName] = useState(editing?.name ?? "");
   const [description, setDescription] = useState(editing?.description ?? "");
   const [allowed, setAllowed] = useState((editing?.allowed_tools ?? []).join(", "));
@@ -69,28 +88,34 @@ function SkillEditor({
   useEffect(() => {
     if (!editing) return;
     let cancelled = false;
-    readSkill(editing.name)
+    readSkill(editing.name, editing.source, cwd)
       .then((b) => !cancelled && setBody(b))
       .catch((e) => !cancelled && toastError(e));
     return () => {
       cancelled = true;
     };
-  }, [editing]);
+  }, [editing, cwd]);
 
   const valid = name.trim() !== "";
 
   async function submit() {
     setSaving(true);
     try {
-      await saveSkill({
-        name: name.trim(),
-        description: description.trim(),
-        allowed_tools: allowed
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean),
-        body,
-      });
+      await saveSkill(
+        {
+          name: name.trim(),
+          description: description.trim(),
+          allowed_tools: allowed
+            .split(",")
+            .map((s) => s.trim())
+            .filter(Boolean),
+          body,
+          // 编辑已有技能：回到它现在所在的那个根（停用侧也照原样，别顺手启用）。
+          // 新建：用户在下面选的落点。
+          source: editing ? editing.source : target || null,
+        },
+        cwd,
+      );
       onClose(true);
     } catch (e) {
       toastError(e);
@@ -115,7 +140,7 @@ function SkillEditor({
         </>
       }
     >
-      <Field label="名称" hint="会成为 ~/.carter/skills/<名称>/SKILL.md，只能用字母、数字、-、_">
+      <Field label="名称" hint="会成为 <目录>/<名称>/SKILL.md，只能用字母、数字、-、_">
         <Input
           mono
           value={name}
@@ -124,6 +149,16 @@ function SkillEditor({
           placeholder="例如 pdf"
         />
       </Field>
+
+      {!editing && targets.length > 1 && (
+        <Field label="保存到" hint="项目里的技能只在这个项目生效，并且优先于用户目录">
+          <Segmented
+            value={target}
+            options={targets.map((t) => ({ id: t.path, label: t.label }))}
+            onChange={setTarget}
+          />
+        </Field>
+      )}
 
       <Field label="描述" hint="模型据此判断什么时候用这个技能">
         <Input
@@ -164,7 +199,8 @@ function RootRow({
   busy: boolean;
   onRemove: () => void;
 }) {
-  const local = r.source === "local";
+  // 项目根是自动发现的，删不掉；用户目录恒在；只有外部根能移除。
+  const removable = r.source === "external";
   return (
     <div className="flex items-start gap-2 border-t border-edge pt-2 first:border-t-0 first:pt-0">
       <div className="min-w-0 flex-1">
@@ -172,7 +208,14 @@ function RootRow({
           <span className="mono truncate text-[11px] text-ink" title={r.path}>
             {r.path}
           </span>
-          {local && <Badge title="本应用自己的技能目录，恒在扫描范围里">自有</Badge>}
+          {r.source === "project" && (
+            <Badge title="当前项目的 .carter/skills：跟着会话走，自动发现">
+              项目
+            </Badge>
+          )}
+          {r.source === "local" && (
+            <Badge title="本应用自己的技能目录，恒在扫描范围里">自有</Badge>
+          )}
         </div>
         <div className="mt-0.5 text-[10px] text-dim">
           {!r.exists
@@ -189,7 +232,7 @@ function RootRow({
           </div>
         )}
       </div>
-      {!local && (
+      {removable && (
         <IconButton title={`移除 ${r.path}`} onClick={onRemove} disabled={busy}>
           <X size={12} />
         </IconButton>
@@ -237,7 +280,7 @@ function ScanRootsCard({
         <FolderPlus size={13} className="shrink-0 text-tone-violet" />
         <span className="text-sm text-ink">扫描路径</span>
         <span className="text-[10px] text-dim">
-          自上而下就是优先级：本地优先，然后是下面这些，重名时靠前的赢
+          自上而下就是优先级：项目优先，然后是用户目录，再往下这些；重名时靠前的赢
         </span>
       </div>
 
@@ -334,6 +377,9 @@ function SkillCard({
         <div className="flex items-center gap-2">
           <Sparkles size={13} className="shrink-0 text-tone-violet" />
           <span className="text-sm font-medium text-ink">{s.name}</span>
+          {s.scope === "project" && (
+            <Badge title="来自当前项目的 .carter/skills：只在这个项目生效">项目</Badge>
+          )}
           {s.readonly && (
             <Badge title="来自外部扫描路径，那是别的工具自己的目录：本应用不改动它，只能忽略">
               外部 · 只读
@@ -395,7 +441,21 @@ function SkillCard({
 }
 
 export function SkillsPage() {
-  const state = useAsync(listSkills, []);
+  // 项目级技能靠会话 cwd 定位（`<cwd>/.carter/skills`）。换了会话 cwd 就重拉 ——
+  // 同一个设置页在两个项目里看到的技能可以不一样，这是设计如此。
+  const cwd = useStore((s) => s.cwd);
+  const state = useAsync(() => listSkills(cwd || null), [cwd]);
+  // 新建技能的落点：用户目录恒在；有项目根时多一个「本项目」。列表还没回来时
+  // 只有一个空选项 —— 编辑器里那个选择器只在 `targets.length > 1` 时出现。
+  const targets = (() => {
+    const roots = state.data?.roots ?? [];
+    const local = roots.find((r) => r.source === "local");
+    const project = roots.find((r) => r.source === "project");
+    return [
+      local && { path: local.path, label: "用户目录" },
+      project && { path: project.path, label: "本项目" },
+    ].filter((t): t is { path: string; label: string } => t !== undefined);
+  })();
   const [editing, setEditing] = useState<SkillRow | null | undefined>(undefined);
   const [busy, setBusy] = useState(false);
   const setNotice = useStore((s) => s.setNotice);
@@ -420,10 +480,10 @@ export function SkillsPage() {
 
   /**
    * 已忽略的技能在「已忽略」那一行上点一下就是恢复 —— 传的是技能名，不是路径。
-   * `external = true`：忽略名单本来就只作用于外部路径，撤销它自然也走那一条。
+   * `source = null`：那个名字可能已经没有对应的行了（目录被删了），没有来源可给。
    */
   function unignore(name: string) {
-    void run(() => toggleSkill(name, true, true));
+    void run(() => toggleSkill(name, true, null, cwd || null));
   }
 
   return (
@@ -442,9 +502,12 @@ export function SkillsPage() {
       </div>
 
       <PageIntro>
-        技能从 <span className="mono">~/.carter/skills/&lt;名称&gt;/SKILL.md</span>{" "}
-        与下面这些扫描路径里<strong className="font-medium">取并集</strong>发现：本地优先、
-        按名字去重。frontmatter 里的 <span className="mono">name</span> /{" "}
+        技能从当前项目的{" "}
+        <span className="mono">&lt;工作目录&gt;/.carter/skills/</span>、
+        <span className="mono">~/.carter/skills/</span> 与下面这些扫描路径里
+        <strong className="font-medium">取并集</strong>发现：
+        <strong className="font-medium">项目优先</strong>，然后是用户目录，再往后是外部路径；
+        同名按名字去重、先出现者胜。frontmatter 里的 <span className="mono">name</span> /{" "}
         <span className="mono">description</span> /{" "}
         <span className="mono">allowed-tools</span> 三个键会被读取。
       </PageIntro>
@@ -460,13 +523,24 @@ export function SkillsPage() {
         }
       >
         {(listing: SkillListing) => {
-          const externalRoots = listing.roots.filter((r) => r.source === "external");
-          // 分组顺序跟着扫描根走（本地在最前）—— 优先级是**读出来**的。
+          const rootsOf = (kind: SkillRootKind) =>
+            listing.roots.filter((r) => r.source === kind);
+          const externalRoots = rootsOf("external");
+          // 分组顺序 = 优先级：项目 → 用户 → 外部。它是**读出来**的，不是这里另排的。
           const groups = [
-            { title: "本地", items: listing.skills.filter((s) => !s.readonly) },
+            ...rootsOf("project").map((r) => ({
+              title: `项目 · ${r.path}`,
+              items: listing.skills.filter((s) => s.scope === "project"),
+            })),
+            {
+              title: "用户目录",
+              items: listing.skills.filter((s) => s.scope === "local"),
+            },
             ...externalRoots.map((r) => ({
               title: r.path,
-              items: listing.skills.filter((s) => s.readonly && s.source === r.path),
+              items: listing.skills.filter(
+                (s) => s.scope === "external" && s.source === r.path,
+              ),
             })),
           ].filter((g) => g.items.length > 0);
 
@@ -523,9 +597,9 @@ export function SkillsPage() {
               </div>
 
               <div className="mb-2 text-[11px] leading-relaxed text-dim">
-                本地技能的启停是把目录在{" "}
-                <span className="mono">~/.carter/skills/</span> 与{" "}
-                <span className="mono">~/.carter/skills.disabled/</span> 之间搬；
+                项目 / 用户技能的启停是把目录在{" "}
+                <span className="mono">skills/</span> 与{" "}
+                <span className="mono">skills.disabled/</span> 之间搬；
                 外部路径里的技能搬不得（那是别的工具的目录），所以开关记的是「按名字忽略」。
               </div>
 
@@ -540,10 +614,12 @@ export function SkillsPage() {
                         key={`${s.source}/${s.name}`}
                         s={s}
                         onEdit={() => setEditing(s)}
-                        onToggle={(v) => void run(() => toggleSkill(s.name, v, s.readonly))}
+                        onToggle={(v) =>
+                          void run(() => toggleSkill(s.name, v, s.source, cwd || null))
+                        }
                         onDelete={() =>
                           void run(() =>
-                            deleteSkill(s.name).then(() => {
+                            deleteSkill(s.name, s.source, cwd || null).then(() => {
                               toastOk(`已删除技能 ${s.name}`);
                             }),
                           )
@@ -569,6 +645,8 @@ export function SkillsPage() {
       {editing !== undefined && (
         <SkillEditor
           editing={editing}
+          targets={targets}
+          cwd={cwd || null}
           onClose={(changed) => {
             setEditing(undefined);
             if (changed) state.reload();

@@ -666,7 +666,7 @@ struct ToolRow {
 /// 见 `list_channels`。MCP 工具也不在这里 —— 它们的名字要连上 server 才知道，
 /// 见 `list_mcp_servers`。
 #[tauri::command]
-fn list_tools(shell: State<'_, Arc<AppShell>>) -> Vec<ToolRow> {
+fn list_tools(shell: State<'_, Arc<AppShell>>, cwd: Option<String>) -> Vec<ToolRow> {
     let settings = AppSettings::load();
     let skills_on = shell.config.load().skills.enabled;
 
@@ -683,7 +683,11 @@ fn list_tools(shell: State<'_, Arc<AppShell>>) -> Vec<ToolRow> {
     // 早已写下的理由，现在才真正落实）。
     //
     // 这里不需要真的能跑：`substitute` 只读构造期参数，不碰 provider、不碰会话。
-    let cwd = carter::config::paths::carter_home();
+    // 会话 cwd 只用来让 `skill` 的说明指出项目级目录；没有会话时退回一个占位路径。
+    let cwd = cwd
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| carter::config::paths::carter_home());
     let mut rows: Vec<ToolRow> = Vec::new();
     for t in registry.tools() {
         let t = carter_app_core::tools::substitute(t.clone(), &settings, &cwd);
@@ -692,10 +696,20 @@ fn list_tools(shell: State<'_, Arc<AppShell>>) -> Vec<ToolRow> {
             "bash" => Some(carter_app_core::platform::os_label().to_string()),
             // `note` 就是为「这个工具从哪来」准备的 —— 技能多了附加扫描路径之后，
             // 「它到底扫哪几个目录」是用户会问的第一个问题。
-            "skill" => Some(match settings.skill_roots.len() {
-                0 => "只扫 ~/.carter/skills".to_string(),
-                n => format!("~/.carter/skills 与 {n} 条附加扫描路径"),
-            }),
+            "skill" => {
+                let scan = Scan::from_settings_at(&settings, Some(&cwd));
+                let extra = match settings.skill_roots.len() {
+                    0 => String::new(),
+                    n => format!(" 与 {n} 条附加扫描路径"),
+                };
+                Some(match &scan.project_enabled {
+                    Some(p) => format!(
+                        "扫 ~/.carter/skills、{} 里的项目技能{extra}",
+                        p.display()
+                    ),
+                    None => format!("扫 ~/.carter/skills{extra}（当前会话的项目里若有 .carter/skills 也会扫）"),
+                })
+            }
             _ => None,
         };
         rows.push(ToolRow {
@@ -798,7 +812,7 @@ struct SkillListing {
     skills: Vec<carter_app_core::SkillRow>,
     /// 全局开关（`[skills].enabled`）。关掉时整个技能目录都不加载。
     globally_enabled: bool,
-    /// 扫描根一览：本地目录排第一，然后是附加路径（顺序 = 优先级）。
+    /// 扫描根一览：项目 → 用户 → 附加路径（顺序 = 优先级）。
     roots: Vec<skills::SkillRootRow>,
     /// Claude Code / Codex 这类默认位置的快捷选项。
     presets: Vec<skills::SkillPreset>,
@@ -809,10 +823,21 @@ struct SkillListing {
     ignored_skills: Vec<String>,
 }
 
+/// 技能命令共用的扫描：会话 cwd 决定项目级根。
+///
+/// 技能页拿的是**当前会话**的 cwd（见 `SkillsPage`）。没有会话时传 `None`，
+/// 那就只有用户级与外部根 —— 与从前一致。
+fn skill_scan(settings: &AppSettings, cwd: Option<&str>) -> Scan {
+    let cwd = cwd
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from);
+    Scan::from_settings_at(settings, cwd.as_deref())
+}
+
 #[tauri::command]
-fn list_skills(shell: State<'_, Arc<AppShell>>) -> SkillListing {
+fn list_skills(shell: State<'_, Arc<AppShell>>, cwd: Option<String>) -> SkillListing {
     let settings = AppSettings::load();
-    let scan = Scan::from_settings(&settings);
+    let scan = skill_scan(&settings, cwd.as_deref());
     SkillListing {
         skills: skills::list(&scan),
         globally_enabled: shell.config.load().skills.enabled,
@@ -823,17 +848,28 @@ fn list_skills(shell: State<'_, Arc<AppShell>>) -> SkillListing {
 }
 
 #[tauri::command]
-fn read_skill(name: String) -> Result<String, String> {
-    skills::read(&Scan::from_settings(&AppSettings::load()), &name)
+fn read_skill(
+    name: String,
+    cwd: Option<String>,
+    source: Option<String>,
+) -> Result<String, String> {
+    let scan = skill_scan(&AppSettings::load(), cwd.as_deref());
+    skills::read(&scan, &name, source.as_deref())
 }
 
+/// 保存技能，返回实际写入的根目录（界面用它说明「存到了项目 / 用户目录」）。
 #[tauri::command]
-fn save_skill(shell: State<'_, Arc<AppShell>>, draft: SkillDraft) -> Result<(), String> {
-    skills::save(&Scan::from_settings(&AppSettings::load()), &draft)?;
+fn save_skill(
+    shell: State<'_, Arc<AppShell>>,
+    draft: SkillDraft,
+    cwd: Option<String>,
+) -> Result<String, String> {
+    let scan = skill_scan(&AppSettings::load(), cwd.as_deref());
+    let dir = skills::save(&scan, &draft)?;
     // 技能目录会进系统提示，所以要让跑着的会话下一轮重算 —— 发个事件叫前端刷新，
     // 会话侧本来每轮都会重读技能目录。
     shell.emit(AppEvent::ConfigChanged);
-    Ok(())
+    Ok(dir.to_string_lossy().to_string())
 }
 
 /// 启停单个技能。本地的搬目录、外部的改忽略名单（分派在 `skills::set_enabled` 里）。
@@ -841,19 +877,21 @@ fn save_skill(shell: State<'_, Arc<AppShell>>, draft: SkillDraft) -> Result<(), 
 /// 回传新的设置：外部技能的开关写的是 `ignored_skills`，而前端 store 里那份设置是
 /// 旧的。不回传的话，下一次改主题（`set_app_settings` 是**整体覆盖写入**）会把刚关掉
 /// 的外部技能又打开。
-/// `external` 是**点的是哪一行**（界面上那个 `readonly`）：本地技能停用后，外部的同名
-/// 技能会顶上来，那时两行同名，能区分它们的只有来源 —— 按名字猜会让「点外部那一行」
+/// `source` 是**点的是哪一行**（界面上那个 `SkillRow::source`）：同一个名字可能同时在
+/// 项目、用户、外部三个根里出现，能区分它们的只有来源 —— 按名字猜会让「点外部那一行」
 /// 变成点了没反应（本地目录此刻正好不在启用侧，搬目录那条路会直接返回 Ok）。
+/// `None` 只用于从「已忽略」名单里恢复一个名字。
 #[tauri::command]
 fn toggle_skill(
     shell: State<'_, Arc<AppShell>>,
     name: String,
     enabled: bool,
-    external: bool,
+    source: Option<String>,
+    cwd: Option<String>,
 ) -> Result<AppSettings, String> {
     let mut settings = AppSettings::load();
-    let scan = Scan::from_settings(&settings);
-    if skills::set_enabled(&mut settings, &scan, &name, enabled, external)? {
+    let scan = skill_scan(&settings, cwd.as_deref());
+    if skills::set_enabled(&mut settings, &scan, &name, enabled, source.as_deref())? {
         settings.save()?;
     }
     shell.emit(AppEvent::ConfigChanged);
@@ -861,8 +899,14 @@ fn toggle_skill(
 }
 
 #[tauri::command]
-fn delete_skill(shell: State<'_, Arc<AppShell>>, name: String) -> Result<(), String> {
-    skills::delete(&Scan::from_settings(&AppSettings::load()), &name)?;
+fn delete_skill(
+    shell: State<'_, Arc<AppShell>>,
+    name: String,
+    source: Option<String>,
+    cwd: Option<String>,
+) -> Result<(), String> {
+    let scan = skill_scan(&AppSettings::load(), cwd.as_deref());
+    skills::delete(&scan, &name, source.as_deref())?;
     shell.emit(AppEvent::ConfigChanged);
     Ok(())
 }

@@ -185,8 +185,12 @@ pub fn substitute_with(
         // save_memory 没有 path 参数可改写，目标路径是内部按 scope 算的 —— 项目级作用域
         // 在桌面应用里必然是错的，明确拒绝掉。
         "save_memory" => Arc::new(ProjectMemoryGuard::new(t)),
-        // `skill` 换成多根实现：技能页加的扫描路径就在这里生效。
-        "skill" => Arc::new(MultiRootSkill::new(Scan::from_settings(settings))),
+        // `skill` 换成多根实现：技能页加的扫描路径与项目级目录就在这里生效。
+        // cwd 是构造期传入的会话工作目录，项目根由它往上找。
+        "skill" => Arc::new(MultiRootSkill::new(Scan::from_settings_at(
+            settings,
+            Some(cwd),
+        ))),
         _ => t,
     }
 }

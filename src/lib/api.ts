@@ -294,12 +294,13 @@ export type AppSettings = {
   /** 对话主区的呈现密度。随时可切，来回切不碰会话历史。 */
   conversation_mode: ConversationMode;
   /**
-   * 额外的技能扫描父目录（规范化后的绝对路径）。技能从 `~/.carter/skills` 与这些目录
-   * **取并集**，本地优先。改动请走 `addSkillRoot` / `removeSkillRoot` ——
+   * 额外的技能扫描父目录（规范化后的绝对路径）。技能从当前项目的 `.carter/skills`、
+   * `~/.carter/skills` 与这些目录**取并集**，项目优先、然后用户、再往后是这里。
+   * 改动请走 `addSkillRoot` / `removeSkillRoot` ——
    * `setAppSettings` 是整体覆盖写入，拿旧值写回会把这些路径抹掉。
    */
   skill_roots: string[];
-  /** 按名字忽略的技能。**只作用于外部扫描路径**（本地技能靠搬目录启停）。 */
+  /** 按名字忽略的技能。**只作用于外部扫描路径**（项目 / 用户技能靠搬目录启停）。 */
   ignored_skills: string[];
   /**
    * 「本轮变更的文件」额外忽略的规则，每条一个 glob，相对会话 cwd。
@@ -889,24 +890,35 @@ export type ToolRow = {
  * `listChannels`。MCP 工具也不在这里：名字要连上 server 才知道，见
  * `listMcpServers`。
  */
-export function listTools(): Promise<ToolRow[]> {
-  return invoke<ToolRow[]>("list_tools");
+export function listTools(cwd?: string | null): Promise<ToolRow[]> {
+  return invoke<ToolRow[]>("list_tools", { cwd: cwd ?? null });
 }
 
 // ---------------------------------------------------------------------------
 // 技能
 // ---------------------------------------------------------------------------
 
+/**
+ * 技能根的三类归属。镜像 `skills.rs::RootKind`。
+ *
+ * - `project`：`<会话 cwd>/.carter/skills`，跟着项目走，可写；
+ * - `local`：`~/.carter/skills`，用户自己的，可写；
+ * - `external`：用户加进来的其它工具目录（Claude Code / Codex），只读。
+ */
+export type SkillRootKind = "project" | "local" | "external";
+
 export type SkillRow = {
   name: string;
   description: string;
   allowed_tools: string[];
-  /** 界面上那个开关的状态：本地技能看目录在哪一侧，外部技能看忽略名单。 */
+  /** 界面上那个开关的状态：本应用的技能看目录在哪一侧，外部技能看忽略名单。 */
   enabled: boolean;
   /** 这一份 `SKILL.md` 的绝对路径。 */
   path: string;
-  /** 这一行来自哪个扫描根（绝对路径）。列表按它分组。 */
+  /** 这一行来自哪个扫描根（绝对路径）。写操作照它定位。 */
   source: string;
+  /** 这一行属于哪一类根。列表按它分组与标注。 */
+  scope: SkillRootKind;
   /** 外部路径 → `true`：不能编辑、不能删除，开关也只能改忽略名单。 */
   readonly: boolean;
   /** 有没有进**并集** —— 也就是模型到底用不用得到它。 */
@@ -918,8 +930,8 @@ export type SkillRow = {
 /** 一条扫描路径，附带「为什么它扫到的技能没全生效」的几个计数。 */
 export type SkillRoot = {
   path: string;
-  /** `local` = 本应用自己的技能目录（不可移除）；`external` = 用户加进来的。 */
-  source: string;
+  /** `project` / `local` 是本应用的目录（不可移除）；`external` = 用户加进来的。 */
+  source: SkillRootKind;
   exists: boolean;
   /** 直接子目录数。 */
   subdirs: number;
@@ -949,7 +961,7 @@ export type SkillListing = {
   skills: SkillRow[];
   /** 全局开关（`[skills].enabled`）。关掉时整个技能目录都不加载。 */
   globally_enabled: boolean;
-  /** 扫描根一览：本地目录排第一，然后是附加路径（顺序 = 优先级）。 */
+  /** 扫描根一览：项目 → 用户 → 附加路径（顺序 = 优先级）。 */
   roots: SkillRoot[];
   presets: SkillPreset[];
   /** 被按名字忽略的外部技能。有些名字可能已经没有对应的行了，靠它撤销。 */
@@ -961,36 +973,69 @@ export type SkillDraft = {
   description: string;
   allowed_tools: string[];
   body: string;
+  /**
+   * 写到哪个根（列表里那一行的 `source`）。不给 = 按名字找它现在所在的目录，
+   * 新技能落用户目录。「新建」时由编辑框上的选择决定。
+   */
+  source?: string | null;
 };
 
-export function listSkills(): Promise<SkillListing> {
-  return invoke<SkillListing>("list_skills");
+/**
+ * 技能列表。`cwd` 是**当前会话**的工作目录 —— 项目级技能靠它定位
+ * （`<cwd>/.carter/skills`，找不到就沿父目录往上找）。没有会话时传 `null`。
+ */
+export function listSkills(cwd?: string | null): Promise<SkillListing> {
+  return invoke<SkillListing>("list_skills", { cwd: cwd ?? null });
 }
 
-export function readSkill(name: string): Promise<string> {
-  return invoke<string>("read_skill", { name });
+/** 读技能正文。`source` 给了就只读那一行对应的根（同名技能可能有好几行）。 */
+export function readSkill(
+  name: string,
+  source?: string | null,
+  cwd?: string | null,
+): Promise<string> {
+  return invoke<string>("read_skill", { name, source: source ?? null, cwd: cwd ?? null });
 }
 
-export function saveSkill(draft: SkillDraft): Promise<void> {
-  return invoke<void>("save_skill", { draft });
+/** 保存技能，返回实际写入的根目录。 */
+export function saveSkill(
+  draft: SkillDraft,
+  cwd?: string | null,
+): Promise<string> {
+  return invoke<string>("save_skill", { draft, cwd: cwd ?? null });
 }
 
 /**
- * 启停单个技能：本地的把目录在 `skills/` 与 `skills.disabled/` 之间搬，
+ * 启停单个技能：项目级 / 用户级的把目录在 `skills/` 与 `skills.disabled/` 之间搬，
  * 外部路径的（Claude Code / Codex 那边）只记进忽略名单 —— 本应用不碰别人的目录。
  *
- * `external` 必须传**点的是哪一行**（行上的 `readonly`）。本地技能停用后外部的同名技能会
- * 顶上来，那时两行同名，能区分它们的只有来源。
+ * `source` 必须传**点的是哪一行**（行上的 `source`）。同一个名字可能同时在项目、用户、
+ * 外部三个根里出现，能区分它们的只有来源。从「已忽略」名单恢复一个名字时传 `null`。
  *
  * 回传新的 `AppSettings`，调用方要 `setSettings` 对齐，否则下一次「改主题」会用
  * 旧值整体覆盖，把忽略名单清掉。
  */
-export function toggleSkill(name: string, enabled: boolean, external: boolean): Promise<AppSettings> {
-  return invoke<AppSettings>("toggle_skill", { name, enabled, external });
+export function toggleSkill(
+  name: string,
+  enabled: boolean,
+  source: string | null,
+  cwd?: string | null,
+): Promise<AppSettings> {
+  return invoke<AppSettings>("toggle_skill", {
+    name,
+    enabled,
+    source,
+    cwd: cwd ?? null,
+  });
 }
 
-export function deleteSkill(name: string): Promise<void> {
-  return invoke<void>("delete_skill", { name });
+/** 删技能。`source` 指到哪个根就删哪个根 —— 同名的可能在项目与用户两处都有。 */
+export function deleteSkill(
+  name: string,
+  source?: string | null,
+  cwd?: string | null,
+): Promise<void> {
+  return invoke<void>("delete_skill", { name, source: source ?? null, cwd: cwd ?? null });
 }
 
 export function setSkillsEnabled(enabled: boolean): Promise<void> {

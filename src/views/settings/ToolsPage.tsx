@@ -59,7 +59,9 @@ function ToolItem({ t, onToggle }: { t: ToolRow; onToggle: (v: boolean) => void 
 }
 
 export function ToolsPage() {
-  const state = useAsync(listTools, []);
+  // 会话 cwd 只影响 `skill` 那一行的说明：它要指出项目级目录在不在扫描范围里。
+  const cwd = useStore((s) => s.cwd);
+  const state = useAsync(() => listTools(cwd || null), [cwd]);
   const settings = useStore((s) => s.settings);
   const setSettings = useStore((s) => s.setSettings);
   const [saving, setSaving] = useState(false);

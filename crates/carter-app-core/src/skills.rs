@@ -10,13 +10,19 @@
 //! 把目录挪到隔壁的 `<root>/skills.disabled/` 就自然消失了。可逆、不丢内容，
 //! 而且用户在文件管理器里也看得懂发生了什么。
 //!
-//! ## 扫描路径：并集，本地优先
+//! ## 扫描路径：并集，项目 → 用户 → 外部根
 //!
-//! 技能不只从 `~/.carter/skills` 来。界面上能加**额外的扫描父目录**（Claude Code 的
-//! `~/.claude/skills`、Codex 的 `~/.codex/skills`，或任意自定义路径），加进来之后按
-//! **并集**用：系统提示里的技能目录与 `skill` 工具都认这些根。
+//! 技能从三类地方来，按**并集**用：系统提示里的技能目录与 `skill` 工具都认这些根。
 //!
-//! 优先级：本地 `~/.carter/skills` → 外部根（按加入顺序），按名字去重、**先出现者胜**。
+//! * **项目级** `<cwd>/.carter/skills`：从会话 cwd 往上找到最近的一个，自动参与，
+//!   不需要任何设置。它排在**最前面** —— 同一个项目里，项目自己钉死的版本比用户
+//!   个人的默认更具体。
+//! * **用户级** `~/.carter/skills`：本应用自己的目录。
+//! * **外部根**：界面上能加**额外的扫描父目录**（Claude Code 的 `~/.claude/skills`、
+//!   Codex 的 `~/.codex/skills`，或任意自定义路径）。
+//!
+//! 按名字去重、**先出现者胜**。项目级与用户级都是本应用的目录，可写（启停仍是搬目录）；
+//! 外部根属于别的工具，只读。
 //!
 //! ## 外部技能为什么只读
 //!
@@ -24,9 +30,14 @@
 //! （搬目录、删除、覆盖 SKILL.md）都是在别的工具的地盘上动土，而那边可能正指着同一个
 //! 文件。所以外部技能只能**看**和**按名字忽略**，界面上的编辑 / 删除按钮直接不出现。
 //!
-//! 忽略名单（[`AppSettings::ignored_skills`]）**只作用于外部**：本地技能已经有自己的
+//! 项目级与用户级都是本应用的目录，写操作一视同仁：编辑、删除、停用（搬到同级的
+//! `skills.disabled/`）。区别只在于命令行看到的永远是用户级那一份 —— 项目级只对本应用
+//! 的会话成立。
+//!
+//! 忽略名单（[`AppSettings::ignored_skills`]）**只作用于外部**：本应用自己的技能已经有
 //! 开关机制（搬目录，文件管理器里看得见），两套混在一起就会出现「文件明明在
 //! `~/.carter/skills/pdf/`、技能却不加载」这种隐形状态 —— 正是本模块一直在躲的那类错。
+//! 项目级尤其不能进忽略名单：它按名字生效，而同一个名字在不同项目里是不同的技能。
 //!
 //! ## 列表为什么不去重、并集为什么去重
 //!
@@ -44,13 +55,29 @@ use carter::skills::{SkillMeta, load, parse_skill_md};
 use crate::app_settings::AppSettings;
 use crate::paths;
 
+/// 一个技能根属于哪一类。类别决定可写性与优先级，界面也按它分组。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RootKind {
+    /// `<cwd>/.carter/skills`：跟着会话走，可写。
+    Project,
+    /// `~/.carter/skills`：本应用自己的目录，可写。
+    Local,
+    /// 用户加进来的其它工具目录，只读。
+    External,
+}
+
 /// 一次扫描的全部输入。
 ///
-/// 这是把「环境」与「纯逻辑」切开的切面：[`Scan::from_settings`] 是**唯一**读环境变量
+/// 这是把「环境」与「纯逻辑」切开的切面：[`Scan::from_settings_at`] 是**唯一**读环境变量
 /// 的地方，其余函数都只吃这个结构体。于是测试可以喂手搓的临时目录，不必改进程级的
 /// `CARTER_HOME` —— cargo 并行跑测试，多一个 env 依赖就多一类随机失败。
 #[derive(Debug, Clone)]
 pub struct Scan {
+    /// `<cwd>/.carter/skills`：当前项目自己的技能目录，可写。`None` = 会话不在项目里。
+    pub project_enabled: Option<PathBuf>,
+    /// `<cwd>/.carter/skills.disabled`：停用的项目技能搬到这里。
+    pub project_disabled: Option<PathBuf>,
     /// `~/.carter/skills`：本应用自己的目录，接受写操作。
     pub local_enabled: PathBuf,
     /// `~/.carter/skills.disabled`：停用的本地技能搬到这里。
@@ -62,30 +89,140 @@ pub struct Scan {
 }
 
 impl Scan {
-    /// 唯一读环境的地方。
+    /// 不带项目上下文的一份扫描（设置页在还没有会话时也能用）。
     pub fn from_settings(s: &AppSettings) -> Self {
+        Self::from_settings_at(s, None)
+    }
+
+    /// 唯一读环境的地方。`cwd` 用来定位项目级技能目录。
+    pub fn from_settings_at(s: &AppSettings, cwd: Option<&Path>) -> Self {
         let local = carter::config::paths::skills_dir();
+        let local_disabled = local.with_file_name("skills.disabled");
+        let project = cwd.and_then(|c| project_roots(c, &local, &local_disabled));
+
+        let mut externals = s.skill_root_paths();
+        if let Some((enabled, disabled)) = &project {
+            // 用户把项目目录也手填进「扫描路径」时只留一份 —— 否则它会在列表里
+            // 出现两次，一遍算项目、一遍算外部（而且外部那份是只读的，自相矛盾）。
+            externals.retain(|r| !same_dir(r, enabled) && !same_dir(r, disabled));
+        }
+
         Self {
-            local_disabled: local.with_file_name("skills.disabled"),
+            project_disabled: project.as_ref().map(|(_, d)| d.clone()),
+            project_enabled: project.map(|(e, _)| e),
+            local_disabled,
             local_enabled: local,
-            externals: s.skill_root_paths(),
+            externals,
             ignored: s.ignored_skills.clone(),
         }
     }
 
-    /// 参与并集的根，按优先级。`true` = 外部根。
-    fn union_roots(&self) -> Vec<(PathBuf, bool)> {
-        let mut v: Vec<(PathBuf, bool)> = vec![(self.local_enabled.clone(), false)];
-        v.extend(self.externals.iter().map(|p| (p.clone(), true)));
+    /// 参与并集的根，按优先级。停用侧不参与。
+    fn union_roots(&self) -> Vec<(PathBuf, RootKind)> {
+        let mut v: Vec<(PathBuf, RootKind)> = Vec::new();
+        if let Some(p) = &self.project_enabled {
+            v.push((p.clone(), RootKind::Project));
+        }
+        v.push((self.local_enabled.clone(), RootKind::Local));
+        v.extend(
+            self.externals
+                .iter()
+                .map(|p| (p.clone(), RootKind::External)),
+        );
         v
+    }
+
+    /// 本应用可写的根（项目 + 用户），启用的在前。
+    ///
+    /// 顺序与 [`Scan::union_roots`] 一致，只多出两个停用侧 —— 停用的技能仍要能
+    /// 编辑、删除、重新启用，所以它们也在这里。
+    fn writable_roots(&self) -> Vec<(PathBuf, RootKind)> {
+        let mut v: Vec<(PathBuf, RootKind)> = Vec::new();
+        for (dir, kind) in [
+            (self.project_enabled.as_ref(), RootKind::Project),
+            (self.project_disabled.as_ref(), RootKind::Project),
+            (Some(&self.local_enabled), RootKind::Local),
+            (Some(&self.local_disabled), RootKind::Local),
+        ] {
+            if let Some(d) = dir {
+                v.push((d.clone(), kind));
+            }
+        }
+        v
+    }
+
+    /// 全部能读的根，按并集优先级，停用侧排在各自的启用侧之后。
+    fn readable_roots(&self) -> Vec<(PathBuf, RootKind)> {
+        let mut v = self.writable_roots();
+        v.extend(
+            self.externals
+                .iter()
+                .map(|p| (p.clone(), RootKind::External)),
+        );
+        v
+    }
+
+    /// 一个路径字符串对应哪个根（含停用侧与外部根）。
+    fn root_of(&self, raw: &str) -> Option<(PathBuf, RootKind)> {
+        let p = Path::new(raw);
+        self.readable_roots()
+            .into_iter()
+            .find(|(root, _)| same_dir(root, p))
     }
 
     /// 这个名字在这里是不是「被忽略的外部技能」。
     ///
-    /// `external` 这个参数是这条规则的全部：忽略名单**不作用于本地**，见模块头。
-    fn ignored_here(&self, name: &str, external: bool) -> bool {
-        external && self.ignored.iter().any(|n| n == name)
+    /// `kind` 这个参数是这条规则的全部：忽略名单**只作用于外部**，见模块头。
+    fn ignored_here(&self, name: &str, kind: RootKind) -> bool {
+        kind == RootKind::External && self.ignored.iter().any(|n| n == name)
     }
+}
+
+/// 两个路径是不是同一个目录（隔一层 `Path` 而已）。
+fn same_dir(a: &Path, b: &Path) -> bool {
+    paths::same_path(&a.to_string_lossy(), &b.to_string_lossy())
+}
+
+/// 从 `cwd` 往上找最近的 `.carter/skills`（或只有停用侧存在）。
+///
+/// 往上找而不是只看 cwd：会话常常开在子目录里，而项目根在仓库顶层。找到最近的一个
+/// 就停 —— 嵌套项目里「该项目生效」比「所有祖先并集」好解释，也不会有两份同名技能
+/// 悄悄竞争。
+///
+/// **一个都找不到时回落到 `<cwd>/.carter/skills`**：否则「新建项目技能」永远没有落点，
+/// 第一份项目技能只能从文件管理器里手搭。创建目录发生在保存那一刻（[`save`]），
+/// 现在只是一条「将会用到哪里」的路径。
+///
+/// 用户自己的 `~/.carter/skills` 被排除掉：它在并集里已经有一席之地，再当项目根
+/// 算一遍就会既是「项目」又是「用户」，优先级也变得看 cwd 深浅。家目录本身也不再
+/// 往上走 —— 项目不是你的 home。
+pub fn project_roots(
+    cwd: &Path,
+    local_enabled: &Path,
+    local_disabled: &Path,
+) -> Option<(PathBuf, PathBuf)> {
+    let home = paths::home_dir();
+    for anc in cwd.ancestors() {
+        if home.as_deref() == Some(anc) {
+            break;
+        }
+        let base = anc.join(".carter");
+        let enabled = base.join("skills");
+        let disabled = base.join("skills.disabled");
+        if same_dir(&enabled, local_enabled) || same_dir(&enabled, local_disabled) {
+            continue;
+        }
+        if enabled.is_dir() || disabled.is_dir() {
+            return Some((enabled, disabled));
+        }
+    }
+
+    let base = cwd.join(".carter");
+    let enabled = base.join("skills");
+    if same_dir(&enabled, local_enabled) || same_dir(&enabled, local_disabled) {
+        return None;
+    }
+    Some((enabled, base.join("skills.disabled")))
 }
 
 /// 扫一个根，并把 frontmatter 里那点「格式噪音」抹平。
@@ -135,19 +272,19 @@ fn discover_at(root: &Path) -> Vec<SkillMeta> {
 ///
 /// [`union_metas`] / [`find_body`] / [`list`] / [`roots`] 都走这一个函数 —— 顺序必须
 /// **处处一致**，否则会出现「系统提示里是本地那个，点开预览却是外部那个」。
-fn winners(scan: &Scan) -> Vec<(SkillMeta, PathBuf)> {
-    let mut out: Vec<(SkillMeta, PathBuf)> = Vec::new();
-    for (root, external) in scan.union_roots() {
+fn winners(scan: &Scan) -> Vec<(SkillMeta, PathBuf, RootKind)> {
+    let mut out: Vec<(SkillMeta, PathBuf, RootKind)> = Vec::new();
+    for (root, kind) in scan.union_roots() {
         for m in discover_at(&root) {
             // 忽略判定必须在「已经见过」判定**之前**：否则一个被忽略的名字会在下一个
             // 根里又冒出来，与「忽略这个名字」的语义对不上。
-            if scan.ignored_here(&m.name, external) {
+            if scan.ignored_here(&m.name, kind) {
                 continue;
             }
-            if out.iter().any(|(seen, _)| seen.name == m.name) {
+            if out.iter().any(|(seen, _, _)| seen.name == m.name) {
                 continue;
             }
-            out.push((m, root.clone()));
+            out.push((m, root.clone(), kind));
         }
     }
     out
@@ -155,15 +292,15 @@ fn winners(scan: &Scan) -> Vec<(SkillMeta, PathBuf)> {
 
 /// 并集里的技能元数据 —— 进系统提示的那一份。
 pub fn union_metas(scan: &Scan) -> Vec<SkillMeta> {
-    winners(scan).into_iter().map(|(m, _)| m).collect()
+    winners(scan).into_iter().map(|(m, _, _)| m).collect()
 }
 
 /// 并集里这个技能的正文 —— 也就是模型用 `skill` 工具实际会拿到的那一份。
 pub fn find_body(scan: &Scan, name: &str) -> Option<String> {
     let root = winners(scan)
         .into_iter()
-        .find(|(m, _)| m.name == name)
-        .map(|(_, root)| root)?;
+        .find(|(m, _, _)| m.name == name)
+        .map(|(_, root, _)| root)?;
     load(&root, name).map(|s| s.body)
 }
 
@@ -172,12 +309,14 @@ pub struct SkillRow {
     pub name: String,
     pub description: String,
     pub allowed_tools: Vec<String>,
-    /// 界面上那个开关的状态：本地技能看目录在哪一侧，外部技能看忽略名单。
+    /// 界面上那个开关的状态：本应用的技能看目录在哪一侧，外部技能看忽略名单。
     pub enabled: bool,
     /// [`SkillRow::name`] 那一份 `SKILL.md` 的绝对路径。
     pub path: String,
-    /// 这一行来自哪个扫描根（绝对路径）。界面按它分组。
+    /// 这一行来自哪个扫描根（绝对路径）。界面按它分组；写操作也照它定位。
     pub source: String,
+    /// 这一行属于哪一类根。界面按它分组与标注。
+    pub scope: RootKind,
     /// 外部路径 → `true`。只读：不能编辑、不能删除，开关也只能改忽略名单。
     pub readonly: bool,
     /// 有没有进**并集** —— 也就是模型到底用不用得到它。
@@ -186,17 +325,17 @@ pub struct SkillRow {
     pub shadowed_by: Option<String>,
 }
 
-/// 一行技能。`readonly` 由调用方给（本地两个目录都是可写的）。
+/// 一行技能。`kind` 决定可写性（只有外部根只读）。
 fn row(
-    winners: &[(SkillMeta, PathBuf)],
+    winners: &[(SkillMeta, PathBuf, RootKind)],
     dir: &Path,
     m: &SkillMeta,
     enabled: bool,
-    readonly: bool,
+    kind: RootKind,
 ) -> SkillRow {
     let effective = winners
         .iter()
-        .any(|(w, root)| w.name == m.name && root.as_path() == dir);
+        .any(|(w, root, _)| w.name == m.name && root.as_path() == dir);
     SkillRow {
         name: m.name.clone(),
         description: m.description.clone(),
@@ -204,15 +343,16 @@ fn row(
         enabled,
         path: skill_md(dir, &m.name),
         source: dir.to_string_lossy().to_string(),
-        readonly,
+        scope: kind,
+        readonly: kind == RootKind::External,
         effective,
         // 开关是开的、却没进并集 → 一定是被前面的根里同名的那一个挡住了。
-        // 开关本来就关着的（本地停用 / 外部忽略）不叫遮蔽，那是用户自己关的。
+        // 开关本来就关着的（停用 / 外部忽略）不叫遮蔽，那是用户自己关的。
         shadowed_by: if enabled && !effective {
             winners
                 .iter()
-                .find(|(w, _)| w.name == m.name)
-                .map(|(_, root)| skill_md(root, &m.name))
+                .find(|(w, _, _)| w.name == m.name)
+                .map(|(_, root, _)| skill_md(root, &m.name))
         } else {
             None
         },
@@ -226,21 +366,32 @@ fn skill_md(root: &Path, name: &str) -> String {
         .to_string()
 }
 
-/// 列举全部技能：本地启用 / 本地停用 / 各外部根，**不去重**（见模块头）。
+/// 列举全部技能：项目 / 本地（各自启用 + 停用）/ 各外部根，**不去重**（见模块头）。
 pub fn list(scan: &Scan) -> Vec<SkillRow> {
     let winners = winners(scan);
     let mut rows = Vec::new();
-    // 本地两个目录：启用在前，于是「停用」的紧跟在它的同类后面，读起来是成组的。
-    for (dir, enabled) in [(&scan.local_enabled, true), (&scan.local_disabled, false)] {
-        for m in discover_at(dir) {
-            rows.push(row(&winners, dir, &m, enabled, false));
+    // 每一类的两个目录都是启用在前，于是「停用」紧跟在同类后面，读起来是成组的。
+    // 顺序与并集优先级一致：项目 → 本地 → 外部。
+    let mut writable: Vec<(PathBuf, RootKind, bool)> = Vec::new();
+    if let Some(p) = &scan.project_enabled {
+        writable.push((p.clone(), RootKind::Project, true));
+    }
+    if let Some(p) = &scan.project_disabled {
+        writable.push((p.clone(), RootKind::Project, false));
+    }
+    writable.push((scan.local_enabled.clone(), RootKind::Local, true));
+    writable.push((scan.local_disabled.clone(), RootKind::Local, false));
+
+    for (dir, kind, enabled) in writable {
+        for m in discover_at(&dir) {
+            rows.push(row(&winners, &dir, &m, enabled, kind));
         }
     }
     for root in &scan.externals {
         for m in discover_at(root) {
             // 外部技能的开关状态就是「有没有被忽略」。
-            let enabled = !scan.ignored_here(&m.name, true);
-            rows.push(row(&winners, root, &m, enabled, true));
+            let enabled = !scan.ignored_here(&m.name, RootKind::External);
+            rows.push(row(&winners, root, &m, enabled, RootKind::External));
         }
     }
     rows
@@ -248,33 +399,40 @@ pub fn list(scan: &Scan) -> Vec<SkillRow> {
 
 /// 技能正文（不含 frontmatter）。用于预览与编辑。
 ///
-/// 比并集多一层**本地停用目录**：停用的本地技能仍然可读，编辑弹窗要预览它，而它
-/// 不在并集里。外部那份与并集同源 —— 被忽略的名字读不到（模型本来也加载不到）。
-pub fn read(scan: &Scan, name: &str) -> Result<String, String> {
-    for dir in [&scan.local_enabled, &scan.local_disabled] {
-        if let Some(s) = load(dir, name) {
-            return Ok(s.body);
+/// `source` 给了就**只读那一个根**：列表里同名的行可能有两三行（项目 / 用户 / 外部），
+/// 编辑器打开的是其中具体一行，按名字猜会把别处的正文显示在这一行里。
+///
+/// 不给 `source` 时按并集优先级找，但多走一段**停用侧**：停用的技能仍然可读，
+/// 编辑弹窗要预览它，而它不在并集里。外部那份与并集同源 —— 被忽略的名字读不到
+/// （模型本来也加载不到）。
+pub fn read(scan: &Scan, name: &str, source: Option<&str>) -> Result<String, String> {
+    if let Some(raw) = source {
+        let Some((dir, kind)) = scan.root_of(raw) else {
+            return Err(format!("扫描列表里没有 `{raw}`"));
+        };
+        if scan.ignored_here(name, kind) {
+            return Err(format!("技能 `{name}` 已被忽略，先恢复它再编辑"));
         }
+        return load(&dir, name)
+            .map(|s| s.body)
+            .ok_or_else(|| format!("`{}` 里找不到技能 `{name}`", dir.display()));
     }
-    for root in &scan.externals {
-        if scan.ignored_here(name, true) {
+    for (dir, kind) in scan.readable_roots() {
+        if scan.ignored_here(name, kind) {
             continue;
         }
-        if let Some(s) = load(root, name) {
+        if let Some(s) = load(&dir, name) {
             return Ok(s.body);
         }
     }
     Err(format!("找不到技能 `{name}`"))
 }
 
-/// 这个名字的本地目录在哪一侧（`None` = 本地没有）。
-fn local_dir_of(scan: &Scan, name: &str) -> Option<PathBuf> {
-    for dir in [&scan.local_enabled, &scan.local_disabled] {
-        if dir.join(name).is_dir() {
-            return Some(dir.clone());
-        }
-    }
-    None
+/// 这个名字在哪个可写目录里（项目或用户，启用侧优先）。
+fn writable_dir_of(scan: &Scan, name: &str) -> Option<(PathBuf, RootKind)> {
+    scan.writable_roots()
+        .into_iter()
+        .find(|(dir, _)| dir.join(name).is_dir())
 }
 
 /// 这个名字在哪个外部根里（按优先级取第一个）。忽略名单不参与 —— 删不掉的时候
@@ -286,11 +444,31 @@ fn external_root_of(scan: &Scan, name: &str) -> Option<PathBuf> {
         .cloned()
 }
 
-fn move_skill(scan: &Scan, name: &str, to_enabled: bool) -> Result<(), String> {
+/// 搬目录启停。项目与用户各有一对目录，形状完全一样。
+fn move_skill(
+    scan: &Scan,
+    name: &str,
+    to_enabled: bool,
+    kind: RootKind,
+) -> Result<(), String> {
+    let (enabled, disabled) = match kind {
+        RootKind::Project => (
+            scan.project_enabled
+                .as_ref()
+                .ok_or_else(|| "当前会话不在项目里".to_string())?,
+            scan.project_disabled
+                .as_ref()
+                .ok_or_else(|| "当前会话不在项目里".to_string())?,
+        ),
+        RootKind::Local => (&scan.local_enabled, &scan.local_disabled),
+        RootKind::External => {
+            return Err("外部路径里的技能不能搬目录，只能按名字忽略".into());
+        }
+    };
     let (from, to) = if to_enabled {
-        (&scan.local_disabled, &scan.local_enabled)
+        (disabled, enabled)
     } else {
-        (&scan.local_enabled, &scan.local_disabled)
+        (enabled, disabled)
     };
     let src = from.join(name);
     if !src.is_dir() {
@@ -311,35 +489,48 @@ fn move_skill(scan: &Scan, name: &str, to_enabled: bool) -> Result<(), String> {
 ///
 /// 两套机制只在这一处交汇：
 ///
-/// * 本地那一行（`external = false`）→ 搬目录（现状不变，界面与文件管理器都看得见）；
-/// * 外部那一行（`external = true`）→ 记进忽略名单，**文件系统一字不动**。
+/// * 项目级 / 用户级那一行 → 搬目录（界面与文件管理器都看得见）；
+/// * 外部那一行 → 记进忽略名单，**文件系统一字不动**。
 ///
-/// 为什么要把「点的是哪一行」传进来，而不是只看名字在不在本地目录里：本地技能**停用**时
-/// 外部的同名技能会顶上来，那时列表里两行都有开关。按名字猜的话，点外部那一行会走到
-/// 「搬本地目录」那条路，而本地目录此刻正好不在启用侧 —— `move_skill` 认为「已经在目标
-/// 那一侧了」直接返回，于是**点了没反应**。名字在这两行里是同一个，能区分它们的只有来源。
+/// 为什么要把「点的是哪一行」传进来，而不是只看名字在不在可写目录里：同一个名字可能
+/// 同时在项目、用户、外部三个根里出现，那时列表里就有三行开关。按名字猜的话，点外部
+/// 那一行会走到「搬本地目录」那条路，而本地目录此刻正好不在启用侧 —— `move_skill`
+/// 认为「已经在目标那一侧了」直接返回，于是**点了没反应**。能区分它们的只有来源。
+///
+/// `source = None` 只有一种用法：从「已忽略」那一行恢复一个名字 —— 那个技能可能已经
+/// 不在任何扫描根里了（目录被删了），界面上没有来源路径可给。
 ///
 /// 合并成一个入口而不是给前端两个命令：界面上就是一个开关。
 ///
 /// 注意改的是 `app`，不是 `scan`：忽略名单住在设置里，所以改完还想重算并集的话，
-/// 得用 `Scan::from_settings(app)` 重新构造一份（`scan` 里那份是旧的快照）。
+/// 得用 `Scan::from_settings_at(app, cwd)` 重新构造一份（`scan` 里那份是旧的快照）。
 pub fn set_enabled(
     app: &mut AppSettings,
     scan: &Scan,
     name: &str,
     enabled: bool,
-    external: bool,
+    source: Option<&str>,
 ) -> Result<bool, String> {
-    if !external {
-        move_skill(scan, name, enabled)?;
-        return Ok(false);
+    let Some(raw) = source else {
+        return Ok(app.set_skill_ignored(name, !enabled));
+    };
+    let Some((dir, kind)) = scan.root_of(raw) else {
+        return Err(format!("扫描列表里没有 `{raw}`"));
+    };
+    match kind {
+        // 外部那一行：即便项目 / 用户里有同名技能，这次要关的也是外部那份。
+        // 按名字忽略只作用于外部路径，所以不会误伤别处的同名技能。
+        RootKind::External => {
+            if !dir.join(name).is_dir() {
+                return Err(format!("找不到技能 `{name}`"));
+            }
+            Ok(app.set_skill_ignored(name, !enabled))
+        }
+        _ => {
+            move_skill(scan, name, enabled, kind)?;
+            Ok(false)
+        }
     }
-    // 外部那一行：即便本地有同名技能，这次要关的也是外部那份。
-    // 按名字忽略只作用于外部路径，所以不会误伤本地的同名技能。
-    if external_root_of(scan, name).is_none() {
-        return Err(format!("找不到技能 `{name}`"));
-    }
-    Ok(app.set_skill_ignored(name, !enabled))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -351,6 +542,12 @@ pub struct SkillDraft {
     pub allowed_tools: Vec<String>,
     #[serde(default)]
     pub body: String,
+    /// 写到哪个根（列表里那一行的 `source`）。
+    ///
+    /// `None` = 按名字找它现在所在的目录；新技能回落用户目录。编辑停用列表里的技能时
+    /// 前端会把它的来源原样带回来，于是「改一个字」不会顺手把它变成启用。
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
 /// 把草稿渲染成 `SKILL.md`。
@@ -376,9 +573,11 @@ fn render(d: &SkillDraft) -> String {
     s
 }
 
-/// 新建或覆盖一个技能。新技能默认落在启用目录。**只写本地目录** —— 外部路径
-/// 一个字节都不碰。
-pub fn save(scan: &Scan, d: &SkillDraft) -> Result<(), String> {
+/// 新建或覆盖一个技能。**只写项目级 / 用户级**，外部路径一个字节都不碰。
+///
+/// 落点由 [`SkillDraft::source`] 决定；它缺省时按名字找技能现在所在的目录，新技能
+/// 落用户目录。返回实际写入的根，供调用方在界面上回显（「已保存到项目」）。
+pub fn save(scan: &Scan, d: &SkillDraft) -> Result<PathBuf, String> {
     let name = d.name.trim();
     if name.is_empty() {
         return Err("技能名不能为空".into());
@@ -391,24 +590,66 @@ pub fn save(scan: &Scan, d: &SkillDraft) -> Result<(), String> {
         return Err(format!("技能名 `{name}` 只能用字母、数字、`-`、`_`"));
     }
 
-    // 名字撞上外部路径里已有的技能 → 拒绝。重名时本地优先，于是「新建的技能把
-    // Claude Code 的技能顶掉了」这句话在磁盘上并不成立（那边一个字没动），
-    // 界面状态与磁盘状态不一致是最难查的一类问题 —— 而报错是可行动的，
-    // 编辑器里的名字本来就能改。
-    //
-    // 例外：那个外部技能**已经被忽略**时不拒绝。它本来就不参与并集，同名不构成竞争，
-    // 而且用户已经表达过「不要它」。
-    let blocked_by = if local_dir_of(scan, name).is_none() && !scan.ignored_here(name, true) {
-        external_root_of(scan, name)
-    } else {
-        None
+    let (dir, kind) = match &d.source {
+        Some(raw) => {
+            let Some((dir, kind)) = scan.root_of(raw) else {
+                return Err(format!("扫描列表里没有 `{raw}`"));
+            };
+            if kind == RootKind::External {
+                return Err(format!(
+                    "`{}` 是外部扫描路径，本应用不往里写。想放自己的版本，写到用户目录或项目目录里。",
+                    dir.display()
+                ));
+            }
+            (dir, kind)
+        }
+        // 已存在的写在它当前所在的目录，别把它从「停用」意外变成「启用」。
+        None => writable_dir_of(scan, name)
+            .unwrap_or_else(|| (scan.local_enabled.clone(), RootKind::Local)),
     };
-    if let Some(root) = blocked_by {
-        return Err(format!(
-            "外部扫描路径 {} 里已经有一个叫 `{name}` 的技能：重名时本地优先，\
-             那样模型用到的就不是你刚写的这一份。换个名字，或者先把它忽略掉。",
-            root.display()
-        ));
+
+    if !dir.join(name).is_dir() {
+        // 同名的在另一侧（停用的那份）→ 拒绝。写下去就会出现两份同名目录，
+        // 而列表只会把「启用」那份算进并集 —— 用户改的那份可能永远不生效。
+        if let Some((sibling, _)) = sibling_dir(scan, &dir, kind) {
+            if sibling.join(name).is_dir() {
+                return Err(format!(
+                    "`{name}` 在 {} 里已经有一份（启用 / 停用两侧各存一份会互相打架）：\
+                     先在列表里处理那一份再保存。",
+                    sibling.display()
+                ));
+            }
+        }
+
+        // 名字撞上外部路径里已有的技能 → 拒绝。写下去会把那一份遮住，而那边
+        // 可能正被别的工具用着；磁盘上那边一个字没动，界面状态却变了 ——
+        // 这是最难查的一类问题。报错是可行动的：改个名字，或者先忽略那一份。
+        //
+        // 例外：那个外部技能**已经被忽略**时不拒绝。它本来就不参与并集，同名不构成
+        // 竞争，而且用户已经表达过「不要它」。
+        if !scan.ignored_here(name, RootKind::External) {
+            if let Some(root) = external_root_of(scan, name) {
+                return Err(format!(
+                    "外部扫描路径 {} 里已经有一个叫 `{name}` 的技能：写下去会把它遮住。\
+                     换个名字，或者先把它忽略掉。",
+                    root.display()
+                ));
+            }
+        }
+
+        // 项目优先于用户：往用户目录写一个项目里已有的名字，模型用到的会是项目那份，
+        // 刚写的这一份永远不生效。
+        if kind == RootKind::Local {
+            if let Some(project) = &scan.project_enabled {
+                if project.join(name).is_dir() {
+                    return Err(format!(
+                        "当前项目（{}）里已经有一个叫 `{name}` 的技能：项目优先于用户目录，\
+                         模型用到的会是那一份。要改它就编辑项目里那一行，或者换个名字。",
+                        project.display()
+                    ));
+                }
+            }
+        }
     }
 
     let text = render(d);
@@ -418,16 +659,51 @@ pub fn save(scan: &Scan, d: &SkillDraft) -> Result<(), String> {
         return Err("生成的 SKILL.md 无法被解析，请检查名称与描述".into());
     }
 
-    // 已存在的话写在它当前所在的目录，别把它从「停用」意外变成「启用」。
-    let dir = local_dir_of(scan, name).unwrap_or_else(|| scan.local_enabled.clone());
     let target = dir.join(name);
     std::fs::create_dir_all(&target).map_err(|e| format!("建目录失败：{e}"))?;
-    std::fs::write(target.join("SKILL.md"), text).map_err(|e| format!("写 SKILL.md 失败：{e}"))
+    std::fs::write(target.join("SKILL.md"), text).map_err(|e| format!("写 SKILL.md 失败：{e}"))?;
+    Ok(dir)
 }
 
-/// 删除技能（目录整个删掉，不可恢复）。**只删本地的**。
-pub fn delete(scan: &Scan, name: &str) -> Result<(), String> {
-    for dir in [&scan.local_enabled, &scan.local_disabled] {
+/// 与 `dir` 同类、但属于另一侧（启用 ↔ 停用）的目录。
+fn sibling_dir(scan: &Scan, dir: &Path, kind: RootKind) -> Option<(PathBuf, RootKind)> {
+    let pair = match kind {
+        RootKind::Project => (scan.project_enabled.as_ref(), scan.project_disabled.as_ref()),
+        RootKind::Local => (Some(&scan.local_enabled), Some(&scan.local_disabled)),
+        RootKind::External => return None,
+    };
+    let (enabled, disabled) = pair;
+    let other = if same_dir(dir, enabled?) {
+        disabled?
+    } else {
+        enabled?
+    };
+    Some((other.clone(), kind))
+}
+
+/// 删除技能（目录整个删掉，不可恢复）。**只删项目级 / 用户级的**。
+///
+/// `source` 指到哪个根就删哪个根 —— 同名的技能可能在项目与用户两处都有，按名字猜
+/// 会删错一份。
+pub fn delete(scan: &Scan, name: &str, source: Option<&str>) -> Result<(), String> {
+    if let Some(raw) = source {
+        let Some((dir, kind)) = scan.root_of(raw) else {
+            return Err(format!("扫描列表里没有 `{raw}`"));
+        };
+        if kind == RootKind::External {
+            return Err(format!(
+                "`{name}` 来自外部扫描路径 {} —— 那是别的工具自己的目录，本应用不会删除它。\
+                 不想要的话，关掉它的开关（记进忽略名单），或者把这条扫描路径移除。",
+                dir.display()
+            ));
+        }
+        let p = dir.join(name);
+        if p.is_dir() {
+            return std::fs::remove_dir_all(&p).map_err(|e| format!("删除失败：{e}"));
+        }
+        return Err(format!("`{}` 里找不到技能 `{name}`", dir.display()));
+    }
+    for (dir, _) in scan.writable_roots() {
         let p = dir.join(name);
         if p.is_dir() {
             return std::fs::remove_dir_all(&p).map_err(|e| format!("删除失败：{e}"));
@@ -498,8 +774,9 @@ pub fn remove_root(app: &mut AppSettings, raw: &str) -> Result<(), String> {
 #[derive(Debug, Clone, Serialize)]
 pub struct SkillRootRow {
     pub path: String,
-    /// `local` = 本应用自己的目录（不可移除）；`external` = 用户加进来的。
-    pub source: String,
+    /// `project` = 跟着会话走（自动发现，不可移除）；`local` = 本应用自己的用户目录
+    /// （不可移除）；`external` = 用户加进来的。
+    pub source: RootKind,
     pub exists: bool,
     /// 直接子目录数。
     pub subdirs: usize,
@@ -513,23 +790,27 @@ pub struct SkillRootRow {
     pub ignored: usize,
 }
 
-/// 扫描根一览：本地目录排第一，然后是外部根（顺序 = 优先级）。
+/// 扫描根一览：项目 → 用户 → 外部根（顺序 = 优先级）。
 pub fn roots(scan: &Scan) -> Vec<SkillRootRow> {
     let winners = winners(scan);
-    let mut out = vec![root_row(scan, &winners, &scan.local_enabled, false)];
+    let mut out = Vec::new();
+    if let Some(project) = &scan.project_enabled {
+        out.push(root_row(scan, &winners, project, RootKind::Project));
+    }
+    out.push(root_row(scan, &winners, &scan.local_enabled, RootKind::Local));
     out.extend(
         scan.externals
             .iter()
-            .map(|root| root_row(scan, &winners, root, true)),
+            .map(|root| root_row(scan, &winners, root, RootKind::External)),
     );
     out
 }
 
 fn root_row(
     scan: &Scan,
-    winners: &[(SkillMeta, PathBuf)],
+    winners: &[(SkillMeta, PathBuf, RootKind)],
     root: &Path,
-    external: bool,
+    kind: RootKind,
 ) -> SkillRootRow {
     let metas = discover_at(root);
     let found = metas.len();
@@ -538,20 +819,16 @@ fn root_row(
         .filter(|m| {
             winners
                 .iter()
-                .any(|(w, r)| w.name == m.name && r.as_path() == root)
+                .any(|(w, r, _)| w.name == m.name && r.as_path() == root)
         })
         .count();
-    let ignored = if external {
-        metas
-            .iter()
-            .filter(|m| scan.ignored_here(&m.name, true))
-            .count()
-    } else {
-        0
-    };
+    let ignored = metas
+        .iter()
+        .filter(|m| scan.ignored_here(&m.name, kind))
+        .count();
     SkillRootRow {
         path: root.to_string_lossy().to_string(),
-        source: if external { "external".into() } else { "local".into() },
+        source: kind,
         exists: root.is_dir(),
         subdirs: count_subdirs(root),
         found,
@@ -687,9 +964,29 @@ mod tests {
             std::fs::create_dir_all(&d).unwrap();
             d
         }
+        /// 项目级目录：`<dir>/proj/.carter/skills`。
+        fn project(&self) -> PathBuf {
+            self.dir.join("proj").join(".carter").join("skills")
+        }
+        fn project_disabled(&self) -> PathBuf {
+            self.project().with_file_name("skills.disabled")
+        }
         fn scan(&self, externals: &[&Path], ignored: &[&str]) -> Scan {
+            self.scan_with_project(None, externals, ignored)
+        }
+        fn scan_with_project(
+            &self,
+            project: Option<&Path>,
+            externals: &[&Path],
+            ignored: &[&str],
+        ) -> Scan {
             std::fs::create_dir_all(self.local()).unwrap();
+            if let Some(p) = project {
+                std::fs::create_dir_all(p).unwrap();
+            }
             Scan {
+                project_disabled: project.map(|p| p.with_file_name("skills.disabled")),
+                project_enabled: project.map(|p| p.to_path_buf()),
                 local_enabled: self.local(),
                 local_disabled: self.disabled(),
                 externals: externals.iter().map(|p| p.to_path_buf()).collect(),
@@ -850,7 +1147,10 @@ mod tests {
 
         let scan = f.scan(&[], &[]);
         assert!(union_metas(&scan).is_empty(), "不进并集");
-        assert_eq!(read(&scan, "pdf").unwrap().trim(), "停用的本地 的正文");
+        assert_eq!(
+            read(&scan, "pdf", None).unwrap().trim(),
+            "停用的本地 的正文"
+        );
         f.cleanup();
     }
 
@@ -870,6 +1170,7 @@ mod tests {
                 description: "新的".into(),
                 allowed_tools: vec![],
                 body: "正文".into(),
+                source: None,
             },
         )
         .expect_err("重名应当被拒绝");
@@ -901,6 +1202,7 @@ mod tests {
                 description: "新的".into(),
                 allowed_tools: vec![],
                 body: "正文".into(),
+                source: None,
             },
         )
         .expect("被忽略的外部同名不该挡住本地新建");
@@ -917,7 +1219,7 @@ mod tests {
         write_skill(&ext, "excel", "外部的");
 
         let scan = f.scan(&[&ext], &[]);
-        let err = delete(&scan, "excel").expect_err("外部技能不该被删");
+        let err = delete(&scan, "excel", None).expect_err("外部技能不该被删");
         assert!(err.contains("excel") && err.contains("忽略"), "{err}");
         assert!(ext.join("excel").is_dir(), "外部目录必须原样留着");
         f.cleanup();
@@ -933,8 +1235,9 @@ mod tests {
         let scan = f.scan(&[&ext], &[]);
         let mut app = AppSettings::default();
 
+        let ext_s = ext.to_string_lossy().to_string();
         assert!(
-            set_enabled(&mut app, &scan, "excel", false, true).unwrap(),
+            set_enabled(&mut app, &scan, "excel", false, Some(&ext_s)).unwrap(),
             "改了忽略名单 → 调用方要落盘"
         );
         assert!(app.skill_ignored("excel"));
@@ -943,7 +1246,7 @@ mod tests {
         // 这正是 `set_enabled` 的文档里那句提醒。
         assert!(union_metas(&rescan(&f, &[&ext], &app)).is_empty());
 
-        assert!(set_enabled(&mut app, &scan, "excel", true, true).unwrap());
+        assert!(set_enabled(&mut app, &scan, "excel", true, Some(&ext_s)).unwrap());
         assert!(!app.skill_ignored("excel"));
         assert_eq!(names(&union_metas(&rescan(&f, &[&ext], &app))), vec!["excel"]);
         f.cleanup();
@@ -957,12 +1260,13 @@ mod tests {
 
         let scan = f.scan(&[], &[]);
         let mut app = AppSettings::default();
+        let local_s = f.local().to_string_lossy().to_string();
 
-        assert!(!set_enabled(&mut app, &scan, "pdf", false, false).unwrap());
+        assert!(!set_enabled(&mut app, &scan, "pdf", false, Some(&local_s)).unwrap());
         assert!(f.disabled().join("pdf").is_dir());
         assert!(app.ignored_skills.is_empty(), "本地技能不走忽略名单");
 
-        assert!(!set_enabled(&mut app, &scan, "pdf", true, false).unwrap());
+        assert!(!set_enabled(&mut app, &scan, "pdf", true, Some(&local_s)).unwrap());
         assert!(f.local().join("pdf").is_dir());
         f.cleanup();
     }
@@ -982,7 +1286,14 @@ mod tests {
         let mut app = AppSettings::default();
 
         // 外部那一行（readonly=true）→ 忽略名单。
-        assert!(set_enabled(&mut app, &scan, "pdf", false, true).unwrap());
+        assert!(set_enabled(
+            &mut app,
+            &scan,
+            "pdf",
+            false,
+            Some(&ext.to_string_lossy())
+        )
+        .unwrap());
         assert!(app.skill_ignored("pdf"));
         assert!(
             f.disabled().join("pdf").is_dir(),
@@ -995,7 +1306,8 @@ mod tests {
         );
 
         // 本地那一行 → 搬目录，与忽略名单无关。
-        assert!(!set_enabled(&mut app, &scan, "pdf", true, false).unwrap());
+        let local_s = f.local().to_string_lossy().to_string();
+        assert!(!set_enabled(&mut app, &scan, "pdf", true, Some(&local_s)).unwrap());
         assert!(f.local().join("pdf").is_dir());
         assert!(app.skill_ignored("pdf"), "点本地那一行不该动忽略名单");
         f.cleanup();
@@ -1016,12 +1328,12 @@ mod tests {
         let scan = f.scan(&[&ext], &["slides"]);
         let rows = roots(&scan);
         assert_eq!(rows.len(), 2, "本地目录排第一，然后是外部根");
-        assert_eq!(rows[0].source, "local");
+        assert_eq!(rows[0].source, RootKind::Local);
         assert!(rows[0].exists && rows[0].found == 1 && rows[0].effective == 1);
         assert_eq!(rows[0].subdirs, 1);
 
         let ext_row = &rows[1];
-        assert_eq!(ext_row.source, "external");
+        assert_eq!(ext_row.source, RootKind::External);
         assert_eq!(ext_row.found, 3);
         assert_eq!(ext_row.effective, 1, "只有 excel 进了并集");
         assert_eq!(ext_row.shadowed, 1, "pdf 被本地那个挡住");
@@ -1187,7 +1499,14 @@ mod tests {
         assert!(find_body(&scan, "something-else").is_none());
         // 启停也照这个名字走，否则开关会「点了没反应」。
         let mut app = AppSettings::default();
-        assert!(set_enabled(&mut app, &scan, "real-dir", false, true).unwrap());
+        assert!(set_enabled(
+            &mut app,
+            &scan,
+            "real-dir",
+            false,
+            Some(&ext.to_string_lossy())
+        )
+        .unwrap());
         assert!(app.skill_ignored("real-dir"));
         f.cleanup();
     }
@@ -1225,12 +1544,258 @@ mod tests {
         f.cleanup();
     }
 
+    /// 项目级：并集里排在用户级**前面**（同一个项目里，项目钉死的版本更具体）。
+    #[test]
+    fn the_project_root_wins_over_the_user_root() {
+        let f = Fixture::new("project-wins");
+        let proj = f.project();
+        write_skill(&f.local(), "pdf", "用户的");
+        write_skill(&proj, "pdf", "项目的");
+
+        let scan = f.scan_with_project(Some(&proj), &[], &[]);
+        let metas = union_metas(&scan);
+        assert_eq!(names(&metas), vec!["pdf"]);
+        assert_eq!(metas[0].description, "项目的", "同名的取项目那份");
+        assert_eq!(
+            find_body(&scan, "pdf").unwrap().trim(),
+            "项目的 的正文",
+            "正文必须与系统提示里的那一份同源"
+        );
+        f.cleanup();
+    }
+
+    /// 项目级与用户级都是本应用的目录：可写、可搬、可删。列表里要能分清是哪一类。
+    #[test]
+    fn project_rows_are_writable_and_tagged_as_project() {
+        let f = Fixture::new("project-rows");
+        let proj = f.project();
+        write_skill(&proj, "pdf", "项目的");
+        write_skill(&f.local(), "excel", "用户的");
+
+        let scan = f.scan_with_project(Some(&proj), &[], &[]);
+        let rows = list(&scan);
+        let project = rows.iter().find(|r| r.name == "pdf").unwrap();
+        assert_eq!(project.scope, RootKind::Project);
+        assert!(!project.readonly && project.enabled && project.effective);
+        let local = rows.iter().find(|r| r.name == "excel").unwrap();
+        assert_eq!(local.scope, RootKind::Local);
+
+        // 根一览也是项目在前
+        let roots = roots(&scan);
+        assert_eq!(roots[0].source, RootKind::Project);
+        assert_eq!(roots[1].source, RootKind::Local);
+        f.cleanup();
+    }
+
+    /// 停用项目技能 = 在项目自己的两个目录之间搬，别动用户目录。
+    #[test]
+    fn toggling_a_project_skill_moves_it_within_the_project() {
+        let f = Fixture::new("toggle-project");
+        let proj = f.project();
+        write_skill(&proj, "pdf", "项目的");
+
+        let scan = f.scan_with_project(Some(&proj), &[], &[]);
+        let mut app = AppSettings::default();
+        let src = proj.to_string_lossy().to_string();
+
+        assert!(!set_enabled(&mut app, &scan, "pdf", false, Some(&src)).unwrap());
+        assert!(f.project_disabled().join("pdf").is_dir());
+        assert!(!proj.join("pdf").is_dir());
+        assert!(union_metas(&scan).is_empty(), "停用后不参与并集");
+        assert!(f.local().join("pdf").is_dir() == false, "用户目录不该多出东西");
+
+        assert!(!set_enabled(&mut app, &scan, "pdf", true, Some(&src)).unwrap());
+        assert!(proj.join("pdf").is_dir());
+        assert!(app.ignored_skills.is_empty(), "项目技能不走忽略名单");
+        f.cleanup();
+    }
+
+    /// 忽略名单只作用于外部：项目里同名的那份照样进并集。
+    #[test]
+    fn the_ignore_list_never_touches_project_skills() {
+        let f = Fixture::new("ignore-project");
+        let proj = f.project();
+        write_skill(&proj, "pdf", "项目的");
+
+        let scan = f.scan_with_project(Some(&proj), &[], &["pdf"]);
+        assert_eq!(names(&union_metas(&scan)), vec!["pdf"]);
+        f.cleanup();
+    }
+
+    /// 往用户目录新建一个项目里已有的名字 → 拒绝。项目优先，刚写的这份永远不生效。
+    #[test]
+    fn save_refuses_a_user_skill_the_project_already_shadows() {
+        let f = Fixture::new("project-shadow");
+        let proj = f.project();
+        write_skill(&proj, "pdf", "项目的");
+
+        let scan = f.scan_with_project(Some(&proj), &[], &[]);
+        let mut d = draft("pdf");
+        d.source = Some(f.local().to_string_lossy().to_string());
+        let err = save(&scan, &d).expect_err("项目里已有同名，用户目录新建要拒绝");
+        assert!(err.contains("项目") && err.contains("pdf"), "{err}");
+        assert!(!f.local().join("pdf").exists(), "拒绝之后不该留下目录");
+        f.cleanup();
+    }
+
+    /// 往项目里新建：落在项目的 `.carter/skills`，用户目录一个字不动。
+    #[test]
+    fn save_into_the_project_writes_only_the_project_root() {
+        let f = Fixture::new("save-project");
+        let proj = f.project();
+        write_skill(&f.local(), "pdf", "用户的");
+
+        let scan = f.scan_with_project(Some(&proj), &[], &[]);
+        let mut d = draft("excel");
+        d.source = Some(proj.to_string_lossy().to_string());
+        let wrote = save(&scan, &d).expect("项目里新建应当成功");
+
+        assert_eq!(wrote, proj);
+        assert!(proj.join("excel").join("SKILL.md").is_file());
+        assert!(!f.local().join("excel").exists(), "用户目录不该多出东西");
+        // 项目优先：并集里 excel 来自项目
+        assert_eq!(
+            find_body(&scan, "excel").unwrap().trim(),
+            "# 用法\n\n先 read_file，再 bash。"
+        );
+        f.cleanup();
+    }
+
+    /// 同名技能在项目与用户两处都有时，按来源删 —— 别删错那一份。
+    #[test]
+    fn deleting_by_source_removes_exactly_that_copy() {
+        let f = Fixture::new("delete-project");
+        let proj = f.project();
+        write_skill(&proj, "pdf", "项目的");
+        write_skill(&f.local(), "pdf", "用户的");
+
+        let scan = f.scan_with_project(Some(&proj), &[], &[]);
+        delete(&scan, "pdf", Some(&proj.to_string_lossy())).unwrap();
+        assert!(!proj.join("pdf").exists());
+        assert!(f.local().join("pdf").is_dir(), "用户那份必须还在");
+        f.cleanup();
+    }
+
+    /// 外部路径不能当写目标 —— 提示要指向可行动的做法。
+    #[test]
+    fn saving_into_an_external_root_is_refused() {
+        let f = Fixture::new("save-external");
+        let ext = f.external("ext");
+        write_skill(&ext, "pdf", "外部的");
+
+        let scan = f.scan(&[&ext], &[]);
+        let mut d = draft("pdf");
+        d.source = Some(ext.to_string_lossy().to_string());
+        let err = save(&scan, &d).expect_err("外部路径只读");
+        assert!(err.contains("外部"), "{err}");
+        f.cleanup();
+    }
+
+    /// 会话开在子目录里也要找得到项目根；最近的那个赢。
+    #[test]
+    fn project_roots_walk_up_and_take_the_nearest_one() {
+        let f = Fixture::new("walk-up");
+        let outer = f.dir.join("repo").join(".carter").join("skills");
+        let inner = outer
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("sub")
+            .join(".carter")
+            .join("skills");
+        std::fs::create_dir_all(&outer).unwrap();
+        std::fs::create_dir_all(&inner).unwrap();
+        let deep = inner.parent().unwrap().parent().unwrap().join("src");
+
+        let got = project_roots(&deep, &f.local(), &f.disabled()).expect("应当找到项目根");
+        assert_eq!(got.0, inner, "最近的 .carter/skills 赢");
+        f.cleanup();
+    }
+
+    /// 用户自己的 `~/.carter/skills` 不能被当成项目根 —— 它在并集里已有位置。
+    #[test]
+    fn project_roots_skip_the_users_own_skills_dir() {
+        let f = Fixture::new("skip-local");
+        // 把「用户目录」放在一个假的项目形状里：<home>/.carter/skills
+        let home = f.dir.join("home");
+        let local = home.join(".carter").join("skills");
+        let disabled = home.join(".carter").join("skills.disabled");
+        std::fs::create_dir_all(&local).unwrap();
+        let deep = home.join("work").join("proj");
+        std::fs::create_dir_all(&deep).unwrap();
+
+        let got = project_roots(&deep, &local, &disabled).expect("回落也不该是 None");
+        assert_ne!(
+            got.0, local,
+            "ancestors 里那个 ~/.carter/skills 是用户目录，不能当项目根"
+        );
+        assert_eq!(
+            got.0,
+            deep.join(".carter").join("skills"),
+            "一个 .carter 都没有时，回落到 cwd 自己的 .carter/skills"
+        );
+        f.cleanup();
+    }
+
+    /// 端到端：`from_settings_at` 把 cwd 的项目根接进并集，并且**项目赢**。
+    ///
+    /// 只有这条测试碰进程级环境（`CARTER_HOME`），所以它拿 [`crate::paths::ENV_LOCK`]
+    /// —— 与 `config_edit` / `changes` 里那些同样改进程环境的测试串行。
+    #[test]
+    fn from_settings_at_attaches_the_project_root_and_it_wins() {
+        let _g = crate::paths::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tmp_dir("from-settings");
+        // SAFETY: 与其它改进程级环境变量的测试共用同一把锁。
+        unsafe { std::env::set_var("CARTER_HOME", &home) };
+
+        let proj = home.join("proj");
+        let project_skills = proj.join(".carter").join("skills");
+        std::fs::create_dir_all(&project_skills).unwrap();
+        let user_skills = home.join("skills");
+        write_skill(&project_skills, "pdf", "项目的");
+        write_skill(&user_skills, "pdf", "用户的");
+
+        // 用户把项目目录也手填进了扫描路径 —— 不该出现两次。
+        let settings = AppSettings {
+            skill_roots: vec![
+                project_skills.to_string_lossy().to_string(),
+                home.join("ext").to_string_lossy().to_string(),
+            ],
+            ..AppSettings::default()
+        };
+
+        let scan = Scan::from_settings_at(&settings, Some(&proj));
+        assert_eq!(
+            scan.project_enabled.as_deref(),
+            Some(project_skills.as_path())
+        );
+        assert_eq!(scan.local_enabled, user_skills);
+        assert_eq!(scan.externals.len(), 1, "项目根重复出现在设置里时只留一份");
+
+        let metas = union_metas(&scan);
+        assert_eq!(names(&metas), vec!["pdf"]);
+        assert_eq!(metas[0].description, "项目的", "项目优先于用户目录");
+        assert_eq!(find_body(&scan, "pdf").unwrap().trim(), "项目的 的正文");
+
+        // 没有 cwd 时退回旧行为：只有用户级与外部根。
+        let scan = Scan::from_settings_at(&settings, None);
+        assert!(scan.project_enabled.is_none());
+        assert_eq!(union_metas(&scan)[0].description, "用户的");
+
+        unsafe { std::env::remove_var("CARTER_HOME") };
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     fn draft(name: &str) -> SkillDraft {
         SkillDraft {
             name: name.into(),
             description: "把 PDF 拆成文本".into(),
             allowed_tools: vec!["read_file".into(), "bash".into()],
             body: "# 用法\n\n先 read_file，再 bash。".into(),
+            source: None,
         }
     }
 }

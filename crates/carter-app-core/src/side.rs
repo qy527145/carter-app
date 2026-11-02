@@ -295,7 +295,11 @@ fn side_system(
     model: &ModelInfo,
 ) -> Vec<String> {
     let skill_metas = if config.skills.enabled {
-        crate::skills::union_metas(&crate::skills::Scan::from_settings(settings))
+        // 项目级技能跟着 cwd 走 —— 侧边会话与主会话在同一个项目里。
+        crate::skills::union_metas(&crate::skills::Scan::from_settings_at(
+            settings,
+            Some(cwd),
+        ))
     } else {
         Vec::new()
     };
