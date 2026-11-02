@@ -282,7 +282,11 @@ pub fn bash_tool_description() -> String {
          **长时间运行的命令**（起服务、跑长构建、`tail -f`）加 `run_in_background: true`：\
          它立刻返回一个 shell_id，不卡住这一轮；之后用 `bash_output` 读它的新输出、\
          用 `kill_shell` 结束它。前台命令在用户点「停止」时会被立即杀掉。\n\n\
-         当前环境：**{os}**，命令通过 {inv} 执行，shell 是 {}。\n",
+         当前环境：**{os}**，命令通过 {inv} 执行，shell 是 {}。\n\n\
+         **工作目录**：命令已经在会话的工作目录（系统提示里的「工作目录」）下执行，\
+         不需要先 `cd` 过去；工作目录内的文件直接写相对路径（`src/main.rs`、`sub/dir`）。\
+         每次调用都是新起的 shell，`cd` 不会带到下一次调用 —— 要在子目录里跑就写\
+         `cd sub && 命令`（相对路径），别写 `cd /完整/绝对/路径 && ...`。\n",
         shell.label()
     );
 
