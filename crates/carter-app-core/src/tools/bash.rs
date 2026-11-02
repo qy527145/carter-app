@@ -50,16 +50,113 @@ use serde_json::{Value, json};
 use carter::agent::CancelToken;
 use carter::tools::{Tool, ToolResult};
 
-use crate::platform::detect_shell;
+use crate::platform::{ShellKind, detect_shell};
 
 use super::background::BackgroundShells;
 
 const MAX_OUTPUT: usize = 30_000;
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
 
+/// bash 的当前目录：跨调用保留，像终端一样。
+///
+/// ## 为什么
+///
+/// 每次调用都是新起的 shell，`cd` 在命令结束时就丢了。模型于是每条命令都写一遍
+/// `cd /很长/的/绝对路径 && ...` —— 卡片上一屏都是同一个前缀。描述里劝它别这么写
+/// 治标不治本：它要在子目录里干活，就只能每次都 cd。
+///
+/// 所以让 `cd` 真的留下来：命令末尾（EXIT trap）把 `pwd` 写进一个临时文件，执行完
+/// 读回来，下一条命令就在那里起。进了子目录之后，后面的命令就不用再带 cd。
+///
+/// ## 只在工作目录之内跟随
+///
+/// 文件工具（read_file 等）的相对路径始终按会话工作目录解析。bash 要是能漂到任意
+/// 地方，两边对「当前目录」的理解会越差越远。所以目录离开工作目录时，下一条命令
+/// 回到工作目录，并在结果里明说。
+///
+/// 只对 POSIX shell 生效：cmd.exe 没有可靠的 EXIT 钩子，那边维持每次从工作目录起。
+pub struct ShellCwd {
+    root: std::path::PathBuf,
+    current: Mutex<std::path::PathBuf>,
+}
+
+impl ShellCwd {
+    pub fn new(root: std::path::PathBuf) -> Arc<Self> {
+        Arc::new(Self {
+            current: Mutex::new(root.clone()),
+            root,
+        })
+    }
+
+    /// 下一条命令该在哪起。记下的目录被删了就回到工作目录。
+    pub fn current(&self) -> std::path::PathBuf {
+        let cur = self.current.lock().unwrap().clone();
+        if cur.is_dir() { cur } else { self.root.clone() }
+    }
+
+    /// 命令结束时 shell 所在的目录。目录变了就返回一句给模型看的说明。
+    fn update(&self, reported: &std::path::Path) -> Option<String> {
+        if !reported.is_dir() {
+            return None;
+        }
+        // 比较前都规范化：macOS 的 /tmp 是 /private/tmp 的链接，不规范化的话
+        // 同一个目录会被当成「工作目录之外」。
+        let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let root = canon(&self.root);
+        let new = canon(reported);
+        let mut cur = self.current.lock().unwrap();
+        if new.starts_with(&root) {
+            if canon(&cur) == new {
+                return None;
+            }
+            *cur = reported.to_path_buf();
+            Some(format!("[cwd] 当前目录：{}（下一条命令在这里执行）", reported.display()))
+        } else {
+            *cur = self.root.clone();
+            Some(format!(
+                "[cwd] 命令结束时在工作目录之外（{}），下一条命令回到工作目录 {}",
+                reported.display(),
+                self.root.display()
+            ))
+        }
+    }
+}
+
+/// EXIT trap 的落点文件。每次调用一个，用完删掉。
+fn cwd_marker() -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    std::env::temp_dir().join(format!(
+        "carter-cwd-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
+struct RemoveOnDrop(std::path::PathBuf);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// 给命令套上「结束时把 pwd 写进 marker」的外壳。路径里有引号就不套 —— 宁可不跟随，
+/// 也不拼出一条引号错乱的命令。
+fn with_cwd_trap(command: &str, marker: &std::path::Path) -> Option<String> {
+    let path = marker.to_string_lossy().replace('\\', "/");
+    if path.contains(['\'', '"', '$', '`']) {
+        return None;
+    }
+    // Git Bash 的 `pwd` 是 `/c/Users/...`，`-W` 才是 Windows 认得的 `C:/Users/...`。
+    let pwd = if cfg!(windows) { "pwd -W 2>/dev/null || pwd" } else { "pwd" };
+    // 换行而不是 `;` 分隔：命令以注释或 heredoc 结尾时也不会把 trap 吞进去。
+    Some(format!("trap '{{ {pwd}; }} > \"{path}\"' EXIT\n{command}"))
+}
+
 pub struct PlatformBash {
-    /// 会话的工作目录。
-    cwd: std::path::PathBuf,
+    /// 会话的工作目录，以及 bash 此刻所在的目录。
+    cwd: Arc<ShellCwd>,
     /// 用户按「停止」/关会话时置位。见模块头。
     cancel: CancelToken,
     /// 后台命令表。`None` = 这个工具只用来展示（设置页的工具体验），不真跑后台。
@@ -69,8 +166,9 @@ pub struct PlatformBash {
 }
 
 impl PlatformBash {
+    /// `cwd` 由会话持有、每轮重建工具时传进来 —— 当前目录要跨轮保留。
     pub fn new(
-        cwd: std::path::PathBuf,
+        cwd: Arc<ShellCwd>,
         cancel: CancelToken,
         shells: Option<Arc<BackgroundShells>>,
         session_id: impl Into<String>,
@@ -129,12 +227,13 @@ impl Tool for PlatformBash {
 
         // 工作目录不存在就直接说清楚。让 spawn 去报 "program not found" 会把
         // 「目录没了」伪装成「命令不存在」，很难查。
-        if !self.cwd.is_dir() {
+        if !self.cwd.root.is_dir() {
             return ToolResult::err(format!(
                 "工作目录不存在：{}（在输入框下方改一个有效目录，或新开会话）",
-                self.cwd.display()
+                self.cwd.root.display()
             ));
         }
+        let here = self.cwd.current();
 
         let shell = detect_shell();
 
@@ -148,7 +247,7 @@ impl Tool for PlatformBash {
             let Some(shells) = &self.shells else {
                 return ToolResult::err("这个会话不支持后台命令。");
             };
-            return match shells.spawn(command, &self.cwd, &shell, &self.session_id) {
+            return match shells.spawn(command, &here, &shell, &self.session_id) {
                 Ok((id, log)) => ToolResult::ok(format!(
                     "命令已在后台启动。\n\
                      shell_id={id}\n\
@@ -163,10 +262,17 @@ impl Tool for PlatformBash {
 
         let warning = sniff_dangerous(command);
 
+        // 跟随 `cd`：命令结束时把所在目录写进 marker，见 [`ShellCwd`]。
+        let marker = matches!(shell.kind, ShellKind::Posix).then(cwd_marker);
+        let wrapped = marker.as_deref().and_then(|m| with_cwd_trap(command, m));
+        let marker = wrapped.is_some().then_some(marker).flatten();
+        // 中断 / 超时 / 转后台都不会走到读回那一步，marker 靠 drop 收掉。
+        let _cleanup = marker.clone().map(RemoveOnDrop);
+
         let mut cmd = tokio::process::Command::new(&shell.program);
         cmd.arg(shell.flag)
-            .arg(command)
-            .current_dir(&self.cwd)
+            .arg(wrapped.as_deref().unwrap_or(command))
+            .current_dir(&here)
             // 桌面进程的 stdin 不是终端。不显式给 null 的话，`cat` / `read`
             // 这类命令会一直等着一个永远不会来的输入 —— 用户看到的就是
             // 「运行中…」再也不会变。
@@ -332,6 +438,12 @@ impl Tool for PlatformBash {
             // 否则模型会以为输出丢了。
             body.push_str("(命令成功，没有输出)");
         }
+        if let Some(note) = marker.as_deref().and_then(|m| self.read_marker(m)) {
+            if !body.ends_with('\n') {
+                body.push('\n');
+            }
+            body.push_str(&note);
+        }
 
         let report = format!("exit_code={code}\n{}", truncate(&body, MAX_OUTPUT));
         if status.success() {
@@ -343,6 +455,17 @@ impl Tool for PlatformBash {
 }
 
 impl PlatformBash {
+    /// 读回命令结束时所在的目录并更新 [`ShellCwd`]。目录变了才返回说明。
+    fn read_marker(&self, marker: &std::path::Path) -> Option<String> {
+        let raw = std::fs::read_to_string(marker).ok();
+        let _ = std::fs::remove_file(marker);
+        let dir = raw?.trim_end_matches(['\n', '\r']).to_string();
+        if dir.is_empty() {
+            return None;
+        }
+        self.cwd.update(std::path::Path::new(&dir))
+    }
+
     /// 把一条前台命令交给后台表，并立刻返回 `shell_id`。
     fn hand_over_to_background(
         &self,
@@ -615,7 +738,7 @@ mod tests {
 
     /// 一个「没有人会去取消」的工具。取消相关的测试自己另建令牌。
     fn tool(cwd: std::path::PathBuf) -> PlatformBash {
-        PlatformBash::new(cwd, CancelToken::new(), None, "test")
+        PlatformBash::new(ShellCwd::new(cwd), CancelToken::new(), None, "test")
     }
 
     #[tokio::test]
@@ -661,7 +784,7 @@ mod tests {
     #[tokio::test]
     async fn a_running_command_is_killed_promptly_on_cancel() {
         let cancel = CancelToken::new();
-        let tool = PlatformBash::new(std::env::temp_dir(), cancel.clone(), None, "test");
+        let tool = PlatformBash::new(ShellCwd::new(std::env::temp_dir()), cancel.clone(), None, "test");
         let c = cancel.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(150)).await;
@@ -719,7 +842,7 @@ mod tests {
             std::process::id()
         )));
         let tool = Arc::new(PlatformBash::new(
-            std::env::temp_dir(),
+            ShellCwd::new(std::env::temp_dir()),
             CancelToken::new(),
             Some(shells.clone()),
             "test-session",
@@ -761,7 +884,7 @@ mod tests {
     async fn a_cancelled_turn_does_not_start_the_command_at_all() {
         let cancel = CancelToken::new();
         cancel.set();
-        let tool = PlatformBash::new(std::env::temp_dir(), cancel, None, "test");
+        let tool = PlatformBash::new(ShellCwd::new(std::env::temp_dir()), cancel, None, "test");
         let res = tool
             .execute(json!({"command": "echo should-not-run"}))
             .await;
@@ -776,7 +899,7 @@ mod tests {
             std::env::temp_dir().join(format!("carter-bg-bash-{}", std::process::id())),
         );
         let tool = PlatformBash::new(
-            std::env::temp_dir(),
+            ShellCwd::new(std::env::temp_dir()),
             CancelToken::new(),
             Some(shells.clone()),
             "test-session",
@@ -790,6 +913,62 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(3), "不该阻塞");
         // 收尾：别把测试进程里的子进程留着。
         shells.kill_all();
+    }
+
+    /// 一个独立的临时工作目录，带一个子目录 `sub`。
+    fn workdir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("carter-cwd-test-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(d.join("sub")).unwrap();
+        d
+    }
+
+    /// `cd` 要留到下一次调用 —— 这是模型不再每条命令都 `cd /绝对路径` 的前提。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cd_sticks_across_calls() {
+        let dir = workdir("stick");
+        let tool = tool(dir.clone());
+        let res = tool.execute(json!({"command": "cd sub"})).await;
+        assert!(res.ok, "{}", res.content);
+        assert!(res.content.contains("[cwd]"), "目录变了要告诉模型：{}", res.content);
+
+        let res = tool.execute(json!({"command": "pwd -P"})).await;
+        assert!(res.content.trim_end().ends_with("/sub"), "{}", res.content);
+        assert!(!res.content.contains("[cwd]"), "目录没变就别啰嗦：{}", res.content);
+    }
+
+    /// 失败的命令也照样跟随，退出码不能被 trap 吃掉。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exit_code_survives_the_trap() {
+        let tool = tool(workdir("code"));
+        let res = tool.execute(json!({"command": "cd sub && exit 3"})).await;
+        assert!(!res.ok);
+        assert!(res.content.contains("exit_code=3"), "{}", res.content);
+        let res = tool.execute(json!({"command": "pwd -P"})).await;
+        assert!(res.content.trim_end().ends_with("/sub"), "{}", res.content);
+    }
+
+    /// 离开工作目录不跟随：文件工具的相对路径始终按工作目录解析，两边不能分家。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn leaving_the_workdir_snaps_back() {
+        let dir = workdir("leave");
+        let tool = tool(dir.join("sub"));
+        let res = tool.execute(json!({"command": "cd /"})).await;
+        assert!(res.content.contains("回到工作目录"), "{}", res.content);
+        let res = tool.execute(json!({"command": "pwd -P"})).await;
+        assert!(res.content.trim_end().ends_with("/sub"), "{}", res.content);
+    }
+
+    /// 命令以注释结尾时 trap 照样生效 —— 外壳用换行而不是 `;` 拼接。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_trailing_comment_does_not_swallow_the_trap() {
+        let tool = tool(workdir("comment"));
+        tool.execute(json!({"command": "cd sub # 进子目录"})).await;
+        let res = tool.execute(json!({"command": "pwd -P"})).await;
+        assert!(res.content.trim_end().ends_with("/sub"), "{}", res.content);
     }
 
     #[test]

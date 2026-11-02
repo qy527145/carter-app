@@ -222,6 +222,7 @@ pub fn start_session(shell: Arc<AppShell>, opts: SessionOptions) -> carter::Resu
         config,
         settings: AppSettings::load(),
         resumed,
+        shell_cwd: crate::tools::bash::ShellCwd::new(cwd.clone()),
         cwd,
         unsupported_server_tools,
         capture: Some(capture_store),
@@ -312,6 +313,7 @@ pub(crate) fn start_side(w: SideWiring, id: String, parent_id: String) -> Arc<Se
         config: w.config,
         settings: AppSettings::load(),
         resumed: false,
+        shell_cwd: crate::tools::bash::ShellCwd::new(w.cwd.clone()),
         cwd: w.cwd,
         unsupported_server_tools: w.unsupported_server_tools,
         // 侧边会话：不派生子 agent、不连 MCP、不抓包。见 `side.rs` 的模块头。
@@ -395,6 +397,8 @@ struct SessionCtx {
     fast_ref: Option<String>,
     /// 后台命令（`bash` 的 `run_in_background`）。一条会话一份，关会话时整组收掉。
     shells: Arc<crate::tools::background::BackgroundShells>,
+    /// bash 此刻所在的目录。工具每轮重建，`cd` 的结果得放在会话这一层才留得住。
+    shell_cwd: Arc<crate::tools::bash::ShellCwd>,
     /// 正在跑的工具表：界面上的「中断命令 / 转后台」靠它定位到具体那一次调用。
     running: Arc<crate::tools::control::RunningTools>,
 }
@@ -1120,6 +1124,7 @@ impl Runner {
                 live: self.live(),
                 shells: Some(self.ctx.shells.clone()),
                 session_id: self.ctx.handle.id.clone(),
+                shell_cwd: Some(self.ctx.shell_cwd.clone()),
                 running: Some(self.ctx.running.clone()),
             },
             &self.ctx.settings,

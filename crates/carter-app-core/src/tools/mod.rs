@@ -83,7 +83,7 @@ use crate::skills::Scan;
 use agent::AgentTool;
 use ask_user::{AskRequest, AskUserTool};
 use background::{BackgroundShells, BashOutputTool, KillShellTool};
-use bash::PlatformBash;
+use bash::{PlatformBash, ShellCwd};
 use control::RunningTools;
 use cwd::{CwdScoped, ProjectMemoryGuard};
 use goal_update::GoalUpdateTool;
@@ -119,6 +119,8 @@ pub struct ToolBuildArgs {
     pub shells: Option<Arc<BackgroundShells>>,
     /// 后台命令的日志按会话分目录。
     pub session_id: String,
+    /// bash 此刻所在的目录。由会话持有，`cd` 跨调用、跨轮保留。见 [`ShellCwd`]。
+    pub shell_cwd: Option<Arc<ShellCwd>>,
     /// 正在跑的工具表。界面按 `call_id` 对单条命令做「中断 / 转后台」。
     pub running: Option<Arc<RunningTools>>,
     /// 长任务目标的信号格子。恒常传 —— `goal_update` 是恒常注册的，见 `goal_update.rs`。
@@ -153,7 +155,7 @@ pub fn filter_tools(full: &ToolRegistry, settings: &AppSettings) -> Vec<Arc<dyn 
 pub fn substitute(t: Arc<dyn Tool>, settings: &AppSettings, cwd: &Path) -> Arc<dyn Tool> {
     // 只在设置页「工具」列表里用到：那里只展示名字与描述，不会真的执行 ——
     // 于是给一个永远不会置位的取消令牌、不给后台表。
-    substitute_with(t, settings, cwd, &CancelToken::new(), None, "")
+    substitute_with(t, settings, cwd, &CancelToken::new(), None, "", None)
 }
 
 /// [`substitute`] 的完整版。真正装配工具池时走这条，带上取消令牌与后台命令表。
@@ -164,11 +166,15 @@ pub fn substitute_with(
     cancel: &CancelToken,
     shells: Option<&Arc<BackgroundShells>>,
     session_id: &str,
+    shell_cwd: Option<&Arc<ShellCwd>>,
 ) -> Arc<dyn Tool> {
     match t.name() {
         // `bash` 换成跨平台实现。
+        // 当前目录由会话持有（`cd` 要跨轮保留）；没给就从工作目录起一份新的。
         "bash" => Arc::new(PlatformBash::new(
-            cwd.to_path_buf(),
+            shell_cwd
+                .cloned()
+                .unwrap_or_else(|| ShellCwd::new(cwd.to_path_buf())),
             cancel.clone(),
             shells.cloned(),
             session_id,
@@ -215,6 +221,7 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
         include_task,
         shells,
         session_id,
+        shell_cwd,
         running,
         goal_signal,
         schedules,
@@ -251,7 +258,15 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
 
     for t in filter_tools(&full, settings) {
         push(
-            substitute_with(t, settings, &cwd, &cancel, shells.as_ref(), &session_id),
+            substitute_with(
+                t,
+                settings,
+                &cwd,
+                &cancel,
+                shells.as_ref(),
+                &session_id,
+                shell_cwd.as_ref(),
+            ),
             &mut tools,
         );
     }
