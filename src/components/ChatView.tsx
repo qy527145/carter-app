@@ -35,7 +35,7 @@ import { useStore, type Item, type Turn } from "../store";
 import { copyText } from "../lib/clipboard";
 import { useConversationMode } from "../lib/conversationMode";
 import { displayName, modelTitle, useModelCatalog } from "../lib/modelLabel";
-import { editInFork, fork, regenerate } from "../lib/sessionOps";
+import { fork, regenerate, retryReply } from "../lib/sessionOps";
 import { TOAST_MS } from "../lib/toast";
 import { FilePreviewModal } from "./FilePreview";
 import { MarkdownImage, MarkdownLink, MarkdownPre, transformMarkdownUrl } from "./Media";
@@ -570,22 +570,48 @@ function assistantActionSlots(turns: Turn[]): (boolean | undefined)[] {
 }
 
 /**
- * 这一条上「从这里分叉」的落点：分叉保留第几轮**之前**的历史（`keepBefore`）。
+ * 这一条上「分叉」的落点。
  *
- * 回答上 = 从这条**回答之后**分叉（保留这一轮，`turn + 1`）—— 最常用的一种：接着
- * 这条思路往别的方向聊。提问上 = 从这句话**之前**分叉（`turn`），也就是换一个问法
- * 把同一件事再问一遍。第一句提问之前什么都没有，切出来会是条空会话，不给入口
- * （想改第一句就点「编辑」—— 那会把改写后的句子直接发进新会话）。
+ * 回答上 = 保留到这条**回答之后**（`turn + 1`），接着这条思路往别的方向聊。
+ * 提问上 = 停在这句话**之前**（`turn`），原话摆进新会话的输入框 —— 改一改再发，
+ * 或原样再问一遍。第一句提问之前是空历史，那就是「带着这句话另开一条对话」。
  */
 function forkTarget(
   turn: Turn,
-  onFork: ((keepBefore: number) => void) | undefined,
+  onFork: ((keepBefore: number, draft?: string) => void) | undefined,
   live: boolean,
 ): (() => void) | undefined {
   if (!onFork || !live || turn.turn === undefined) return undefined;
   const n = turn.turn;
   if (turn.role === "assistant") return () => onFork(n + 1);
-  return n > 0 ? () => onFork(n) : undefined;
+  const draft = turn.raw ?? turn.text;
+  return () => onFork(n, draft);
+}
+
+/**
+ * 同一轮里相邻的几条助手轮并成一条再渲染。
+ *
+ * 历史里工具的每次往返各是一条助手消息（见 `store.ts::historyToTurns`），原样画出来
+ * 就是一串各自带间距、各自带一行（看不见但占位的）操作按钮的小块 —— 而实时那一轮
+ * 在界面上本来就是一整块。并起来之后两边长得一样，精简模式也能把整轮的过程折成
+ * 一行，操作按钮只在这一轮末尾出现一次。
+ */
+function mergeAssistantRuns(turns: Turn[]): Turn[] {
+  const out: Turn[] = [];
+  for (const t of turns) {
+    const last = out[out.length - 1];
+    if (
+      t.role === "assistant" &&
+      last?.role === "assistant" &&
+      t.turn !== undefined &&
+      last.turn === t.turn
+    ) {
+      out[out.length - 1] = { ...last, items: [...last.items, ...t.items] };
+      continue;
+    }
+    out.push(t);
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -673,7 +699,7 @@ function AssistantTurn({
     .join("\n\n")
     .trim();
 
-  // 重试落在这条回答上，但重跑的是**用户那一轮提问**。流式期间整排重试都由
+  // 重试 = 就地重写这条回答（提问与前面的工具往返都留着）。流式期间整排重试都由
   // `TurnList` 收掉（见那边的注释），这里只认「有没有回调」。
   const canRetry = onRetry !== undefined;
   // 一条动作都没有时整行不渲染：纯工具输出的回答末尾不该留一条看不见的空白。
@@ -791,7 +817,11 @@ function AssistantTurn({
             <ActionChip
               icon={<RotateCcw size={12} />}
               label="重试"
-              title={retryAsks ? "重新生成这一轮的回复（会丢掉后面的对话）" : "重新生成这一轮的回复"}
+              title={
+                retryAsks
+                  ? "沿用同样的上下文重写这条回复（会丢掉后面的对话）"
+                  : "沿用同样的上下文重写这条回复"
+              }
               onClick={() => (retryAsks ? setConfirmingRetry(true) : onRetry?.())}
             />
           )}
@@ -799,7 +829,7 @@ function AssistantTurn({
             <ActionChip
               icon={<GitBranch size={12} />}
               label="分叉"
-              title="从这条回答之后分叉出一条新会话，原来这条不受影响"
+              title="带着到这条回答为止的对话分叉出一条新会话，原来这条不受影响"
               onClick={onFork}
             />
           )}
@@ -822,7 +852,7 @@ function AssistantTurn({
           title="重新生成这条回复？"
           message={
             <>
-              这一轮之后的对话会被丢掉，模型会基于同一个提问重新回答一遍。
+              这条回复之后的对话会被丢掉，模型会拿写这条回复时的同一份上下文重写一遍。
               <br />
               <span className="text-dim">
                 只回滚对话，已经改过的文件、跑过的命令不会撤销。
@@ -843,25 +873,22 @@ function AssistantTurn({
 
 function UserTurn({
   turn,
-  onEdit,
+  onRetry,
+  retryAsks,
   onFork,
 }: {
   turn: Extract<Turn, { role: "user" }>;
-  /**
-   * 改写这句话，并从这句之前分叉出一条新会话重新提问。
-   *
-   * 只给听得出是哪一轮的（`turn` 有值）的条目 —— 没有轮次号就没法指名从哪儿分。
-   */
-  onEdit?: (text: string) => void;
-  /** 从这一轮之前分叉出一条新会话（不改提问）。 */
+  /** 把这句话原样再问一遍（这一轮的回答及之后的对话丢掉）。 */
+  onRetry?: () => void;
+  /** 重试会顺带丢掉后面几轮对话 —— 点之前要先问一句。 */
+  retryAsks?: boolean;
+  /** 从这句话之前分叉出一条新会话，原话摆进输入框。 */
   onFork?: () => void;
 }) {
   const menu = useContextMenu();
   // 与回答那边同一套反馈：就地变对勾，2.5 秒后复位。
   const [copied, setCopied] = useState(false);
-  // 就地编辑：把气泡换成输入框，而不是把这句话搬回底部的输入框。搬下去的话
-  // 用户得在一屏之外改一句他要对着看的话。
-  const [draft, setDraft] = useState<string | null>(null);
+  const [confirmingRetry, setConfirmingRetry] = useState(false);
 
   useEffect(() => {
     if (!copied) return;
@@ -869,15 +896,7 @@ function UserTurn({
     return () => clearTimeout(timer);
   }, [copied]);
 
-  const submitEdit = (text: string) => {
-    setDraft(null);
-    onEdit?.(text);
-  };
-
-  // 改写框的初值：有原文用原文，没有就退回气泡里显示的那段。历史里存的是
-  // `@文件` 展开之后的正文，拿它回填有时会长得吓人 —— 但那是用户**看得见**的
-  // 那句话，总好过给一个空框让他重打。
-  const draftSeed = turn.raw ?? turn.text;
+  const retry = () => (retryAsks ? setConfirmingRetry(true) : onRetry?.());
 
   const menuEntries = (): MenuEntry[] => {
     const entries: MenuEntry[] = [
@@ -887,12 +906,8 @@ function UserTurn({
         onSelect: () => void copyText(turn.text),
       },
     ];
-    if (onEdit) {
-      entries.push({
-        label: "编辑并重发",
-        icon: <Pencil size={12} />,
-        onSelect: () => setDraft(draftSeed),
-      });
+    if (onRetry) {
+      entries.push({ label: "重新提问", icon: <RotateCcw size={12} />, onSelect: retry });
     }
     if (onFork) {
       entries.push({
@@ -913,81 +928,59 @@ function UserTurn({
         menu.open({ x: e.clientX, y: e.clientY }, menuEntries());
       }}
     >
-      {draft === null ? (
-        <>
-          {/* 粘贴的图片在会话里存的是 `[img:...]` 引用 token，回看时要渲染回图。
-              纯文本消息走 MessageImages 的文本分支，行为与直接输出一致。 */}
-          <div className="max-w-[75%] break-words rounded-2xl bg-bubble px-3.5 py-2 text-sm leading-relaxed text-ink">
-            <MessageImages text={turn.text} />
-          </div>
-          {/* 用户消息下面只给「复制 / 编辑」—— 重试挂在回答上（重跑的落点是模型
-              那一段），放在提问下面就变成两颗一样的东西了。 */}
-          <div className={`${ACTION_ROW} mt-1 justify-end`}>
-            <ActionChip
-              icon={copied ? <Check size={12} className="carter-pop text-[var(--ok)]" /> : <Copy size={12} />}
-              label={copied ? "已复制" : "复制"}
-              onClick={async () => {
-                if (await copyText(turn.text, null)) setCopied(true);
-              }}
-            />
-            {onEdit && (
-              <ActionChip
-                icon={<Pencil size={12} />}
-                label="编辑"
-                title="改写这句话，从这一句之前分叉出一条新会话重问（原来这条不受影响）"
-                onClick={() => setDraft(draftSeed)}
-              />
-            )}
-            {onFork && (
-              <ActionChip
-                icon={<GitBranch size={12} />}
-                label="分叉"
-                title="从这句话之前分叉出一条新会话，原来这条不受影响"
-                onClick={onFork}
-              />
-            )}
-          </div>
-        </>
-      ) : (
-        <div className="w-full max-w-[85%] rounded-2xl bg-elevated p-2 shadow-soft">
-          <textarea
-            autoFocus
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Escape") {
-                e.preventDefault();
-                setDraft(null);
-              }
-              // 与底部输入框一致：Enter 发送、Shift+Enter 换行。
-              if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) {
-                e.preventDefault();
-                const t = draft.trim();
-                if (t) submitEdit(t);
-              }
-            }}
-            rows={Math.min(8, Math.max(2, draft.split("\n").length))}
-            className="w-full resize-none bg-transparent px-1.5 py-1 text-sm leading-relaxed text-ink outline-none"
+      {/* 粘贴的图片在会话里存的是 `[img:...]` 引用 token，回看时要渲染回图。
+          纯文本消息走 MessageImages 的文本分支，行为与直接输出一致。 */}
+      <div className="max-w-[75%] break-words rounded-2xl bg-bubble px-3.5 py-2 text-sm leading-relaxed text-ink">
+        <MessageImages text={turn.text} />
+      </div>
+      <div className={`${ACTION_ROW} mt-1 justify-end`}>
+        <ActionChip
+          icon={copied ? <Check size={12} className="carter-pop text-[var(--ok)]" /> : <Copy size={12} />}
+          label={copied ? "已复制" : "复制"}
+          onClick={async () => {
+            if (await copyText(turn.text, null)) setCopied(true);
+          }}
+        />
+        {onRetry && (
+          <ActionChip
+            icon={<RotateCcw size={12} />}
+            label="重试"
+            title={
+              retryAsks
+                ? "把这句话原样再问一遍（会丢掉后面的对话）"
+                : "把这句话原样再问一遍"
+            }
+            onClick={retry}
           />
-          <div className="mt-1 flex items-center justify-end gap-1.5">
-            <span className="mr-auto text-[11px] text-dim">
-              会从这句开一条新分支，原来这条不受影响
-            </span>
-            <button
-              onClick={() => setDraft(null)}
-              className="rounded-md px-2 py-1 text-xs text-dim transition-colors hover:bg-ink/5 hover:text-ink"
-            >
-              取消
-            </button>
-            <button
-              disabled={!draft.trim()}
-              onClick={() => submitEdit(draft.trim())}
-              className="rounded-md bg-accent px-2 py-1 text-xs font-medium text-[var(--accent-contrast)] transition-opacity hover:opacity-90 disabled:opacity-40"
-            >
-              重发
-            </button>
-          </div>
-        </div>
+        )}
+        {onFork && (
+          <ActionChip
+            icon={<GitBranch size={12} />}
+            label="分叉"
+            title="从这句话之前分叉出一条新会话，原话放进输入框（原来这条不受影响）"
+            onClick={onFork}
+          />
+        )}
+      </div>
+      {confirmingRetry && (
+        <ConfirmDialog
+          title="重新问这句话？"
+          message={
+            <>
+              这句之后的对话会被丢掉，模型会基于这句话重新回答。
+              <br />
+              <span className="text-dim">
+                只回滚对话，已经改过的文件、跑过的命令不会撤销。
+              </span>
+            </>
+          }
+          confirmLabel="重新提问"
+          onCancel={() => setConfirmingRetry(false)}
+          onConfirm={() => {
+            setConfirmingRetry(false);
+            onRetry?.();
+          }}
+        />
       )}
     </div>
   );
@@ -1000,9 +993,8 @@ function TurnView({
   showPayload,
   changed,
   cwd,
-  onRegenerate,
+  onRetry,
   retryAsks,
-  onEditPrompt,
   onFork,
 }: {
   turn: Turn;
@@ -1011,13 +1003,12 @@ function TurnView({
   showPayload: boolean;
   changed: ChangedFile[];
   cwd: string;
-  onRegenerate?: () => void;
+  onRetry?: () => void;
   retryAsks?: boolean;
-  onEditPrompt?: (text: string) => void;
   onFork?: () => void;
 }) {
   if (turn.role === "user") {
-    return <UserTurn turn={turn} onEdit={onEditPrompt} onFork={onFork} />;
+    return <UserTurn turn={turn} onRetry={onRetry} retryAsks={retryAsks} onFork={onFork} />;
   }
   return (
     <AssistantTurn
@@ -1027,7 +1018,7 @@ function TurnView({
       showPayload={showPayload}
       changed={changed}
       cwd={cwd}
-      onRetry={onRegenerate}
+      onRetry={onRetry}
       retryAsks={retryAsks}
       onFork={onFork}
     />
@@ -1039,13 +1030,12 @@ function TurnView({
  * 共用这一份：两边的事件词汇、item 形状完全相同，各画一遍必然会走样。
  */
 export function TurnList({
-  turns,
+  turns: raw,
   streaming,
   showPayload = true,
   changedByTurn = {},
   cwd = "",
-  onRegenerate,
-  onEditPrompt,
+  onRetry,
   onFork,
 }: {
   turns: Turn[];
@@ -1057,25 +1047,27 @@ export function TurnList({
   /** 用来把工具参数里的绝对路径对回监听器给的相对路径。 */
   cwd?: string;
   /**
-   * 重跑某一轮。**只有真正跑着的那条会话才传** —— 重试要发 `regenerate` 命令，
-   * 而侧边聊天、侧边聊天里那段继承来的上下文都不该往回改。
+   * 重试。**只有真正跑着的那条会话才传** —— 侧边聊天、侧边聊天里那段继承来的
+   * 上下文都不该往回改。
+   *
+   * `reply = true` 是回答上的重试：就地重写这条回答（`retry_reply`）；
+   * `false` 是提问上的重试：把这句话原样再问一遍（`regenerate`）。
    */
-  onRegenerate?: (turn: number) => void;
+  onRetry?: (turn: number, reply: boolean) => void;
   /**
-   * 改写第 `turn` 轮的提问（参数是改写后的**原文**）。实现上是从这一句之前
-   * 分叉一条新会话再发出去（见 `sessionOps.editInFork`），原会话一个字不动。
+   * 只保留第 `keepBefore` 轮之前的历史，分叉出一条新会话。`draft` 是提问上的分叉
+   * 带过去的那句话，新会话里摆进输入框。
    */
-  onEditPrompt?: (turn: number, text: string) => void;
-  /** 只保留第 `keepBefore` 轮之前的历史，分叉出一条新会话。 */
-  onFork?: (keepBefore: number) => void;
+  onFork?: (keepBefore: number, draft?: string) => void;
 }) {
+  const turns = useMemo(() => mergeAssistantRuns(raw), [raw]);
   // 挂在「这一轮用户输入的最后一条助手消息」上，而不是每条助手消息各算各的。
   const changed = changedFilesPerTurn(turns, changedByTurn, cwd);
   // 一圈正在跑着的时候整排都不给改动：重试会插进队列、等这一轮跑完才生效，那时
   // 用户多半已经忘了自己点过它；分叉 / 编辑要关掉当前会话再开新的，正在跑的那一轮
   // 与排队里的消息会跟着没掉 —— 按钮看着只是「分一条出去」，不该有这个副作用。
   const live = !streaming;
-  const slots = onRegenerate && live ? assistantActionSlots(turns) : [];
+  const slots = onRetry && live ? assistantActionSlots(turns) : [];
 
   return (
     <div className="flex flex-col gap-6">
@@ -1092,19 +1084,13 @@ export function TurnList({
             changed={changed[i]}
             cwd={cwd}
             // 没有轮次号（历史里那种极端竞态）就没法指名改哪一轮。
-            onRegenerate={
-              asks !== undefined && onRegenerate && turn !== undefined
-                ? () => onRegenerate(turn)
+            onRetry={
+              onRetry && live && turn !== undefined && (t.role === "user" || asks !== undefined)
+                ? () => onRetry(turn, t.role === "assistant")
                 : undefined
             }
-            retryAsks={asks}
-            // 历史里的提问也能改：改完是**另开一条分支**，不碰这条对话，所以
-            // 不需要「后面的会被丢掉」那种确认。
-            onEditPrompt={
-              live && t.role === "user" && onEditPrompt && turn !== undefined
-                ? (text) => onEditPrompt(turn, text)
-                : undefined
-            }
+            // 提问上的重试：这句之后还有回答以外的对话（下一句提问）才要先问一句。
+            retryAsks={t.role === "user" ? turns.slice(i + 1).some((x) => x.role === "user") : asks}
             onFork={forkTarget(t, onFork, live)}
           />
         );
@@ -1149,17 +1135,16 @@ function MessageList() {
             streaming={streaming}
             changedByTurn={changed}
             cwd={cwd}
-            // 回退与分叉都作用在**这条会话**上 —— 侧边聊天那份 TurnList 一概不传。
-            onRegenerate={
-              sessionId ? (turn) => regenerate(sessionId, turn) : undefined
-            }
-            // 改写提问 = 从那句之前分叉出新会话再发出去，原会话不动。
-            onEditPrompt={
+            // 重试与分叉都作用在**这条会话**上 —— 侧边聊天那份 TurnList 一概不传。
+            onRetry={
               sessionId
-                ? (turn, text) => void editInFork(sessionId, turn, text)
+                ? (turn, reply) =>
+                    reply ? retryReply(sessionId, turn) : regenerate(sessionId, turn)
                 : undefined
             }
-            onFork={sessionId ? (keep) => void fork(sessionId, keep) : undefined}
+            onFork={
+              sessionId ? (keep, draft) => void fork(sessionId, keep, draft) : undefined
+            }
           />
         )}
       </div>

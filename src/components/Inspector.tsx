@@ -166,8 +166,14 @@ function ExchangeRow({
   onClick: () => void;
 }) {
   const label = purposeLabel(s.purpose);
+  const ref = useRef<HTMLButtonElement>(null);
+  // 选中的那条（尤其是从回答上点进来自动选中的）要在列表里看得见。
+  useEffect(() => {
+    if (active) ref.current?.scrollIntoView({ block: "nearest" });
+  }, [active]);
   return (
     <button
+      ref={ref}
       onClick={onClick}
       title={`${s.method} ${s.url}`}
       className={`w-full border-b border-edge px-3 py-2 text-left transition-colors ${
@@ -345,6 +351,23 @@ export function Inspector() {
   useEffect(() => {
     setSelected(null);
   }, [turn, sessionId]);
+
+  // 从某条回答上的「报文」点进来（带着轮次）时，列表一到就直接选中产出这条回答的
+  // 那次请求 —— 这一轮最后一次主对话请求（前面几次是工具往返，后面可能还有起标题、
+  // 压缩）。只自动选一次：之后用户点别的条目不该被拽回来。
+  const autoPick = useRef(false);
+  useEffect(() => {
+    autoPick.current = open && turn !== null;
+  }, [open, turn, sessionId]);
+  useEffect(() => {
+    if (!autoPick.current || !list || turn === null) return;
+    const ofTurn = list.filter((s) => s.turn === turn);
+    if (ofTurn.length === 0) return;
+    const main = ofTurn.filter((s) => s.purpose === null || s.purpose === "main_turn");
+    const pool = main.length > 0 ? main : ofTurn;
+    autoPick.current = false;
+    setSelected(pool[pool.length - 1].id);
+  }, [list, turn]);
 
   // 选中某条时取完整记录。
   useEffect(() => {

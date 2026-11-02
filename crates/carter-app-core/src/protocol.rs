@@ -97,6 +97,11 @@ pub enum Command {
     /// 会话先把历史回退到这一轮之前，再把它原样重跑一遍 —— 所以这一轮之后
     /// 的对话会一并丢掉。注意这只回滚**对话**，不动磁盘：已经改过的文件保持现状。
     Regenerate { turn: u32 },
+    /// 就地重写第 `turn` 轮的最后一条回答（界面上回答下面的「重试」）。
+    ///
+    /// 与 `Regenerate` 不同，提问和这一轮前面的工具往返都留着，模型拿到的上下文与
+    /// 它当初写这条回答时完全相同。之后的轮次同样会丢掉，磁盘同样不动。
+    RetryReply { turn: u32 },
     /// 切换本会话使用的模型（`provider/model` 形式）。
     SetModel { model: String },
     /// 回答 `ask_user_question` 提的问题。
@@ -229,6 +234,15 @@ pub enum SessionEvent {
     ///
     /// 改写提问不走这里：它开一条新分支（见 `sessions::fork`），原会话一个字不动。
     TurnRetracted { turn: u32 },
+    /// 历史被就地截短（回答上的「重试」），界面按这份历史整个重建。
+    ///
+    /// 不复用 `TurnRetracted`：那边切在用户气泡上，界面自己删得准；这里切在一轮
+    /// 中间的某条助手消息上，而实时那一轮在界面上是一整块，分不出边界。
+    HistoryReplaced {
+        history: Vec<crate::view::MessageView>,
+        prompts: Vec<crate::prompts::TurnPrompt>,
+        changes: Vec<crate::changes::TurnFiles>,
+    },
     /// 思考增量。签名分片不会传到这里（对模型有用，对人没意义）。
     ThinkingDelta { text: String },
     /// 正文增量。

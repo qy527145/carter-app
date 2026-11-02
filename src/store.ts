@@ -188,6 +188,11 @@ type Store = Conv & {
    * 回来时挪进 `turns`。换会话、重建会话都会清空。
    */
   queued: QueuedPrompt[];
+  /**
+   * 要塞进底部输入框的一段文字（提问上的「分叉」：新会话里把那句话摆好等用户改）。
+   * 输入框取走后清回 `null`。
+   */
+  composerDraft: string | null;
 
   setAppInfo: (i: AppInfo) => void;
   setSettings: (s: AppSettings) => void;
@@ -217,6 +222,7 @@ type Store = Conv & {
   closeInspector: () => void;
   setInspectorTurn: (turn: number | null) => void;
   setView: (v: "chat" | "settings") => void;
+  setComposerDraft: (text: string | null) => void;
   // 侧边聊天
   beginSide: (c: CreatedSide) => void;
   closeSide: () => void;
@@ -327,7 +333,7 @@ export function reduceConv(c: Conv, e: SessionEvent, sessionId?: string): Partia
   switch (e.type) {
     case "turn_started": {
       const last = c.turns[c.turns.length - 1];
-      // 末尾已经是**同号**的助手轮 → 重复事件，复用。
+      // 末尾已经是**同号**的助手轮 → 重复事件，或就地重试接着这一轮往下写，复用。
       if (last && last.role === "assistant" && last.turn === e.turn) {
         return { streaming: true, turns: c.turns };
       }
@@ -402,6 +408,12 @@ export function reduceConv(c: Conv, e: SessionEvent, sessionId?: string): Partia
       }
       return { turns, changed };
     }
+    case "history_replaced":
+      // 就地重试：截断点在一轮中间，按后端给的历史整个重建。
+      return {
+        turns: historyToTurns(e.history, e.prompts),
+        changed: changedRecord(e.changes),
+      };
     case "turn_usage":
       return { usage: e.usage, cost: e.cost };
     case "goal":
@@ -671,6 +683,7 @@ export const useStore = create<Store>((set) => ({
   view: "chat",
   queued: [],
   sessionsNonce: 0,
+  composerDraft: null,
 
   // 应用信息里带着设置，一起落地 —— 分开拉会让主题在首帧闪一下。
   setAppInfo: (i) => set({ appInfo: i, settings: i.settings }),
@@ -734,6 +747,7 @@ export const useStore = create<Store>((set) => ({
   closeInspector: () => set({ inspectorOpen: false }),
   setInspectorTurn: (turn) => set({ inspectorTurn: turn }),
   setView: (view) => set({ view }),
+  setComposerDraft: (composerDraft) => set({ composerDraft }),
 
   applyEvent: (e) =>
     set((s) => {

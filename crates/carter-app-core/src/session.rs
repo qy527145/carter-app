@@ -756,6 +756,7 @@ impl Runner {
             // 历史里存的是展开后的正文，原样重发 —— 不再过一次展开，
             // 否则 `@文件` 的内容会被贴第二遍。
             Command::Regenerate { turn } => self.regenerate(turn).await,
+            Command::RetryReply { turn } => self.retry_reply(turn).await,
             // 空闲时「插队」= 把那条消息挪到队首。下一轮循环就会取到它。
             Command::PromotePrompt { id } => promote(&mut self.queued, id),
             Command::DropPrompt { id } => drop_queued(&mut self.queued, id),
@@ -806,6 +807,50 @@ impl Runner {
         // `echo` 一律给 `None`：这一轮的用户气泡界面上已经有了，`TurnRetracted`
         // 刚刚交代过它 —— 再带一次 `prompt` 会多画一条。
         self.run_sequence(stored, git, None, None).await;
+    }
+
+    /// 就地重试一条回答：历史退到这一轮最后一条助手消息之前，**不重发提问**，
+    /// 直接拿同一份上下文再请求一次。
+    ///
+    /// 与 [`Self::regenerate`] 的区别见 `history::rewind_reply`。截断点落在一轮
+    /// 中间，界面没法自己删准，所以发一份 `HistoryReplaced` 让它整个重建，再接一条
+    /// 不带 `prompt` 的 `turn_started` —— 新的增量接在重建出来的那一轮末尾。
+    async fn retry_reply(&mut self, turn: u32) {
+        let git = self.meta.git.clone();
+        self.settle_history();
+        if let Err(e) = crate::history::rewind_reply(&mut self.thread, turn) {
+            self.error(&e);
+            return;
+        }
+        // 这一轮自己的变更清单与原文都留着（前面几次往返改过的文件还算这一轮的），
+        // 只退后面的。
+        let id = self.ctx.handle.id.clone();
+        if let Err(e) = crate::changes::retract(&id, turn + 1) {
+            tracing::warn!("回退轮次变更记录失败：{e}");
+        }
+        if let Err(e) = crate::prompts::retract(&id, turn + 1) {
+            tracing::warn!("回退用户原文失败：{e}");
+        }
+        self.ctx.handle.publish_history(&self.thread.messages);
+        self.emit(SessionEvent::HistoryReplaced {
+            history: crate::view::to_views(&self.thread.messages),
+            prompts: crate::prompts::load(&id),
+            changes: crate::changes::load(&id),
+        });
+
+        self.ctx.refresh();
+        self.begin_changes();
+        self.emit(SessionEvent::TurnStarted {
+            turn,
+            prompt_id: None,
+            prompt: None,
+        });
+        let result = self.run_one_turn(git.clone()).await;
+        self.settle_history();
+        self.finish_changes(result.used_tools).await;
+        self.after_turn(&result).await;
+        self.drive_goal(result, git).await;
+        self.emit(SessionEvent::Idle);
     }
 
     /// 用户发来一条消息：展开、落进历史、跑一轮，再按目标决定要不要自动继续。

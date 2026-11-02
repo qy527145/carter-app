@@ -61,6 +61,16 @@ export type SessionEvent =
    * 改写提问不走这里：它开一条新分支（`forkSession`），原会话一个字不动。
    */
   | { type: "turn_retracted"; turn: number }
+  /**
+   * 历史被就地截短（回答上的「重试」）。界面按这份历史整个重建，紧接着来一条
+   * 不带 `prompt` 的 `turn_started`，新的回答接在重建出来的那一轮末尾。
+   */
+  | {
+      type: "history_replaced";
+      history: MessageView[];
+      prompts: TurnPrompt[];
+      changes: TurnFiles[];
+    }
   | { type: "thinking_delta"; text: string }
   | { type: "text_delta"; text: string }
   | { type: "text_end" }
@@ -237,6 +247,11 @@ export type Command =
    * 之前再原样重跑 —— 之后那几轮会一并丢掉。**只回滚对话，不动磁盘。**
    */
   | { type: "regenerate"; turn: number }
+  /**
+   * 就地重写第 `turn` 轮的最后一条回答：提问与前面的工具往返都留着，拿同一份
+   * 上下文再请求一次。之后那几轮同样会丢掉，磁盘同样不动。
+   */
+  | { type: "retry_reply"; turn: number }
   | { type: "set_model"; model: string }
   /**
    * 回答 `ask_user_question` 提的问题。

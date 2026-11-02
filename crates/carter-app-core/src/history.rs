@@ -258,6 +258,53 @@ pub fn retract_turn(thread: &mut Thread, turn: u32) -> Result<String, String> {
     Ok(text)
 }
 
+/// 就地重试一条回答：把历史回退到第 `turn` 轮**最后一条助手消息之前**。
+///
+/// 与 [`retract_turn`] 的区别在落点：那边连这一轮的提问一起切掉、再原样重发；
+/// 这里提问与这一轮前面几次工具往返都留着，只把最后那条回答（连同它之后的一切）
+/// 拿掉 —— 模型拿到的上下文与它当初写这条回答时一模一样，重写的只是这一条。
+///
+/// 这一轮里一条助手消息都没有（上一次请求直接失败了）时，切掉的只是后面那几轮。
+/// 落盘与 `user_turns` 的处理同 [`retract_turn`]。
+pub fn rewind_reply(thread: &mut Thread, turn: u32) -> Result<(), String> {
+    let mut seen = 0u32;
+    let mut start = None;
+    let mut end = thread.messages.len();
+    for (i, msg) in thread.messages.iter().enumerate() {
+        if !crate::view::is_turn_start(msg) {
+            continue;
+        }
+        if start.is_some() {
+            end = i;
+            break;
+        }
+        if seen == turn {
+            start = Some(i);
+        }
+        seen += 1;
+    }
+    let Some(start) = start else {
+        return Err(format!(
+            "第 {} 轮不在历史里了（可能已被压缩），没法重试",
+            turn + 1
+        ));
+    };
+    let cut = thread.messages[start + 1..end]
+        .iter()
+        .rposition(|m| m.role == Role::Assistant)
+        .map_or(end, |k| start + 1 + k);
+
+    thread.messages.truncate(cut);
+    thread.user_turns = turn;
+    if let Some(rec) = thread.recorder() {
+        rec.record(carter::session::RecordKind::Compacted {
+            tier: "retry".into(),
+            messages: thread.messages.clone(),
+        });
+    }
+    Ok(())
+}
+
 /// 压缩之后，旧轮次号 → 新轮次号。
 ///
 /// carter 的摘要压缩把历史重排成 `[首条, 摘要, 最近 8 条]`：首条（原始任务）还是第 0 轮，
@@ -492,6 +539,38 @@ mod tests {
         let err = retract_turn(&mut t, 3).unwrap_err();
         assert!(err.contains("没法重试"), "{err}");
         assert_eq!(t.messages.len(), 2);
+    }
+
+    /// 就地重试：提问与前面的工具往返都留着，只切掉这一轮最后那条回答及之后的轮次。
+    #[test]
+    fn rewinding_a_reply_keeps_the_prompt_and_earlier_rounds() {
+        let mut t = thread(vec![
+            WireMessage::user_text("第一问"),
+            WireMessage::new(Role::Assistant, vec![Block::text("第一答")]),
+            WireMessage::user_text("第二问"),
+            WireMessage::new(Role::Assistant, vec![tool_use("call_1", "bash")]),
+            WireMessage::new(Role::User, vec![tool_result("call_1")]),
+            WireMessage::new(Role::Assistant, vec![Block::text("第二答")]),
+            WireMessage::user_text("第三问"),
+            WireMessage::new(Role::Assistant, vec![Block::text("第三答")]),
+        ]);
+        rewind_reply(&mut t, 1).unwrap();
+        assert_eq!(t.messages.len(), 5, "停在工具结果之后");
+        assert!(matches!(t.messages[4].content[0], Block::ToolResult { .. }));
+        assert_eq!(t.user_turns, 1);
+    }
+
+    /// 这一轮只有一条回答：退到提问之后，提问本身留着。
+    #[test]
+    fn rewinding_a_single_reply_stops_right_after_the_prompt() {
+        let mut t = thread(vec![
+            WireMessage::user_text("只有一问"),
+            WireMessage::new(Role::Assistant, vec![Block::text("答")]),
+        ]);
+        rewind_reply(&mut t, 0).unwrap();
+        assert_eq!(t.messages.len(), 1);
+        assert_eq!(t.messages[0].concat_text(), "只有一问");
+        assert!(rewind_reply(&mut t, 3).is_err());
     }
 
     /// 分叉截断：`turn + 1` = 留住这一轮的提问与回答。

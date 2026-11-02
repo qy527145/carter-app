@@ -110,58 +110,32 @@ export async function rename(id: string, title: string): Promise<void> {
 }
 
 /**
- * fork 一条会话并打开它。
+ * 从第 `keepBefore` 轮之前分叉出一条新会话并打开它。
  *
  * carter 的 `fork` 会写出一个**自包含**的新文件（种子历史 + `forked_from` 血缘），
  * 所以这里只要把新 id 打开即可，不用管历史怎么搬。
  *
- * `keepBefore` = 只保留第几轮**之前**的历史（不含该轮）。回答下面的「从这里分叉」
- * 传 `turn + 1`；提问下面的「编辑并重发」走 [`editInFork`]。不传就是整条复制。
+ * 两处入口，落点不同：
+ * - 回答上的「分叉」传 `turn + 1`：带着这条回答接着往别的方向聊；
+ * - 提问上的「分叉」传 `turn` 并带上 `draft`（那句话的原文）：新会话停在这句之前，
+ *   原话摆进输入框 —— 改一改再发，或者原样再问一遍。
+ *
+ * 不传 `keepBefore` 就是整条复制。
  */
-export async function fork(id: string, keepBefore?: number): Promise<void> {
+export async function fork(id: string, keepBefore?: number, draft?: string): Promise<void> {
   try {
     const newId = await api.forkSession(id, keepBefore);
     await refreshSessions();
     useStore.getState().setView("chat");
     await replaceSession({ resume: false, resumeId: newId });
+    if (draft !== undefined) useStore.getState().setComposerDraft(draft);
     toastOk(
       keepBefore === undefined
         ? "已 fork 出一条新会话"
-        : `已从第 ${keepBefore} 轮分叉出一条新会话`,
+        : draft !== undefined
+          ? "已分叉出一条新会话，原话已放进输入框"
+          : `已从第 ${keepBefore} 轮分叉出一条新会话`,
     );
-  } catch (e) {
-    toastError(e);
-  }
-}
-
-/**
- * 改写第 `turn` 轮那句提问，在新分叉出来的一条会话里重发。
- *
- * 这就是「编辑历史消息」的实现 —— **原会话一个字都不动**：改过去的对话本来就与
- * 原来那句提问对不上，塞回同一份历史只会让它自相矛盾。新会话截到这一句之前，
- * 再把改写后的句子发进去；模型看到的就是「从这句开始的另一个走向」。
- *
- * 失败只留一句 toast：新会话没建起来时用户手上还是原来那条，没有任何东西被改坏。
- */
-export async function editInFork(
-  id: string,
-  turn: number,
-  text: string,
-): Promise<void> {
-  const ask = text.trim();
-  if (!ask) return;
-  try {
-    const newId = await api.forkSession(id, turn);
-    await refreshSessions();
-    useStore.getState().setView("chat");
-    await replaceSession({ resume: false, resumeId: newId });
-    const sid = useStore.getState().sessionId;
-    if (!sid) return;
-    // 这里**不**自己插用户气泡：新会话是空闲的，`turn_started` 会带着原文回来
-    // （没有排队编号，靠 `prompt` 画气泡），由事件那一侧统一落地 —— 自己先插一条
-    // 会在事件到达时多画一遍。
-    await send(sid, ask);
-    toastOk("已从改写后的提问分叉出一条新会话");
   } catch (e) {
     toastError(e);
   }
@@ -363,6 +337,16 @@ export async function cancel(sessionId: string): Promise<void> {
  */
 export function regenerate(sessionId: string, turn: number): void {
   api.sendCommand(sessionId, { type: "regenerate", turn }).catch(toastError);
+}
+
+/**
+ * 就地重试一条回答（回答下面的「重试」）。
+ *
+ * 与 [`regenerate`] 不同：提问与这一轮前面的工具往返都留着，只把最后那条回答
+ * 拿掉、用同一份上下文再请求一次。之后的轮次同样丢掉 —— 确认由调用方先问过。
+ */
+export function retryReply(sessionId: string, turn: number): void {
+  api.sendCommand(sessionId, { type: "retry_reply", turn }).catch(toastError);
 }
 
 /**

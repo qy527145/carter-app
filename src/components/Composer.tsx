@@ -337,6 +337,16 @@ export function Composer() {
   const connected = sessionId !== null;
   const disabled = !connected || pendingAsk !== null;
 
+  // 提问上的「分叉」把那句话交到这里：新会话打开后摆进输入框，等用户改完再发。
+  const composerDraft = useStore((s) => s.composerDraft);
+  useEffect(() => {
+    if (composerDraft === null || !connected) return;
+    useStore.getState().setComposerDraft(null);
+    setText(composerDraft);
+    setFileQuery(null);
+    focusEnd(taRef.current, composerDraft.length);
+  }, [composerDraft, connected]);
+
   // 命令列表按 cwd 取一次。自定义命令来自磁盘，cwd 变了要重取。
   useEffect(() => {
     listCommands(cwd || null)
