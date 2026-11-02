@@ -1591,6 +1591,8 @@ export type ConnectorRow = {
   auth: ConnectorAuth;
   /** 三层都齐了。 */
   ready: boolean;
+  /** 登录方式：扫码 / 先配应用再扫码 / 填邮箱账号。 */
+  auth_kind: "oauth" | "app_then_oauth" | "account";
 };
 
 export function listConnectors(): Promise<ConnectorRow[]> {
@@ -1624,4 +1626,38 @@ export function cancelConnectorLogin(vendor: string): Promise<void> {
 
 export function logoutConnector(vendor: string): Promise<void> {
   return invoke<void>("logout_connector", { vendor });
+}
+
+/**
+ * 配置应用（飞书）：`config init --new`，一次性在浏览器里创建应用，之后才能登录。
+ * 和登录一样会阻塞到用户完成，输出与授权页地址走事件，取消用 `cancelConnectorLogin`。
+ */
+export function configureConnectorApp(vendor: string): Promise<void> {
+  return invoke<void>("configure_connector_app", { vendor });
+}
+
+export type MailAccountDraft = {
+  name: string;
+  email: string;
+  imapHost: string;
+  smtpHost: string;
+  /** 密码 / 授权码。只经环境变量交给 CLI，由它存进系统钥匙串。 */
+  password: string;
+};
+
+/** 添加邮箱账号（邮件）。 */
+export function addMailAccount(vendor: string, d: MailAccountDraft): Promise<void> {
+  return invoke<void>("add_mail_account", {
+    vendor,
+    name: d.name,
+    email: d.email,
+    imapHost: d.imapHost,
+    smtpHost: d.smtpHost,
+    password: d.password,
+  });
+}
+
+/** 移除邮箱账号（连同钥匙串里的密码）。 */
+export function removeMailAccount(vendor: string, name: string): Promise<void> {
+  return invoke<void>("remove_mail_account", { vendor, name });
 }

@@ -1182,6 +1182,48 @@ async fn logout_connector(
     carter_app_core::connectors::logout(shell.inner(), &vendor).await
 }
 
+/// 配置应用（飞书）：`config init --new`。和登录一样会阻塞到用户在浏览器里完成，
+/// 取消走 `cancel_connector_login`。
+#[tauri::command]
+async fn configure_connector_app(
+    shell: State<'_, Arc<AppShell>>,
+    vendor: String,
+) -> Result<(), String> {
+    carter_app_core::connectors::configure_app(shell.inner(), &vendor).await
+}
+
+/// 添加邮箱账号（邮件）。密码只经环境变量交给 CLI，由它存进系统钥匙串。
+#[tauri::command]
+async fn add_mail_account(
+    shell: State<'_, Arc<AppShell>>,
+    vendor: String,
+    name: String,
+    email: String,
+    imap_host: String,
+    smtp_host: String,
+    password: String,
+) -> Result<(), String> {
+    carter_app_core::connectors::add_mail_account(
+        shell.inner(),
+        &vendor,
+        &name,
+        &email,
+        &imap_host,
+        &smtp_host,
+        &password,
+    )
+    .await
+}
+
+#[tauri::command]
+async fn remove_mail_account(
+    shell: State<'_, Arc<AppShell>>,
+    vendor: String,
+    name: String,
+) -> Result<(), String> {
+    carter_app_core::connectors::remove_mail_account(shell.inner(), &vendor, &name).await
+}
+
 // ---------------------------------------------------------------------------
 // MCP
 // ---------------------------------------------------------------------------
@@ -1615,6 +1657,9 @@ pub fn run() {
             login_connector,
             cancel_connector_login,
             logout_connector,
+            configure_connector_app,
+            add_mail_account,
+            remove_mail_account,
             // MCP
             list_mcp_servers,
             save_mcp_server,

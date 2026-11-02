@@ -77,6 +77,34 @@ pub struct Vendor {
     pub install_windows: &'static str,
     /// 官方仓库地址，界面上的「文档」按钮用它。
     pub docs: &'static str,
+    /// 查版本的参数。dws 是 `version -f json`，lark-cli 只有 `--version`，mail-cli 同。
+    pub version_args: &'static [&'static str],
+    /// 技能从哪来：三家的分发方式完全不同，不能再假定都有 `skill setup`。
+    pub skill_source: SkillSource,
+    /// 「登录」在这个厂商上是什么：扫码 OAuth、先配应用再扫码、还是填邮箱账号。
+    pub auth: AuthKind,
+}
+
+/// 技能的取法。
+pub enum SkillSource {
+    /// `<cli> skill setup`（钉钉）：临时 HOME 里展开，再搬进本应用技能目录。
+    SkillSetup,
+    /// 技能内嵌在二进制里（飞书）：临时 HOME 里跑 `update --skills-layout suite`，
+    /// 产物是单个 `lark-suite` 技能（552 个文件收在 `references/` 下），
+    /// 比 separate 布局往技能列表里塞 28 条干净。
+    EmbeddedSuite,
+    /// 仓库里一份单独的 `SKILL.md`（邮件）：按 URL 直接取。
+    RawUrl(&'static str),
+}
+
+/// 登录方式。
+pub enum AuthKind {
+    /// `auth login` 一步到位（钉钉）。
+    Oauth,
+    /// 先 `config init --new` 配应用，再 `auth login`（飞书）。
+    AppThenOauth,
+    /// 没有 OAuth，只有 IMAP/SMTP 账号（邮件）：界面给表单，调 `account add`。
+    Account,
 }
 
 /// 支持的连接器。顺序 = 界面上的顺序。
@@ -91,6 +119,39 @@ pub static VENDORS: &[Vendor] = &[Vendor {
     install_unix: "curl -fsSL https://raw.githubusercontent.com/DingTalk-Real-AI/dingtalk-workspace-cli/main/scripts/install.sh | DWS_NO_SKILLS=1 sh",
     install_windows: "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$env:DWS_NO_SKILLS='1'; irm https://raw.githubusercontent.com/DingTalk-Real-AI/dingtalk-workspace-cli/main/scripts/install.ps1 | iex\"",
     docs: "https://github.com/DingTalk-Real-AI/dingtalk-workspace-cli",
+    version_args: &["version", "-f", "json"],
+    skill_source: SkillSource::SkillSetup,
+    auth: AuthKind::Oauth,
+},
+Vendor {
+    id: "feishu",
+    name: "飞书",
+    blurb: "日历、任务、通讯录、消息、云文档、多维表格、邮箱、审批与会议纪要。底层是飞书官方的 lark-cli 与内置的 lark-suite 技能。",
+    cli: "lark-cli",
+    skill: "lark-suite",
+    // 官方推荐 npm 分发；二进制由 npm 包的 postinstall 下载。
+    install_unix: "npm install -g @larksuite/cli",
+    install_windows: "npm install -g @larksuite/cli",
+    docs: "https://github.com/larksuite/cli",
+    // lark-cli 没有 `version` 子命令，只认 `--version`。
+    version_args: &["--version"],
+    skill_source: SkillSource::EmbeddedSuite,
+    auth: AuthKind::AppThenOauth,
+},
+Vendor {
+    id: "mail",
+    name: "邮件",
+    blurb: "通过 IMAP / SMTP 收发邮件、下载附件、查本地通讯录。底层是自研的 mail-cli 与配套 mail-skill，发信默认 dry-run 且受白名单约束。",
+    cli: "mail-cli",
+    skill: "mail-skill",
+    // cargo-dist 的安装脚本，二进制落在 `~/.cargo/bin`。
+    install_unix: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/qy527145/mail-cli/releases/latest/download/mail-cli-installer.sh | sh",
+    install_windows: "powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm https://github.com/qy527145/mail-cli/releases/latest/download/mail-cli-installer.ps1 | iex\"",
+    docs: "https://github.com/qy527145/mail-cli",
+    version_args: &["--version"],
+    // raw.githubusercontent.com 在部分网络下会超时，GitHub contents API 配 `Accept: application/vnd.github.raw` 实测可用。
+    skill_source: SkillSource::RawUrl("https://api.github.com/repos/qy527145/mail-cli/contents/skills/mail-skill/SKILL.md"),
+    auth: AuthKind::Account,
 }];
 
 pub fn vendor(id: &str) -> Option<&'static Vendor> {
@@ -114,6 +175,9 @@ pub struct ConnectorRow {
     pub auth: AuthState,
     /// 三层都齐了（CLI 装了、skill 装了、登录态有效）。界面上的绿点看它。
     pub ready: bool,
+    /// 登录方式：界面据此决定给「扫码登录」「配置应用」还是「添加账号」。
+    /// 取值 `oauth` | `app_then_oauth` | `account`。
+    pub auth_kind: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -168,12 +232,12 @@ async fn row(v: &'static Vendor) -> ConnectorRow {
         Some(p) => CliState {
             name: v.cli.to_string(),
             path: Some(p.to_string_lossy().to_string()),
-            version: cli_version(p).await,
+            version: cli_version(v, p).await,
         },
     };
     let skill = skill_state(v);
     let auth = match &cli_path {
-        Some(p) => auth_state(p).await,
+        Some(p) => auth_state(v, p).await,
         None => AuthState {
             message: Some(format!("还没有安装 {} CLI", v.cli)),
             hint: Some("点「安装 CLI」，装完就能登录。".into()),
@@ -191,6 +255,11 @@ async fn row(v: &'static Vendor) -> ConnectorRow {
         skill,
         auth,
         ready,
+        auth_kind: match v.auth {
+            AuthKind::Oauth => "oauth",
+            AuthKind::AppThenOauth => "app_then_oauth",
+            AuthKind::Account => "account",
+        },
     }
 }
 
@@ -227,13 +296,21 @@ pub fn user_bin_dirs() -> Vec<PathBuf> {
     let mut v = Vec::new();
     if let Some(home) = crate::paths::home_dir() {
         v.push(home.join(".local").join("bin"));
+        // mail-cli 的 cargo-dist 安装脚本落在 CARGO_HOME/bin。
+        v.push(home.join(".cargo").join("bin"));
+    }
+    // npm 全局 bin（lark-cli）：从 Finder 启动的 GUI 进程 PATH 里常常没有这些目录。
+    #[cfg(not(windows))]
+    {
+        v.push(PathBuf::from("/opt/homebrew/bin"));
+        v.push(PathBuf::from("/usr/local/bin"));
     }
     v
 }
 
-async fn cli_version(cli: &Path) -> Option<String> {
+async fn cli_version(v: &Vendor, cli: &Path) -> Option<String> {
     let mut cmd = tokio::process::Command::new(cli);
-    cmd.args(["version", "-f", "json"])
+    cmd.args(v.version_args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -244,11 +321,22 @@ async fn cli_version(cli: &Path) -> Option<String> {
         .ok()?
         .ok()?;
     let raw = String::from_utf8_lossy(&out.stdout);
-    // 老版本不认 `-f json`，吐的是 `dws version v1.0.46 (...)`
-    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    v.get("version")
-        .and_then(|x| x.as_str())
-        .map(|s| s.to_string())
+    parse_version(&raw)
+}
+
+/// 版本号可能是 JSON（`{"version":..}`），也可能是一行文字（`lark-cli version 1.0.98`、
+/// `mail-cli 0.1.0`、老版 dws 的 `dws version v1.0.46 (...)`）。先试 JSON，
+/// 再取第一个以数字开头（可带 v）的词。
+fn parse_version(raw: &str) -> Option<String> {
+    if let Ok(j) = serde_json::from_str::<serde_json::Value>(raw) {
+        if let Some(s) = j.get("version").and_then(|x| x.as_str()) {
+            return Some(s.to_string());
+        }
+    }
+    raw.split_whitespace()
+        .map(|w| w.trim_start_matches('v'))
+        .find(|w| w.chars().next().is_some_and(|c| c.is_ascii_digit()))
+        .map(|w| w.to_string())
 }
 
 /// 技能在哪儿、是不是生效的。
@@ -331,7 +419,143 @@ struct RawStatus {
     error: Option<serde_json::Value>,
 }
 
-async fn auth_state(cli: &Path) -> AuthState {
+/// 按厂商分派：三家的「登录态」长得完全不一样。
+async fn auth_state(v: &Vendor, cli: &Path) -> AuthState {
+    match v.auth {
+        AuthKind::Oauth => dws_auth_state(cli).await,
+        AuthKind::AppThenOauth => lark_auth_state(cli).await,
+        AuthKind::Account => mail_auth_state(cli).await,
+    }
+}
+
+/// 跑一条只读命令并把输出当 JSON 解析。成功信封在 stdout、错误信封在 stderr（lark-cli），
+/// 两边都试；失败时直接给出可展示的 [`AuthState`]。
+async fn run_json(cli: &Path, args: &[&str], secs: u64) -> Result<serde_json::Value, AuthState> {
+    let mut cmd = tokio::process::Command::new(cli);
+    cmd.args(args)
+        .env("LARKSUITE_CLI_NO_UPDATE_NOTIFIER", "1")
+        .env("LARKSUITE_CLI_NO_SKILLS_NOTIFIER", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    platform::hide_console_async(&mut cmd);
+    let out = match tokio::time::timeout(Duration::from_secs(secs), cmd.output()).await {
+        Err(_) => {
+            return Err(AuthState {
+                message: Some("检查登录态超时".into()),
+                hint: Some("网络不通，或服务端暂时没有响应，稍后再试。".into()),
+                ..Default::default()
+            });
+        }
+        Ok(Err(e)) => {
+            return Err(AuthState {
+                message: Some(format!("跑不起来：{e}")),
+                ..Default::default()
+            });
+        }
+        Ok(Ok(o)) => o,
+    };
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    serde_json::from_str(&stdout)
+        .or_else(|_| serde_json::from_str(&stderr))
+        .map_err(|_| AuthState {
+            message: Some("看不懂命令的输出".into()),
+            hint: first_line(&stderr).or_else(|| first_line(&stdout)),
+            ..Default::default()
+        })
+}
+
+/// `lark-cli auth status`：未配置应用时是 `{ok:false,error:{subtype:"not_configured"}}`；
+/// 配好应用后是 `identities.{bot,user}`，只有 `user.available` 为真才算登录了用户身份
+/// （bot 身份看不到用户的日历与文档，不能算「已连接」）。
+async fn lark_auth_state(cli: &Path) -> AuthState {
+    let j = match run_json(cli, &["auth", "status"], 25).await {
+        Ok(j) => j,
+        Err(s) => return s,
+    };
+    if j.get("ok").and_then(|x| x.as_bool()) == Some(false) {
+        let sub = j.pointer("/error/subtype").and_then(|x| x.as_str()).unwrap_or("");
+        if sub == "not_configured" {
+            return AuthState {
+                message: Some("还没有配置飞书应用".into()),
+                hint: Some("先点「配置应用」，在浏览器里完成一次性的应用创建，再登录。".into()),
+                ..Default::default()
+            };
+        }
+        return AuthState {
+            message: j.pointer("/error/message").and_then(|x| x.as_str()).map(String::from),
+            hint: j.pointer("/error/hint").and_then(|x| x.as_str()).map(String::from),
+            ..Default::default()
+        };
+    }
+    let user = j.pointer("/identities/user");
+    let s = |k: &str| user.and_then(|u| u.get(k)).and_then(|x| x.as_str()).map(String::from);
+    if user.and_then(|u| u.get("available")).and_then(|x| x.as_bool()) != Some(true) {
+        return AuthState {
+            message: s("message").or_else(|| Some("还没有登录用户身份".into())),
+            hint: Some("点「扫码登录」授权用户身份；只有应用身份时，模型看不到你个人的日历与文档。".into()),
+            ..Default::default()
+        };
+    }
+    let (message, hint) = match s("tokenStatus").as_deref() {
+        Some("valid") | None => (None, None),
+        Some(t) => (
+            Some(format!("token 状态：{t}")),
+            Some("如果用起来报错，重新登录一次。".to_string()),
+        ),
+    };
+    AuthState {
+        logged_in: true,
+        user_name: s("userName"),
+        corp_name: j.get("brand").and_then(|x| x.as_str()).map(String::from),
+        corp_id: j.get("appId").and_then(|x| x.as_str()).map(String::from),
+        expires_at: s("expiresAt"),
+        message,
+        hint,
+    }
+}
+
+/// `mail-cli account list --json`：没有 OAuth，有账号就算「已登录」。
+async fn mail_auth_state(cli: &Path) -> AuthState {
+    let j = match run_json(cli, &["account", "list", "--json"], 10).await {
+        Ok(j) => j,
+        Err(s) => return s,
+    };
+    let accounts = j
+        .get("accounts")
+        .and_then(|a| a.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if accounts.is_empty() {
+        return AuthState {
+            message: Some("还没有添加邮箱账号".into()),
+            hint: Some("填写邮箱与授权码即可，密码只存进系统钥匙串，不进配置文件。".into()),
+            ..Default::default()
+        };
+    }
+    let def = j.get("default_account").and_then(|x| x.as_str());
+    let acc = accounts
+        .iter()
+        .find(|a| a.get("name").and_then(|x| x.as_str()) == def)
+        .or(accounts.first());
+    let pick = |p: &str| acc.and_then(|a| a.pointer(p)).and_then(|x| x.as_str()).map(String::from);
+    AuthState {
+        logged_in: true,
+        user_name: pick("/email"),
+        corp_name: pick("/imap/host"),
+        corp_id: pick("/name"),
+        hint: if accounts.len() > 1 {
+            Some(format!("共 {} 个账号，当前默认账号如上。", accounts.len()))
+        } else {
+            None
+        },
+        ..Default::default()
+    }
+}
+
+async fn dws_auth_state(cli: &Path) -> AuthState {
     let mut cmd = tokio::process::Command::new(cli);
     cmd.args(["auth", "status", "-f", "json"])
         .stdin(Stdio::null())
@@ -513,8 +737,32 @@ async fn fetch_skill(
     ));
     std::fs::create_dir_all(&tmp).map_err(|e| format!("建临时目录失败：{e}"))?;
 
+    // 邮件：仓库里就一份 SKILL.md，直接下载，不经过 CLI。
+    if let SkillSource::RawUrl(url) = v.skill_source {
+        let out_dir = tmp.join("skill");
+        let _ = std::fs::create_dir_all(&out_dir);
+        let mut curl = tokio::process::Command::new("curl");
+        curl.args(["-fsSL", "--max-time", "30", "-H", "Accept: application/vnd.github.raw", "-o"])
+            .arg(out_dir.join("SKILL.md"))
+            .arg(url);
+        let status = run_streamed(shell, v, curl, Duration::from_secs(60), false).await;
+        let result = match status {
+            Err(e) => Err(e),
+            Ok(st) if !st.success() => Err(format!("下载技能失败（curl 退出码 {:?}）", st.code())),
+            Ok(_) => copy_skill_dir(&out_dir, dst),
+        };
+        let _ = std::fs::remove_dir_all(&tmp);
+        return result;
+    }
+
     let mut cmd = tokio::process::Command::new(cli);
-    cmd.args(["skill", "setup", "--mode", "mono", "--target", "agents", "--yes"])
+    let setup_args: &[&str] = match v.skill_source {
+        SkillSource::SkillSetup => &["skill", "setup", "--mode", "mono", "--target", "agents", "--yes"],
+        // 飞书技能内嵌在二进制里；临时 HOME 里同步 suite 布局，只产出一个 lark-suite 技能。
+        SkillSource::EmbeddedSuite => &["update", "--skills-layout", "suite", "--json"],
+        SkillSource::RawUrl(_) => unreachable!("上面已经处理"),
+    };
+    cmd.args(setup_args)
         // 临时 HOME 同时收住技能目录与 CLI 自己的状态目录（`~/.dws`），
         // 免得一次「装技能」动到用户真正的登录态与别的 Agent 目录。
         .env("HOME", &tmp)
@@ -628,10 +876,27 @@ pub async fn login(shell: &AppShell, id: &str, recommend: bool) -> Result<(), St
         .get_or_insert_with(Default::default)
         .remove(v.id);
 
+    if matches!(v.auth, AuthKind::Account) {
+        return Err("邮件没有扫码登录，请在卡片上添加邮箱账号。".into());
+    }
     let mut cmd = tokio::process::Command::new(&cli);
-    cmd.args(["auth", "login", "--no-browser", "--yes", "-f", "json"]);
-    if recommend {
-        cmd.arg("--recommend");
+    match v.auth {
+        // lark-cli 的 `auth login` 没有 --no-browser / --yes：授权链接会直接打在输出里，
+        // 由 run_streamed 解析出来。必须指定范围，否则会进交互式 TUI。
+        AuthKind::AppThenOauth => {
+            cmd.args(["auth", "login"]);
+            if recommend {
+                cmd.arg("--recommend");
+            } else {
+                cmd.args(["--domain", "contact,calendar,task,im"]);
+            }
+        }
+        _ => {
+            cmd.args(["auth", "login", "--no-browser", "--yes", "-f", "json"]);
+            if recommend {
+                cmd.arg("--recommend");
+            }
+        }
     }
     let status = run_streamed(shell, v, cmd, Duration::from_secs(15 * 60), true).await;
 
@@ -656,6 +921,137 @@ pub async fn login(shell: &AppShell, id: &str, recommend: bool) -> Result<(), St
     Ok(())
 }
 
+/// 配置应用（飞书）：`config init --new`，一次性在浏览器里创建应用，之后才能登录。
+///
+/// 和登录一样会阻塞到用户在浏览器里完成，所以同样登记进 [`LOGINS`]，
+/// 能被 [`cancel_login`] 取消；授权链接单独一行，由 [`run_streamed`] 解析并广播。
+pub async fn configure_app(shell: &AppShell, id: &str) -> Result<(), String> {
+    let Some(v) = vendor(id) else {
+        return Err(format!("没有 `{id}` 这个连接器"));
+    };
+    if !matches!(v.auth, AuthKind::AppThenOauth) {
+        return Err(format!("{} 不需要配置应用", v.name));
+    }
+    let cli = cli_path(v).ok_or_else(|| format!("还没装 {} CLI", v.cli))?;
+    {
+        let guard = logins();
+        if guard.as_ref().is_some_and(|m| m.contains_key(v.id)) {
+            return Err("已经在进行中，先取消上一次再试。".into());
+        }
+    }
+    cancelled_set()
+        .get_or_insert_with(Default::default)
+        .remove(v.id);
+
+    let mut cmd = tokio::process::Command::new(&cli);
+    cmd.args(["config", "init", "--new", "--lang", "zh"]);
+    let status = run_streamed(shell, v, cmd, Duration::from_secs(15 * 60), true).await;
+
+    logins().get_or_insert_with(HashMap::new).remove(v.id);
+    let was_cancelled = cancelled_set()
+        .as_mut()
+        .map(|s| s.remove(v.id))
+        .unwrap_or(false);
+    let status = status?;
+    if was_cancelled {
+        return Err("已取消配置".into());
+    }
+    if !status.success() {
+        return Err("应用配置没有完成，看上面对话框里的提示。".into());
+    }
+    shell.emit(AppEvent::ConnectorDone {
+        vendor: v.id.to_string(),
+        ok: true,
+        message: Some("应用已配置，接着扫码登录".into()),
+    });
+    Ok(())
+}
+
+/// 添加邮箱账号（邮件）：调 `mail-cli account add`。
+///
+/// 密码走环境变量（`--password-env`）而不是 `--password`：后者会出现在进程列表与
+/// shell 历史里。mail-cli 自己把它存进系统钥匙串，不进配置文件。不带 `--force`：
+/// 同名账号已存在时让它报错，不悄悄覆盖用户原有的账号。
+pub async fn add_mail_account(
+    shell: &AppShell,
+    id: &str,
+    name: &str,
+    email: &str,
+    imap_host: &str,
+    smtp_host: &str,
+    password: &str,
+) -> Result<(), String> {
+    let Some(v) = vendor(id) else {
+        return Err(format!("没有 `{id}` 这个连接器"));
+    };
+    if !matches!(v.auth, AuthKind::Account) {
+        return Err(format!("{} 不是账号式连接器", v.name));
+    }
+    let cli = cli_path(v).ok_or_else(|| format!("还没装 {} CLI", v.cli))?;
+    for (label, val) in [
+        ("账号名", name),
+        ("邮箱", email),
+        ("IMAP 主机", imap_host),
+        ("SMTP 主机", smtp_host),
+        ("密码 / 授权码", password),
+    ] {
+        if val.trim().is_empty() {
+            return Err(format!("{label}不能为空"));
+        }
+    }
+    let mut cmd = tokio::process::Command::new(&cli);
+    cmd.args([
+        "account",
+        "add",
+        "--name",
+        name.trim(),
+        "--email",
+        email.trim(),
+        "--imap-host",
+        imap_host.trim(),
+        "--smtp-host",
+        smtp_host.trim(),
+        "--password-env",
+        "CARTER_MAIL_PASSWORD",
+        "-p",
+        "--json",
+    ])
+    .env("CARTER_MAIL_PASSWORD", password);
+    let status = run_streamed(shell, v, cmd, Duration::from_secs(60), false).await?;
+    if !status.success() {
+        return Err("添加账号失败，看上面对话框里的提示（同名账号已存在时需先移除）。".into());
+    }
+    shell.emit(AppEvent::ConnectorDone {
+        vendor: v.id.to_string(),
+        ok: true,
+        message: Some("邮箱账号已添加".into()),
+    });
+    Ok(())
+}
+
+/// 移除邮箱账号（连同钥匙串里的密码）。
+pub async fn remove_mail_account(shell: &AppShell, id: &str, name: &str) -> Result<(), String> {
+    let Some(v) = vendor(id) else {
+        return Err(format!("没有 `{id}` 这个连接器"));
+    };
+    if !matches!(v.auth, AuthKind::Account) {
+        return Err(format!("{} 不是账号式连接器", v.name));
+    }
+    let cli = cli_path(v).ok_or_else(|| format!("还没装 {} CLI", v.cli))?;
+    let mut cmd = tokio::process::Command::new(&cli);
+    cmd.args(["account", "remove", "--name", name.trim(), "--json"]);
+    let status = run_streamed(shell, v, cmd, Duration::from_secs(30), false).await?;
+    if !status.success() {
+        return Err("移除账号失败".into());
+    }
+    shell.emit(AppEvent::ConnectorDone {
+        vendor: v.id.to_string(),
+        ok: true,
+        message: Some("邮箱账号已移除".into()),
+    });
+    Ok(())
+}
+
 /// 取消正在进行的登录。没在登录时什么也不做（幂等）。
 pub fn cancel_login(id: &str) {
     let pid = logins().as_ref().and_then(|m| m.get(id).copied());
@@ -670,8 +1066,19 @@ pub async fn logout(shell: &AppShell, id: &str) -> Result<(), String> {
         return Err(format!("没有 `{id}` 这个连接器"));
     };
     let cli = cli_path(v).ok_or_else(|| format!("还没装 {} CLI", v.cli))?;
+    if matches!(v.auth, AuthKind::Account) {
+        return Err("邮件没有登录态可退出，请在卡片上移除邮箱账号。".into());
+    }
     let mut cmd = tokio::process::Command::new(&cli);
-    cmd.args(["auth", "logout", "--yes", "-f", "json"]);
+    match v.auth {
+        // lark-cli 的 logout 只认 --json；只清本机登录态，服务端授权要用户在授权管理页取消。
+        AuthKind::AppThenOauth => {
+            cmd.args(["auth", "logout", "--json"]);
+        }
+        _ => {
+            cmd.args(["auth", "logout", "--yes", "-f", "json"]);
+        }
+    }
     let status = run_streamed(shell, v, cmd, Duration::from_secs(60), false).await?;
     if !status.success() {
         return Err("退出登录失败".into());
@@ -878,6 +1285,26 @@ mod tests {
         assert!(copy_skill_dir(&src, &dst).is_err());
         assert_eq!(std::fs::read_to_string(dst.join("SKILL.md")).unwrap(), "old");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn versions_are_read_from_json_or_plain_text() {
+        assert_eq!(parse_version("{\"version\":\"1.0.46\"}"), Some("1.0.46".into()));
+        assert_eq!(parse_version("lark-cli version 1.0.98\n"), Some("1.0.98".into()));
+        assert_eq!(parse_version("mail-cli 0.1.0"), Some("0.1.0".into()));
+        assert_eq!(
+            parse_version("dws version v1.0.46 (bba94c0, 2026-07-01T08:49:22Z)"),
+            Some("1.0.46".into())
+        );
+        assert_eq!(parse_version(""), None);
+    }
+
+    #[test]
+    fn the_feishu_authorization_url_is_recognized() {
+        assert_eq!(
+            auth_url("  https://open.feishu.cn/page/cli?user_code=9NTD-T7WM&lpv=1.0.98&ocv=1.0.98&from=cli"),
+            Some("https://open.feishu.cn/page/cli?user_code=9NTD-T7WM&lpv=1.0.98&ocv=1.0.98&from=cli".into())
+        );
     }
 
     #[test]

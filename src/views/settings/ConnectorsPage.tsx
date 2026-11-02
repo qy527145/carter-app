@@ -38,26 +38,31 @@ import {
 
 import { EVENT_NAME, type AppEvent } from "../../lib/api";
 import {
+  addMailAccount,
   cancelConnectorLogin,
+  configureConnectorApp,
   installConnectorCli,
   installConnectorSkill,
   listConnectors,
   loginConnector,
   logoutConnector,
+  removeMailAccount,
   type ConnectorRow,
+  type MailAccountDraft,
 } from "../../lib/api";
 import { toastError, toastOk } from "../../lib/toast";
 import { useAsync } from "../../lib/useAsync";
 import { Button } from "../../components/ui/Button";
-import { Switch } from "../../components/ui/Input";
+import { Field, Input, Switch } from "../../components/ui/Input";
 import { Badge, Banner, Card, Modal, Spinner } from "../../components/ui/Panel";
 import { AsyncBody, PageIntro } from "./AsyncBody";
 
-type Job = "install-cli" | "install-skill" | "login" | "logout";
+type Job = "install-cli" | "install-skill" | "configure-app" | "login" | "logout";
 
 const JOB_TITLE: Record<Job, string> = {
   "install-cli": "安装 CLI",
   "install-skill": "安装技能",
+  "configure-app": "配置应用",
   login: "扫码登录",
   logout: "退出登录",
 };
@@ -97,9 +102,64 @@ function StatusLine({
   );
 }
 
+/** 邮箱账号表单（邮件）：没有扫码登录，填账号即「登录」。密码只经环境变量交给 CLI，存进系统钥匙串。 */
+function MailAccountForm({ vendor, onClose }: { vendor: string; onClose: () => void }) {
+  const [d, setD] = useState<MailAccountDraft>({
+    name: "",
+    email: "",
+    imapHost: "",
+    smtpHost: "",
+    password: "",
+  });
+  const [busy, setBusy] = useState(false);
+  const set = (k: keyof MailAccountDraft) => (e: React.ChangeEvent<HTMLInputElement>) =>
+    setD((p) => ({ ...p, [k]: e.target.value }));
+
+  async function submit() {
+    setBusy(true);
+    try {
+      await addMailAccount(vendor, d);
+      onClose();
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="space-y-2 rounded-lg bg-base p-2.5">
+      <Field label="账号名" hint="本地标识，如 work">
+        <Input value={d.name} onChange={set("name")} placeholder="work" />
+      </Field>
+      <Field label="邮箱">
+        <Input value={d.email} onChange={set("email")} placeholder="me@example.com" />
+      </Field>
+      <Field label="IMAP 主机" hint="端口 993">
+        <Input value={d.imapHost} onChange={set("imapHost")} placeholder="imap.example.com" />
+      </Field>
+      <Field label="SMTP 主机" hint="端口 465">
+        <Input value={d.smtpHost} onChange={set("smtpHost")} placeholder="smtp.example.com" />
+      </Field>
+      <Field label="密码 / 授权码" hint="只存进系统钥匙串">
+        <Input type="password" value={d.password} onChange={set("password")} />
+      </Field>
+      <div className="flex gap-2">
+        <Button size="sm" variant="primary" disabled={busy} onClick={() => void submit()}>
+          {busy ? "添加中…" : "添加账号"}
+        </Button>
+        <Button size="sm" disabled={busy} onClick={onClose}>
+          取消
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function ConnectorCard({ row, onStart }: { row: ConnectorRow; onStart: (job: Job) => void }) {
   const { cli, skill, auth } = row;
   const [showHint, setShowHint] = useState(false);
+  const [showMail, setShowMail] = useState(false);
 
   return (
     <Card className="space-y-3">
@@ -148,13 +208,43 @@ function ConnectorCard({ row, onStart }: { row: ConnectorRow; onStart: (job: Job
             退出登录
           </Button>
         )}
-        {cli.path !== null && !auth.logged_in && (
+        {cli.path !== null && row.auth_kind === "account" && (
+          <Button size="sm" variant={auth.logged_in ? "secondary" : "primary"} onClick={() => setShowMail(!showMail)}>
+            <LogIn size={12} />
+            添加账号
+          </Button>
+        )}
+        {cli.path !== null && row.auth_kind === "account" && auth.logged_in && auth.corp_id && (
+          <Button
+            size="sm"
+            onClick={() => {
+              removeMailAccount(row.id, auth.corp_id ?? "").catch(toastError);
+            }}
+            title="移除当前默认账号（连同钥匙串里的密码）"
+          >
+            <LogOut size={12} />
+            移除账号
+          </Button>
+        )}
+        {cli.path !== null && !auth.logged_in && row.auth_kind === "app_then_oauth" && (
+          <Button
+            size="sm"
+            onClick={() => onStart("configure-app")}
+            title="首次使用：在浏览器里一次性创建应用，之后才能登录"
+          >
+            <ScanLine size={12} />
+            配置应用
+          </Button>
+        )}
+        {cli.path !== null && !auth.logged_in && row.auth_kind !== "account" && (
           <Button size="sm" variant="primary" onClick={() => onStart("login")}>
             <LogIn size={12} />
             扫码登录
           </Button>
         )}
       </div>
+
+      {showMail && <MailAccountForm vendor={row.id} onClose={() => setShowMail(false)} />}
 
       <div className="space-y-1.5 border-t border-edge pt-3">
         <StatusLine ok={cli.path !== null}>
@@ -378,11 +468,13 @@ export function ConnectorsPage() {
         running: true,
         error: null,
       });
-      if (job === "login") loginVendor.current = row.id;
+      // 配置应用与登录一样会阻塞到用户在浏览器里完成，取消走同一条命令。
+      if (job === "login" || job === "configure-app") loginVendor.current = row.id;
 
       try {
         if (job === "install-cli") await installConnectorCli(row.id);
         else if (job === "install-skill") await installConnectorSkill(row.id);
+        else if (job === "configure-app") await configureConnectorApp(row.id);
         else if (job === "logout") await logoutConnector(row.id);
         else await loginConnector(row.id, recommend);
         setProgress((p) => (p ? { ...p, running: false } : p));
@@ -390,7 +482,7 @@ export function ConnectorsPage() {
         const msg = typeof e === "string" ? e : String(e);
         setProgress((p) => (p ? { ...p, running: false, error: msg } : p));
       } finally {
-        if (job === "login") loginVendor.current = null;
+        if (job === "login" || job === "configure-app") loginVendor.current = null;
         settle.current?.();
       }
     },
