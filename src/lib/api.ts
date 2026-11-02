@@ -583,6 +583,8 @@ export type ProviderDraft = {
   server_tool_max_uses: number | null;
   /** 整表对齐：不在这个列表里的模型会被删掉。 */
   models: ModelDraft[];
+  /** 编辑时的原渠道名；与 `name` 不同即改名。 */
+  rename_from?: string | null;
 };
 
 /** 全部模型引用 + 从 models.dev 解出来的元数据。 */

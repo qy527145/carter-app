@@ -466,6 +466,7 @@ fn save_provider_from_detail(
                 default_reasoning: config_edit::reasoning_to_draft(&m.default_reasoning),
             })
             .collect(),
+        rename_from: None,
     };
     config_edit::save_provider_reload(shell, &draft)
 }

@@ -161,7 +161,7 @@ pub struct ModelDraft {
     pub default_reasoning: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProviderDraft {
     pub name: String,
     /// 协议。可以是规范名，也可以是 carter 认的别名（`deepseek` / `ollama` …）。
@@ -179,12 +179,51 @@ pub struct ProviderDraft {
     /// 整表对齐：不在这个列表里的模型会被删掉。
     #[serde(default)]
     pub models: Vec<ModelDraft>,
+    /// 编辑时的原渠道名。与 `name` 不同就是改名：整段表挪到新名字下（密钥、注释、
+    /// 界面不认识的字段跟着走），再把指向它的 `渠道/模型` 引用一起改掉。
+    #[serde(default)]
+    pub rename_from: Option<String>,
+}
+
+/// `old/xxx` → `new/xxx`；不是这个渠道的引用原样返回 `None`。
+pub fn renamed_ref(reference: &str, old: &str, new: &str) -> Option<String> {
+    let (p, m) = reference.split_once('/')?;
+    (p == old).then(|| format!("{new}/{m}"))
+}
+
+/// 把 `[providers.<old>]` 整段挪成 `[providers.<new>]`，并改写 `[agent]` 里指向它的引用。
+fn rename_provider(doc: &mut DocumentMut, old: &str, new: &str) -> Result<(), String> {
+    let providers = child_table(doc.as_table_mut(), "providers")?;
+    if providers.contains_key(new) {
+        return Err(format!("已有渠道 `{new}`，换一个名字"));
+    }
+    let item = providers
+        .remove(old)
+        .ok_or_else(|| format!("找不到渠道 `{old}`"))?;
+    // 表段自带在文档里的位置，原样插回去，文件里它还在原来那个地方。
+    providers.insert(new, item);
+
+    if let Some(agent) = doc.get_mut("agent").and_then(|i| i.as_table_mut()) {
+        for key in ["model", "fast_model"] {
+            let next = agent
+                .get(key)
+                .and_then(|v| v.as_str())
+                .and_then(|r| renamed_ref(r, old, new));
+            if let Some(next) = next {
+                agent.insert(key, value(next));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn save_provider(doc: &mut DocumentMut, d: &ProviderDraft) -> Result<(), String> {
     check_key("渠道", &d.name)?;
     if d.kind.trim().is_empty() {
         return Err("协议不能为空".into());
+    }
+    if let Some(old) = d.rename_from.as_deref().filter(|o| *o != d.name) {
+        rename_provider(doc, old, &d.name)?;
     }
 
     let providers = child_table(doc.as_table_mut(), "providers")?;
@@ -402,6 +441,18 @@ pub fn save_provider_reload(
     let mut doc = load_doc()?;
     save_provider(&mut doc, d)?;
     apply(shell, &doc)?;
+    // 定时任务存的也是 `渠道/模型`，不跟着改的话到点就开不出会话。
+    // 配置已经写成功了，这一步失败只记一笔，不回滚。
+    if let Some(old) = d.rename_from.as_deref().filter(|o| *o != d.name) {
+        for mut s in shell.schedules.list() {
+            if let Some(next) = s.model.as_deref().and_then(|r| renamed_ref(r, old, &d.name)) {
+                s.model = Some(next);
+                if let Err(e) = shell.schedules.upsert(s) {
+                    tracing::warn!("渠道改名后更新定时任务失败：{e}");
+                }
+            }
+        }
+    }
     provider_detail(&d.name)
 }
 
@@ -643,6 +694,7 @@ whatever = true
                 api_name: Some("claude-sonnet-4-6".into()),
                 default_reasoning: None,
             }],
+            ..Default::default()
         };
         save_provider(&mut d, &draft).unwrap();
         let out = d.to_string();
@@ -653,6 +705,42 @@ whatever = true
         );
         assert!(!out.contains("sk-"), "核心里不该出现任何明文密钥");
         assert!(out.contains("https://example.test"), "改过的字段要写进去");
+    }
+
+    /// 改名：整段挪过去（密钥引用、模型、不认识的字段都在），默认模型的引用跟着改，
+    /// 旧名字不再留着；撞上已有渠道要拒绝，而不是把它覆盖掉。
+    #[test]
+    fn renaming_a_provider_moves_the_table_and_rewrites_references() {
+        let mut d = doc();
+        let draft = ProviderDraft {
+            name: "proxy".into(),
+            kind: "anthropic".into(),
+            server_tools: vec!["web_search".into()],
+            models: vec![ModelDraft {
+                name: "sonnet".into(),
+                meta: "anthropic/claude-sonnet-4-5".into(),
+                api_name: Some("claude-sonnet-4-6".into()),
+                default_reasoning: None,
+            }],
+            rename_from: Some("ws".into()),
+            ..Default::default()
+        };
+        save_provider(&mut d, &draft).unwrap();
+        let out = d.to_string();
+        assert!(!out.contains("[providers.ws]"), "旧名字应当消失：\n{out}");
+        assert!(out.contains(r#"api_key = "${ANTHROPIC_API_KEY}""#), "密钥要跟着走：\n{out}");
+        assert!(out.contains("[providers.proxy.models.sonnet]"), "{out}");
+        assert!(out.contains(r#"model = "proxy/sonnet""#), "默认模型引用要改：\n{out}");
+
+        let mut d = doc();
+        save_provider(
+            &mut d,
+            &ProviderDraft { name: "other".into(), kind: "anthropic".into(), ..Default::default() },
+        )
+        .unwrap();
+        let clash = ProviderDraft { name: "other".into(), ..draft };
+        assert!(save_provider(&mut d, &clash).is_err());
+        assert!(d.to_string().contains("[providers.ws]"), "拒绝时原渠道不能动");
     }
 
     /// 自动压缩：两个键写进 `[agent]`，越界的比例挡在外面。
@@ -706,6 +794,7 @@ whatever = true
                 api_name: None,
                 default_reasoning: None,
             }],
+            ..Default::default()
         };
         save_provider(&mut d, &draft).unwrap();
         let out = d.to_string();
@@ -732,6 +821,7 @@ whatever = true
                 api_name: Some(String::new()), // 清空
                 default_reasoning: None,
             }],
+            ..Default::default()
         };
         save_provider(&mut d, &draft).unwrap();
         let out = d.to_string();
@@ -758,6 +848,7 @@ whatever = true
                 api_name: None,
                 default_reasoning: None,
             }],
+            ..Default::default()
         };
         save_provider(&mut d, &draft).unwrap();
 
@@ -786,6 +877,7 @@ whatever = true
                 api_name: None,
                 default_reasoning: None,
             }],
+            ..Default::default()
         };
         save_provider(&mut d, &draft).unwrap();
         let back = provider_detail_from(&d, "ws");
@@ -804,6 +896,7 @@ whatever = true
             server_tools: vec![],
             server_tool_max_uses: None,
             models: vec![],
+            ..Default::default()
         };
         let err = save_provider(&mut d, &draft).unwrap_err();
         assert!(err.contains("只能用字母"), "错误信息要说清规则，实际：{err}");
@@ -925,6 +1018,7 @@ whatever = true
                         api_name: Some("claude-sonnet-4-6".into()),
                         default_reasoning: Some("medium".into()),
                     }],
+                    ..Default::default()
                 },
             )
             .unwrap();

@@ -78,7 +78,7 @@ export function ProviderEditor({
   // 新建时渠道名先跟着默认协议走，选别的协议会跟着换（见 changeKind）。
   const [name, setName] = useState(editing ?? "anthropic");
   const [kind, setKind] = useState("anthropic");
-  // 新建时要防重名：保存是按名字 upsert 的，撞上已有渠道会把它整个覆盖掉。
+  // 防重名（新建与改名都要）：保存是按名字 upsert 的，撞上已有渠道会把它整个覆盖掉。
   const [existing, setExisting] = useState<string[]>([]);
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
@@ -103,11 +103,11 @@ export function ProviderEditor({
 
   // 编辑时拉原始配置回填。
   useEffect(() => {
+    listChannels()
+      .then((cs) => setExisting(cs.map((c) => c.name)))
+      .catch(() => setExisting([]));
     if (!editing) {
       setModels([blankModel()]);
-      listChannels()
-        .then((cs) => setExisting(cs.map((c) => c.name)))
-        .catch(() => setExisting([]));
       return;
     }
     let cancelled = false;
@@ -161,7 +161,9 @@ export function ProviderEditor({
   }, [baseUrl, kind]);
 
   const preset = presetFor(kind);
+  // 编辑已有渠道：名字可以改，但预设、跟着协议换名、预填模型这些「新建才有」的行为都不要。
   const nameLocked = editing !== null;
+  const renaming = editing !== null && name.trim() !== editing;
 
   // 旧配置里可能写着别名 kind（`deepseek` 之类）。下拉只列三种线协议，所以要把
   // 当前这个别名单独塞进去 —— 否则选择框会显示成占位符，看着像配置丢了。
@@ -253,7 +255,7 @@ export function ProviderEditor({
     setKind(k);
   };
 
-  const duplicate = !nameLocked && existing.includes(name.trim());
+  const duplicate = name.trim() !== editing && existing.includes(name.trim());
 
   const valid = useMemo(() => {
     if (!name.trim() || duplicate) return false;
@@ -283,6 +285,8 @@ export function ProviderEditor({
         server_tools: serverTools,
         server_tool_max_uses: maxUses.trim() ? Number(maxUses.replace(/\D/g, "")) : null,
         models: models.filter((m) => m.name.trim() && m.meta.trim()).map(toDraft),
+        // 改名时后端把整段挪过去，并改写默认模型、副模型、定时任务里的引用。
+        rename_from: editing,
       };
       await saveProvider(draft);
       onClose(true);
@@ -393,10 +397,10 @@ export function ProviderEditor({
       <Field
         label="渠道名"
         hint={
-          nameLocked
-            ? "改名要新建一个渠道再删掉旧的"
-            : duplicate
-              ? <span className="text-[var(--danger)]">已有同名渠道，换一个名字或去编辑它</span>
+          duplicate
+            ? <span className="text-[var(--danger)]">已有同名渠道，换一个名字或去编辑它</span>
+            : renaming
+              ? "改名后默认模型、副模型、定时任务里的引用会一起改"
               : "只能用字母、数字、-、_（它会变成配置里的表键）"
         }
       >
@@ -404,7 +408,6 @@ export function ProviderEditor({
           mono
           value={name}
           onChange={(e) => setName(e.target.value)}
-          disabled={nameLocked}
           placeholder="例如 anthropic、my-proxy"
         />
       </Field>
