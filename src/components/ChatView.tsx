@@ -1202,7 +1202,7 @@ function EmptyState() {
 // ---------------------------------------------------------------------------
 
 /**
- * 底栏的待办进度。
+ * 底栏的待办进度。默认折叠成一行（进度条 + 当前项），点击展开整张清单。
  *
  * **全部完成就自动收起** —— 之前它会一直挂在那里（`todos.length > 0` 就渲染），
  * 一轮做完之后还占着版面，用户分不清那是「还要做」还是「已经做完了」。
@@ -1212,6 +1212,9 @@ function EmptyState() {
 function TodoPanel() {
   const todos = useStore((s) => s.todos);
   const [dismissed, setDismissed] = useState(false);
+  // 默认折叠成一行：整张清单常驻底栏太占地方，对话流里那张 todo_write 卡片
+  // 才是看全貌的地方，这里点开即可临时展开。
+  const [expanded, setExpanded] = useState(false);
 
   const allDone = todos.length > 0 && todos.every((t) => t.status === "completed");
 
@@ -1234,36 +1237,71 @@ function TodoPanel() {
   if (allDone && dismissed) return null;
 
   const done = todos.filter((t) => t.status === "completed").length;
+  // 折叠时标题行只露「此刻在做的那一项」；没有进行中的就露下一项待做的。
+  const current =
+    todos.find((t) => t.status === "in_progress") ?? todos.find((t) => t.status === "pending");
 
   return (
-    <div className="border-t border-edge bg-card px-4 py-2">
-      <div className="mx-auto flex max-w-3xl items-start gap-2">
-        <div className="min-w-0 flex-1 space-y-1">
-          <div className="flex items-center gap-2 text-[10px] text-dim">
-            <span>待办 {done}/{todos.length}</span>
-            {allDone && <span className="text-[var(--ok)]">已全部完成</span>}
-          </div>
-          {todos.map((t, i) => (
-            <div key={i} className="flex items-center gap-2 text-xs">
-              {t.status === "completed" ? (
-                <CircleCheck
-                  size={13}
-                  className="carter-pop shrink-0 text-[var(--ok)]"
-                />
-              ) : t.status === "in_progress" ? (
-                <LoaderCircle size={13} className="shrink-0 animate-spin text-tone-blue" />
-              ) : (
-                <span className="inline-block size-3 shrink-0 rounded-full border border-edge" />
-              )}
-              <span className={t.status === "completed" ? "text-dim line-through" : "text-ink"}>
-                {t.status === "in_progress" ? t.active_form : t.content}
-              </span>
-            </div>
-          ))}
+    <div className="border-t border-edge bg-card px-4 py-1.5">
+      <div className="mx-auto max-w-3xl">
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setExpanded((o) => !o)}
+            title={expanded ? "折叠待办" : "展开待办"}
+            className="flex min-w-0 flex-1 items-center gap-2 py-0.5 text-left text-xs text-dim transition-colors hover:text-ink"
+          >
+            <ChevronRight
+              size={12}
+              className={`shrink-0 transition-transform ${expanded ? "rotate-90" : ""}`}
+            />
+            <span className="shrink-0 tabular-nums">
+              待办 {done}/{todos.length}
+            </span>
+            <span className="h-1 w-16 shrink-0 overflow-hidden rounded-full bg-ink/[0.08]">
+              <span
+                className="block h-full rounded-full bg-[var(--ok)] transition-[width] duration-300"
+                style={{ width: `${(done / todos.length) * 100}%` }}
+              />
+            </span>
+            {allDone ? (
+              <span className="text-[var(--ok)]">已全部完成</span>
+            ) : (
+              !expanded &&
+              current && (
+                <span className="flex min-w-0 items-center gap-1.5 text-ink">
+                  {current.status === "in_progress" && (
+                    <LoaderCircle size={12} className="shrink-0 animate-spin text-tone-blue" />
+                  )}
+                  <span className="truncate">
+                    {current.status === "in_progress" ? current.active_form : current.content}
+                  </span>
+                </span>
+              )
+            )}
+          </button>
+          <IconButton title="关闭待办" onClick={() => setDismissed(true)}>
+            <X size={12} />
+          </IconButton>
         </div>
-        <IconButton title="收起待办" onClick={() => setDismissed(true)}>
-          <X size={12} />
-        </IconButton>
+        <Collapse open={expanded}>
+          {/* 清单很长时限高滚动，别把对话区挤没了。 */}
+          <div className="max-h-48 space-y-1 overflow-y-auto pb-1 pl-5 pt-1">
+            {todos.map((t, i) => (
+              <div key={i} className="flex items-center gap-2 text-xs">
+                {t.status === "completed" ? (
+                  <CircleCheck size={13} className="carter-pop shrink-0 text-[var(--ok)]" />
+                ) : t.status === "in_progress" ? (
+                  <LoaderCircle size={13} className="shrink-0 animate-spin text-tone-blue" />
+                ) : (
+                  <span className="inline-block size-3 shrink-0 rounded-full border border-edge" />
+                )}
+                <span className={t.status === "completed" ? "text-dim line-through" : "text-ink"}>
+                  {t.status === "in_progress" ? t.active_form : t.content}
+                </span>
+              </div>
+            ))}
+          </div>
+        </Collapse>
       </div>
     </div>
   );
