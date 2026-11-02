@@ -29,6 +29,11 @@ pub struct SessionRow {
     pub forked_from: Option<String>,
     /// 文件字节数。界面上用来判断「这条会话是不是已经很大了」。
     pub bytes: u64,
+    /// 会话记的工作目录现在还在不在。
+    ///
+    /// 会话文件存在 `~/.carter/projects/` 下，项目目录被删掉后它们照样列得出来；
+    /// 界面据此把那一组标成「目录已不存在」，并禁掉「在此目录新建」。
+    pub cwd_exists: bool,
 }
 
 fn row(entry: &SessionEntry) -> SessionRow {
@@ -40,6 +45,7 @@ fn row(entry: &SessionEntry) -> SessionRow {
         created_at: entry.meta.created_at,
         forked_from: entry.meta.forked_from.clone(),
         bytes: std::fs::metadata(&entry.path).map(|m| m.len()).unwrap_or(0),
+        cwd_exists: Path::new(&entry.meta.cwd).is_dir(),
     }
 }
 

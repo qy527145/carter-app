@@ -397,6 +397,8 @@ export type SessionRow = {
   created_at: number;
   forked_from: string | null;
   bytes: number;
+  /** 会话记的工作目录现在还在不在（项目目录被删掉后会话文件仍然列得出来）。 */
+  cwd_exists: boolean;
 };
 
 export type SearchHit = {

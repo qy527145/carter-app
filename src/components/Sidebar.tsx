@@ -109,13 +109,15 @@ function ProjectGroups({
       {groups.map((g) => {
         const open = searching || expanded.has(g.cwd);
         const current = g.cwd === currentCwd;
+        // 组内各条记的是同一个目录，取哪条都一样。
+        const gone = !g.sessions[0]?.cwd_exists;
         return (
           <div key={g.cwd}>
             {/* 标题行拆成两个按钮：折叠与新建是两件事，按钮也不能套按钮。 */}
             <div className="flex items-center rounded-md transition-colors hover:bg-ink/5">
               <button
                 onClick={() => toggle(g.cwd)}
-                title={g.cwd}
+                title={gone ? `${g.cwd}（目录已不存在）` : g.cwd}
                 className={`flex min-w-0 flex-1 items-center gap-1 px-1.5 py-1 text-left text-[11px] ${
                   current ? "text-ink" : "text-dim"
                 }`}
@@ -125,13 +127,17 @@ function ProjectGroups({
                   className={`shrink-0 transition-transform ${open ? "rotate-90" : ""}`}
                 />
                 <Folder size={11} className="shrink-0" />
-                <span className={`truncate ${current ? "font-medium" : ""}`}>
+                <span
+                  className={`truncate ${current ? "font-medium" : ""} ${gone ? "line-through opacity-60" : ""}`}
+                >
                   {baseName(g.cwd) || "未知目录"}
                 </span>
                 <span className="ml-auto shrink-0 text-dim">{g.sessions.length}</span>
               </button>
               <IconButton
-                title={`在 ${g.cwd} 新建对话`}
+                // 目录没了就别让点：后端也会拒，但先在这里说清楚比点完弹错误强。
+                disabled={gone}
+                title={gone ? "目录已不存在，无法在这里新建对话" : `在 ${g.cwd} 新建对话`}
                 aria-label="在此目录新建对话"
                 onClick={() => {
                   setView("chat");

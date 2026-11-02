@@ -601,6 +601,8 @@ export function withCurrent(
       created_at: Date.now(),
       forked_from: null,
       bytes: 0,
+      // 刚开的会话，目录刚被后端校验过。
+      cwd_exists: true,
     },
     ...list,
   ];

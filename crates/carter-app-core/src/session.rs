@@ -107,6 +107,16 @@ pub fn start_session(shell: Arc<AppShell>, opts: SessionOptions) -> carter::Resu
             )));
         }
     }
+    // 新开会话的目录必须还在：目录被删掉之后侧栏里那一组仍然会列出来（会话文件存在
+    // `~/.carter/projects/` 下，不随项目目录消失），从那里点「+」不拦的话，会得到
+    // 一条每个工具调用都报「找不到目录」的会话。续接不受此限 —— 那条路由
+    // `resumed_cwd` 退回请求里的目录。
+    if opts.resume_id.is_none() && !opts.resume_latest && !opts.cwd.is_dir() {
+        return Err(carter::CarterError::Config(format!(
+            "目录 {} 不存在，无法在这里新建对话",
+            opts.cwd.display()
+        )));
+    }
     let config = shell.config.load_full();
     let cache_json = fetch::read_cache()?;
     let model_ref = opts

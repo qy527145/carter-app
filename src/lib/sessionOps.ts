@@ -40,7 +40,11 @@ export async function refreshSessions(): Promise<void> {
  * 会话任务的存活跟着句柄走：不先关掉旧的，它会继续占着后台任务，
  * 而且旧的 `Recorder` 还攥着文件。
  */
-async function replaceSession(args: { resume: boolean; resumeId?: string | null }) {
+async function replaceSession(args: {
+  resume: boolean;
+  resumeId?: string | null;
+  cwd?: string | null;
+}) {
   const store = useStore.getState();
   const prev = store.sessionId;
   store.resetSession();
@@ -66,10 +70,17 @@ async function replaceSession(args: { resume: boolean; resumeId?: string | null 
   }
 }
 
-/** 新建会话并切到对话视图。 */
+/**
+ * 新建会话并切到对话视图。
+ *
+ * 沿用**当前会话的工作目录**：在某个项目里聊着、点「新对话」，本意是在同一个项目里
+ * 另起一条，而不是被扔回家目录。还没有当前会话（启动失败、刚删掉当前这条）时传空，
+ * 后端退回默认目录。
+ */
 export function newSession(): void {
-  useStore.getState().setView("chat");
-  void replaceSession({ resume: false });
+  const store = useStore.getState();
+  store.setView("chat");
+  void replaceSession({ resume: false, cwd: store.cwd || null });
 }
 
 /**
