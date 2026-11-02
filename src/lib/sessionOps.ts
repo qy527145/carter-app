@@ -421,6 +421,8 @@ async function recoverSession(sessionId: string): Promise<string | null> {
       // 恢复并把它们一起投出去。悄悄丢掉用户刚打的字比失败本身更糟。
       const s = useStore.getState();
       s.clearStreaming();
+      // 不会有 `turn_started` 来接走了：直发的那条也退回排队条，别让气泡一直转下去。
+      s.restoreQueued(s.queued.map((q) => ({ ...q, direct: false })));
       return `会话已结束，自动重建也失败了：${e}`;
     } finally {
       recovering = null;

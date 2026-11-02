@@ -267,7 +267,7 @@ function ProcessGroup({ items, cwd }: { items: Item[]; cwd: string }) {
               key={i}
               item={it}
               cwd={cwd}
-              showCursor={false}
+              writing={false}
               isLast={i === items.length - 1}
             />
           ))}
@@ -310,12 +310,12 @@ function segmentsOf(items: Item[]): Segment[] {
 
 function ItemView({
   item,
-  showCursor,
+  writing,
   isLast,
   cwd,
 }: {
   item: Item;
-  showCursor: boolean;
+  writing: boolean;
   isLast: boolean;
   /** 解析正文里的相对图片路径、判断本地链接用。 */
   cwd: string;
@@ -328,17 +328,10 @@ function ItemView({
         // 流式时给整段文字一个「墨落纸」的落定动画（见 index.css 的 carter-bloom）。
         // 只在正在生成的这一段上挂 —— 历史消息静默出现，不该一条条播动画。
         // 同一段后续增量复用同一个 DOM 元素，不会每帧重播。
-        <div className={`text-sm text-ink ${showCursor ? "carter-bloom" : ""}`}>
-          {/* showCursor 只挂在正在生成的那一段上：同一件事也是「这段还在写」的判据，
+        <div className={`text-sm text-ink ${writing ? "carter-bloom" : ""}`}>
+          {/* writing 只挂在正在生成的那一段上：它就是「这段还在写」的判据，
               内联的 HTML 预览等它写完再挂载，否则每个增量都会把 iframe 重载一次。 */}
-          <MarkdownText text={item.text} cwd={cwd} live={showCursor} />
-          {showCursor && (
-            <span className="carter-dots mt-2" aria-label="正在生成">
-              <span />
-              <span />
-              <span />
-            </span>
-          )}
+          <MarkdownText text={item.text} cwd={cwd} live={writing} />
         </div>
       );
     // 按名字分派到各自的呈现。所有工具共用一种卡片是之前数据不够的产物，
@@ -669,6 +662,20 @@ function mergeAssistantRuns(turns: Turn[]): Turn[] {
 // 轮次
 // ---------------------------------------------------------------------------
 
+/** 「还在跑」的跳动圆点。还什么都没出来时（`label`）多带一句字。 */
+function GeneratingHint({ label = false }: { label?: boolean }) {
+  return (
+    <div className="flex h-5 items-center gap-2 text-sm text-dim" aria-label="正在生成">
+      <span className="carter-dots">
+        <span />
+        <span />
+        <span />
+      </span>
+      {label && "正在生成…"}
+    </div>
+  );
+}
+
 /**
  * 气泡下面那一行小按钮（复制 / 重试 / 报文）。
  *
@@ -707,6 +714,7 @@ function AssistantTurn({
   turn: t,
   isLast,
   streaming,
+  awaitingUser,
   showPayload,
   cwd,
   onRetry,
@@ -716,6 +724,7 @@ function AssistantTurn({
   turn: AssistantTurnT;
   isLast: boolean;
   streaming: boolean;
+  awaitingUser: boolean;
   showPayload: boolean;
   /** 预览文件时用来解析相对路径。 */
   cwd: string;
@@ -813,29 +822,19 @@ function AssistantTurn({
           <span className="h-px flex-1 bg-edge" />
         </div>
       )}
-      {items.length === 0 && streaming && (
-        <div className="flex items-center gap-2 text-sm text-dim">
-          <span className="carter-dots">
-            <span />
-            <span />
-            <span />
-          </span>
-          正在生成…
-        </div>
-      )}
       {segs
         ? segs.map((seg, i) => {
             const last = i === segs.length - 1;
             if (seg.kind === "process")
               return <ProcessGroup key={i} items={seg.items} cwd={cwd} />;
-            // 光标只挂在正在生成的那一段正文上，与详细模式的判断口径一致。
+            // 「正在写」只算正在生成的那一段正文，与详细模式的判断口径一致。
             return (
               <ItemView
                 key={i}
                 item={seg.item}
                 cwd={cwd}
                 isLast={last}
-                showCursor={streaming && isLast && last && seg.kind === "text"}
+                writing={streaming && isLast && last && seg.kind === "text"}
               />
             );
           })
@@ -845,9 +844,14 @@ function AssistantTurn({
               item={item}
               cwd={cwd}
               isLast={i === items.length - 1}
-              showCursor={streaming && isLast && i === items.length - 1 && item.kind === "text"}
+              writing={streaming && isLast && i === items.length - 1 && item.kind === "text"}
             />
           ))}
+      {/* 挂在整轮末尾，不挂在某一段正文后面：思考、跑工具的时候最后一项不是正文，
+          挂在正文上这几段就看不出还在跑。等用户回答提问时不算在跑。 */}
+      {streaming && isLast && !awaitingUser && (
+        <GeneratingHint label={items.length === 0} />
+      )}
       {/* 回答下面那一行小动作。悬停才浮出来，但一直占着位置 —— 否则鼠标移上来
           的一瞬间整段对话会跳一下。一条动作都没有时整行不渲染（纯工具输出的回答
           不该在末尾留一条空白）。 */}
@@ -1037,6 +1041,7 @@ function TurnView({
   turn,
   isLast,
   streaming,
+  awaitingUser,
   showPayload,
   cwd,
   onRetry,
@@ -1046,6 +1051,7 @@ function TurnView({
   turn: Turn;
   isLast: boolean;
   streaming: boolean;
+  awaitingUser: boolean;
   showPayload: boolean;
   cwd: string;
   onRetry?: () => void;
@@ -1060,6 +1066,7 @@ function TurnView({
       turn={turn}
       isLast={isLast}
       streaming={streaming}
+      awaitingUser={awaitingUser}
       showPayload={showPayload}
       cwd={cwd}
       onRetry={onRetry}
@@ -1076,6 +1083,7 @@ function TurnView({
 export function TurnList({
   turns: raw,
   streaming,
+  awaitingUser = false,
   showPayload = true,
   cwd = "",
   onRetry,
@@ -1083,6 +1091,8 @@ export function TurnList({
 }: {
   turns: Turn[];
   streaming: boolean;
+  /** 模型停下来等用户回答提问：还算这一轮，但不该再显示「正在生成」。 */
+  awaitingUser?: boolean;
   /** 是否给助手轮画「查看报文」入口。侧边聊天传 false（它不抓包）。 */
   showPayload?: boolean;
   /** 预览工具卡片里的文件时用来解析相对路径。 */
@@ -1119,6 +1129,7 @@ export function TurnList({
             turn={t}
             isLast={i === turns.length - 1}
             streaming={streaming}
+            awaitingUser={awaitingUser}
             showPayload={showPayload}
             cwd={cwd}
             // 没有轮次号（历史里那种极端竞态）就没法指名改哪一轮。
@@ -1133,6 +1144,10 @@ export function TurnList({
           />
         );
       })}
+      {/* 消息已发出、助手轮还没开始：和空的助手轮同一个位置，接上时不会跳。 */}
+      {streaming && !awaitingUser && turns[turns.length - 1]?.role === "user" && (
+        <GeneratingHint label />
+      )}
     </div>
   );
 }
@@ -1142,8 +1157,17 @@ export function TurnList({
 // ---------------------------------------------------------------------------
 
 function MessageList() {
-  const turns = useStore((s) => s.turns);
-  const streaming = useStore((s) => s.streaming);
+  const stored = useStore((s) => s.turns);
+  const generating = useStore((s) => s.streaming);
+  const awaitingUser = useStore((s) => s.pendingForm !== null);
+  // 直发的那条先画成气泡（见 `QueuedPrompt.direct`）。`turn_started` 到了换成真的
+  // 那条，两者下标相同，React 就地复用，看不出替换。
+  const direct = useStore((s) => s.queued.find((q) => q.direct));
+  const turns = useMemo<Turn[]>(
+    () => (direct ? [...stored, { role: "user", text: direct.text }] : stored),
+    [stored, direct],
+  );
+  const streaming = generating || direct !== undefined;
   const cwd = useStore((s) => s.cwd);
   const sessionId = useStore((s) => s.sessionId);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -1170,6 +1194,7 @@ function MessageList() {
           <TurnList
             turns={turns}
             streaming={streaming}
+            awaitingUser={awaitingUser}
             cwd={cwd}
             // 重试与分叉都作用在**这条会话**上 —— 侧边聊天那份 TurnList 一概不传。
             onRetry={

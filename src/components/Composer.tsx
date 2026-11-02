@@ -330,6 +330,8 @@ export function Composer() {
   const addUserTurn = useStore((s) => s.addUserTurn);
   const setNotice = useStore((s) => s.setNotice);
   const queued = useStore((s) => s.queued);
+  // 直发的那条已经画在对话里了，从这一刻起就该能停，不等 `turn_started`。
+  const busy = streaming || queued.some((q) => q.direct);
   const enqueuePrompt = useStore((s) => s.enqueuePrompt);
 
   const taRef = useRef<HTMLTextAreaElement>(null);
@@ -553,7 +555,10 @@ export function Composer() {
     const payload = [t, ...attachments].filter(Boolean).join("\n");
     const id = nextPromptId();
     // 挂进「排队中」：模型写这一轮时用户还能接着说，后端的队列保证顺序。
-    enqueuePrompt({ id, text: payload });
+    // 后端闲着、前面也没有别的消息时不用等，标成直发（见 `QueuedPrompt.direct`）。
+    const s = useStore.getState();
+    const direct = !s.streaming && !s.compacting && s.queued.length === 0;
+    enqueuePrompt({ id, text: payload, direct });
     setText("");
     setAttachments([]);
     setFileQuery(null);
@@ -645,7 +650,7 @@ export function Composer() {
                 ? "会话未就绪 —— 点「新对话」开始"
                 : pendingAsk
                   ? "请先回答上面的问题"
-                  : streaming
+                  : busy
                     ? "可以接着说：Enter 排队，⌘/Ctrl+Enter 插队"
                     : "输入消息   / 命令   @ 引用文件/目录   可直接粘贴图片"
             }
@@ -662,7 +667,7 @@ export function Composer() {
             {/* 停止和发送共用一个位置，互斥出现：生成中且输入框是空的 → 停止；
                 一旦打了字 → 变回发送（排队，⌘/Ctrl+Enter 插队）。
                 两个按钮并排时停止很容易被忽略，也容易点错。 */}
-            {streaming && !canSend ? (
+            {busy && !canSend ? (
               <button
                 onClick={cancel}
                 title="停止这一轮（正在跑的命令会被立刻结束）"
@@ -674,7 +679,7 @@ export function Composer() {
               <button
                 onClick={() => send(false)}
                 disabled={!canSend}
-                title={streaming ? "排队发送（⌘/Ctrl+Enter 插队）" : "发送"}
+                title={busy ? "排队发送（⌘/Ctrl+Enter 插队）" : "发送"}
                 className="rounded-full bg-accent p-2 text-[var(--accent-contrast)] transition-opacity hover:opacity-90 disabled:opacity-30"
               >
                 <Send size={14} />
@@ -712,15 +717,16 @@ function QueueStrip({
   queued: QueuedPrompt[];
   sessionId: string | null;
 }) {
-  if (queued.length === 0) return null;
+  const waiting = queued.filter((q) => !q.direct);
+  if (waiting.length === 0) return null;
   return (
     <div className="border-b border-edge/70 px-3.5 py-2">
       <div className="mb-1 flex items-center gap-1.5 text-[10px] text-dim">
         <ListOrdered size={11} />
-        排队中 {queued.length} 条 · 这一轮结束后依次发送
+        排队中 {waiting.length} 条 · 这一轮结束后依次发送
       </div>
       <ul className="space-y-0.5">
-        {queued.map((q) => (
+        {waiting.map((q) => (
           <li
             key={q.id}
             className="group flex items-center gap-2 rounded px-1 py-0.5 hover:bg-ink/5"

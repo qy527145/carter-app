@@ -142,7 +142,18 @@ export type Conv = {
  * `turn_started { prompt_id }`，那时才把气泡插进对话里。提前插会让正在流式输出的
  * 那一轮被这笔用户消息截断成两段（助手轮是按「末尾」累积的）。
  */
-export type QueuedPrompt = { id: number; text: string };
+export type QueuedPrompt = {
+  id: number;
+  text: string;
+  /**
+   * 发出时后端正空闲，不用等任何东西：`turn_started` 马上就到。
+   *
+   * 这种不算「排队」，不进排队条，直接在对话里画成用户气泡（否则每次发消息排队条
+   * 都会闪一下）。但仍然留在 `queued` 里 —— 会话已死时的重新投递认的是这张表。
+   * 投递失败时摘掉这个标记，消息回到排队条，用户还能看见、能撤回。
+   */
+  direct?: boolean;
+};
 
 /** 侧边聊天：一份 `Conv` + 它是谁（事件按 session_id 路由，见 `lib/events.ts`）。 */
 export type SideConv = Conv & {
