@@ -208,8 +208,7 @@ fn bare_provider(kind: &str) -> carter::config::ProviderConfig {
         base_url: None,
         models: Default::default(),
         server_tools: Vec::new(),
-        server_tool_specs: Vec::new(),
-        server_tool_max_uses: None,
+        ..Default::default()
     }
 }
 

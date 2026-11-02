@@ -96,8 +96,7 @@ pub fn check_server_tools(kind: &str, tools: &[String]) -> (Vec<String>, Vec<Str
         base_url: None,
         models: Default::default(),
         server_tools: tools.to_vec(),
-        server_tool_specs: Vec::new(),
-        server_tool_max_uses: None,
+        ..Default::default()
     };
     let unsupported = unsupported_server_tools(&cfg);
     let ok = tools

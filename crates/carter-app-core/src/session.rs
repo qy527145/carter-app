@@ -1035,7 +1035,7 @@ impl Runner {
         let prompt = first_prompt.to_string();
 
         tokio::spawn(async move {
-            let Ok(title) = crate::title::generate(&prompt, provider, &model, &kind).await else {
+            let Ok(title) = crate::title::generate(&prompt, &session_id, provider, &model, &kind).await else {
                 return;
             };
             if title.trim().is_empty() {

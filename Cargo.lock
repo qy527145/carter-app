@@ -583,9 +583,9 @@ dependencies = [
 
 [[package]]
 name = "carter"
-version = "0.1.4"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "792445b2321cd7ead06e4680b6b8fa4cf86a95c7551209f6f0c501c72ae33857"
+checksum = "cfa5c301651240c268d63d5136f63c04b4140135ca8467ed7112b02f726cb1d1"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2964,9 +2964,9 @@ checksum = "4744e383959f0db86ede514b809b1c53251889093803c05267acc7d4e7030d70"
 
 [[package]]
 name = "llm_adapt_core"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ee26bcf2a5249873f14a55a81f6aed764d83aeff3114ec5f74d7f13f4e9b265"
+checksum = "1317f33279c64960296d6999ee5bcedb76665730fe721c44a46bc3117d53ac0f"
 dependencies = [
  "bytes",
  "futures-util",

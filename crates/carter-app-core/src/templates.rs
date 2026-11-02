@@ -197,8 +197,7 @@ mod tests {
                 base_url: Some(t.base_url.to_string()),
                 models: Default::default(),
                 server_tools: Vec::new(),
-                server_tool_specs: Vec::new(),
-                server_tool_max_uses: None,
+                ..Default::default()
             };
             assert_eq!(
                 p.protocol().to_string(),

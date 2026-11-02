@@ -77,9 +77,11 @@ impl LlmProvider for NoThinking {
 /// 生成会话标题。
 ///
 /// `kind` 是渠道种类（`config.provider_for(model.provider).kind`）——
-/// 它决定要不要关思考，见模块文档。
+/// 它决定要不要关思考，见模块文档。`session_id` 让起标题的请求也带上会话 id，
+/// 网关靠它把这次请求归进同一条对话。
 pub async fn generate(
     first_prompt: &str,
+    session_id: &str,
     provider: Arc<dyn LlmProvider>,
     model: &ModelInfo,
     kind: &str,
@@ -89,7 +91,7 @@ pub async fn generate(
     } else {
         provider
     };
-    carter::agent::generate_title(first_prompt, &*provider, model).await
+    carter::agent::generate_title(first_prompt, Some(session_id), &*provider, model).await
 }
 
 #[cfg(test)]

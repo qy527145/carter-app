@@ -465,6 +465,7 @@ mod tests {
             correlation: Some(
                 serde_json::to_value(RequestMeta {
                     session_id: sid.map(str::to_string),
+                    agent_id: None,
                     turn: 3,
                     round: 1,
                     purpose: RequestPurpose::MainTurn,
