@@ -184,6 +184,26 @@ pub enum AppEvent {
         #[serde(default)]
         error: Option<String>,
     },
+    /// IM 连接器（钉钉等）底层命令的一行输出。
+    ///
+    /// 安装要下载几十 MB、登录要等人扫码，静默几分钟用户只会以为按钮没反应。
+    /// 每一行都推给界面，那个日志框同时是「正在干活」的证据和故障时的诊断材料。
+    ConnectorOutput { vendor: String, line: String },
+    /// 扫码登录的授权页地址（`dws auth login` 打在 stderr 里的那一条）。
+    ///
+    /// 单独一条事件，不从文本里再解析一遍：界面要拿它做实打实的「打开授权页」
+    /// 按钮 —— 浏览器没被拉起来时，那是唯一的出路。
+    ConnectorAuthUrl { vendor: String, url: String },
+    /// 一个连接器动作（装 CLI / 装技能 / 登录 / 退出）结束了。
+    ///
+    /// 界面据此重拉整张卡片：只改一个字不如重算一遍状态可靠（成功与「其实没成功」
+    /// 之间差的往往就是某一份本地文件）。
+    ConnectorDone {
+        vendor: String,
+        ok: bool,
+        #[serde(default)]
+        message: Option<String>,
+    },
 }
 
 /// 一个会话内的事件流。

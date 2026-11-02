@@ -136,6 +136,16 @@ export function useAppEvents() {
         onSessionEvent(sid, e);
         return;
       }
+      // 连接器那三条只给设置页里那个临时弹窗看（它自己单挂一个监听器，见
+      // `ConnectorsPage`）。总线上不处理，但要显式放行 —— 不能掉到下面那条
+      // 「当作错误消息弹出来」的分支上。
+      if (
+        payload.type === "connector_output" ||
+        payload.type === "connector_auth_url" ||
+        payload.type === "connector_done"
+      ) {
+        return;
+      }
       useStore.getState().setNotice(payload.message);
     }).then((fn) => {
       if (cancelled) fn();

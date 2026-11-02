@@ -10,6 +10,7 @@
 import { useState } from "react";
 import {
   Clock,
+  Cable,
   Cpu,
   FileDiff,
   Info,
@@ -25,6 +26,7 @@ import { AboutPage } from "./AboutPage";
 import { ChangesPage } from "./ChangesPage";
 import { AppearancePage } from "./AppearancePage";
 import { ChannelsPage } from "./ChannelsPage";
+import { ConnectorsPage } from "./ConnectorsPage";
 import { McpPage } from "./McpPage";
 import { ModelsPage } from "./ModelsPage";
 import { SchedulesPage } from "./SchedulesPage";
@@ -34,6 +36,7 @@ import { ToolsPage } from "./ToolsPage";
 
 const TABS = [
   { id: "channels", label: "渠道", icon: Plug },
+  { id: "connectors", label: "连接器", icon: Cable },
   { id: "models", label: "模型", icon: Cpu },
   { id: "tools", label: "工具", icon: Wrench },
   { id: "schedules", label: "定时任务", icon: Clock },
@@ -77,6 +80,7 @@ export function SettingsPage() {
       <div className="min-w-0 flex-1 overflow-y-auto">
         <div className="mx-auto max-w-2xl px-6 py-6">
           {tab === "channels" && <ChannelsPage />}
+          {tab === "connectors" && <ConnectorsPage />}
           {tab === "models" && <ModelsPage />}
           {tab === "tools" && <ToolsPage />}
           {tab === "schedules" && <SchedulesPage />}

@@ -224,6 +224,49 @@ fn is_executable_file(p: &Path) -> bool {
     p.is_file()
 }
 
+/// 把用户级可执行目录补进本进程的 `PATH`。
+///
+/// ## 为什么需要
+///
+/// 从 Finder / 开始菜单启动的 GUI 进程**不读 shell 启动文件**，拿到的 PATH 是系统
+/// 给的默认值：没有 `/usr/local/bin`、没有 `~/.local/bin`。而官方 CLI 的安装脚本
+/// 恰恰把二进制放进 `~/.local/bin`（钉钉的 `dws` 就是这样）。结果就是「我在终端里
+/// 明明能跑 `dws`，这个应用却说没装」。
+///
+/// 补的是**用户级**目录，不是把登录 shell 的 PATH 整个搬过来：后者要起一个 shell、
+/// 要解析 rc 文件，慢且不可预测（rc 里可能有一堆交互式的东西）。
+///
+/// 幂等 —— 装完 CLI 之后再调一次，把新出现的目录补上。
+pub fn ensure_user_paths() {
+    let Some(home) = crate::paths::home_dir() else {
+        return;
+    };
+    let mut dirs = vec![home.join(".local").join("bin")];
+    if cfg!(windows) {
+        // npm / bun 的全局 bin 在 Windows 上也常常不在这份 PATH 里。
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            dirs.push(PathBuf::from(appdata).join("npm"));
+        }
+    }
+    let current = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths: Vec<PathBuf> = std::env::split_paths(&current).collect();
+    let mut added = false;
+    for d in dirs {
+        if d.is_dir() && !paths.iter().any(|p| *p == d) {
+            paths.push(d);
+            added = true;
+        }
+    }
+    if added {
+        if let Ok(joined) = std::env::join_paths(&paths) {
+            // SAFETY（语义上）：`set_var` 在多线程下与并发读 PATH 有数据竞争。
+            // 这里只在启动早期、或用户点了「安装」之后的命令层调用，那时没有
+            // 别的线程在读 PATH 做决策；而且这是整个应用唯一写 PATH 的地方。
+            unsafe { std::env::set_var("PATH", joined) };
+        }
+    }
+}
+
 /// 探测结果 + 平台上手要点，一起写进 bash 工具的描述。
 ///
 /// 这一段是给**模型**看的，不是给人看的。所以要写它真正会踩的坑：

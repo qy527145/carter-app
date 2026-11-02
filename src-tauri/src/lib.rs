@@ -974,6 +974,59 @@ fn remove_skill_root(shell: State<'_, Arc<AppShell>>, path: String) -> Result<Ap
 }
 
 // ---------------------------------------------------------------------------
+// IM 连接器
+// ---------------------------------------------------------------------------
+//
+// 每个命令都是「立即返回」，真正干活的那条 `dws` 在后台跑，输出与结果走
+// `Connector*` 事件。登录要等最长 15 分钟 —— 一条同步命令挂在那里的话，界面只能
+// 干等，连「取消」都点不了（命令还没返回，下一次 invoke 也没法发）。
+
+#[tauri::command]
+async fn list_connectors() -> Vec<carter_app_core::ConnectorRow> {
+    carter_app_core::connectors::list().await
+}
+
+#[tauri::command]
+async fn install_connector_cli(
+    shell: State<'_, Arc<AppShell>>,
+    vendor: String,
+) -> Result<(), String> {
+    carter_app_core::connectors::install_cli(shell.inner(), &vendor).await
+}
+
+#[tauri::command]
+async fn install_connector_skill(
+    shell: State<'_, Arc<AppShell>>,
+    vendor: String,
+) -> Result<(), String> {
+    carter_app_core::connectors::install_skill(shell.inner(), &vendor).await
+}
+
+/// 扫码登录。`recommend` = 顺带授予服务端推荐权限（官方给 Agent 用的一条路）。
+#[tauri::command]
+async fn login_connector(
+    shell: State<'_, Arc<AppShell>>,
+    vendor: String,
+    recommend: bool,
+) -> Result<(), String> {
+    carter_app_core::connectors::login(shell.inner(), &vendor, recommend).await
+}
+
+/// 取消正在进行的登录。同步命令：它只是杀一个进程，要立刻生效。
+#[tauri::command]
+fn cancel_connector_login(vendor: String) {
+    carter_app_core::connectors::cancel_login(&vendor);
+}
+
+#[tauri::command]
+async fn logout_connector(
+    shell: State<'_, Arc<AppShell>>,
+    vendor: String,
+) -> Result<(), String> {
+    carter_app_core::connectors::logout(shell.inner(), &vendor).await
+}
+
+// ---------------------------------------------------------------------------
 // MCP
 // ---------------------------------------------------------------------------
 
@@ -1274,6 +1327,11 @@ pub fn run() {
             let shell = AppShell::new(config);
             app.manage(shell.clone());
 
+            // GUI 进程拿不到 shell 启动文件里写的 PATH（见 `platform::ensure_user_paths` 的
+            // 说明）。官方 CLI 的安装脚本把二进制放进 `~/.local/bin`，不补这一步的话
+            // 「终端里能用、应用里说没装」。
+            carter_app_core::platform::ensure_user_paths();
+
             // 定时任务的后台调度。**和窗口无关**：窗口最小化、切走都不影响它，
             // 到点照常开一条新会话。
             //
@@ -1362,6 +1420,13 @@ pub fn run() {
             set_skills_enabled,
             add_skill_root,
             remove_skill_root,
+            // IM 连接器
+            list_connectors,
+            install_connector_cli,
+            install_connector_skill,
+            login_connector,
+            cancel_connector_login,
+            logout_connector,
             // MCP
             list_mcp_servers,
             save_mcp_server,
