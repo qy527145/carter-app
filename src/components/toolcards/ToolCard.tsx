@@ -15,8 +15,8 @@
 // ## 折叠的默认状态
 //
 // 长输出默认折叠，但**失败的一定展开** —— 出错时用户的第一反应是看输出，
-// 让他再点一次是多余的。同理，`bash` 的命令行永远可见（折叠起来的话，
-// 一行结果放在那里没有任何意义）。
+// 让他再点一次是多余的。同理，`bash` 的命令行永远可见：折叠时压成一行跟在
+// 标题后面（太长就截断），展开后才完整显示命令与输出。
 //
 // 结果正文从 `exit_code=0` 这类脚手架里**解出真正的内容**再显示：那是回灌给
 // 模型的格式，不是给人看的格式。
@@ -81,7 +81,8 @@ function Card({
   tone,
   icon,
   title,
-  subtitle,
+  subtitle: rawSubtitle,
+  subtitleOnlyCollapsed = false,
   status,
   preview,
   children,
@@ -93,6 +94,8 @@ function Card({
   icon: React.ReactNode;
   title: string;
   subtitle?: string;
+  /** 展开时隐藏 subtitle —— 正文里已经有完整版了（如 bash 的命令）。 */
+  subtitleOnlyCollapsed?: boolean;
   status: React.ReactNode;
   /** 折叠时**也**显示的内容。命令、路径这类「不看就没意义」的东西放这里。 */
   preview?: React.ReactNode;
@@ -110,6 +113,7 @@ function Card({
   const open = manual ?? defaultOpen;
   const expanded = forceOpen || open;
   const hasBody = children != null;
+  const subtitle = subtitleOnlyCollapsed && expanded ? undefined : rawSubtitle;
 
   const head = (
     <>
@@ -250,40 +254,40 @@ function BashCard({ item }: { item: ToolItem }) {
       icon={<Terminal size={11} />}
       title="bash"
       status={<Status item={item} />}
-      // 命令放 preview：折叠起来的话，这张卡片就只剩一行输出，看不出在跑什么。
+      // 折叠时命令压成一行跟在标题后（CSS 截断），展开后在正文里完整显示。
+      subtitle={command.replace(/\s+/g, " ").trim()}
+      subtitleOnlyCollapsed
+      // 正在跑的命令要有自己的出口。之前只有输入框上的「停止」——
+      // 一条跑偏的 `brew install` 会顺带掐掉模型已经想好的后续步骤。
       preview={
-        <div className="space-y-1.5">
-          <div className="mono flex gap-2">
-            <span className="shrink-0 select-none text-dim">$</span>
-            <span className="min-w-0 whitespace-pre-wrap break-all text-ink">{command}</span>
+        !r ? (
+          <div className="flex items-center gap-1.5">
+            <button
+              onClick={() => act("interrupt")}
+              title="只结束这条命令；模型会拿到「已中断」的结果继续往下走"
+              className="inline-flex items-center gap-1 rounded bg-bubble px-1.5 py-0.5 text-[11px] text-dim transition-colors hover:text-[var(--danger)]"
+            >
+              <Square size={10} />
+              中断命令
+            </button>
+            <button
+              onClick={() => act("background")}
+              title="命令继续跑，工具立刻返回 shell_id；之后模型用 bash_output 读输出"
+              className="inline-flex items-center gap-1 rounded bg-bubble px-1.5 py-0.5 text-[11px] text-dim transition-colors hover:text-tone-blue"
+            >
+              <ArrowDownToLine size={10} />
+              转后台
+            </button>
           </div>
-          {/* 正在跑的命令要有自己的出口。之前只有输入框上的「停止」——
-              一条跑偏的 `brew install` 会顺带掐掉模型已经想好的后续步骤。 */}
-          {!r && (
-            <div className="flex items-center gap-1.5">
-              <button
-                onClick={() => act("interrupt")}
-                title="只结束这条命令；模型会拿到「已中断」的结果继续往下走"
-                className="inline-flex items-center gap-1 rounded bg-bubble px-1.5 py-0.5 text-[11px] text-dim transition-colors hover:text-[var(--danger)]"
-              >
-                <Square size={10} />
-                中断命令
-              </button>
-              <button
-                onClick={() => act("background")}
-                title="命令继续跑，工具立刻返回 shell_id；之后模型用 bash_output 读输出"
-                className="inline-flex items-center gap-1 rounded bg-bubble px-1.5 py-0.5 text-[11px] text-dim transition-colors hover:text-tone-blue"
-              >
-                <ArrowDownToLine size={10} />
-                转后台
-              </button>
-            </div>
-          )}
-        </div>
+        ) : undefined
       }
       defaultOpen={false}
       forceOpen={r ? !r.ok : false}
     >
+      <div className="mono mb-1.5 flex gap-2 text-[11px]">
+        <span className="shrink-0 select-none text-dim">$</span>
+        <span className="min-w-0 whitespace-pre-wrap break-all text-ink">{command}</span>
+      </div>
       {parsed && (
         <>
           {parsed.code !== null && !r?.ok && (
