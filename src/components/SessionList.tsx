@@ -207,24 +207,25 @@ function Row({
 export type ProjectGroup = { cwd: string; sessions: SessionRow[] };
 
 /**
- * 按所属目录分组，当前目录排第一，其余按最近一条会话的时间排。
+ * 按所属目录分组，组间按组内最近一次写入（`updated_at`）倒序 —— 最近在用的项目排
+ * 最上面。用写入时间而不是创建时间：续接一条老会话接着聊，项目也该浮上来。
  *
- * 后端返回的列表已经按 created_at 倒序，所以组内不用再排，组间取每组的首条比较即可。
+ * 当前目录**不**置顶：它通常本来就是最近的那个；不是的时候（打开了一条旧项目里的
+ * 老会话），硬顶上去反而打乱了「最近项目」的顺序。当前组靠展开 + 加粗来认。
+ *
+ * 组内不重排，保持后端给的 created_at 倒序 —— 行上显示的就是创建时间，两者一致。
  * 侧栏与「会话」设置页共用 —— 两处分组顺序不一致会让人对不上号。
  */
-export function groupByProject(sessions: SessionRow[], currentCwd: string): ProjectGroup[] {
+export function groupByProject(sessions: SessionRow[]): ProjectGroup[] {
   const groups = new Map<string, SessionRow[]>();
   for (const s of sessions) {
     const list = groups.get(s.cwd);
     if (list) list.push(s);
     else groups.set(s.cwd, [s]);
   }
-  const out = [...groups].map(([cwd, sessions]) => ({ cwd, sessions }));
-  return out.sort((a, b) => {
-    if (a.cwd === currentCwd) return -1;
-    if (b.cwd === currentCwd) return 1;
-    return (b.sessions[0]?.created_at ?? 0) - (a.sessions[0]?.created_at ?? 0);
-  });
+  const latest = (list: SessionRow[]) => Math.max(...list.map((s) => s.updated_at));
+  const out = [...groups].map(([cwd, sessions]) => ({ cwd, sessions, at: latest(sessions) }));
+  return out.sort((a, b) => b.at - a.at).map(({ cwd, sessions }) => ({ cwd, sessions }));
 }
 
 /** 按 今天 / 昨天 / 更早 分组。空组不显示。 */

@@ -97,6 +97,10 @@ export function useAppEvents() {
         // 标题是**异步**来的（首轮跑着的时候另一条任务在起名）。它不改对话内容，
         // 只改会话列表里那一行 —— 重拉一次列表，侧栏与顶部标题一起更新。
         if (e.type === "title") void refreshSessions();
+        // 开始一轮 = 这条会话刚被写过。侧栏按写入时间排项目，本地顺手把这一行的时间
+        // 刷新掉 —— 续接一条老项目里的会话接着聊时，那个项目当场浮到最上面，
+        // 不用等下一次重拉列表。
+        if (e.type === "turn_started") useStore.getState().touchSession(sessionId);
       } else if (state.side !== null && sessionId === state.side.sessionId) {
         flush(sessionId);
         state.applySideEvent(e);

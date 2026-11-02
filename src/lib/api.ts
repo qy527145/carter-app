@@ -396,6 +396,8 @@ export type SessionRow = {
   /** epoch 毫秒。 */
   created_at: number;
   forked_from: string | null;
+  /** 最后一次写入的时间（文件 mtime，epoch 毫秒）。项目按它排「最近」。 */
+  updated_at: number;
   bytes: number;
   /** 会话记的工作目录现在还在不在（项目目录被删掉后会话文件仍然列得出来）。 */
   cwd_exists: boolean;

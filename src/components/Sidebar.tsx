@@ -95,7 +95,7 @@ function ProjectGroups({
   }, [currentCwd]);
 
   const setView = useStore((s) => s.setView);
-  const groups = groupByProject(sessions, currentCwd);
+  const groups = groupByProject(sessions);
   const toggle = (cwd: string) =>
     setExpanded((prev) => {
       const next = new Set(prev);

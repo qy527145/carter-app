@@ -193,6 +193,8 @@ type Store = Conv & {
   setSettings: (s: AppSettings) => void;
   bumpConfig: () => void;
   setSessions: (s: SessionRow[]) => void;
+  /** 把某条会话的 `updated_at` 记成现在（它刚被写过）。不碰 `sessionsNonce`。 */
+  touchSession: (id: string) => void;
   beginSession: (c: CreatedSession) => void;
   resetSession: () => void;
   addUserTurn: (text: string) => void;
@@ -600,6 +602,7 @@ export function withCurrent(
       cwd: cur.cwd,
       created_at: Date.now(),
       forked_from: null,
+      updated_at: Date.now(),
       bytes: 0,
       // 刚开的会话，目录刚被后端校验过。
       cwd_exists: true,
@@ -673,6 +676,11 @@ export const useStore = create<Store>((set) => ({
   bumpConfig: () => set((s) => ({ configNonce: s.configNonce + 1 })),
 
   setSessions: (sessions) => set((s) => ({ sessions, sessionsNonce: s.sessionsNonce + 1 })),
+
+  touchSession: (id) =>
+    set((s) => ({
+      sessions: s.sessions.map((r) => (r.id === id ? { ...r, updated_at: Date.now() } : r)),
+    })),
 
   beginSession: (c) =>
     set((s) => ({

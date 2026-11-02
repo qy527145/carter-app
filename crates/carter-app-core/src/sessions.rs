@@ -29,6 +29,11 @@ pub struct SessionRow {
     pub forked_from: Option<String>,
     /// 文件字节数。界面上用来判断「这条会话是不是已经很大了」。
     pub bytes: u64,
+    /// 最后一次写入的时间（文件 mtime，epoch 毫秒）。
+    ///
+    /// 界面按它给项目排「最近」：续接一条老会话接着聊，`created_at` 不动，只有这个会变。
+    /// 文件还没建出来（读不到 mtime）时退回 `created_at`。
+    pub updated_at: u64,
     /// 会话记的工作目录现在还在不在。
     ///
     /// 会话文件存在 `~/.carter/projects/` 下，项目目录被删掉后它们照样列得出来；
@@ -37,6 +42,13 @@ pub struct SessionRow {
 }
 
 fn row(entry: &SessionEntry) -> SessionRow {
+    let meta = std::fs::metadata(&entry.path).ok();
+    let updated_at = meta
+        .as_ref()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(entry.meta.created_at);
     SessionRow {
         id: entry.meta.id.clone(),
         title: entry.meta.title.clone(),
@@ -44,7 +56,8 @@ fn row(entry: &SessionEntry) -> SessionRow {
         cwd: entry.meta.cwd.clone(),
         created_at: entry.meta.created_at,
         forked_from: entry.meta.forked_from.clone(),
-        bytes: std::fs::metadata(&entry.path).map(|m| m.len()).unwrap_or(0),
+        updated_at,
+        bytes: meta.map(|m| m.len()).unwrap_or(0),
         cwd_exists: Path::new(&entry.meta.cwd).is_dir(),
     }
 }

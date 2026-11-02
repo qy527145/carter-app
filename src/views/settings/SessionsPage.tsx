@@ -110,10 +110,7 @@ export function SessionsPage() {
 
   const sessions = state.data ?? [];
   const bytes = sessions.reduce((a, s) => a + s.bytes, 0);
-  const groups = useMemo(
-    () => groupByProject(sessions, currentCwd),
-    [sessions, currentCwd],
-  );
+  const groups = useMemo(() => groupByProject(sessions), [sessions]);
 
   return (
     <>
