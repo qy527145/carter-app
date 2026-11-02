@@ -308,8 +308,39 @@ pub fn user_bin_dirs() -> Vec<PathBuf> {
     v
 }
 
+/// 给子进程用的 PATH：CLI 自己所在的目录 → 用户级 bin 目录 → 本进程原有的 PATH。
+///
+/// npm 装的 `lark-cli` 是个 `#!/usr/bin/env node` 脚本。从 Finder 启动的 GUI 进程
+/// PATH 里没有 node，直接跑会报 `env: node: No such file or directory`（退出码 127）。
+/// node 与 npm 全局 bin 通常在同一个目录（Homebrew、nvm、fnm 都是），把 CLI 所在
+/// 目录放在最前面就够了。
+fn child_path(program: Option<&Path>) -> std::ffi::OsString {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(d) = program.and_then(|p| p.parent()) {
+        // `sh` 这类没带目录的程序名，parent 是空串，放进 PATH 等于「当前目录」，要滤掉。
+        if !d.as_os_str().is_empty() {
+            dirs.push(d.to_path_buf());
+        }
+    }
+    dirs.extend(user_bin_dirs());
+    dirs.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    let mut seen: Vec<PathBuf> = Vec::new();
+    dirs.retain(|d| {
+        if seen.contains(d) {
+            false
+        } else {
+            seen.push(d.clone());
+            true
+        }
+    });
+    std::env::join_paths(dirs).unwrap_or_default()
+}
+
 async fn cli_version(v: &Vendor, cli: &Path) -> Option<String> {
     let mut cmd = tokio::process::Command::new(cli);
+    cmd.env("PATH", child_path(Some(cli)));
     cmd.args(v.version_args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -433,6 +464,7 @@ async fn auth_state(v: &Vendor, cli: &Path) -> AuthState {
 async fn run_json(cli: &Path, args: &[&str], secs: u64) -> Result<serde_json::Value, AuthState> {
     let mut cmd = tokio::process::Command::new(cli);
     cmd.args(args)
+        .env("PATH", child_path(Some(cli)))
         .env("LARKSUITE_CLI_NO_UPDATE_NOTIFIER", "1")
         .env("LARKSUITE_CLI_NO_SKILLS_NOTIFIER", "1")
         .stdin(Stdio::null())
@@ -1114,6 +1146,9 @@ async fn run_streamed(
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // 安装 / 取技能 / 登录都经过这里：统一补 PATH，npm 装的 CLI 才找得到 node。
+    let program = PathBuf::from(cmd.as_std().get_program());
+    cmd.env("PATH", child_path(Some(&program)));
     #[cfg(windows)]
     platform::hide_console_async(&mut cmd);
     // 独立进程组：取消时能整组杀干净（`dws` 起的子进程也不会漏）。
