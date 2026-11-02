@@ -124,6 +124,11 @@ export type Conv = {
   changed: Record<number, string[]>;
   /** 变更条的统计起点：只汇总轮次号 ≥ 它的那些轮（用户点过「清空」）。 */
   changesSince: number;
+  /**
+   * 起点那一轮里要跳过的前几条 item：生成中途点「清空」时，这一轮之前的工具调用
+   * 已经在列表里了，只按轮次号筛会把它们又算回来。空闲时清空恒为 0。
+   */
+  changesSkip: number;
   /** 上下文占用（输入框旁的百分比环）。`null` = 后端还没报过。 */
   context: ContextView | null;
   /** 正在压缩上下文（环换成转圈）。 */
@@ -401,7 +406,12 @@ export function reduceConv(c: Conv, e: SessionEvent, sessionId?: string): Partia
       for (const [k, v] of Object.entries(c.changed)) {
         if (Number(k) >= e.since) changed[Number(k)] = v;
       }
-      return { changed, changesSince: e.since };
+      // 生成中途清空：起点就是正在跑的这一轮，已经画出来的那些 item 不算。
+      const changesSkip = c.turns.reduce(
+        (n, t) => (t.role === "assistant" && t.turn === e.since ? n + t.items.length : n),
+        0,
+      );
+      return { changed, changesSince: e.since, changesSkip };
     }
     case "turn_retracted": {
       // 重试：把这一轮的回答及之后的轮次从列表里拿掉，只留那条用户气泡。
@@ -418,7 +428,12 @@ export function reduceConv(c: Conv, e: SessionEvent, sessionId?: string): Partia
       }
       // 起点落在被回退掉的那段里就跟着退（与后端 `changes::retract` 一致），
       // 否则重跑出来的轮次全被当成「清空之前」。
-      return { turns, changed, changesSince: Math.min(c.changesSince, e.turn) };
+      return {
+        turns,
+        changed,
+        changesSince: Math.min(c.changesSince, e.turn),
+        changesSkip: e.turn <= c.changesSince ? 0 : c.changesSkip,
+      };
     }
     case "history_replaced":
       // 就地重试：截断点在一轮中间，按后端给的历史整个重建。
@@ -426,6 +441,7 @@ export function reduceConv(c: Conv, e: SessionEvent, sessionId?: string): Partia
         turns: historyToTurns(e.history, e.prompts),
         changed: changedRecord(e.changes),
         changesSince: e.changes_since,
+        changesSkip: 0,
       };
     case "turn_usage":
       return { usage: e.usage, cost: e.cost };
@@ -453,6 +469,7 @@ export function reduceConv(c: Conv, e: SessionEvent, sessionId?: string): Partia
         turns: historyToTurns(e.history, e.prompts),
         changed: changedRecord(e.changes),
         changesSince: e.changes_since,
+        changesSkip: 0,
         compacting: false,
         notice: `${what}（${e.tier} 摘要）：历史约 ${e.before.toLocaleString()} → ${e.after.toLocaleString()} tokens`,
       };
@@ -652,6 +669,7 @@ const emptyConversation: Conv = {
   goal: null,
   changed: {},
   changesSince: 0,
+  changesSkip: 0,
   context: null,
   compacting: false,
 };
@@ -669,6 +687,7 @@ function convOf(s: Conv): Conv {
     goal: s.goal,
     changed: s.changed,
     changesSince: s.changesSince,
+    changesSkip: s.changesSkip,
     context: s.context,
     compacting: s.compacting,
   };

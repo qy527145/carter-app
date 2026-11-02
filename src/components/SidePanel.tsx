@@ -135,6 +135,7 @@ export function SidePanel() {
         turns={side.turns}
         changedByTurn={side.changed}
         since={side.changesSince}
+        skip={side.changesSkip}
         cwd={side.cwd}
       />
 

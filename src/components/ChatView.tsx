@@ -442,10 +442,19 @@ function changedSince(
   turns: Turn[],
   changedByTurn: Record<number, string[]>,
   since: number,
+  skip: number,
   cwd: string,
 ): ChangedFile[] {
   const counted = (turn: number | undefined) => (turn === undefined ? since === 0 : turn >= since);
-  const items = turns.flatMap((t) => (t.role === "assistant" && counted(t.turn) ? t.items : []));
+  // 起点那一轮的前 `skip` 条是清空之前就有的（生成中途点的清空），跳过。
+  let skipped = 0;
+  const items = turns.flatMap((t) => {
+    if (t.role !== "assistant" || !counted(t.turn)) return [];
+    if (t.turn !== since || skipped >= skip) return t.items;
+    const drop = Math.min(skip - skipped, t.items.length);
+    skipped += drop;
+    return t.items.slice(drop);
+  });
   const watched = Object.entries(changedByTurn).flatMap(([k, v]) => (counted(Number(k)) ? v : []));
   return changedFiles(items, watched, cwd);
 }
@@ -464,6 +473,7 @@ export function ChangesPanel({
   turns,
   changedByTurn,
   since,
+  skip,
   cwd,
 }: {
   sessionId: string | null;
@@ -471,6 +481,8 @@ export function ChangesPanel({
   changedByTurn: Record<number, string[]>;
   /** 统计起点（轮次号）。点开文件时的 diff 也从这一轮的基线算起。 */
   since: number;
+  /** 起点那一轮里清空之前就有的 item 数（见 store 的 `changesSkip`）。 */
+  skip: number;
   cwd: string;
 }) {
   // 点开的是**现在磁盘上的内容**与「起点以来的 diff」，不是某一轮的历史快照。
@@ -478,8 +490,8 @@ export function ChangesPanel({
   // 默认折叠：长任务可能一次改几十上百个文件，整张清单常驻底栏会把输入框顶走。
   const [expanded, setExpanded] = useState(false);
   const files = useMemo(
-    () => changedSince(turns, changedByTurn, since, cwd),
-    [turns, changedByTurn, since, cwd],
+    () => changedSince(turns, changedByTurn, since, skip, cwd),
+    [turns, changedByTurn, since, skip, cwd],
   );
   if (!sessionId || files.length === 0) return null;
   const label: Record<ChangedFile["kind"], string> = {
@@ -513,7 +525,7 @@ export function ChangesPanel({
             )}
           </button>
           <IconButton
-            title="清空：从下一轮起重新统计变更（不动文件）"
+            title="清空：从现在起重新统计变更（不动文件）"
             onClick={() => {
               setExpanded(false);
               clearChanges(sessionId);
@@ -1359,6 +1371,7 @@ function MainChangesPanel() {
   const turns = useStore((s) => s.turns);
   const changed = useStore((s) => s.changed);
   const since = useStore((s) => s.changesSince);
+  const skip = useStore((s) => s.changesSkip);
   const cwd = useStore((s) => s.cwd);
   return (
     <ChangesPanel
@@ -1366,6 +1379,7 @@ function MainChangesPanel() {
       turns={turns}
       changedByTurn={changed}
       since={since}
+      skip={skip}
       cwd={cwd}
     />
   );

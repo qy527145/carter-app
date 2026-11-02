@@ -1251,6 +1251,27 @@ impl Runner {
                             );
                             self.goal = goal;
                         }
+                        // 清空也要立刻生效：排队的话要等这一轮（自动继续时是整串）跑完，
+                        // 用户点了半天变更条纹丝不动。起点就是**正在跑的这一轮**，监听器
+                        // 重建一个 —— 新基线、空清单，这一轮清空之前动过的文件不再算。
+                        Command::ClearChanges => {
+                            let since = self.changes_turn;
+                            if let Err(e) = crate::changes::clear(&self.ctx.handle.id, since) {
+                                tracing::warn!("清空变更记录失败：{e}");
+                            }
+                            if self.changes.is_some() {
+                                self.changes = None;
+                                self.changes = ChangeWatch::start(
+                                    &self.ctx.cwd,
+                                    &self.ctx.settings.changes_ignore,
+                                );
+                            }
+                            emit(
+                                &self.ctx.shell,
+                                &self.ctx.handle.id,
+                                SessionEvent::ChangesCleared { since },
+                            );
+                        }
                         other => self.queued.push_back(other),
                     },
                     // 关会话（关掉侧边抽屉、换会话）要立刻断流，而不是等这一轮
