@@ -20,9 +20,9 @@ import {
 import { setAppSettings, type AppSettings, type SessionRow, type ThemePref } from "../lib/api";
 import { baseName } from "../lib/format";
 import { modelSearchText, useModelCatalog } from "../lib/modelLabel";
-import { newSession } from "../lib/sessionOps";
+import { newSession, startInDirectory } from "../lib/sessionOps";
 import { groupByProject, SessionList } from "./SessionList";
-import { Button } from "./ui/Button";
+import { Button, IconButton } from "./ui/Button";
 import { Input } from "./ui/Input";
 import { useStore } from "../store";
 
@@ -94,6 +94,7 @@ function ProjectGroups({
     if (currentCwd) setExpanded(new Set([currentCwd]));
   }, [currentCwd]);
 
+  const setView = useStore((s) => s.setView);
   const groups = groupByProject(sessions, currentCwd);
   const toggle = (cwd: string) =>
     setExpanded((prev) => {
@@ -110,23 +111,37 @@ function ProjectGroups({
         const current = g.cwd === currentCwd;
         return (
           <div key={g.cwd}>
-            <button
-              onClick={() => toggle(g.cwd)}
-              title={g.cwd}
-              className={`flex w-full items-center gap-1 rounded-md px-1.5 py-1 text-left text-[11px] transition-colors hover:bg-ink/5 ${
-                current ? "text-ink" : "text-dim"
-              }`}
-            >
-              <ChevronRight
-                size={12}
-                className={`shrink-0 transition-transform ${open ? "rotate-90" : ""}`}
-              />
-              <Folder size={11} className="shrink-0" />
-              <span className={`truncate ${current ? "font-medium" : ""}`}>
-                {baseName(g.cwd) || "未知目录"}
-              </span>
-              <span className="ml-auto shrink-0 text-dim">{g.sessions.length}</span>
-            </button>
+            {/* 标题行拆成两个按钮：折叠与新建是两件事，按钮也不能套按钮。 */}
+            <div className="flex items-center rounded-md transition-colors hover:bg-ink/5">
+              <button
+                onClick={() => toggle(g.cwd)}
+                title={g.cwd}
+                className={`flex min-w-0 flex-1 items-center gap-1 px-1.5 py-1 text-left text-[11px] ${
+                  current ? "text-ink" : "text-dim"
+                }`}
+              >
+                <ChevronRight
+                  size={12}
+                  className={`shrink-0 transition-transform ${open ? "rotate-90" : ""}`}
+                />
+                <Folder size={11} className="shrink-0" />
+                <span className={`truncate ${current ? "font-medium" : ""}`}>
+                  {baseName(g.cwd) || "未知目录"}
+                </span>
+                <span className="ml-auto shrink-0 text-dim">{g.sessions.length}</span>
+              </button>
+              <IconButton
+                title={`在 ${g.cwd} 新建对话`}
+                aria-label="在此目录新建对话"
+                onClick={() => {
+                  setView("chat");
+                  void startInDirectory(g.cwd);
+                }}
+                className="p-1"
+              >
+                <Plus size={12} />
+              </IconButton>
+            </div>
             {open && (
               <div className="pl-2">
                 <SessionList
