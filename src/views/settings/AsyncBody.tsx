@@ -18,7 +18,9 @@ export function AsyncBody<T>({
   empty: ReactNode;
   children: (data: T) => ReactNode;
 }) {
-  if (state.loading) return <Loading />;
+  // 只有第一次（手里还没数据）才显示转圈；重拉期间留着旧数据，
+  // 否则点一下「设为默认」整张列表就闪成转圈再弹回来。
+  if (state.loading && state.data === null) return <Loading />;
 
   if (state.error) {
     return (

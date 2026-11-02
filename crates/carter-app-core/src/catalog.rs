@@ -142,6 +142,24 @@ fn resolve_one(
         }
     };
 
+    // carter 的 `resolve_model` 每调一次都会把传进来的整份缓存（几 MB）重新解析一遍，
+    // 一张表几十行就是几十次 —— 「模型」页慢就慢在这里。所以只把这一条的节点抠出来，
+    // 拼成一份迷你缓存喂给它：换算逻辑仍然是 carter 那份，不必在这边抄一遍。
+    let mini;
+    let cache = match (root, row.meta.split_once('/')) {
+        (Some(root), Some((pid, mid))) => {
+            match root.get(pid).and_then(|p| p.get("models")).and_then(|m| m.get(mid)) {
+                Some(node) => {
+                    mini = serde_json::json!({ pid: { "models": { mid: node } } }).to_string();
+                    mini.as_str()
+                }
+                // 查不到就让 carter 自己报那条「缓存中找不到」，措辞与别处一致。
+                None => "{}",
+            }
+        }
+        _ => cache.as_str(),
+    };
+
     match resolve_model(config, cache, &reference) {
         Ok(info) => {
             fill(&mut row, &info);
