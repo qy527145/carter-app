@@ -189,6 +189,27 @@ function Output({ text }: { text: string }) {
   );
 }
 
+/** 卡片正文里带小标题的一段（如 bash 的「输入」「输出」）。 */
+function Section({
+  label,
+  extra,
+  children,
+}: {
+  label: string;
+  extra?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <div>
+      <div className="mb-1 flex items-center gap-2 text-[10px] text-dim">
+        <span>{label}</span>
+        {extra}
+      </div>
+      {children}
+    </div>
+  );
+}
+
 /** 失败时把结果直白地顶出来（红色），不等用户展开。 */
 function ErrorLine({ text }: { text: string }) {
   return (
@@ -284,23 +305,33 @@ function BashCard({ item }: { item: ToolItem }) {
       defaultOpen={false}
       forceOpen={r ? !r.ok : false}
     >
-      <div className="mono mb-1.5 flex gap-2 text-[11px]">
-        <span className="shrink-0 select-none text-dim">$</span>
-        <span className="min-w-0 whitespace-pre-wrap break-all text-ink">{command}</span>
-      </div>
-      {parsed && (
-        <>
-          {parsed.code !== null && !r?.ok && (
-            <div className="mb-1 text-[10px] text-[var(--danger)]">退出码 {parsed.code}</div>
-          )}
-          {parsed.body.trim() ? (
+      {/* 输入、输出各占一段、中间一条分隔线：合在一起的话，长命令折行后
+          和输出的第一行挨着，分不清哪里是命令哪里是结果。 */}
+      <Section label="输入">
+        <div className="mono flex gap-2 text-[11px]">
+          <span className="shrink-0 select-none text-dim">$</span>
+          <span className="min-w-0 whitespace-pre-wrap break-all text-ink">{command}</span>
+        </div>
+      </Section>
+      <div className="-mx-3 my-2 border-t border-edge" />
+      <Section
+        label="输出"
+        extra={
+          parsed?.code != null && !r?.ok ? (
+            <span className="text-[var(--danger)]">退出码 {parsed.code}</span>
+          ) : undefined
+        }
+      >
+        {parsed ? (
+          parsed.body.trim() ? (
             <Output text={parsed.body} />
           ) : (
             <span className="text-[11px] text-dim">（无输出）</span>
-          )}
-        </>
-      )}
-      {!r && <span className="text-[11px] text-dim">运行中…</span>}
+          )
+        ) : (
+          <span className="text-[11px] text-dim">运行中…</span>
+        )}
+      </Section>
     </Card>
   );
 }
