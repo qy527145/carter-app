@@ -12,20 +12,18 @@ import { toastError, toastOk } from "./toast";
 /**
  * 重拉会话列表。侧栏与设置页共用同一份。
  *
- * 按**当前会话的 cwd** 拉，而不是后端默认目录：切到别的项目之后侧栏里该列的是
- * 那个项目的会话。还没开会话（启动首帧）时传空，后端退回默认目录。
- * `cwd` 参数用来盖过 store 里那个 —— 删掉当前会话后 store 已经清空 cwd，但侧栏
- * 该继续显示刚删掉的那条所在的目录，而不是跳回家目录。
+ * 拉的是**全部目录**的会话：侧栏按工作目录分组折叠，只展开当前那组 —— 换到别的
+ * 项目后不用重拉就能看到那边，没在用的目录折起来也不占地方。
  *
  * 拉回来之后补一次 `withCurrent`：刚开的会话在磁盘上还没有文件（carter 的 Recorder
  * 惰性建文件），不补的话「点了新对话，左边什么都没多」。
  *
  * 写进 store 会连带把 `sessionsNonce` +1 —— 「会话」设置页据此重拉它那份全量列表。
  */
-export async function refreshSessions(cwd?: string): Promise<void> {
+export async function refreshSessions(): Promise<void> {
   try {
     const s = useStore.getState();
-    const list = await api.listSessions(false, cwd ?? (s.cwd || undefined));
+    const list = await api.listSessions(true);
     // 补出来那一行要按**引用**写：会话列表里显示的模型一律是 `渠道/显示名`，
     // 用实际请求名（`claude-opus-5-5`）会与列表里其它行长得不一样。
     s.setSessions(
@@ -163,9 +161,6 @@ export async function editInFork(
  */
 export async function remove(id: string): Promise<void> {
   const store = useStore.getState();
-  // 删完之后 store 的 cwd 会被清空（删的是当前会话时），但侧栏该继续显示
-  // 刚才那条所在的目录，而不是跳回家目录 —— 先把目录记下来。
-  const cwd = store.cwd;
   try {
     await api.deleteSession(id);
     if (id === store.sessionId) {
@@ -177,7 +172,7 @@ export async function remove(id: string): Promise<void> {
       useStore.getState().resetSession();
       useStore.getState().setNotice("当前会话已删除，请点「新对话」继续。");
     }
-    await refreshSessions(cwd);
+    await refreshSessions();
   } catch (e) {
     toastError(e);
   }

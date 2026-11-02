@@ -80,6 +80,12 @@ export function shortenPath(p: string): string {
   return win ? `${parts[0]}${sep}…${sep}${tail}` : `…${sep}${tail}`;
 }
 
+/** 路径的最后一段（目录名）。根目录之类没有最后一段的，原样返回。 */
+export function baseName(p: string): string {
+  const parts = p.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] ?? p;
+}
+
 /** 计数（字数、token、事件数）的千分位：12345 → 12,345。 */
 export function fmtNumber(n: number): string {
   return n.toLocaleString("zh-CN");

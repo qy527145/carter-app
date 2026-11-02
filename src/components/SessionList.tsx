@@ -203,6 +203,30 @@ function Row({
   );
 }
 
+/** 一处目录下的一批会话。 */
+export type ProjectGroup = { cwd: string; sessions: SessionRow[] };
+
+/**
+ * 按所属目录分组，当前目录排第一，其余按最近一条会话的时间排。
+ *
+ * 后端返回的列表已经按 created_at 倒序，所以组内不用再排，组间取每组的首条比较即可。
+ * 侧栏与「会话」设置页共用 —— 两处分组顺序不一致会让人对不上号。
+ */
+export function groupByProject(sessions: SessionRow[], currentCwd: string): ProjectGroup[] {
+  const groups = new Map<string, SessionRow[]>();
+  for (const s of sessions) {
+    const list = groups.get(s.cwd);
+    if (list) list.push(s);
+    else groups.set(s.cwd, [s]);
+  }
+  const out = [...groups].map(([cwd, sessions]) => ({ cwd, sessions }));
+  return out.sort((a, b) => {
+    if (a.cwd === currentCwd) return -1;
+    if (b.cwd === currentCwd) return 1;
+    return (b.sessions[0]?.created_at ?? 0) - (a.sessions[0]?.created_at ?? 0);
+  });
+}
+
 /** 按 今天 / 昨天 / 更早 分组。空组不显示。 */
 export function SessionList({
   sessions,

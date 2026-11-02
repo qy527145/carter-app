@@ -31,7 +31,7 @@ export default function App() {
         if (cancelled) return;
         useStore.getState().setAppInfo(info);
 
-        const sessions = await listSessions(false);
+        const sessions = await listSessions(true);
         if (cancelled) return;
         useStore.getState().setSessions(sessions);
 

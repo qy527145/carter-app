@@ -1,9 +1,7 @@
 // 会话页：跨所有项目的全量列表 + 全文搜索 + 重命名 / fork / 导出 / 删除。
 //
-// 侧栏那个列表是「**当前目录**最近在聊的几条」，这里多出来的两件事才是本页存在的
-// 理由：属于别的 cwd 的会话（`list_sessions(all=true)`），以及跨全部会话的全文搜索。
-// 所以按项目分组而不是按今天/昨天 —— 时间分组侧栏已经有一份，按目录分组只有这里有，
-// 而且「点开一条别的目录的会话」正是本页最需要说清楚的操作。
+// 侧栏同样按目录分组，但只展开当前目录、行也更紧凑；这里多出来的是全部展开的
+// 宽松视图、文件大小，以及跨全部会话的全文搜索。
 //
 // 两个列表共用 `SessionList` 的行，行内动作只有一份实现。
 
@@ -15,36 +13,13 @@ import { fmtBytes, fullTime, relTime, shortenPath } from "../../lib/format";
 import { displayName, modelTitle, useModelCatalog } from "../../lib/modelLabel";
 import { toastError } from "../../lib/toast";
 import { useAsync } from "../../lib/useAsync";
-import { SessionList } from "../../components/SessionList";
+import { groupByProject, SessionList } from "../../components/SessionList";
 import { openSession } from "../../lib/sessionOps";
 import { useStore } from "../../store";
 import { Button, IconButton } from "../../components/ui/Button";
 import { Input } from "../../components/ui/Input";
 import { Badge, Card } from "../../components/ui/Panel";
 import { AsyncBody, PageIntro } from "./AsyncBody";
-
-/** 一处目录下的一批会话。 */
-type ProjectGroup = { cwd: string; sessions: SessionRow[] };
-
-/**
- * 按所属目录分组，当前目录排第一，其余按最近一条会话的时间排。
- *
- * 后端返回的列表已经按 created_at 倒序，所以组内不用再排，组间取每组的首条比较即可。
- */
-function groupByProject(sessions: SessionRow[], currentCwd: string): ProjectGroup[] {
-  const groups = new Map<string, SessionRow[]>();
-  for (const s of sessions) {
-    const list = groups.get(s.cwd);
-    if (list) list.push(s);
-    else groups.set(s.cwd, [s]);
-  }
-  const out = [...groups].map(([cwd, sessions]) => ({ cwd, sessions }));
-  return out.sort((a, b) => {
-    if (a.cwd === currentCwd) return -1;
-    if (b.cwd === currentCwd) return 1;
-    return (b.sessions[0]?.created_at ?? 0) - (a.sessions[0]?.created_at ?? 0);
-  });
-}
 
 /** 搜索命中列表。与「列表」是两种视图，所以单独一块。 */
 function SearchResults({
@@ -149,8 +124,7 @@ export function SessionsPage() {
         包括当前对话之外的目录。会话文件在{" "}
         <span className="mono">~/.carter/projects/&lt;项目&gt;/*.jsonl</span>，
         与 carter 命令行共用 —— 那边也能 `/resume` 到这些对话。
-        侧栏只列当前目录的那些；点开这里别的目录的会话时，工具与工作目录都跟着那条会话
-        自己记的目录走。
+        点开别的目录的会话时，工具与工作目录都跟着那条会话自己记的目录走。
       </PageIntro>
 
       <div className="relative mb-4">

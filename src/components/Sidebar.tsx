@@ -1,10 +1,13 @@
 // 左侧栏：视图切换 + 会话列表 + 主题。
 //
 // 宽度可拖，拖完存进设置的 `sidebar_width`（应用私有，见 lib/api 的 AppSettings）。
-// 会话列表按 今天 / 昨天 / 更早 分组 —— 平铺一长条时，找「昨天那条」只能靠时间戳。
+// 会话列表按工作目录（项目）分组折叠，只展开当前目录那组 —— 别的项目的会话
+// 一点就能找到，平时又不挤占当前项目的列表。
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  ChevronRight,
+  Folder,
   MessageSquare,
   Monitor,
   Moon,
@@ -14,10 +17,11 @@ import {
   Sun,
 } from "lucide-react";
 
-import { setAppSettings, type AppSettings, type ThemePref } from "../lib/api";
+import { setAppSettings, type AppSettings, type SessionRow, type ThemePref } from "../lib/api";
+import { baseName } from "../lib/format";
 import { modelSearchText, useModelCatalog } from "../lib/modelLabel";
 import { newSession } from "../lib/sessionOps";
-import { SessionList } from "./SessionList";
+import { groupByProject, SessionList } from "./SessionList";
 import { Button } from "./ui/Button";
 import { Input } from "./ui/Input";
 import { useStore } from "../store";
@@ -65,9 +69,85 @@ function ThemeToggle() {
   );
 }
 
+/**
+ * 按目录分组的会话列表，每组可折叠。
+ *
+ * 默认只展开当前目录那组；换到别的目录（打开了那边的会话）时跟着改成只展开新的
+ * 那组 —— 手动展开过的组不保留，否则开过几次别的项目之后侧栏又会全摊开。
+ * 搜索时全部展开：命中项藏在折叠组里等于没搜到。
+ */
+function ProjectGroups({
+  sessions,
+  activeId,
+  currentCwd,
+  searching,
+}: {
+  sessions: SessionRow[];
+  activeId: string | null;
+  currentCwd: string;
+  searching: boolean;
+}) {
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set([currentCwd]));
+  useEffect(() => {
+    // 空 = 当前会话刚被删掉（store 清了 cwd）或启动首帧还没开会话。这时保持原样，
+    // 侧栏该继续展开刚才那组，而不是全部收起。
+    if (currentCwd) setExpanded(new Set([currentCwd]));
+  }, [currentCwd]);
+
+  const groups = groupByProject(sessions, currentCwd);
+  const toggle = (cwd: string) =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(cwd)) next.delete(cwd);
+      else next.add(cwd);
+      return next;
+    });
+
+  return (
+    <div className="flex flex-col gap-1">
+      {groups.map((g) => {
+        const open = searching || expanded.has(g.cwd);
+        const current = g.cwd === currentCwd;
+        return (
+          <div key={g.cwd}>
+            <button
+              onClick={() => toggle(g.cwd)}
+              title={g.cwd}
+              className={`flex w-full items-center gap-1 rounded-md px-1.5 py-1 text-left text-[11px] transition-colors hover:bg-ink/5 ${
+                current ? "text-ink" : "text-dim"
+              }`}
+            >
+              <ChevronRight
+                size={12}
+                className={`shrink-0 transition-transform ${open ? "rotate-90" : ""}`}
+              />
+              <Folder size={11} className="shrink-0" />
+              <span className={`truncate ${current ? "font-medium" : ""}`}>
+                {baseName(g.cwd) || "未知目录"}
+              </span>
+              <span className="ml-auto shrink-0 text-dim">{g.sessions.length}</span>
+            </button>
+            {open && (
+              <div className="pl-2">
+                <SessionList
+                  sessions={g.sessions}
+                  activeId={activeId}
+                  dense
+                  groupByTime={false}
+                />
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 export function Sidebar() {
   const sessions = useStore((s) => s.sessions);
   const sessionId = useStore((s) => s.sessionId);
+  const cwd = useStore((s) => s.cwd);
   const appInfo = useStore((s) => s.appInfo);
   const view = useStore((s) => s.view);
   const setView = useStore((s) => s.setView);
@@ -173,7 +253,12 @@ export function Sidebar() {
           {shown.length === 0 && sessions.length > 0 && (
             <div className="px-2 py-6 text-center text-xs text-dim">没有匹配的会话</div>
           )}
-          <SessionList sessions={shown} activeId={sessionId} dense />
+          <ProjectGroups
+            sessions={shown}
+            activeId={sessionId}
+            currentCwd={cwd}
+            searching={q !== ""}
+          />
         </div>
 
         {/* 底部：设置 + 主题。设置放在这里而不是顶部导航里 —— 它是「偶尔去一次」
