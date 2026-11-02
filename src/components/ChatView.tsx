@@ -116,8 +116,33 @@ function MarkdownText({ text, cwd, live }: { text: string; cwd: string; live: bo
   );
 }
 
-function ThinkingBlock({ text, hasSignature }: { text: string; hasSignature?: boolean }) {
+/**
+ * 思考块。
+ *
+ * 渠道给思考的方式有两种，都是正常情况，不该提示成异常：
+ * - 给明文（OpenAI Chat 系的 `reasoning_content` 等）：可能没有签名，照常展开看；
+ * - 只给签名 / 加密内容（Anthropic 的 redacted thinking、Responses 的
+ *   `encrypted_content`）：内容不透明，下一轮原样回传给上游即可，界面上只留一个
+ *   「这里想过」的记号，不给展开（展开了也是空的）。
+ */
+function ThinkingBlock({ text }: { text: string }) {
   const [open, setOpen] = useState(false);
+  const opaque = text.trim() === "";
+  if (opaque) {
+    return (
+      <div
+        className="flex items-center gap-2 rounded-lg bg-ink/[0.03] px-3 py-1.5 text-xs text-dim"
+        title="渠道只返回了加密的思考（签名），内容不公开；下一轮会原样回传给上游"
+      >
+        <span className="w-3 shrink-0" />
+        <Glyph tone="violet">
+          <Brain size={11} />
+        </Glyph>
+        <span>思考</span>
+        <span className="text-dim/70">内容未公开</span>
+      </div>
+    );
+  }
   return (
     <div className="rounded-lg bg-ink/[0.03]">
       <button
@@ -132,12 +157,6 @@ function ThinkingBlock({ text, hasSignature }: { text: string; hasSignature?: bo
           <Brain size={11} />
         </Glyph>
         <span>思考</span>
-        {/* hasSignature 只在历史消息里带值；实时增量拿不到签名状态，不显示提示。 */}
-        {hasSignature === false && (
-          <span className="ml-1 text-[11px] text-tone-orange">
-            无签名 · 历史消息无法原样回传
-          </span>
-        )}
       </button>
       <Collapse open={open}>
         <div className="whitespace-pre-wrap border-t border-edge px-3 py-2 text-xs leading-relaxed text-dim">
@@ -302,7 +321,7 @@ function ItemView({
 }) {
   switch (item.kind) {
     case "thinking":
-      return <ThinkingBlock text={item.text} hasSignature={item.hasSignature} />;
+      return <ThinkingBlock text={item.text} />;
     case "text":
       return (
         // 流式时给整段文字一个「墨落纸」的落定动画（见 index.css 的 carter-bloom）。

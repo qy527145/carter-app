@@ -159,8 +159,12 @@ fn block_view(b: &Block) -> Option<BlockView> {
                 .to_string(),
             summary: server_activity_summary(raw),
         },
-        // 加密思考只有一段不透明的 blob，给界面看没有意义。
-        Block::RedactedThinking { .. } => return None,
+        // 加密思考只有一段不透明的 blob：内容不给看，但「这里想过」要留个记号 ——
+        // 与只给签名、不给正文的思考是同一种情况。
+        Block::RedactedThinking { .. } => BlockView::Thinking {
+            text: String::new(),
+            has_signature: true,
+        },
     })
 }
 

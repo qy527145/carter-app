@@ -58,7 +58,11 @@ function BlockRenderer({ block }: { block: BlockView }) {
           <div className="mb-1 text-[11px] text-dim">
             思考内容{block.has_signature ? "（带签名）" : ""}
           </div>
-          <LongText text={block.text} limit={400} className="italic" />
+          {block.text.trim() ? (
+            <LongText text={block.text} limit={400} className="italic" />
+          ) : (
+            <div className="text-[11px] text-dim">只有签名，内容未公开</div>
+          )}
         </div>
       );
 
