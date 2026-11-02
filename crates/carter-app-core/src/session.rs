@@ -58,6 +58,9 @@ pub struct SessionOptions {
     pub resume_latest: bool,
     /// 打开指定的历史会话（按 id）。优先于 `resume_latest`。
     pub resume_id: Option<String>,
+    /// 给**新**会话指定 id。用来让助理的对话有一个固定身份 —— 界面靠它找到那条会话，
+    /// 续接时也用 `resume_id` 走同一条路。续接已有会话时忽略。
+    pub new_id: Option<String>,
 }
 
 /// 新建/续接的结果：句柄 + 已有历史。
@@ -159,7 +162,9 @@ pub fn start_session(shell: Arc<AppShell>, opts: SessionOptions) -> carter::Resu
             (t, m, true)
         }
         None => {
-            let sess_opts = SessionOpts { session_id: None };
+            let sess_opts = SessionOpts {
+                session_id: opts.new_id.clone(),
+            };
             let (t, m) = session::start_new(&opts.cwd, &model_ref, &sess_opts)?;
             (t, m, false)
         }
@@ -1087,6 +1092,9 @@ impl Runner {
             }
             None => {
                 let mut s = self.ctx.system(git);
+                if self.ctx.handle.id == crate::assistant::CHAT_SESSION_ID {
+                    s.push(crate::assistant::chat_segment(&self.ctx.shell.assistant));
+                }
                 // 目标段接在最后：它是最「当下」的指令，而且（将来 carter 打开
                 // cache 断点后）末段正是断点位置 —— 所以它必须是稳定的，
                 // 见 `goal.rs` 模块头。
@@ -1133,6 +1141,8 @@ impl Runner {
                 shell_cwd: Some(self.ctx.shell_cwd.clone()),
                 running: Some(self.ctx.running.clone()),
                 assistant: ticket.map(|(id, _)| (self.ctx.shell.assistant.clone(), id)),
+                assistant_chat: (self.ctx.handle.id == crate::assistant::CHAT_SESSION_ID)
+                    .then(|| self.ctx.shell.assistant.clone()),
             },
             &self.ctx.settings,
         )
@@ -2160,6 +2170,7 @@ mod tests {
             model: None,
             resume_latest: false,
             resume_id: None,
+            new_id: None,
         };
         // 不用 `expect_err`：`StartedSession` 没实现 Debug，而且这里关心的是「返回 Err」。
         let msg = match start_session(shell, opts) {

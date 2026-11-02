@@ -158,7 +158,37 @@ async fn create_session(
         model,
         resume_latest: resume,
         resume_id,
+        new_id: None,
     };
+    let started = carter_app_core::start_session(shell.inner().clone(), opts)
+        .map_err(|e| e.to_string())?;
+    let handle = &started.handle;
+    Ok(CreatedSession {
+        session_id: handle.id.clone(),
+        model: handle.model.load().api_name.clone(),
+        model_ref: handle.model.load().key.clone(),
+        cwd: handle.cwd.to_string_lossy().to_string(),
+        history: started.history,
+        goal: started.goal,
+        changes: started.changes,
+        changes_since: started.changes_since,
+        prompts: started.prompts,
+    })
+}
+
+/// 打开（或续接）常驻的助理对话：固定 id，盘上有历史就接着聊，没有就新建。
+///
+/// 和 `create_session` 一样先关掉注册表里可能残留的同 id 会话再开 —— 否则
+/// `start_session` 会以「同一会话不能有两个 runner」拒绝。
+#[tauri::command]
+async fn open_assistant_chat(
+    shell: State<'_, Arc<AppShell>>,
+    model: Option<String>,
+) -> Result<CreatedSession, String> {
+    shell
+        .close_session(carter_app_core::assistant::CHAT_SESSION_ID)
+        .await;
+    let opts = carter_app_core::assistant::chat::options(model);
     let started = carter_app_core::start_session(shell.inner().clone(), opts)
         .map_err(|e| e.to_string())?;
     let handle = &started.handle;
@@ -1591,6 +1621,7 @@ pub fn run() {
             set_app_settings,
             // 会话
             create_session,
+            open_assistant_chat,
             create_side_session,
             send_command,
             close_session,

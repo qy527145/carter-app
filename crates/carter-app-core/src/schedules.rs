@@ -559,6 +559,7 @@ async fn fire(shell: &Arc<crate::shell::AppShell>, s: &Schedule, now: u64) -> Re
         model: s.model.clone(),
         resume_latest: false,
         resume_id: None,
+        new_id: None,
     };
     let started = match start_session(shell.clone(), opts) {
         Ok(v) => v,

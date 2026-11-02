@@ -150,6 +150,7 @@ export type AppEvent =
   | { type: "assistant_alert"; ticket_id: string; title: string; body: string }
   /** 托盘菜单点了「助理面板」：切过去。 */
   | { type: "assistant_open" }
+  | { type: "assistant_turn_ended"; session_id: string }
   /**
    * IM 连接器底层命令的一行输出（安装脚本 / 登录流程）。弹窗里的日志框逐行追加。
    */
@@ -469,6 +470,14 @@ export function createSession(args: {
     resume: args.resume,
     resumeId: args.resumeId ?? null,
   });
+}
+
+/**
+ * 打开（或续接）常驻的助理对话：固定 id，盘上有历史就接着聊，没有就新建。
+ * 返回值与 `createSession` 一样，直接交给 `beginSession`。
+ */
+export function openAssistantChat(model?: string | null): Promise<CreatedSession> {
+  return invoke<CreatedSession>("open_assistant_chat", { model: model ?? null });
 }
 
 /**

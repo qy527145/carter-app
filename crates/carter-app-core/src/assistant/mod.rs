@@ -43,6 +43,7 @@
 //! 写法：先写临时文件再改名，坏了就按空的读。条数有上限（决定与已结束的工单只留
 //! 最近的），文件不会无限长。
 
+pub mod chat;
 pub mod eval;
 pub mod runtime;
 pub mod source;
@@ -827,5 +828,148 @@ pub(crate) mod tests {
         let mut s = source();
         s.command = "  ".into();
         assert!(s.validate().unwrap_err().contains("命令"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 助理对话
+// ---------------------------------------------------------------------------
+
+/// 助理对话的固定会话 id。
+///
+/// 原型里那是 Main Session：一个普通的、可以对话的会话，用户跟它说要盯什么、什么时候
+/// 提醒，它调工具把观察源和规则建出来；工单的汇报也送进这个会话。这里用固定 id 让它
+/// 永远只有一条 —— 界面靠它找到，汇报靠它送进去。
+pub const CHAT_SESSION_ID: &str = "assistant";
+
+/// 主动汇报送进对话时加在前面的标记。模型靠它认出「这不是用户说的话」。
+pub const REPORT_MARK: &str = "【助理汇报】";
+
+/// 助理对话这一轮的系统提示追加段：现状 + 该怎么做。
+///
+/// 每轮现算（与原型 `runtime/policy` 每轮重新生成同一个理由）：用户在别处删了来源、
+/// 改了规则，对话里的模型下一条消息就该看到新的，而不是开会话那一刻的快照。
+pub fn chat_segment(store: &AssistantStore) -> String {
+    let s = store.snapshot();
+    let mut out = String::from(
+        "## 你是卡特的常驻助理，这个会话就是助理对话\n\n\
+         用户在这里跟你说要盯什么、什么情况下可以替你做事、汇报成什么样。你说完就调工具把\
+         观察源与接单规则建好 —— 不要只说「好的，你可以去设置页添加」，那是让用户替你干活。\n\n\
+         - 观察源：一条能反复跑的命令，输出里**每行一件事**；新出现的行就是事件。\n\
+         - 接单规则：一句话写清什么样的事可以替你做、做到什么程度。规则是文字，模型读。\n\
+         - 接单后助理在后台另开一条会话去做（工单），做完把结局汇报回这个会话。\n\
+         - 默认「只观察」：只记录本来会接的，用户批准才开工。别擅自切成自动。\n\
+         - 改完配置用一两句说清改成了什么，别复述工具调用。\n\
+         - 汇报消息以 `",
+    );
+    out.push_str(REPORT_MARK);
+    out.push_str(
+        "` 开头，是助理自己送进来的，不是用户说的。收到时用一两句话告诉用户结果与下一步\
+         （要回答就去面板回答），不要重新去做那件事。\n\n",
+    );
+
+    out.push_str(&format!(
+        "## 现状\n\n模式：{}；{}；同时最多 {} 张工单。\n\n",
+        match s.settings.mode {
+            Mode::Observe => "只观察（命中只记录，等用户批准）",
+            Mode::Auto => "自动接单（命中就开工）",
+        },
+        if s.settings.paused { "**已暂停**" } else { "运行中" },
+        s.settings.max_running
+    ));
+
+    out.push_str("### 观察源\n\n");
+    if s.sources.is_empty() {
+        out.push_str("（还没有）\n");
+    }
+    for x in s.sources.iter().take(15) {
+        out.push_str(&format!(
+            "- {}（{}，每 {} 分钟，{}{}）：`{}`\n",
+            x.name,
+            x.cwd,
+            x.every_minutes,
+            if x.enabled { "启用" } else { "停用" },
+            match &x.state.last_error {
+                Some(e) => format!("，上次失败：{e}"),
+                None => String::new(),
+            },
+            x.command
+        ));
+    }
+
+    out.push_str("\n### 接单规则\n\n");
+    let rules: Vec<&Rule> = s.settings.rules.iter().collect();
+    if rules.is_empty() {
+        out.push_str("（还没有 —— 没有规则时助理什么都不接）\n");
+    }
+    for r in rules.iter().take(20) {
+        out.push_str(&format!(
+            "- {}（{}）：{}\n",
+            r.name,
+            if r.enabled { "启用" } else { "停用" },
+            r.instruction
+        ));
+    }
+
+    out.push_str("\n### 工单\n\n");
+    let mut live: Vec<&Ticket> = s.tickets.iter().filter(|t| !t.status.ended()).collect();
+    live.sort_by_key(|t| std::cmp::Reverse(t.updated_at));
+    if live.is_empty() {
+        out.push_str("（没有）\n");
+    }
+    for t in live.iter().take(20) {
+        out.push_str(&format!(
+            "- #{} {}（{}）{}\n",
+            t.number,
+            t.title,
+            t.status.label(),
+            t.question
+                .as_deref()
+                .or(t.summary.as_deref())
+                .map(|x| format!("：{x}"))
+                .unwrap_or_default()
+        ));
+    }
+    out
+}
+
+#[cfg(test)]
+mod chat_tests {
+    use super::*;
+
+    #[test]
+    fn the_segment_shows_the_current_configuration() {
+        let dir = std::env::temp_dir().join(format!("carter-chatseg-{}-{}", std::process::id(), now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = AssistantStore::open(dir.join("assistant.json"));
+        store
+            .with(|s| {
+                s.sources.push(tests::source());
+                s.settings.rules.push(Rule {
+                    id: "r1".into(),
+                    name: "修 CI".into(),
+                    instruction: "主干 CI 挂了就修".into(),
+                    enabled: true,
+                });
+                s.open_ticket(&tests::source(), "修 CI", "修主干 CI", "x", vec![]);
+            })
+            .unwrap();
+        let seg = chat_segment(&store);
+        assert!(seg.contains("GitHub 通知"));
+        assert!(seg.contains("gh api notifications"));
+        assert!(seg.contains("修 CI"));
+        assert!(seg.contains("#1 修主干 CI（排队中）"));
+        assert!(seg.contains("只观察"), "默认模式要说清楚");
+        assert!(seg.contains(REPORT_MARK));
+    }
+
+    #[test]
+    fn an_empty_assistant_says_so_instead_of_showing_blanks() {
+        let dir = std::env::temp_dir().join(format!("carter-chatempty-{}-{}", std::process::id(), now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let seg = chat_segment(&AssistantStore::open(dir.join("assistant.json")));
+        assert!(seg.contains("（还没有）"));
+        assert!(seg.contains("（还没有 —— 没有规则时助理什么都不接）"));
+        assert!(seg.contains("（没有）"));
     }
 }

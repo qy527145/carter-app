@@ -103,6 +103,38 @@ async function replaceSession(args: {
 }
 
 /**
+ * 打开常驻的助理对话，切到对话视图。
+ *
+ * 它是一条固定 id 的真实会话，所以直接复用主对话视图：已经是当前这条时只切回去，
+ * 不重开（重开会把正在流式输出的那一轮丢掉）。其余与 `replaceSession` 一样先关掉
+ * 当前会话再开。
+ */
+export async function openAssistantChat(): Promise<void> {
+  const store = useStore.getState();
+  store.setView("chat");
+  if (store.sessionId === ASSISTANT_CHAT_ID) return;
+  const prev = store.sessionId;
+  store.resetSession();
+  if (prev) {
+    try {
+      await api.closeSession(prev);
+    } catch {
+      /* 已经自己结束了 */
+    }
+  }
+  try {
+    const created = await api.openAssistantChat();
+    useStore.getState().beginSession(created);
+    await refreshSessions();
+  } catch (e) {
+    toastError(e);
+  }
+}
+
+/** 助理对话的固定会话 id，与后端 `assistant::CHAT_SESSION_ID` 一致。 */
+export const ASSISTANT_CHAT_ID = "assistant";
+
+/**
  * 新建会话并切到对话视图。
  *
  * 沿用**当前会话的工作目录**：在某个项目里聊着、点「新对话」，本意是在同一个项目里

@@ -546,6 +546,7 @@ async fn start(shell: &Arc<AppShell>, l: &Launch, model: Option<String>) -> Resu
                     model,
                     resume_latest: false,
                     resume_id: t.session_id.clone(),
+                    new_id: None,
                 },
             )
             .map_err(|e| format!("开不出执行会话：{e}"))?;
@@ -646,6 +647,12 @@ async fn watch(shell: Arc<AppShell>) {
         match rx.recv().await {
             Ok(AppEvent::Session { session_id, event }) => match event {
                 SessionEvent::Error { message } => shell.assistant.note_error(&session_id, &message),
+                SessionEvent::Idle if session_id == super::CHAT_SESSION_ID => {
+                    // 助理对话这一轮跑完了：它可能刚用配置工具改了观察源或规则。
+                    // 它不属于任何工单，不走 `on_idle` 的收尾。
+                    shell.emit(AppEvent::AssistantTurnEnded { session_id });
+                    changed(&shell);
+                }
                 SessionEvent::Idle => on_idle(&shell, &session_id).await,
                 _ => {}
             },
@@ -794,6 +801,9 @@ fn changed(shell: &AppShell) {
 
 /// 一张工单进入了要人处理的状态。外壳把它变成系统通知。
 fn alert(shell: &AppShell, t: &Ticket) {
+    // 助理对话开着的话，把汇报推进去：用户在对话里就能直接回答、让它接着办。
+    // 系统通知照发 —— 用户未必正看着这个窗口，对话没开时它也是唯一的出口。
+    let _ = super::chat::push_report(shell, t);
     let body = t
         .question
         .clone()

@@ -51,7 +51,7 @@ import {
 } from "../../lib/api";
 import { fullTime, relTime } from "../../lib/format";
 import { useModelCatalog } from "../../lib/modelLabel";
-import { openSession, refreshAssistant } from "../../lib/sessionOps";
+import { openAssistantChat, openSession, refreshAssistant } from "../../lib/sessionOps";
 import { toastError, toastOk } from "../../lib/toast";
 import { useStore } from "../../store";
 import { Button, IconButton } from "../../components/ui/Button";
@@ -242,6 +242,9 @@ function Header({ settings }: { settings: AssistantSettings }) {
       <h1 className="text-base font-semibold">常驻助理</h1>
       {settings.paused && <Badge tone="orange">已暂停</Badge>}
       <span className="ml-auto flex items-center gap-2">
+        <Button size="sm" onClick={() => void openAssistantChat()}>
+          和助理聊
+        </Button>
         <Segmented<"observe" | "auto">
           value={settings.mode}
           onChange={(mode) => save({ mode })}

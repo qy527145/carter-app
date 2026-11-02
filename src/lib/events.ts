@@ -132,6 +132,11 @@ export function useAppEvents() {
         useStore.getState().setView("assistant");
         return;
       }
+      if (payload.type === "assistant_turn_ended") {
+        // 助理对话这一轮跑完了：它可能刚用配置工具改了观察源、规则或模式，面板要跟上。
+        void refreshAssistant();
+        return;
+      }
       if (payload.type === "session") {
         const { session_id: sid, event: e } = payload;
         // 增量进缓冲 —— 只认「确实属于当前主对话或当前侧边聊天」的，别的会话

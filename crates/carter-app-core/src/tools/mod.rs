@@ -55,6 +55,7 @@
 
 pub mod agent;
 pub mod ask_user;
+pub mod assistant_config;
 pub mod assistant_report;
 pub mod background;
 pub mod bash;
@@ -83,6 +84,7 @@ use crate::goal::GoalSignal;
 use crate::skills::Scan;
 use agent::AgentTool;
 use ask_user::{AskRequest, AskUserTool};
+use assistant_config::{AssistantConfigTool, Kind as ConfigKind};
 use assistant_report::AssistantReportTool;
 use background::{BackgroundShells, BashOutputTool, KillShellTool};
 use bash::{PlatformBash, ShellCwd};
@@ -135,6 +137,8 @@ pub struct ToolBuildArgs {
     pub live: Option<Arc<crate::shell::LiveLog>>,
     /// 这条会话是常驻助理某张工单的执行会话：挂上 `assistant_report`。
     pub assistant: Option<(Arc<crate::assistant::AssistantStore>, String)>,
+    /// 这条会话就是「助理对话」本身：挂上观察源 / 规则 / 模式的配置工具。
+    pub assistant_chat: Option<Arc<crate::assistant::AssistantStore>>,
 }
 
 /// 按设置挑出要保留的工具（不含 `task`、不含 `ask_user_question`）。
@@ -232,6 +236,7 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
         activity,
         live,
         assistant,
+        assistant_chat,
     } = args;
 
     // ui_tx 传 None：carter 的 ask_user 会一并注册进来，而我们用自己的那个
@@ -337,6 +342,20 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
     // 工单的结局。同样挂在快照之后：交不交工是主会话的决定，不是某个子 agent 的。
     if let Some((store, ticket_id)) = assistant {
         push(Arc::new(AssistantReportTool::new(store, ticket_id)), &mut tools);
+    }
+
+    // 助理对话的配置工具。同样在快照之后：工单的执行会话与子 agent 都不该
+    // 顺手改掉接单规则。
+    if let Some(store) = assistant_chat {
+        for kind in [
+            ConfigKind::SourceSave,
+            ConfigKind::SourceDelete,
+            ConfigKind::RuleSave,
+            ConfigKind::RuleDelete,
+            ConfigKind::Mode,
+        ] {
+            push(Arc::new(AssistantConfigTool::new(store.clone(), kind)), &mut tools);
+        }
     }
 
     tools
