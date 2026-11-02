@@ -193,7 +193,11 @@ type Store = Conv & {
   setSettings: (s: AppSettings) => void;
   bumpConfig: () => void;
   setSessions: (s: SessionRow[]) => void;
-  /** 把某条会话的 `updated_at` 记成现在（它刚被写过）。不碰 `sessionsNonce`。 */
+  /**
+   * 把某条会话的 `updated_at` 记成现在（它刚被写过）。不碰 `sessionsNonce`。
+   *
+   * 列表里还没有这一行（新会话的第一句）时补一行出来 —— 新对话从这一刻起才算存在。
+   */
   touchSession: (id: string) => void;
   beginSession: (c: CreatedSession) => void;
   resetSession: () => void;
@@ -581,11 +585,11 @@ export function historyToTurns(
 /**
  * 让列表里一定有「当前这条会话」。
  *
- * carter 的会话文件是**惰性创建**的（`Recorder` 等到第一条消息才建文件），所以刚
- * 点「新对话」时它还没落盘、不在 `list_sessions` 的结果里 —— 界面上就表现为
- * 「左边什么都没多」。可它确实是当前开着的对话，只是还没说过话。
+ * carter 的会话文件是**惰性创建**的（`Recorder` 等到第一条消息才建文件），所以第一句
+ * 刚发出去时它可能还没落盘、不在 `list_sessions` 的结果里。
  *
- * 于是补一行临时的：标题为 null（界面上显示「新对话」），等第一条消息写下去之后，
+ * 只给**说过话**的会话补：一句没发的新对话切走就没了（盘上没有文件），提前列出来
+ * 只会让它「出现了又消失」。补的这行标题显示「新对话」，等第一条消息写下去之后，
  * 下一次刷新自然会用磁盘上那份把它换掉 —— 那时通常也已经有自动标题了。
  */
 export function withCurrent(
@@ -679,11 +683,14 @@ export const useStore = create<Store>((set) => ({
 
   touchSession: (id) =>
     set((s) => ({
-      sessions: s.sessions.map((r) => (r.id === id ? { ...r, updated_at: Date.now() } : r)),
+      sessions: withCurrent(
+        s.sessions.map((r) => (r.id === id ? { ...r, updated_at: Date.now() } : r)),
+        { id, model: s.modelRef, cwd: s.cwd },
+      ),
     })),
 
   beginSession: (c) =>
-    set((s) => ({
+    set(() => ({
       sessionId: c.session_id,
       model: c.model,
       modelRef: c.model_ref ?? c.model,
@@ -695,11 +702,9 @@ export const useStore = create<Store>((set) => ({
       goal: c.goal,
       turns: historyToTurns(c.history, c.prompts),
       changed: changedRecord(c.changes),
-      sessions: withCurrent(s.sessions, {
-        id: c.session_id,
-        model: c.model,
-        cwd: c.cwd,
-      }),
+      // 这里**不**补当前会话那一行：续接的会话本来就在列表里；新开的会话在发出第一句
+      // 之前盘上没有文件，补进去的那行一切走就会消失 —— 等 `turn_started` 时再补
+      //（见 `touchSession`）。
     })),
 
   // 换会话时侧边聊天一起收掉：它继承的是**上一条**主对话的上下文，

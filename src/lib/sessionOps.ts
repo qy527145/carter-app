@@ -15,8 +15,9 @@ import { toastError, toastOk } from "./toast";
  * 拉的是**全部目录**的会话：侧栏按工作目录分组折叠，只展开当前那组 —— 换到别的
  * 项目后不用重拉就能看到那边，没在用的目录折起来也不占地方。
  *
- * 拉回来之后补一次 `withCurrent`：刚开的会话在磁盘上还没有文件（carter 的 Recorder
- * 惰性建文件），不补的话「点了新对话，左边什么都没多」。
+ * 拉回来之后补一次 `withCurrent`，但只在当前会话**说过话**时：第一句刚发出去那一刻
+ * 盘上可能还没有文件（carter 的 Recorder 惰性建文件）。一句没发的新对话不补 ——
+ * 切走它就没了，列出来只会「出现了又消失」。
  *
  * 写进 store 会连带把 `sessionsNonce` +1 —— 「会话」设置页据此重拉它那份全量列表。
  */
@@ -27,7 +28,9 @@ export async function refreshSessions(): Promise<void> {
     // 补出来那一行要按**引用**写：会话列表里显示的模型一律是 `渠道/显示名`，
     // 用实际请求名（`claude-opus-5-5`）会与列表里其它行长得不一样。
     s.setSessions(
-      withCurrent(list, { id: s.sessionId, model: s.modelRef, cwd: s.cwd }),
+      s.turns.length > 0
+        ? withCurrent(list, { id: s.sessionId, model: s.modelRef, cwd: s.cwd })
+        : list,
     );
   } catch (e) {
     toastError(e);
