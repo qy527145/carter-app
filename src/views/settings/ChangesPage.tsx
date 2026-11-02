@@ -1,4 +1,4 @@
-// 「变更」设置页：回答末尾那张「本轮变更了 N 个文件」清单的规则。
+// 「变更」设置页：底栏那条「变更 N 个文件」清单的规则。
 //
 // 三层忽略规则里，只有最后一层是可配的：
 // 1. 固定规则（这里展示，不可改）—— 构建产物与依赖目录；
@@ -59,12 +59,12 @@ export function ChangesPage() {
       <h1 className="mb-4 text-base font-semibold">变更</h1>
 
       <PageIntro>
-        对话里每次回答结尾会列出「本轮变更了哪些文件」。这份清单来自对工作目录的
+        输入框上方的变更条会汇总「到目前为止改了哪些文件」（可随时清空、重新统计）。这份清单来自对工作目录的
         <strong className="font-medium text-ink">文件系统监听</strong>
         ，不是解析模型调用的参数 —— 所以 <code className="mono">bash</code>、脚本、
         子进程的写入都算在内。下面配置的是清单
         <strong className="font-medium text-ink">不看哪些文件</strong>
-        ；点开清单里的文件还能看到本轮 diff。
+        ；点开清单里的文件还能看到改动 diff。
       </PageIntro>
 
       <Section title="额外忽略规则">

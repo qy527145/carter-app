@@ -359,6 +359,16 @@ export function compact(sessionId: string): void {
   api.sendCommand(sessionId, { type: "compact" }).catch(toastError);
 }
 
+/**
+ * 清空变更条（底栏那条「变更了 N 个文件」的清空按钮）：从下一轮起重新统计。
+ *
+ * 只动统计口径，磁盘上的文件不动。界面等后端的 `changes_cleared` 再收起来 ——
+ * 起点是后端按它那边的轮次号定的。
+ */
+export function clearChanges(sessionId: string): void {
+  api.sendCommand(sessionId, { type: "clear_changes" }).catch(toastError);
+}
+
 /** 把一条排队中的消息提到队首，并中断当前轮。 */
 export function promote(sessionId: string, id: number): void {
   api.sendCommand(sessionId, { type: "promote_prompt", id }).catch(toastError);

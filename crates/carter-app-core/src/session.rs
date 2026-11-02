@@ -77,6 +77,8 @@ pub struct StartedSession {
     /// 与 `goal` 同理：这些数据只存在应用私有目录里，不能回放成事件，所以随
     /// `create_session` 一次性带回；实时那几轮走 `files_changed` 事件。
     pub changes: Vec<crate::changes::TurnFiles>,
+    /// 变更条的统计起点（轮次号）。用户点过「清空」之后，只汇总这一轮及之后的。
+    pub changes_since: u32,
     /// 历史里每一轮用户**打的原文**（`/命令`、`@文件` 展开之前，见 `prompts.rs`）。
     ///
     /// 界面拿它回填「编辑」框 —— 会话文件里存的是展开后的正文，回填进去等于把
@@ -257,12 +259,14 @@ pub fn start_session(shell: Arc<AppShell>, opts: SessionOptions) -> carter::Resu
     };
     tokio::spawn(runner.run());
     let changes = crate::changes::load(&handle.id);
+    let changes_since = crate::changes::since(&handle.id);
     let prompts = crate::prompts::load(&handle.id);
     Ok(StartedSession {
         handle,
         history,
         goal: goal_view,
         changes,
+        changes_since,
         prompts,
     })
 }
@@ -766,6 +770,15 @@ impl Runner {
                 self.ctx.refresh();
                 self.compact(false).await;
             }
+            // 空闲时才走到这里（生成中收到的排队等这一轮跑完），所以下一轮的号
+            // 就是 `user_turns` —— 起点从它开始，已经跑完的轮次都算「清空之前」。
+            Command::ClearChanges => {
+                let since = self.thread.user_turns;
+                if let Err(e) = crate::changes::clear(&self.ctx.handle.id, since) {
+                    tracing::warn!("清空变更记录失败：{e}");
+                }
+                self.emit(SessionEvent::ChangesCleared { since });
+            }
         }
     }
 
@@ -836,6 +849,7 @@ impl Runner {
             history: crate::view::to_views(&self.thread.messages),
             prompts: crate::prompts::load(&id),
             changes: crate::changes::load(&id),
+            changes_since: crate::changes::since(&id),
         });
 
         self.ctx.refresh();
@@ -1459,7 +1473,7 @@ impl Runner {
             if let Err(e) = crate::prompts::remap(&id, |t| remap.map(t)) {
                 tracing::warn!("压缩后重排用户原文失败：{e}");
             }
-            if let Err(e) = crate::changes::remap(&id, |t| remap.map(t)) {
+            if let Err(e) = crate::changes::remap(&id, &remap) {
                 tracing::warn!("压缩后重排变更记录失败：{e}");
             }
         }
@@ -1468,6 +1482,7 @@ impl Runner {
             history: crate::view::to_views(&self.thread.messages),
             prompts: crate::prompts::load(&id),
             changes: crate::changes::load(&id),
+            changes_since: crate::changes::since(&id),
             before,
             after,
             tier,

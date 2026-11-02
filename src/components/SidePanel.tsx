@@ -16,7 +16,7 @@ import { ChevronRight, Globe, Send, Square, X } from "lucide-react";
 import { displayName, modelTitle, useModelCatalog } from "../lib/modelLabel";
 import * as ops from "../lib/sessionOps";
 import { useStore } from "../store";
-import { TurnList } from "./ChatView";
+import { ChangesPanel, TurnList } from "./ChatView";
 import { IconButton } from "./ui/Button";
 import { Collapse } from "./ui/Panel";
 
@@ -126,10 +126,17 @@ export function SidePanel() {
           turns={side.turns}
           streaming={side.streaming}
           showPayload={false}
-          changedByTurn={side.changed}
           cwd={side.cwd}
         />
       </div>
+
+      <ChangesPanel
+        sessionId={side.sessionId}
+        turns={side.turns}
+        changedByTurn={side.changed}
+        since={side.changesSince}
+        cwd={side.cwd}
+      />
 
       <div className="shrink-0 border-t border-edge p-2.5">
         <div className="focus-ring-bite rounded-xl bg-elevated shadow-soft">

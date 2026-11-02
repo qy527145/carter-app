@@ -122,6 +122,8 @@ export type Conv = {
    * 历史里那几轮随 `create_session` 带回，实时那几轮走 `files_changed` 事件。
    */
   changed: Record<number, string[]>;
+  /** 变更条的统计起点：只汇总轮次号 ≥ 它的那些轮（用户点过「清空」）。 */
+  changesSince: number;
   /** 上下文占用（输入框旁的百分比环）。`null` = 后端还没报过。 */
   context: ContextView | null;
   /** 正在压缩上下文（环换成转圈）。 */
@@ -393,6 +395,14 @@ export function reduceConv(c: Conv, e: SessionEvent, sessionId?: string): Partia
     case "files_changed":
       // 轮末一次性到达。空清单后端就不发了，这里只负责合并。
       return { changed: { ...c.changed, [e.turn]: e.files } };
+    case "changes_cleared": {
+      // 起点之前的记录后端已经丢了，这里一起丢，免得两边对不上。
+      const changed: Record<number, string[]> = {};
+      for (const [k, v] of Object.entries(c.changed)) {
+        if (Number(k) >= e.since) changed[Number(k)] = v;
+      }
+      return { changed, changesSince: e.since };
+    }
     case "turn_retracted": {
       // 重试：把这一轮的回答及之后的轮次从列表里拿掉，只留那条用户气泡。
       //
@@ -406,13 +416,16 @@ export function reduceConv(c: Conv, e: SessionEvent, sessionId?: string): Partia
       for (const [k, v] of Object.entries(c.changed)) {
         if (Number(k) < e.turn) changed[Number(k)] = v;
       }
-      return { turns, changed };
+      // 起点落在被回退掉的那段里就跟着退（与后端 `changes::retract` 一致），
+      // 否则重跑出来的轮次全被当成「清空之前」。
+      return { turns, changed, changesSince: Math.min(c.changesSince, e.turn) };
     }
     case "history_replaced":
       // 就地重试：截断点在一轮中间，按后端给的历史整个重建。
       return {
         turns: historyToTurns(e.history, e.prompts),
         changed: changedRecord(e.changes),
+        changesSince: e.changes_since,
       };
     case "turn_usage":
       return { usage: e.usage, cost: e.cost };
@@ -439,6 +452,7 @@ export function reduceConv(c: Conv, e: SessionEvent, sessionId?: string): Partia
       return {
         turns: historyToTurns(e.history, e.prompts),
         changed: changedRecord(e.changes),
+        changesSince: e.changes_since,
         compacting: false,
         notice: `${what}（${e.tier} 摘要）：历史约 ${e.before.toLocaleString()} → ${e.after.toLocaleString()} tokens`,
       };
@@ -637,6 +651,7 @@ const emptyConversation: Conv = {
   notice: null,
   goal: null,
   changed: {},
+  changesSince: 0,
   context: null,
   compacting: false,
 };
@@ -653,6 +668,7 @@ function convOf(s: Conv): Conv {
     notice: s.notice,
     goal: s.goal,
     changed: s.changed,
+    changesSince: s.changesSince,
     context: s.context,
     compacting: s.compacting,
   };
@@ -715,6 +731,7 @@ export const useStore = create<Store>((set) => ({
       goal: c.goal,
       turns: historyToTurns(c.history, c.prompts),
       changed: changedRecord(c.changes),
+      changesSince: c.changes_since ?? 0,
       // 这里**不**补当前会话那一行：续接的会话本来就在列表里；新开的会话在发出第一句
       // 之前盘上没有文件，补进去的那行一切走就会消失 —— 等 `turn_started` 时再补
       //（见 `touchSession`）。

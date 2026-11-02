@@ -1,4 +1,4 @@
-// 对话主区：消息列表 + 待办 + 提问面板 + 输入框。
+// 对话主区：消息列表 + 变更 / 待办 + 提问面板 + 输入框。
 //
 // 列表**没有**做虚拟滚动。`@tanstack/react-virtual` 已经装好，但流式追加时每一帧
 // 都在改末尾元素的高度，虚拟器要不断重测；在这个「跟着底部滚」的场景里，它带来
@@ -19,6 +19,7 @@ import {
   ChevronRight,
   CircleCheck,
   Copy,
+  Eraser,
   FileText,
   GitBranch,
   LoaderCircle,
@@ -35,7 +36,7 @@ import { useStore, type Item, type Turn } from "../store";
 import { copyText } from "../lib/clipboard";
 import { useConversationMode } from "../lib/conversationMode";
 import { displayName, modelTitle, useModelCatalog } from "../lib/modelLabel";
-import { fork, regenerate, retryReply } from "../lib/sessionOps";
+import { clearChanges, fork, regenerate, retryReply } from "../lib/sessionOps";
 import { TOAST_MS } from "../lib/toast";
 import { FilePreviewModal } from "./FilePreview";
 import { MarkdownImage, MarkdownLink, MarkdownPre, transformMarkdownUrl } from "./Media";
@@ -423,120 +424,133 @@ function changedFiles(items: Item[], watched: string[], cwd: string): ChangedFil
 }
 
 /**
- * 一轮跑完后「到底改了哪几个文件」。
+ * 统计起点（`since`）以来**一共**改了哪几个文件 —— 底栏变更条的内容。
+ *
+ * 不再按轮挂在每条回答末尾：长任务一轮接一轮地改，用户关心的是「到现在为止动过
+ * 哪些」，而不是逐条回答往上翻着拼。同一个文件跨轮只算一行，计数累加。
+ *
+ * 实时那一轮的工具参数在 `turns` 里，监听结果在 `changedByTurn` 里（历史回看时
+ * 靠它，事件不回放）。没有轮次号的助手轮（极端竞态）只在从头统计时算进去。
+ */
+function changedSince(
+  turns: Turn[],
+  changedByTurn: Record<number, string[]>,
+  since: number,
+  cwd: string,
+): ChangedFile[] {
+  const counted = (turn: number | undefined) => (turn === undefined ? since === 0 : turn >= since);
+  const items = turns.flatMap((t) => (t.role === "assistant" && counted(t.turn) ? t.items : []));
+  const watched = Object.entries(changedByTurn).flatMap(([k, v]) => (counted(Number(k)) ? v : []));
+  return changedFiles(items, watched, cwd);
+}
+
+/**
+ * 底栏的变更条：与待办条同一级，默认折叠成一行（文件数 + 前几个路径）。
  *
  * 工具卡片已经在流里各画了一张，但十几次调用之后，这件事不该靠用户往上翻着数。
  * 清单主要来自后端轮首轮末的文件系统监听（见 core 的 `changes.rs`），而不是解析
  * 工具参数 —— 后者只用来补 cwd 之外的写入与「写入 / 修改」标签。
+ *
+ * 「清空」= 从下一轮起重新统计（磁盘上的文件不动）。主对话与侧边聊天各用一条。
  */
-function ChangedFiles({
-  files,
+export function ChangesPanel({
+  sessionId,
+  turns,
+  changedByTurn,
+  since,
   cwd,
-  turn,
 }: {
-  files: ChangedFile[];
+  sessionId: string | null;
+  turns: Turn[];
+  changedByTurn: Record<number, string[]>;
+  /** 统计起点（轮次号）。点开文件时的 diff 也从这一轮的基线算起。 */
+  since: number;
   cwd: string;
-  /** 这一轮的用户输入序号：算本轮 diff 用。 */
-  turn?: number;
 }) {
-  // 点开的是**现在磁盘上的内容**，不是这一轮的历史快照。
+  // 点开的是**现在磁盘上的内容**与「起点以来的 diff」，不是某一轮的历史快照。
   const [preview, setPreview] = useState<string | null>(null);
-  // 默认摊开：一轮干完，用户最先想看的就是动了哪些文件。但长任务可能一次改几十上百个
-  // 文件（跑测试、装依赖），清单本身会把输入框顶到屏幕外，所以标题行就是开关，
-  // 展开时也只占一段可滚动的高度。
-  const [open, setOpen] = useState(true);
-  if (files.length === 0) return null;
+  // 默认折叠：长任务可能一次改几十上百个文件，整张清单常驻底栏会把输入框顶走。
+  const [expanded, setExpanded] = useState(false);
+  const files = useMemo(
+    () => changedSince(turns, changedByTurn, since, cwd),
+    [turns, changedByTurn, since, cwd],
+  );
+  if (!sessionId || files.length === 0) return null;
   const label: Record<ChangedFile["kind"], string> = {
     write: "写入",
     edit: "修改",
     other: "变更",
   };
   return (
-    <div className="overflow-hidden rounded-lg bg-card">
-      <button
-        onClick={() => setOpen((o) => !o)}
-        title={`${files.length} 个文件`}
-        className="flex w-full cursor-pointer items-center gap-1.5 px-3 py-2 text-left text-[11px] text-dim transition-colors hover:text-ink"
-      >
-        <ChevronRight
-          size={12}
-          className={`shrink-0 transition-transform ${open ? "rotate-90" : ""}`}
-        />
-        <Pencil size={11} className="shrink-0" />
-        <span className="shrink-0">本轮变更了 {files.length} 个文件</span>
-        {/* 折起来时标题行要能说明里头是什么，否则一串路径缩成一行等于什么都没说。 */}
-        {!open && (
-          <span className="mono min-w-0 flex-1 truncate text-dim/70">
-            {files
-              .slice(0, 3)
-              .map((f) => f.path)
-              .join(" · ")}
-            {files.length > 3 ? " …" : ""}
-          </span>
-        )}
-      </button>
-      <Collapse open={open}>
-        <ul className="max-h-72 space-y-1 overflow-y-auto border-t border-edge px-3 py-2">
-          {files.map((f) => (
-            <li key={f.path} className="min-w-0">
-              <button
-                onClick={() => setPreview(f.path)}
-                title={`预览 ${f.path}`}
-                className="flex w-full min-w-0 cursor-pointer items-center gap-2 rounded px-1 py-0.5 text-left transition-colors hover:bg-elevated"
-              >
-                <Glyph
-                  tone={f.kind === "write" ? "blue" : f.kind === "edit" ? "orange" : "violet"}
+    <div className="border-t border-edge bg-card px-4 py-1.5">
+      <div className="mx-auto max-w-3xl">
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setExpanded((o) => !o)}
+            title={expanded ? "折叠变更" : "展开变更"}
+            className="flex min-w-0 flex-1 items-center gap-2 py-0.5 text-left text-xs text-dim transition-colors hover:text-ink"
+          >
+            <ChevronRight
+              size={12}
+              className={`shrink-0 transition-transform ${expanded ? "rotate-90" : ""}`}
+            />
+            <span className="shrink-0 tabular-nums">变更 {files.length} 个文件</span>
+            {/* 折起来时这一行要能说明里头是什么，否则只有个数等于什么都没说。 */}
+            {!expanded && (
+              <span className="mono min-w-0 flex-1 truncate text-dim/70">
+                {files
+                  .slice(0, 3)
+                  .map((f) => f.path)
+                  .join(" · ")}
+                {files.length > 3 ? " …" : ""}
+              </span>
+            )}
+          </button>
+          <IconButton
+            title="清空：从下一轮起重新统计变更（不动文件）"
+            onClick={() => {
+              setExpanded(false);
+              clearChanges(sessionId);
+            }}
+          >
+            <Eraser size={12} />
+          </IconButton>
+        </div>
+        <Collapse open={expanded}>
+          {/* 清单很长时限高滚动，别把对话区挤没了。 */}
+          <ul className="max-h-48 space-y-0.5 overflow-y-auto pb-1 pl-3 pt-1">
+            {files.map((f) => (
+              <li key={f.path} className="min-w-0">
+                <button
+                  onClick={() => setPreview(f.path)}
+                  title={`预览 ${f.path}`}
+                  className="flex w-full min-w-0 cursor-pointer items-center gap-2 rounded px-1 py-0.5 text-left transition-colors hover:bg-elevated"
                 >
-                  {f.kind === "edit" ? <Pencil size={11} /> : <FileText size={11} />}
-                </Glyph>
-                <span className="mono min-w-0 flex-1 truncate text-xs text-ink" title={f.path}>
-                  {f.path}
-                </span>
-                {f.count > 1 && <span className="shrink-0 text-[10px] text-dim">×{f.count}</span>}
-                <span className="shrink-0 text-[10px] text-dim">{label[f.kind]}</span>
-              </button>
-            </li>
-          ))}
-        </ul>
-      </Collapse>
+                  <Glyph
+                    tone={f.kind === "write" ? "blue" : f.kind === "edit" ? "orange" : "violet"}
+                  >
+                    {f.kind === "edit" ? <Pencil size={11} /> : <FileText size={11} />}
+                  </Glyph>
+                  <span className="mono min-w-0 flex-1 truncate text-xs text-ink">{f.path}</span>
+                  {f.count > 1 && <span className="shrink-0 text-[10px] text-dim">×{f.count}</span>}
+                  <span className="shrink-0 text-[10px] text-dim">{label[f.kind]}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </Collapse>
+      </div>
       {preview !== null && (
         <FilePreviewModal
           path={preview}
           cwd={cwd}
-          turn={turn}
+          sessionId={sessionId}
+          since={since}
           onClose={() => setPreview(null)}
         />
       )}
     </div>
   );
-}
-
-/**
- * 每一轮用户输入收尾时要列的文件。
- *
- * 实时那一轮里，整个工具循环都落在同一条助手轮上（`TurnStarted` 按用户输入发），
- * 但历史里工具的每次往返各是一条助手消息（见 `store.ts::historyToTurns`）。
- * 按 `turn` 号把相邻的助手轮并成一组、把汇总挂在**最后一个**上面，实时与回看
- * 才会落在同一个位置 —— 这条回答的末尾，而不是半途某次工具调用下面。
- *
- * `changedByTurn` 是后端按轮存下来的**实际**变更（历史回看时靠它，事件不回放）。
- */
-function changedFilesPerTurn(
-  turns: Turn[],
-  changedByTurn: Record<number, string[]>,
-  cwd: string,
-): ChangedFile[][] {
-  const out: ChangedFile[][] = turns.map(() => []);
-  for (const { start, end } of assistantGroups(turns)) {
-    const t = turns[start];
-    if (t.role !== "assistant") continue;
-    const items = turns
-      .slice(start, end + 1)
-      .flatMap((x) => (x.role === "assistant" ? x.items : []));
-    const watched = t.turn !== undefined ? (changedByTurn[t.turn] ?? []) : [];
-    out[end] = changedFiles(items, watched, cwd);
-  }
-  return out;
 }
 
 /**
@@ -676,7 +690,6 @@ function AssistantTurn({
   isLast,
   streaming,
   showPayload,
-  changed,
   cwd,
   onRetry,
   retryAsks,
@@ -686,8 +699,6 @@ function AssistantTurn({
   isLast: boolean;
   streaming: boolean;
   showPayload: boolean;
-  /** 这一轮用户输入改过的文件，由 `TurnList` 按 `turn` 聚合（见那边的注释）。 */
-  changed: ChangedFile[];
   /** 预览文件时用来解析相对路径。 */
   cwd: string;
   /** 重跑这一轮。不给就不画「重试」（侧边聊天、继承来的上下文）。 */
@@ -819,7 +830,6 @@ function AssistantTurn({
               showCursor={streaming && isLast && i === items.length - 1 && item.kind === "text"}
             />
           ))}
-      {changed.length > 0 && <ChangedFiles files={changed} cwd={cwd} turn={t.turn} />}
       {/* 回答下面那一行小动作。悬停才浮出来，但一直占着位置 —— 否则鼠标移上来
           的一瞬间整段对话会跳一下。一条动作都没有时整行不渲染（纯工具输出的回答
           不该在末尾留一条空白）。 */}
@@ -1010,7 +1020,6 @@ function TurnView({
   isLast,
   streaming,
   showPayload,
-  changed,
   cwd,
   onRetry,
   retryAsks,
@@ -1020,7 +1029,6 @@ function TurnView({
   isLast: boolean;
   streaming: boolean;
   showPayload: boolean;
-  changed: ChangedFile[];
   cwd: string;
   onRetry?: () => void;
   retryAsks?: boolean;
@@ -1035,7 +1043,6 @@ function TurnView({
       isLast={isLast}
       streaming={streaming}
       showPayload={showPayload}
-      changed={changed}
       cwd={cwd}
       onRetry={onRetry}
       retryAsks={retryAsks}
@@ -1052,7 +1059,6 @@ export function TurnList({
   turns: raw,
   streaming,
   showPayload = true,
-  changedByTurn = {},
   cwd = "",
   onRetry,
   onFork,
@@ -1061,9 +1067,7 @@ export function TurnList({
   streaming: boolean;
   /** 是否给助手轮画「查看报文」入口。侧边聊天传 false（它不抓包）。 */
   showPayload?: boolean;
-  /** 后端记下的按轮实际变更（`files_changed` 事件 / `create_session` 的历史）。 */
-  changedByTurn?: Record<number, string[]>;
-  /** 用来把工具参数里的绝对路径对回监听器给的相对路径。 */
+  /** 预览工具卡片里的文件时用来解析相对路径。 */
   cwd?: string;
   /**
    * 重试。**只有真正跑着的那条会话才传** —— 侧边聊天、侧边聊天里那段继承来的
@@ -1080,8 +1084,6 @@ export function TurnList({
   onFork?: (keepBefore: number, draft?: string) => void;
 }) {
   const turns = useMemo(() => mergeAssistantRuns(raw), [raw]);
-  // 挂在「这一轮用户输入的最后一条助手消息」上，而不是每条助手消息各算各的。
-  const changed = changedFilesPerTurn(turns, changedByTurn, cwd);
   // 一圈正在跑着的时候整排都不给改动：重试会插进队列、等这一轮跑完才生效，那时
   // 用户多半已经忘了自己点过它；分叉 / 编辑要关掉当前会话再开新的，正在跑的那一轮
   // 与排队里的消息会跟着没掉 —— 按钮看着只是「分一条出去」，不该有这个副作用。
@@ -1100,7 +1102,6 @@ export function TurnList({
             isLast={i === turns.length - 1}
             streaming={streaming}
             showPayload={showPayload}
-            changed={changed[i]}
             cwd={cwd}
             // 没有轮次号（历史里那种极端竞态）就没法指名改哪一轮。
             onRetry={
@@ -1125,7 +1126,6 @@ export function TurnList({
 function MessageList() {
   const turns = useStore((s) => s.turns);
   const streaming = useStore((s) => s.streaming);
-  const changed = useStore((s) => s.changed);
   const cwd = useStore((s) => s.cwd);
   const sessionId = useStore((s) => s.sessionId);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -1152,7 +1152,6 @@ function MessageList() {
           <TurnList
             turns={turns}
             streaming={streaming}
-            changedByTurn={changed}
             cwd={cwd}
             // 重试与分叉都作用在**这条会话**上 —— 侧边聊天那份 TurnList 一概不传。
             onRetry={
@@ -1198,7 +1197,7 @@ function EmptyState() {
 }
 
 // ---------------------------------------------------------------------------
-// 待办 / 提示条 / 提问面板 / 输入框
+// 变更 / 待办 / 提示条 / 提问面板 / 输入框
 // ---------------------------------------------------------------------------
 
 /**
@@ -1349,12 +1348,30 @@ function ChatHeader() {
   );
 }
 
+function MainChangesPanel() {
+  const sessionId = useStore((s) => s.sessionId);
+  const turns = useStore((s) => s.turns);
+  const changed = useStore((s) => s.changed);
+  const since = useStore((s) => s.changesSince);
+  const cwd = useStore((s) => s.cwd);
+  return (
+    <ChangesPanel
+      sessionId={sessionId}
+      turns={turns}
+      changedByTurn={changed}
+      since={since}
+      cwd={cwd}
+    />
+  );
+}
+
 export function ChatView() {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <ChatHeader />
       <NoticeBanner />
       <MessageList />
+      <MainChangesPanel />
       <TodoPanel />
       <AskForm />
       {/* 目标条贴着输入框：它和「我要它干什么」是一件事，读起来是一句话。 */}

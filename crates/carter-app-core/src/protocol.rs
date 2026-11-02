@@ -116,6 +116,11 @@ pub enum Command {
     /// 与自动压缩走同一个函数，区别只在目标值：手动压缩把目标定成 0，于是一定会
     /// 走到摘要那一档（历史太短切不出中段时除外）。生成中收到会排队，这一轮跑完再压。
     Compact,
+    /// 清空底栏的变更条：从下一轮起重新统计（界面上变更条的「清空」）。
+    ///
+    /// 只动统计口径，不动磁盘上的文件。生成中收到会排队，这一轮跑完再清 ——
+    /// 否则正在跑的这一轮算在起点前还是后说不清。
+    ClearChanges,
 }
 
 /// 单条工具调用的操作。见 `Command::ToolAction`。
@@ -242,6 +247,7 @@ pub enum SessionEvent {
         history: Vec<crate::view::MessageView>,
         prompts: Vec<crate::prompts::TurnPrompt>,
         changes: Vec<crate::changes::TurnFiles>,
+        changes_since: u32,
     },
     /// 思考增量。签名分片不会传到这里（对模型有用，对人没意义）。
     ThinkingDelta { text: String },
@@ -281,9 +287,11 @@ pub enum SessionEvent {
     /// 这一轮**实际**改了哪些文件（相对会话 cwd，`/` 分隔）。
     ///
     /// 来自轮首挂上、轮末收起的文件系统监听（见 `changes.rs`）—— 不是解析工具
-    /// 参数，所以 `bash`、子进程、MCP 的写入都在里面。轮末发一次，界面上挂在
-    /// 这条回答的末尾。
+    /// 参数，所以 `bash`、子进程、MCP 的写入都在里面。轮末发一次，界面汇总进
+    /// 底栏的变更条。
     FilesChanged { turn: u32, files: Vec<String> },
+    /// 变更条被清空，从第 `since` 轮起重新统计。
+    ChangesCleared { since: u32 },
     /// 上下文占用（输入框旁那个百分比环）。会话就绪、每轮结束、换模型、压缩之后各发一次。
     Context(ContextView),
     /// 开始压缩上下文（界面上把百分比环换成转圈）。
@@ -300,6 +308,8 @@ pub enum SessionEvent {
         history: Vec<crate::view::MessageView>,
         prompts: Vec<crate::prompts::TurnPrompt>,
         changes: Vec<crate::changes::TurnFiles>,
+        /// 变更条的统计起点，按新轮次号重排过。
+        changes_since: u32,
         /// 压缩前后的估算占用（只算历史消息）。
         before: u64,
         after: u64,

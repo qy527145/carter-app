@@ -123,6 +123,8 @@ struct CreatedSession {
     goal: Option<carter_app_core::GoalView>,
     /// 历史里每一轮实际改过的文件。事件不回放，所以随历史一起带回。
     changes: Vec<carter_app_core::TurnFiles>,
+    /// 变更条的统计起点（点过「清空」之后只汇总这一轮及之后的）。
+    changes_since: u32,
     /// 历史里每一轮用户打的原文（展开之前）。界面拿它回填「编辑」框。
     prompts: Vec<carter_app_core::prompts::TurnPrompt>,
 }
@@ -168,6 +170,7 @@ async fn create_session(
         history: started.history,
         goal: started.goal,
         changes: started.changes,
+        changes_since: started.changes_since,
         prompts: started.prompts,
     })
 }
@@ -1073,7 +1076,7 @@ async fn read_image(token: String) -> Option<String> {
         .flatten()
 }
 
-/// 文件预览：点击「本轮变更的文件」里的一行时打开。
+/// 文件预览：点击变更条里的一行时打开。
 ///
 /// 读的是**现在磁盘上的内容**，不是历史快照 —— 预览要回答的是「它现在什么样」。
 /// 返回的是可渲染的形状（文本 / 图片 data URL / 二进制 / 消失 / 读失败），
@@ -1094,7 +1097,7 @@ async fn preview_file(cwd: Option<String>, path: String) -> carter_app_core::Fil
         })
 }
 
-/// 「本轮变更的文件」的固定忽略名单，给设置页展示用。
+/// 变更条的固定忽略名单，给设置页展示用。
 ///
 /// 从核心拿，不在前端抄一份 —— 抄的那份迟早和真实行为对不上，而「界面上写着会
 /// 忽略、实际上没忽略」比不显示更糟（与工具页同一个道理）。
@@ -1118,15 +1121,15 @@ fn change_rules() -> ChangeRules {
     }
 }
 
-/// 某一轮里某个文件的 diff：点开预览时按需算（见 core 的 `changes.rs`）。
+/// 某个文件从第 `since` 轮起累计的 diff：点开预览时按需算（见 core 的 `changes.rs`）。
 ///
-/// 只有 cwd 在 git 仓库里、且那一轮记下了基线时才有结果；其余情况返回
+/// 只有 cwd 在 git 仓库里、且那几轮记下了基线时才有结果；其余情况返回
 /// `unavailable` 与一句人话原因。`spawn_blocking`：要起 git 进程，别占着
 /// async 的工作线程。
 #[tauri::command]
 async fn file_diff(
     session_id: String,
-    turn: u32,
+    since: u32,
     cwd: String,
     path: String,
 ) -> carter_app_core::FileDiff {
@@ -1134,7 +1137,7 @@ async fn file_diff(
     tokio::task::spawn_blocking(move || {
         carter_app_core::changes::diff_for(
             &session_id,
-            turn,
+            since,
             std::path::Path::new(&cwd),
             &path,
         )

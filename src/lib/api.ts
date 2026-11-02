@@ -70,6 +70,7 @@ export type SessionEvent =
       history: MessageView[];
       prompts: TurnPrompt[];
       changes: TurnFiles[];
+      changes_since: number;
     }
   | { type: "thinking_delta"; text: string }
   | { type: "text_delta"; text: string }
@@ -94,10 +95,12 @@ export type SessionEvent =
    * 这一轮**实际**改了哪些文件（相对会话 cwd，`/` 分隔）。
    *
    * 后端在轮首挂文件系统监听、轮末收回，所以 `bash`、子进程、MCP 的写入都在里面。
-   * 与前端的 `write_file` / `edit_file` 参数合并后显示在回答末尾（后者能补上
+   * 与前端的 `write_file` / `edit_file` 参数合并后汇总在底栏的变更条里（后者能补上
    * 写在 cwd 之外的文件，并提供「写入 / 修改」的来源标签）。
    */
   | { type: "files_changed"; turn: number; files: string[] }
+  /** 变更条被清空：从第 `since` 轮起重新统计。 */
+  | { type: "changes_cleared"; since: number }
   | { type: "turn_usage"; usage: UsageView; cost: number; model: string }
   /** 上下文占用（输入框旁的百分比环）。就绪、每轮结束、换模型、压缩之后各来一次。 */
   | ({ type: "context" } & ContextView)
@@ -114,6 +117,7 @@ export type SessionEvent =
       history: MessageView[];
       prompts: TurnPrompt[];
       changes: TurnFiles[];
+      changes_since: number;
       /** 压缩前后的估算占用（只算历史消息）。 */
       before: number;
       after: number;
@@ -263,7 +267,9 @@ export type Command =
   /** 长任务目标（`/goal`）的操作。 */
   | { type: "goal"; action: GoalCommand }
   /** 手动压缩上下文（`/compact`）。生成中发的话排队，这一轮跑完再压。 */
-  | { type: "compact" };
+  | { type: "compact" }
+  /** 清空底栏的变更条，从下一轮起重新统计。生成中发的话排队，这一轮跑完再清。 */
+  | { type: "clear_changes" };
 
 /** `/goal` 的动作。拼写由输入框那一侧解析一次，后端只认结构化枚举。 */
 export type GoalCommand =
@@ -318,7 +324,7 @@ export type AppSettings = {
   /** 按名字忽略的技能。**只作用于外部扫描路径**（项目 / 用户技能靠搬目录启停）。 */
   ignored_skills: string[];
   /**
-   * 「本轮变更的文件」额外忽略的规则，每条一个 glob，相对会话 cwd。
+   * 变更条额外忽略的规则，每条一个 glob，相对会话 cwd。
    *
    * 含 `/` 按相对路径匹配（`dist/**`），不含 `/` 按任意层级的名字匹配（`*.log`）。
    * 内置目录规则与 `.gitignore` 不在这里，它们始终生效。
@@ -385,6 +391,8 @@ export type CreatedSession = {
   goal: GoalView | null;
   /** 历史里每一轮实际改过的文件。事件不回放，所以随历史一起带回。 */
   changes: TurnFiles[];
+  /** 变更条的统计起点（点过「清空」之后只汇总这一轮及之后的）。 */
+  changes_since?: number;
   /**
    * 历史里每一轮用户打的原文。界面拿它回填「编辑」框 ——
    * 会话文件里存的是展开后的正文，回填进去等于把整份文件内容摊在输入框里。
@@ -1165,7 +1173,7 @@ export function readImage(token: string): Promise<string | null> {
 }
 
 /**
- * 文件预览：点击「本轮变更的文件」里的一行时打开。
+ * 文件预览：点击变更条里的一行时打开。
  *
  * `path` 可以是相对会话 cwd 的路径，也可以是绝对路径（工具可能写到 cwd 之外）。
  * 后端把「文件不在了 / 是二进制 / 是图片 / 读失败」都收成枚举变体，所以这里
@@ -1177,9 +1185,9 @@ export function previewFile(cwd: string | null, path: string): Promise<FilePrevi
 
 /** 一个文件的预览结果。`kind` 决定弹窗里画什么。 */
 /**
- * 某一轮里某个文件的 diff（点开预览时按需算）。
+ * 某个文件从第 `since` 轮起累计的 diff（点开预览时按需算）。
  *
- * 只有 cwd 在 git 仓库里、且那一轮记下了轮首基线时才会有 `diff`；其余情况是
+ * 只有 cwd 在 git 仓库里、且那几轮记下了轮首基线时才会有 `diff`；其余情况是
  * `unavailable` + 一句原因。
  */
 export type FileDiff =
@@ -1189,14 +1197,14 @@ export type FileDiff =
 
 export function fileDiff(
   sessionId: string,
-  turn: number,
+  since: number,
   cwd: string,
   path: string,
 ): Promise<FileDiff> {
-  return invoke<FileDiff>("file_diff", { sessionId, turn, cwd, path });
+  return invoke<FileDiff>("file_diff", { sessionId, since, cwd, path });
 }
 
-/** 「本轮变更的文件」的固定忽略名单。设置页展示用，真实来源在 core 里。 */
+/** 变更条的固定忽略名单。设置页展示用，真实来源在 core 里。 */
 export type ChangeRules = { dirs: string[]; files: string[] };
 
 export function changeRules(): Promise<ChangeRules> {

@@ -605,25 +605,33 @@ fn new_file_diff(cwd: &Path, path: &str) -> FileDiff {
     }
 }
 
-/// 算某一轮里某个文件的 diff。**按需**调用（用户点开预览时）。
-pub fn diff_for(session_id: &str, turn: u32, cwd: &Path, raw_path: &str) -> FileDiff {
+/// 算某个文件**从第 `since` 轮起**累计的 diff。**按需**调用（用户点开预览时）。
+///
+/// 基线取 `since` 及之后**最早**那条带基线的记录：基线是整个工作区的快照，
+/// 拿最早那份去比，就是统计起点以来这个文件的全部改动 —— 不管它是哪一轮才
+/// 第一次被动到的。
+pub fn diff_for(session_id: &str, since: u32, cwd: &Path, raw_path: &str) -> FileDiff {
     let path = raw_path.trim().replace('\\', "/");
-    let Some(record) = load(session_id).into_iter().find(|t| t.turn == turn) else {
+    let records: Vec<TurnFiles> = load(session_id)
+        .into_iter()
+        .filter(|t| t.turn >= since)
+        .collect();
+    if records.is_empty() {
         return FileDiff::Unavailable {
             path,
-            reason: "没有这一轮的变更记录".into(),
+            reason: "没有对应的变更记录".into(),
         };
-    };
-    let Some(baseline) = record.baseline else {
+    }
+    let Some(baseline) = records.into_iter().find_map(|t| t.baseline) else {
         return FileDiff::Unavailable {
             path,
-            reason: "这一轮没有 git 基线（工作目录不在 git 仓库里，或 git 不可用）".into(),
+            reason: "没有 git 基线（工作目录不在 git 仓库里，或 git 不可用）".into(),
         };
     };
     if Path::new(&path).is_absolute() {
         return FileDiff::Unavailable {
             path,
-            reason: "这个文件不在会话工作目录里，算不了本轮 diff".into(),
+            reason: "这个文件不在会话工作目录里，算不了 diff".into(),
         };
     }
 
@@ -681,6 +689,14 @@ pub struct TurnFiles {
 struct Stored {
     #[serde(default)]
     turns: BTreeMap<u32, StoredTurn>,
+    /// 统计起点：界面上的变更条只汇总轮次号 ≥ 它的那些轮。用户点「清空」时
+    /// 挪到下一轮（见 [`clear`]）。缺省 0 = 从头算。
+    #[serde(default, skip_serializing_if = "is_zero")]
+    since: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 /// 每一轮的落盘形状。`Plain` 是早先只有路径数组的版本 —— 读到它就当没有基线，
@@ -755,6 +771,36 @@ fn load_from(path: &Path) -> Vec<TurnFiles> {
         .collect()
 }
 
+/// 变更条的统计起点（见 `Stored::since`）。
+pub fn since(session_id: &str) -> u32 {
+    since_from(&file_for(session_id))
+}
+
+fn since_from(path: &Path) -> u32 {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Stored>(&raw).ok())
+        .map_or(0, |s| s.since)
+}
+
+/// 「清空」变更条：统计起点挪到第 `since` 轮，之前那些轮的记录一并丢掉。
+///
+/// 丢掉而不是留着：它们只服务变更条（汇总与 diff 基线都只看起点之后），
+/// 留着只会让文件一直长。
+pub fn clear(session_id: &str, since: u32) -> Result<(), String> {
+    clear_at(&file_for(session_id), since)
+}
+
+fn clear_at(path: &Path, since: u32) -> Result<(), String> {
+    let mut stored = match std::fs::read_to_string(path) {
+        Ok(raw) => serde_json::from_str::<Stored>(&raw).unwrap_or_default(),
+        Err(_) => Stored::default(),
+    };
+    stored.turns = stored.turns.split_off(&since);
+    stored.since = since;
+    write_stored(path, &stored)
+}
+
 /// 记下某一轮的变更。空清单不落盘（没有条目就是「没变」）。
 pub fn record(
     session_id: &str,
@@ -792,12 +838,13 @@ pub fn retract(session_id: &str, turn: u32) -> Result<(), String> {
     retract_from(&file_for(session_id), turn)
 }
 
-/// 压缩之后按新轮次号重排（见 `history::TurnRemap`）。被摘要吃掉的那几轮直接丢掉。
-pub fn remap(session_id: &str, f: impl Fn(u32) -> Option<u32>) -> Result<(), String> {
-    remap_at(&file_for(session_id), f)
+/// 压缩之后按新轮次号重排（见 `history::TurnRemap`）。被摘要吃掉的那几轮直接丢掉，
+/// 统计起点落在被吃掉的那段里时挪到第一条留下来的轮次上。
+pub fn remap(session_id: &str, remap: &crate::history::TurnRemap) -> Result<(), String> {
+    remap_at(&file_for(session_id), remap)
 }
 
-fn remap_at(path: &Path, f: impl Fn(u32) -> Option<u32>) -> Result<(), String> {
+fn remap_at(path: &Path, remap: &crate::history::TurnRemap) -> Result<(), String> {
     let Ok(raw) = std::fs::read_to_string(path) else {
         return Ok(());
     };
@@ -807,9 +854,10 @@ fn remap_at(path: &Path, f: impl Fn(u32) -> Option<u32>) -> Result<(), String> {
     let turns = stored
         .turns
         .into_iter()
-        .filter_map(|(turn, t)| f(turn).map(|n| (n, t)))
+        .filter_map(|(turn, t)| remap.map(turn).map(|n| (n, t)))
         .collect();
-    write_stored(path, &Stored { turns })
+    let since = remap.floor(stored.since);
+    write_stored(path, &Stored { turns, since })
 }
 
 /// fork 出来的新会话继承变更记录。`keep_before` = 只留轮次号小于它的那些。
@@ -827,8 +875,9 @@ fn copy_between(from: &Path, to: &Path, keep_before: Option<u32>) -> Result<(), 
     };
     if let Some(cut) = keep_before {
         stored.turns.split_off(&cut);
+        stored.since = stored.since.min(cut);
     }
-    if stored.turns.is_empty() {
+    if stored.turns.is_empty() && stored.since == 0 {
         return Ok(());
     }
     write_stored(to, &stored)
@@ -852,9 +901,13 @@ fn retract_from(path: &Path, turn: u32) -> Result<(), String> {
     let Ok(mut stored) = serde_json::from_str::<Stored>(&raw) else {
         return Ok(());
     };
-    if stored.turns.split_off(&turn).is_empty() {
+    // 起点落在被回退掉的那段里：重跑出来的轮次号会从 `turn` 重新长，
+    // 起点不跟着退的话，它们全都会被当成「清空之前」藏起来。
+    let clamped = stored.since > turn;
+    if stored.turns.split_off(&turn).is_empty() && !clamped {
         return Ok(());
     }
+    stored.since = stored.since.min(turn);
     write_stored(path, &stored)
 }
 
@@ -1023,6 +1076,34 @@ mod tests {
 
         // 没有文件 / 已经是空的：不报错（重试本身不该被它挡下来）。
         assert!(retract_from(&dir.join("nope.json"), 1).is_ok());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 清空：起点挪过去，之前的记录丢掉；之后回退到起点之前时起点跟着退。
+    #[test]
+    fn clearing_moves_the_start_and_retract_pulls_it_back() {
+        let dir = tmp_dir("clear");
+        let path = dir.join("s.json");
+        record_to(&path, 1, &["a.txt".to_string()], None).unwrap();
+        record_to(&path, 2, &["b.txt".to_string()], None).unwrap();
+
+        clear_at(&path, 2).unwrap();
+        assert_eq!(since_from(&path), 2);
+        let turns: Vec<u32> = load_from(&path).iter().map(|t| t.turn).collect();
+        assert_eq!(turns, vec![2]);
+
+        // 新记录不会动起点。
+        record_to(&path, 3, &["c.txt".to_string()], None).unwrap();
+        assert_eq!(since_from(&path), 2);
+
+        // 重试第 1 轮：之后的全退掉，起点也退到 1，重跑出来的轮次要算进去。
+        retract_from(&path, 1).unwrap();
+        assert_eq!(since_from(&path), 1);
+        assert!(load_from(&path).is_empty());
+
+        // 没清空过的旧文件读出来起点是 0。
+        std::fs::write(&path, r#"{"turns":{"1":["old.txt"]}}"#).unwrap();
+        assert_eq!(since_from(&path), 0);
         std::fs::remove_dir_all(&dir).ok();
     }
 

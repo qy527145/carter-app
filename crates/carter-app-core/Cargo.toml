@@ -22,7 +22,7 @@ toml_edit = { workspace = true }
 async-trait = "0.1"
 # 粘贴进来的图片走 JSON 传字节；顺带把图读回成 data URL 给界面显示。
 base64 = "0.22"
-# 文件系统监听（见 `changes.rs`）：回答末尾列出这一轮真实改过的文件。
+# 文件系统监听（见 `changes.rs`）：底栏变更条汇总真实改过的文件。
 notify = { workspace = true }
 # 用户在设置里写的额外忽略规则（glob）。
 globset = { workspace = true }

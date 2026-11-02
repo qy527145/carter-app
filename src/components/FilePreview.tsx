@@ -1,8 +1,8 @@
-// 文件预览弹窗：点击「本轮变更的文件」里的一行时打开。
+// 文件预览弹窗：点击底栏变更条里的一行时打开。
 //
 // 两页：
-// * **本轮改动** —— 后端用轮首 git 基线算出的 unified diff（见 core 的
-//   `changes.rs`）。只有 cwd 在 git 仓库里、且那一轮记下了基线时才有；
+// * **改动** —— 后端拿统计起点那一轮的 git 基线算出的 unified diff（见 core 的
+//   `changes.rs`）。只有 cwd 在 git 仓库里、且那几轮记下了基线时才有；
 //   没有就只显示当前内容，并说明为什么。
 // * **当前内容** —— 现在磁盘上的样子（见 core 的 `preview.rs`）。
 //
@@ -29,7 +29,6 @@ import {
 import { copyText } from "../lib/clipboard";
 import { fmtBytes, relTime } from "../lib/format";
 import { toastError, TOAST_MS } from "../lib/toast";
-import { useStore } from "../store";
 import { HtmlFrame, SvgCanvas, isHtmlFile, isSvgPath } from "./Media";
 import { Button } from "./ui/Button";
 import { Segmented } from "./ui/Input";
@@ -115,16 +114,18 @@ function DiffCode({ text }: { text: string }) {
 export function FilePreviewModal({
   path,
   cwd,
-  turn,
+  sessionId,
+  since,
   onClose,
 }: {
   path: string;
   cwd: string;
-  /** 这一轮的用户输入序号；没有就只显示当前内容。 */
-  turn?: number;
+  /** 算 diff 的那条会话。侧边聊天传它自己的，别拿主对话的去查。 */
+  sessionId: string;
+  /** 统计起点（轮次号）：diff 从这一轮的轮首基线算起。 */
+  since: number;
   onClose: () => void;
 }) {
-  const sessionId = useStore((s) => s.sessionId);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [diff, setDiff] = useState<FileDiff | null>(null);
@@ -163,12 +164,8 @@ export function FilePreviewModal({
   useEffect(() => {
     setDiff(null);
     setTab("diff");
-    if (turn === undefined || !sessionId) {
-      setDiff({ kind: "unavailable", path, reason: "这一轮没有 diff 基线" });
-      return;
-    }
     let cancelled = false;
-    fileDiff(sessionId, turn, cwd, path)
+    fileDiff(sessionId, since, cwd, path)
       .then((d) => {
         if (!cancelled) setDiff(d);
       })
@@ -184,7 +181,7 @@ export function FilePreviewModal({
     return () => {
       cancelled = true;
     };
-  }, [sessionId, turn, cwd, path]);
+  }, [sessionId, since, cwd, path]);
 
   // 没有可用 diff 时不要停在空页面上 —— 直接落到「当前内容」。
   useEffect(() => {
@@ -254,16 +251,16 @@ export function FilePreviewModal({
             value={tab}
             onChange={setTab}
             options={[
-              { id: "diff", label: "本轮改动" },
+              { id: "diff", label: "改动" },
               { id: "file", label: "当前内容" },
             ]}
           />
         </div>
       )}
 
-      {/* 不可用时在「当前内容」上方说明原因，而不是让用户以为这一轮没动过。 */}
+      {/* 不可用时在「当前内容」上方说明原因，而不是让用户以为它没动过。 */}
       {diff?.kind === "unavailable" && (
-        <div className="mb-2 text-[11px] text-dim">本轮改动：{diff.reason}</div>
+        <div className="mb-2 text-[11px] text-dim">改动：{diff.reason}</div>
       )}
 
       {error && <Notice kind="error">{error}</Notice>}
@@ -278,7 +275,7 @@ export function FilePreviewModal({
       {tab === "diff" && diff === null && (
         <div className="flex items-center gap-2 py-8 text-sm text-dim">
           <LoaderCircle size={14} className="animate-spin" />
-          正在计算本轮改动…
+          正在计算改动…
         </div>
       )}
 
@@ -291,7 +288,7 @@ export function FilePreviewModal({
 
       {tab === "diff" && diff?.kind === "empty" && (
         <div className="flex items-center gap-2 rounded-lg bg-card px-3 py-4 text-sm text-dim">
-          这一轮相对轮首没有差异（可能改完又改回去了）。
+          相对统计起点没有差异（可能改完又改回去了）。
         </div>
       )}
 
@@ -362,7 +359,7 @@ export function FilePreviewModal({
           )}
 
           {preview?.kind === "missing" && (
-            <Notice kind="warn">文件已经不存在了 —— 可能在本轮或之后被删除 / 移走。</Notice>
+            <Notice kind="warn">文件已经不存在了 —— 可能已被删除 / 移走。</Notice>
           )}
 
           {preview?.kind === "error" && (

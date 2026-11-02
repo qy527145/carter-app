@@ -356,6 +356,17 @@ impl TurnRemap {
         let first_kept = self.before - tail;
         (turn >= first_kept && turn < self.before).then(|| turn - (self.before - self.after))
     }
+
+    /// 「从第 `turn` 轮起」这种起点在压缩之后落在哪：被摘要吃掉的话挪到第一条
+    /// 留下来的轮次上；还没发生的轮次（`turn >= before`）照样平移。
+    pub fn floor(&self, turn: u32) -> u32 {
+        if self.is_identity() || (self.head && turn == 0) {
+            return turn;
+        }
+        let tail = self.after - u32::from(self.head);
+        let first_kept = self.before - tail;
+        turn.max(first_kept) - (self.before - self.after)
+    }
 }
 
 #[cfg(test)]
@@ -650,6 +661,11 @@ mod tests {
         assert_eq!(m.map(7), Some(1));
         assert_eq!(m.map(9), Some(3));
         assert_eq!(m.map(10), None, "越界的轮次不该映射出来");
+        // 起点：被吃掉的挪到第一条留下的轮次，留下的照常平移，下一轮也平移。
+        assert_eq!(m.floor(0), 0);
+        assert_eq!(m.floor(3), 1);
+        assert_eq!(m.floor(8), 2);
+        assert_eq!(m.floor(10), 4);
     }
 
     /// 保留窗口从一轮的中间切开（开头是工具结果）：那半截不算新的一轮，映射照样对。
