@@ -199,6 +199,8 @@ pub struct AppShell {
     /// 定时任务表。与配置分开：它由后台调度器自己写（`next_at` 每次触发都变），
     /// 不该混进那份「界面改动 → 热重载 → 广播 `config_changed`」的流程里。
     pub schedules: Arc<crate::schedules::ScheduleStore>,
+    /// 常驻助理的状态。理由同 `schedules`：由后台循环自己写，不进配置热重载那条路。
+    pub assistant: Arc<crate::assistant::AssistantStore>,
     pub sessions: DashMap<String, Arc<SessionHandle>>,
     /// 已经发出关闭信号、但任务还没退出的会话 id。
     ///
@@ -219,10 +221,18 @@ impl AppShell {
                 crate::capture::CaptureStore::default_root(),
             )),
             schedules: crate::schedules::ScheduleStore::open_default(),
+            assistant: crate::assistant::AssistantStore::open_default(),
             sessions: DashMap::new(),
             closing: Mutex::new(HashSet::new()),
             events,
         })
+    }
+
+    /// 换一份助理状态（测试用：不碰用户的 `assistant.json`）。
+    #[cfg(test)]
+    pub(crate) fn with_assistant(mut self, store: Arc<crate::assistant::AssistantStore>) -> Self {
+        self.assistant = store;
+        self
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<AppEvent> {

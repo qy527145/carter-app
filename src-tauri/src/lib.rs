@@ -592,6 +592,162 @@ async fn run_schedule(shell: State<'_, Arc<AppShell>>, id: String) -> Result<Str
     carter_app_core::schedules::fire_now(shell.inner(), &id).await
 }
 
+// ---------------------------------------------------------------------------
+// 常驻助理
+// ---------------------------------------------------------------------------
+
+use carter_app_core::assistant::runtime as assistant;
+
+#[tauri::command]
+fn get_assistant(shell: State<'_, Arc<AppShell>>) -> assistant::AssistantView {
+    assistant::view(&shell)
+}
+
+#[tauri::command]
+fn save_assistant_settings(
+    shell: State<'_, Arc<AppShell>>,
+    settings: carter_app_core::assistant::Settings,
+) -> Result<(), String> {
+    assistant::save_settings(shell.inner(), settings)
+}
+
+#[tauri::command]
+fn save_assistant_source(
+    shell: State<'_, Arc<AppShell>>,
+    source: carter_app_core::assistant::Source,
+) -> Result<(), String> {
+    assistant::save_source(shell.inner(), source)
+}
+
+#[tauri::command]
+fn delete_assistant_source(shell: State<'_, Arc<AppShell>>, id: String) -> Result<(), String> {
+    assistant::delete_source(shell.inner(), &id)
+}
+
+/// 「立即检查」：现在就跑一次观察源。返回这次的新行数（第一次是 0 —— 只建基线）。
+#[tauri::command]
+async fn poll_assistant_source(shell: State<'_, Arc<AppShell>>, id: String) -> Result<u32, String> {
+    assistant::poll_now(shell.inner(), &id).await
+}
+
+/// 试跑观察源的命令，不比对、不评估 —— 编辑框里「试一下」，让人看到命令到底吐了什么。
+#[tauri::command]
+async fn test_assistant_command(command: String, cwd: String) -> Result<String, String> {
+    carter_app_core::assistant::source::run_command(&command, std::path::Path::new(&cwd)).await
+}
+
+#[tauri::command]
+async fn assistant_ticket_action(
+    shell: State<'_, Arc<AppShell>>,
+    ticket_id: String,
+    action: assistant::TicketAction,
+) -> Result<(), String> {
+    assistant::ticket_action(shell.inner(), &ticket_id, action).await
+}
+
+#[tauri::command]
+async fn approve_assistant_decision(
+    shell: State<'_, Arc<AppShell>>,
+    decision_id: String,
+) -> Result<String, String> {
+    assistant::approve(shell.inner(), &decision_id).await
+}
+
+#[tauri::command]
+fn dismiss_assistant_decision(
+    shell: State<'_, Arc<AppShell>>,
+    decision_id: String,
+) -> Result<(), String> {
+    assistant::dismiss(shell.inner(), &decision_id)
+}
+
+#[tauri::command]
+async fn reassess_assistant_decision(
+    shell: State<'_, Arc<AppShell>>,
+    decision_id: String,
+) -> Result<carter_app_core::assistant::Decision, String> {
+    assistant::reassess(shell.inner(), &decision_id).await
+}
+
+/// 托盘：图标常驻菜单栏，标题显示要人处理的件数。
+///
+/// 窗口关掉之后应用不退出（见 `run` 里的 `CloseRequested`）—— 助理要接着盯观察源，
+/// 托盘是它还活着的唯一证据，也是把窗口叫回来的入口。
+const TRAY_ID: &str = "carter-tray";
+
+fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
+    use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+
+    let open = MenuItem::with_id(app, "open", "打开 Carter", true, None::<&str>)?;
+    let panel = MenuItem::with_id(app, "assistant", "助理面板", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+    let sep = PredefinedMenuItem::separator(app)?;
+    let menu = Menu::with_items(app, &[&open, &panel, &sep, &quit])?;
+
+    let mut tray = TrayIconBuilder::with_id(TRAY_ID)
+        .tooltip("Carter")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "open" => show_main(app),
+            "assistant" => {
+                show_main(app);
+                if let Some(shell) = app.try_state::<Arc<AppShell>>() {
+                    shell.emit(AppEvent::AssistantOpen);
+                }
+            }
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_main(tray.app_handle());
+            }
+        });
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+    tray.build(app)?;
+    Ok(())
+}
+
+fn show_main(app: &tauri::AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+    }
+}
+
+/// 助理的事件 → 系统通知与托盘标题。
+fn on_assistant_event(app: &tauri::AppHandle, shell: &AppShell, ev: &AppEvent) {
+    match ev {
+        AppEvent::AssistantAlert { title, body, .. } => {
+            use tauri_plugin_notification::NotificationExt;
+            let _ = app.notification().builder().title(title).body(body).show();
+        }
+        AppEvent::AssistantChanged => {
+            let n = assistant::attention(&shell.assistant.snapshot());
+            if let Some(tray) = app.tray_by_id(TRAY_ID) {
+                let tip = match n {
+                    0 => "Carter".to_string(),
+                    n => format!("Carter · {n} 件事等你处理"),
+                };
+                let _ = tray.set_tooltip(Some(tip));
+                // 菜单栏上的数字：只在 macOS 上显示得出来，别的平台这一句什么都不做。
+                let _ = tray.set_title(if n == 0 { None } else { Some(n.to_string()) });
+            }
+        }
+        _ => {}
+    }
+}
+
 /// models.dev 里某个服务商下的模型（给渠道编辑框的「从目录选」下拉用）。
 #[tauri::command]
 fn list_catalog_models(
@@ -1321,6 +1477,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         // 选工作目录 / 选文件用。原生选择器比自己拿 list_files 拼一个强得多。
         .plugin(tauri_plugin_dialog::init())
+        // 助理只在工单要人处理时出声，走的就是系统通知。
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             // 配置在启动时读一次。之后每次界面写回都会热重载（`apply_config`）。
             let config = carter::config::Config::load()?;
@@ -1340,13 +1498,21 @@ pub fn run() {
             // panic（启动即崩）。Tauri 自己带一个 runtime，这就是把任务送进去的正路。
             tauri::async_runtime::spawn(carter_app_core::schedules::run_scheduler(shell.clone()));
 
+            // 常驻助理：轮询观察源、评估、开工。同样和窗口无关。
+            tauri::async_runtime::spawn(assistant::run(shell.clone()));
+            if let Err(e) = setup_tray(app) {
+                eprintln!("托盘建不起来：{e}");
+            }
+
             // 事件总线 → webview。一条长驻任务，AppShell 的广播接收端跟着它。
             let handle = app.handle().clone();
             let mut rx = shell.subscribe();
+            let bus_shell = shell.clone();
             tauri::async_runtime::spawn(async move {
                 loop {
                     match rx.recv().await {
                         Ok(ev) => {
+                            on_assistant_event(&handle, &bus_shell, &ev);
                             let _ = handle.emit(CARTER_EVENT, &ev);
                         }
                         // 慢订阅者被追上时广播会报 Lagged —— 丢的是历史事件，
@@ -1363,7 +1529,18 @@ pub fn run() {
                     }
                 }
             });
+            // 启动时把托盘标题对齐一次（上次退出时可能还有等人处理的工单）。
+            shell.emit(AppEvent::AssistantChanged);
             Ok(())
+        })
+        // 关窗 = 收到托盘里，不退出：助理要接着盯观察源。真要退出走托盘菜单的「退出」。
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             // 应用信息与设置
@@ -1401,6 +1578,17 @@ pub fn run() {
             delete_schedule,
             toggle_schedule,
             run_schedule,
+            // 常驻助理
+            get_assistant,
+            save_assistant_settings,
+            save_assistant_source,
+            delete_assistant_source,
+            poll_assistant_source,
+            test_assistant_command,
+            assistant_ticket_action,
+            approve_assistant_decision,
+            dismiss_assistant_decision,
+            reassess_assistant_decision,
             refresh_model_catalog,
             list_catalog_models,
             recommended_catalog_models,
@@ -1444,6 +1632,14 @@ pub fn run() {
             get_exchange,
             inspect_exchange,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|app, event| {
+            // macOS 上点 Dock 图标：窗口藏着的话叫回来。
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = event {
+                show_main(app);
+            }
+            let _ = (app, event);
+        });
 }

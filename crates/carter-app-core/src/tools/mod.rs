@@ -55,6 +55,7 @@
 
 pub mod agent;
 pub mod ask_user;
+pub mod assistant_report;
 pub mod background;
 pub mod bash;
 pub mod control;
@@ -82,6 +83,7 @@ use crate::goal::GoalSignal;
 use crate::skills::Scan;
 use agent::AgentTool;
 use ask_user::{AskRequest, AskUserTool};
+use assistant_report::AssistantReportTool;
 use background::{BackgroundShells, BashOutputTool, KillShellTool};
 use bash::{PlatformBash, ShellCwd};
 use control::RunningTools;
@@ -131,6 +133,8 @@ pub struct ToolBuildArgs {
     pub activity: Arc<AtomicU32>,
     /// 进行中那一轮的记录。`None` = 没人要看（侧边会话自己就不需要被别人看）。
     pub live: Option<Arc<crate::shell::LiveLog>>,
+    /// 这条会话是常驻助理某张工单的执行会话：挂上 `assistant_report`。
+    pub assistant: Option<(Arc<crate::assistant::AssistantStore>, String)>,
 }
 
 /// 按设置挑出要保留的工具（不含 `task`、不含 `ask_user_question`）。
@@ -227,6 +231,7 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
         schedules,
         activity,
         live,
+        assistant,
     } = args;
 
     // ui_tx 传 None：carter 的 ask_user 会一并注册进来，而我们用自己的那个
@@ -327,6 +332,11 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
             Arc::new(ScheduleTool::new(schedules, cwd.to_string_lossy().to_string())),
             &mut tools,
         );
+    }
+
+    // 工单的结局。同样挂在快照之后：交不交工是主会话的决定，不是某个子 agent 的。
+    if let Some((store, ticket_id)) = assistant {
+        push(Arc::new(AssistantReportTool::new(store, ticket_id)), &mut tools);
     }
 
     tools

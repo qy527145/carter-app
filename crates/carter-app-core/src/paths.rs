@@ -180,6 +180,11 @@ pub fn schedules_path() -> PathBuf {
     app_home().join("schedules.json")
 }
 
+/// 常驻助理的全部状态（设置、观察源、决定、工单）。见 `assistant/mod.rs`。
+pub fn assistant_path() -> PathBuf {
+    app_home().join("assistant.json")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

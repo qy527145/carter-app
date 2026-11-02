@@ -184,6 +184,20 @@ pub enum AppEvent {
         #[serde(default)]
         error: Option<String>,
     },
+    /// 常驻助理的状态变了（轮询、决定、工单）。界面据此重拉面板与角标。
+    ///
+    /// 不带载荷：状态整份由 `get_assistant` 取。变化很碎（一次轮询就改好几处），
+    /// 逐条推增量让界面自己拼，迟早拼出一份与盘上对不上的状态。
+    AssistantChanged,
+    /// 一张工单进入了要人处理的状态。外壳把它变成系统通知 —— 这是助理唯一主动
+    /// 出声的地方。
+    AssistantAlert {
+        ticket_id: String,
+        title: String,
+        body: String,
+    },
+    /// 托盘菜单点了「助理」：界面切到助理面板。
+    AssistantOpen,
     /// IM 连接器（钉钉等）底层命令的一行输出。
     ///
     /// 安装要下载几十 MB、登录要等人扫码，静默几分钟用户只会以为按钮没反应。

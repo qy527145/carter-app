@@ -13,8 +13,10 @@ import { StatusBar } from "./components/StatusBar";
 import { ContextMenuProvider } from "./components/ui/ContextMenu";
 import { ToastContainer } from "./components/ui/Toast";
 import { SettingsPage } from "./views/settings/SettingsPage";
+import { AssistantPage } from "./views/assistant/AssistantPage";
 import { appInfo, createSession, listSessions } from "./lib/api";
 import { useAppEvents } from "./lib/events";
+import { refreshAssistant } from "./lib/sessionOps";
 import { applyTheme } from "./lib/theme";
 import { toastError } from "./lib/toast";
 import { useStore } from "./store";
@@ -27,6 +29,7 @@ export default function App() {
     let cancelled = false;
     (async () => {
       try {
+        void refreshAssistant();
         const info = await appInfo();
         if (cancelled) return;
         useStore.getState().setAppInfo(info);
@@ -75,6 +78,8 @@ export default function App() {
               <ChatView />
               <StatusBar />
             </>
+          ) : view === "assistant" ? (
+            <AssistantPage />
           ) : (
             <SettingsPage />
           )}

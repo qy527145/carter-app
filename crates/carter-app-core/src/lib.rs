@@ -22,8 +22,10 @@
 //! * [`inspect`] —— 抓到的报文解回 IR，供报文面板按语义渲染。
 //! * [`title`] —— 首轮之后用副模型起会话标题（含「别思考」的那层包装）。
 //! * [`platform`] —— 操作系统与 shell 探测（bash 工具的跨平台基础）。
+//! * [`assistant`] —— 常驻助理：盯观察源、按规则接单、在后台会话里做完（移植自 dsh-superagent）。
 
 pub mod app_settings;
+pub mod assistant;
 pub mod capture;
 pub mod catalog;
 pub mod changes;

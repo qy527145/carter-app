@@ -21,7 +21,7 @@ import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 
 import { EVENT_NAME, type AppEvent, type SessionEvent } from "./api";
-import { refreshSessions } from "./sessionOps";
+import { refreshAssistant, refreshSessions } from "./sessionOps";
 import { useStore } from "../store";
 
 type Chunk = { kind: "text" | "thinking"; text: string };
@@ -120,6 +120,16 @@ export function useAppEvents() {
         // 被强行拽走只会让人莫名。只刷新侧栏，让它出现在列表里。
         if (payload.error) useStore.getState().setNotice(payload.error);
         void refreshSessions();
+        return;
+      }
+      if (payload.type === "assistant_changed" || payload.type === "assistant_alert") {
+        // 助理的状态整份重拉。工单开会话、改标题时侧栏也要跟着变。
+        void refreshAssistant();
+        if (payload.type === "assistant_alert") void refreshSessions();
+        return;
+      }
+      if (payload.type === "assistant_open") {
+        useStore.getState().setView("assistant");
         return;
       }
       if (payload.type === "session") {

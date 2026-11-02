@@ -1100,6 +1100,11 @@ impl Runner {
 
     /// 这一轮的工具表（工具开关、MCP、子 agent 都在这里装配）。
     fn turn_tools(&self, system: &[String]) -> carter::tools::ToolRegistry {
+        // 常驻助理的工单会话：挂上 `assistant_report`；助理在后台推着跑、没人在看时，
+        // 不给提问表单（没人回答，这一轮会永远卡住）。用户自己打开会话接着聊时照常给。
+        let ticket =
+            crate::assistant::runtime::ticket_for_session(&self.ctx.shell, &self.ctx.handle);
+        let unattended = ticket.as_ref().is_some_and(|(_, u)| *u);
         build_tools(
             ToolBuildArgs {
                 provider: self.ctx.provider.clone(),
@@ -1111,7 +1116,7 @@ impl Runner {
                 cwd: self.ctx.cwd.clone(),
                 skills_enabled: self.ctx.config.skills.enabled,
                 tool_tx: self.tool_tx.clone().expect("事件通道在 run() 里建好"),
-                ask_tx: if self.ctx.include_task {
+                ask_tx: if self.ctx.include_task && !unattended {
                     self.ask_tx.clone()
                 } else {
                     // 侧边聊天不挂 ask_user：抽屉里再套一层提问表单，与「临时问一句」
@@ -1127,6 +1132,7 @@ impl Runner {
                 session_id: self.ctx.handle.id.clone(),
                 shell_cwd: Some(self.ctx.shell_cwd.clone()),
                 running: Some(self.ctx.running.clone()),
+                assistant: ticket.map(|(id, _)| (self.ctx.shell.assistant.clone(), id)),
             },
             &self.ctx.settings,
         )

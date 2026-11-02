@@ -144,6 +144,12 @@ export type AppEvent =
       session_id: string | null;
       error: string | null;
     }
+  /** 常驻助理的状态变了。面板与侧栏角标据此重拉 `getAssistant()`。 */
+  | { type: "assistant_changed" }
+  /** 工单进入要人处理的状态。系统通知由外壳发，界面只需要重拉。 */
+  | { type: "assistant_alert"; ticket_id: string; title: string; body: string }
+  /** 托盘菜单点了「助理面板」：切过去。 */
+  | { type: "assistant_open" }
   /**
    * IM 连接器底层命令的一行输出（安装脚本 / 登录流程）。弹窗里的日志框逐行追加。
    */
@@ -751,6 +757,158 @@ export function toggleSchedule(id: string, enabled: boolean): Promise<Schedule |
 /** 立即跑一次，返回新开的会话 id。不动它原来的节奏。 */
 export function runSchedule(id: string): Promise<string> {
   return invoke<string>("run_schedule", { id });
+}
+
+// ---------------------------------------------------------------------------
+// 常驻助理（镜像 `assistant/mod.rs`、`assistant/runtime.rs`）
+// ---------------------------------------------------------------------------
+
+export type AssistantMode = "observe" | "auto";
+
+export type AssistantRule = {
+  id: string;
+  name: string;
+  instruction: string;
+  enabled: boolean;
+};
+
+export type AssistantSettings = {
+  mode: AssistantMode;
+  rules: AssistantRule[];
+  scope: string;
+  max_running: number;
+  eval_model: string | null;
+  work_model: string | null;
+  paused: boolean;
+};
+
+export type AssistantSourceState = {
+  baselined: boolean;
+  next_at: number;
+  last_polled_at: number | null;
+  last_new: number;
+  last_error: string | null;
+  failures: number;
+};
+
+export type AssistantSource = {
+  id: string;
+  name: string;
+  command: string;
+  cwd: string;
+  every_minutes: number;
+  enabled: boolean;
+  state: AssistantSourceState;
+};
+
+export type Verdict = "accept" | "would_accept" | "attach" | "ignore" | "unavailable";
+
+export type AssistantDecision = {
+  id: string;
+  at: number;
+  source_id: string;
+  source_name: string;
+  events: string[];
+  verdict: Verdict;
+  rule: string | null;
+  reason: string;
+  title: string | null;
+  task: string | null;
+  ticket_id: string | null;
+  dismissed: boolean;
+};
+
+export type TicketStatus =
+  | "queued"
+  | "working"
+  | "ready"
+  | "blocked"
+  | "failed"
+  | "needs_user"
+  | "unreported"
+  | "dropped"
+  | "done"
+  | "stopped";
+
+export type AssistantTicket = {
+  id: string;
+  number: number;
+  title: string;
+  task: string;
+  rule: string;
+  source_id: string;
+  source_name: string;
+  cwd: string;
+  events: string[];
+  created_at: number;
+  updated_at: number;
+  status: TicketStatus;
+  session_id: string | null;
+  summary: string | null;
+  question: string | null;
+  pending: string[];
+  runs: number;
+};
+
+export type AssistantView = {
+  settings: AssistantSettings;
+  sources: AssistantSource[];
+  /** 新的在前。 */
+  decisions: AssistantDecision[];
+  tickets: AssistantTicket[];
+  next_number: number;
+  /** 正在检查的观察源 id。 */
+  busy: string[];
+  /** 要人处理的件数。 */
+  attention: number;
+};
+
+export type TicketAction =
+  | { type: "reply"; text: string }
+  | { type: "retry" }
+  | { type: "done" }
+  | { type: "stop" };
+
+export function getAssistant(): Promise<AssistantView> {
+  return invoke<AssistantView>("get_assistant");
+}
+
+export function saveAssistantSettings(settings: AssistantSettings): Promise<void> {
+  return invoke<void>("save_assistant_settings", { settings });
+}
+
+export function saveAssistantSource(source: AssistantSource): Promise<void> {
+  return invoke<void>("save_assistant_source", { source });
+}
+
+export function deleteAssistantSource(id: string): Promise<void> {
+  return invoke<void>("delete_assistant_source", { id });
+}
+
+/** 现在就检查一次。返回新行数（第一次只建基线，是 0）。 */
+export function pollAssistantSource(id: string): Promise<number> {
+  return invoke<number>("poll_assistant_source", { id });
+}
+
+/** 试跑命令，返回原样输出。 */
+export function testAssistantCommand(command: string, cwd: string): Promise<string> {
+  return invoke<string>("test_assistant_command", { command, cwd });
+}
+
+export function assistantTicketAction(ticketId: string, action: TicketAction): Promise<void> {
+  return invoke<void>("assistant_ticket_action", { ticketId, action });
+}
+
+export function approveAssistantDecision(decisionId: string): Promise<string> {
+  return invoke<string>("approve_assistant_decision", { decisionId });
+}
+
+export function dismissAssistantDecision(decisionId: string): Promise<void> {
+  return invoke<void>("dismiss_assistant_decision", { decisionId });
+}
+
+export function reassessAssistantDecision(decisionId: string): Promise<AssistantDecision> {
+  return invoke<AssistantDecision>("reassess_assistant_decision", { decisionId });
 }
 
 export function setDefaultModel(modelRef: string): Promise<void> {

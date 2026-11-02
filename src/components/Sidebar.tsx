@@ -12,6 +12,7 @@ import {
   Monitor,
   Moon,
   Plus,
+  Radar,
   Search,
   Settings as SettingsIcon,
   Sun,
@@ -201,6 +202,40 @@ function ProjectGroups({
   );
 }
 
+/**
+ * 常驻助理的入口。角标是要人处理的件数 —— 健康的时候什么都不显示（原型的「面板只显示
+ * 要人处理的」）；在跑的工单只用一个小点表示「它在干活」。
+ */
+function AssistantEntry() {
+  const view = useStore((s) => s.view);
+  const setView = useStore((s) => s.setView);
+  const a = useStore((s) => s.assistant);
+  const attention = a?.attention ?? 0;
+  const working = a?.tickets.some((t) => t.status === "working") ?? false;
+  return (
+    <button
+      onClick={() => setView("assistant")}
+      className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors ${
+        view === "assistant" ? "bg-ink/10 font-medium text-ink" : "text-dim hover:bg-ink/5"
+      }`}
+    >
+      <Radar size={14} />
+      助理
+      {a?.settings.paused && <span className="text-[10px] text-dim">已暂停</span>}
+      <span className="ml-auto flex items-center gap-1.5">
+        {working && (
+          <span title="有工单在跑" className="size-1.5 animate-pulse rounded-full bg-tone-blue" />
+        )}
+        {attention > 0 && (
+          <span className="min-w-4 rounded-full bg-tone-orange px-1 text-center text-[10px] font-medium leading-4 text-white">
+            {attention}
+          </span>
+        )}
+      </span>
+    </button>
+  );
+}
+
 export function Sidebar() {
   const sessions = useStore((s) => s.sessions);
   const sessionId = useStore((s) => s.sessionId);
@@ -321,6 +356,7 @@ export function Sidebar() {
         {/* 底部：设置 + 主题。设置放在这里而不是顶部导航里 —— 它是「偶尔去一次」
             的地方，占着顶部第一屏的位置不值当；而左下角是这类入口的常规位置。 */}
         <div className="space-y-1 border-t border-edge p-2">
+          <AssistantEntry />
           <button
             onClick={() => setView("settings")}
             className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors ${

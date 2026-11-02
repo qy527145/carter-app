@@ -38,6 +38,35 @@ export async function refreshSessions(): Promise<void> {
 }
 
 /**
+ * 重拉常驻助理的状态。面板与侧栏角标共用这一份。
+ *
+ * 短时间里会被连着叫好几次（一次轮询就改好几处）：同一时刻只发一个请求，期间
+ * 再来的合并成「跑完再拉一次」，免得旧的响应后到、把新的盖掉。
+ */
+let assistantInflight: Promise<void> | null = null;
+let assistantAgain = false;
+
+export function refreshAssistant(): Promise<void> {
+  if (assistantInflight) {
+    assistantAgain = true;
+    return assistantInflight;
+  }
+  assistantInflight = (async () => {
+    try {
+      do {
+        assistantAgain = false;
+        useStore.getState().setAssistant(await api.getAssistant());
+      } while (assistantAgain);
+    } catch {
+      /* 拉不到就保持上一份；下一条事件还会再拉 */
+    } finally {
+      assistantInflight = null;
+    }
+  })();
+  return assistantInflight;
+}
+
+/**
  * 换会话 = 关掉当前 + 新建/打开。
  *
  * 会话任务的存活跟着句柄走：不先关掉旧的，它会继续占着后台任务，

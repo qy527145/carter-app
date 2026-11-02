@@ -26,6 +26,7 @@
 import { create } from "zustand";
 
 import type {
+  AssistantView,
   AppInfo,
   AppSettings,
   AskQuestion,
@@ -191,7 +192,7 @@ type Store = Conv & {
    */
   configNonce: number;
   /** 主区显示哪个视图。默认对话。 */
-  view: "chat" | "settings";
+  view: "chat" | "settings" | "assistant";
   /**
    * 会话列表被改过几次（新建 / 改名 / fork / 删除）。
    *
@@ -239,7 +240,10 @@ type Store = Conv & {
   openInspector: (turn?: number | null) => void;
   closeInspector: () => void;
   setInspectorTurn: (turn: number | null) => void;
-  setView: (v: "chat" | "settings") => void;
+  setView: (v: "chat" | "settings" | "assistant") => void;
+  /** 常驻助理的状态（面板与侧栏角标共用一份，`assistant_changed` 时重拉）。 */
+  assistant: AssistantView | null;
+  setAssistant: (a: AssistantView) => void;
   setComposerDraft: (text: string | null) => void;
   // 侧边聊天
   beginSide: (c: CreatedSide) => void;
@@ -727,6 +731,7 @@ export const useStore = create<Store>((set) => ({
   settings: null,
   configNonce: 0,
   view: "chat",
+  assistant: null,
   queued: [],
   sessionsNonce: 0,
   composerDraft: null,
@@ -794,6 +799,7 @@ export const useStore = create<Store>((set) => ({
   closeInspector: () => set({ inspectorOpen: false }),
   setInspectorTurn: (turn) => set({ inspectorTurn: turn }),
   setView: (view) => set({ view }),
+  setAssistant: (assistant) => set({ assistant }),
   setComposerDraft: (composerDraft) => set({ composerDraft }),
 
   applyEvent: (e) =>
