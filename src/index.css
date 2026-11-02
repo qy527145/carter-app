@@ -267,24 +267,6 @@ body {
    动效
    ========================================================================== */
 
-/* 流式生成时尾部那个闪烁光标。 */
-@keyframes carter-blink {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0;
-  }
-}
-.carter-cursor {
-  display: inline-block;
-  width: 0.5em;
-  margin-left: 1px;
-  color: var(--text-dim);
-  animation: carter-blink 1s step-end infinite;
-}
-
 /* 「墨落纸」：一段文字出现时从淡、微虚焦落到清晰。
    作用是让新出现的一整段有落定感，而不是硬蹦出来。
 
@@ -436,7 +418,6 @@ body {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .carter-cursor,
   .carter-dots > span,
   .carter-bloom,
   .carter-menu,

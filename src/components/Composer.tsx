@@ -659,26 +659,27 @@ export function Composer() {
             {pasting && <LoaderCircle size={13} className="animate-spin text-dim" />}
             <span className="flex-1" />
             <ContextRing />
-            {streaming && (
+            {/* 停止和发送共用一个位置，互斥出现：生成中且输入框是空的 → 停止；
+                一旦打了字 → 变回发送（排队，⌘/Ctrl+Enter 插队）。
+                两个按钮并排时停止很容易被忽略，也容易点错。 */}
+            {streaming && !canSend ? (
               <button
                 onClick={cancel}
-                title="中断这一轮（正在跑的命令会被立刻结束）"
-                className="inline-flex items-center gap-1.5 rounded-full bg-bubble px-3 py-1.5 text-xs text-dim transition-colors hover:text-[var(--danger)]"
+                title="停止这一轮（正在跑的命令会被立刻结束）"
+                className="rounded-full bg-[var(--danger)] p-2 text-white transition-opacity hover:opacity-85"
               >
-                <Square size={11} />
-                停止
+                <Square size={14} fill="currentColor" strokeWidth={0} />
+              </button>
+            ) : (
+              <button
+                onClick={() => send(false)}
+                disabled={!canSend}
+                title={streaming ? "排队发送（⌘/Ctrl+Enter 插队）" : "发送"}
+                className="rounded-full bg-accent p-2 text-[var(--accent-contrast)] transition-opacity hover:opacity-90 disabled:opacity-30"
+              >
+                <Send size={14} />
               </button>
             )}
-            {/* 生成中**也**能发：默认排队，⌘/Ctrl+Enter 或按钮提示里的插队方式
-                会中断当前轮。把发送键藏起来是之前「只能干等」的原因。 */}
-            <button
-              onClick={() => send(false)}
-              disabled={!canSend}
-              title={streaming ? "排队发送（⌘/Ctrl+Enter 插队）" : "发送"}
-              className="rounded-full bg-accent p-2 text-[var(--accent-contrast)] transition-opacity hover:opacity-90 disabled:opacity-30"
-            >
-              <Send size={14} />
-            </button>
           </div>
         </div>
 

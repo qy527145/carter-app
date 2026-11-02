@@ -332,7 +332,13 @@ function ItemView({
           {/* showCursor 只挂在正在生成的那一段上：同一件事也是「这段还在写」的判据，
               内联的 HTML 预览等它写完再挂载，否则每个增量都会把 iframe 重载一次。 */}
           <MarkdownText text={item.text} cwd={cwd} live={showCursor} />
-          {showCursor && <span className="carter-cursor">▍</span>}
+          {showCursor && (
+            <span className="carter-dots mt-2" aria-label="正在生成">
+              <span />
+              <span />
+              <span />
+            </span>
+          )}
         </div>
       );
     // 按名字分派到各自的呈现。所有工具共用一种卡片是之前数据不够的产物，
