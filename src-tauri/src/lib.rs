@@ -140,6 +140,17 @@ async fn create_session(
     resume: bool,
     resume_id: Option<String>,
 ) -> Result<CreatedSession, String> {
+    // 按 id 打开一条**还挂在后台**的会话：先把它关掉再重开。
+    //
+    // 前端同一时刻只连着一条主会话，换会话时总是先关掉旧的 —— 所以按 id 打开时
+    // 它若还在注册表里，必然是界面已经不认识的孤儿：页面重载过（前端状态清空、
+    // 后端任务还活着）、快速连点了两条会话（两次「关旧开新」交错，有一条被盖掉），
+    // 或是定时任务在后台开的那条。不先关掉，`start_session` 会以「同一会话不能有
+    // 两个 runner」拒绝，而且之后每次都拒 —— 这条会话就再也点不开了。
+    // `close_session` 会等任务真的放掉会话文件才返回，所以重开不会出现双写者。
+    if let Some(id) = resume_id.as_deref() {
+        shell.close_session(id).await;
+    }
     let opts = SessionOptions {
         cwd: cwd.map(PathBuf::from).unwrap_or_else(default_cwd),
         model,
