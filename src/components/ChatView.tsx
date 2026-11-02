@@ -960,7 +960,7 @@ function UserTurn({
                 setDraft(null);
               }
               // 与底部输入框一致：Enter 发送、Shift+Enter 换行。
-              if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+              if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) {
                 e.preventDefault();
                 const t = draft.trim();
                 if (t) submitEdit(t);

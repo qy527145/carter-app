@@ -565,6 +565,9 @@ export function Composer() {
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // 输入法组字中（如拼音候选框开着）按回车只是上屏，不发送。
+    // WebKit 下确认那一下 isComposing 可能已是 false，但 keyCode 仍是 229。
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
     if (menu && items.length > 0) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
