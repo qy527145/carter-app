@@ -286,9 +286,18 @@ pub fn bash_tool_description() -> String {
          **当前目录**：第一条命令在会话的工作目录（系统提示里的「工作目录」）下执行，\
          之后像终端一样**保留 `cd` 的结果**（目录变了结果末尾会有一行 `[cwd]`）。\
          所以不要每条命令都写 `cd /完整/绝对/路径 && ...`：要进子目录就单独 `cd sub` 一次，\
-         之后直接写命令；文件用相对路径。`cd` 到工作目录之外不会被保留，下一条命令回到工作目录。\n",
+         之后直接写命令；文件用相对路径。`cd` 到工作目录之外不会被保留，下一条命令回到工作目录。\n\n\
+         **看图片不要用 bash**：想知道一张图（png/jpg/gif/webp/bmp）里是什么，直接 `read_file` \
+         那个路径 —— 它把真实图像交给你看。不要写 python / PIL 脚本去「读」图：脚本看不到画面，\
+         而且环境里多半没装 PIL。只有要**裁剪 / 放大局部**时才用命令处理，处理完再 `read_file` 产物。\n",
         shell.label()
     );
+    if current_os() == Os::Macos {
+        d.push_str(
+            "macOS 裁图 / 缩放用系统自带的 `sips`：\
+             `sips -c 高 宽 --cropOffset y x in.png --out out.png`、`sips -Z 最长边 in.png --out out.png`。\n",
+        );
+    }
 
     match shell.kind {
         ShellKind::Posix => {
@@ -386,6 +395,16 @@ mod tests {
             d.contains("cmd 的内建命令不可用") || d.contains("不是 bash"),
             "描述里要写清哪些命令不存在：{d}"
         );
+    }
+
+    /// 模型看图时爱先写 PIL 脚本（多半没装、也看不到画面），描述里要把它引回 read_file。
+    #[test]
+    fn the_description_points_images_to_read_file() {
+        let d = bash_tool_description();
+        assert!(d.contains("看图片不要用 bash") && d.contains("read_file"), "{d}");
+        if current_os() == Os::Macos {
+            assert!(d.contains("sips"), "macOS 上要给出自带的裁图工具：{d}");
+        }
     }
 
     #[test]
