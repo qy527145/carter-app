@@ -482,8 +482,8 @@ export function ChangesPanel({
     other: "变更",
   };
   return (
-    <div className="border-t border-edge bg-card px-4 py-1.5">
-      <div className="mx-auto max-w-3xl">
+    <div className="shrink-0 px-4 pt-2">
+      <div className="mx-auto max-w-3xl rounded-xl bg-card px-3 py-1.5">
         <div className="flex items-center gap-2">
           <button
             onClick={() => setExpanded((o) => !o)}
@@ -1241,8 +1241,8 @@ function TodoPanel() {
     todos.find((t) => t.status === "in_progress") ?? todos.find((t) => t.status === "pending");
 
   return (
-    <div className="border-t border-edge bg-card px-4 py-1.5">
-      <div className="mx-auto max-w-3xl">
+    <div className="shrink-0 px-4 pt-2">
+      <div className="mx-auto max-w-3xl rounded-xl bg-card px-3 py-1.5">
         <div className="flex items-center gap-2">
           <button
             onClick={() => setExpanded((o) => !o)}
