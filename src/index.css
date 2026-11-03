@@ -67,6 +67,10 @@
 
   --diff-add-bg: #e6ffec;
   --diff-del-bg: #ffebe9;
+
+  /* 列表行所在的底色。行上悬浮的动作按钮要垫一层「同色渐隐」才能盖住标题末尾，
+     而行可能落在 base（设置页）或 sidebar（侧栏）上 —— 容器各自覆盖它。 */
+  --row-bg: var(--bg);
 }
 
 .dark {
@@ -321,11 +325,30 @@ body {
   animation-delay: 0.3s;
 }
 
-/* 右键菜单：贴光标弹出时的一点微动效。时长要短 —— 菜单是「立刻要能点」的东西。 */
+/* 缓动曲线。内置的 ease-out 太软，起步不够快 —— 交互要的是「一按就动」。
+   --ease-out 给进场与按压，--ease-in-out 给屏幕上的位移（侧栏收展、滑块）。 */
+:root {
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+}
+
+/* 按压反馈：一切可点的东西按下去都要「被听见」。缩放极轻（0.97），
+   松手 160ms 弹回。只动 transform，不碰布局。 */
+.carter-press {
+  transition-property: color, background-color, opacity, transform;
+  transition-duration: 150ms, 150ms, 150ms, 160ms;
+  transition-timing-function: ease, ease, ease, var(--ease-out);
+}
+.carter-press:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+/* 右键菜单：从**光标所在的角**长出来（transform-origin 由组件按翻转方向给），
+   而不是从中心。时长要短 —— 菜单是「立刻要能点」的东西。 */
 @keyframes carter-menu-in {
   from {
     opacity: 0;
-    transform: scale(0.98);
+    transform: scale(0.96);
   }
   to {
     opacity: 1;
@@ -333,7 +356,18 @@ body {
   }
 }
 .carter-menu {
-  animation: carter-menu-in 90ms ease-out;
+  animation: carter-menu-in 140ms var(--ease-out);
+}
+
+/* 设置页换页、侧栏组展开这类「内容换了一块」：淡入 + 2px 落定，不做位移大动作。 */
+@keyframes carter-enter {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+.carter-enter {
+  animation: carter-enter 200ms var(--ease-out);
 }
 
 /* 模态：背板淡入 + 面板从 96% 回到原位。比菜单慢一档 —— 它是「进入一个状态」，
@@ -353,7 +387,7 @@ body {
   animation: carter-fade-in 120ms ease-out;
 }
 .carter-modal-body {
-  animation: carter-modal-in 160ms cubic-bezier(0.215, 0.61, 0.355, 1);
+  animation: carter-modal-in 200ms var(--ease-out);
 }
 
 /* toast：从右上角滑进来，不用缩放 —— 它是「一条通知」，不是一块面板。 */
@@ -364,7 +398,15 @@ body {
   }
 }
 .carter-toast {
-  animation: carter-toast-in 140ms cubic-bezier(0.215, 0.61, 0.355, 1);
+  animation: carter-toast-in 180ms var(--ease-out);
+  transition:
+    opacity 150ms ease,
+    transform 150ms var(--ease-out);
+}
+/* 离场比进场快：系统在收拾，不该让人等。 */
+.carter-toast[data-leaving="true"] {
+  opacity: 0;
+  transform: translateX(12px);
 }
 
 /* 欠阻尼（会微微过冲再落定）：只给「事情办成了」这种小反馈用 —— 开关滑块、
@@ -424,8 +466,15 @@ body {
   .carter-modal-scrim,
   .carter-modal-body,
   .carter-toast,
-  .carter-pop {
+  .carter-pop,
+  .carter-enter {
     animation: none;
+  }
+  .carter-press:active:not(:disabled) {
+    transform: none;
+  }
+  .carter-sidebar {
+    transition: none;
   }
   .carter-collapse,
   .carter-collapse[data-open="true"] {

@@ -4,10 +4,12 @@
 // 把边框整个换成实色：环是「双环」，内圈压深描边、外圈淡淡铺开，靠近时是
 // 一圈咬住边缘的暗环。单纯把边框从 7% 透明度跳到实色太跳，会抢走内容本身。
 
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type {
   InputHTMLAttributes,
   LabelHTMLAttributes,
   ReactNode,
+  Ref,
   TextareaHTMLAttributes,
 } from "react";
 
@@ -16,7 +18,10 @@ const FIELD_BASE =
   "placeholder:text-dim outline-none transition-[border-color,box-shadow] " +
   "disabled:cursor-not-allowed disabled:opacity-50";
 
-type InputProps = InputHTMLAttributes<HTMLInputElement> & { mono?: boolean };
+type InputProps = InputHTMLAttributes<HTMLInputElement> & {
+  mono?: boolean;
+  ref?: Ref<HTMLInputElement>;
+};
 
 export function Input({ className = "", mono = false, ...rest }: InputProps) {
   return (
@@ -72,7 +77,13 @@ export function Switch({
   );
 }
 
-/** 分段选择（主题、transport 这类二三选一）。 */
+/**
+ * 分段选择（主题、transport 这类二三选一）。
+ *
+ * 选中的那块底是**一块滑过去的**，而不是每个按钮各自变色：切换时眼睛跟着它走，
+ * 才知道「从哪换到了哪」。位置靠量出来的 offsetLeft/width —— 各段文字长短不一，
+ * 等分算不准。首帧还没量到时不画，免得从最左边滑过来一下。
+ */
 export function Segmented<T extends string>({
   value,
   options,
@@ -82,17 +93,53 @@ export function Segmented<T extends string>({
   options: { id: T; label: string }[];
   onChange: (v: T) => void;
 }) {
+  const wrap = useRef<HTMLDivElement>(null);
+  const [box, setBox] = useState<{ x: number; w: number } | null>(null);
+  const first = useRef(true);
+
+  useLayoutEffect(() => {
+    const el = wrap.current?.querySelector<HTMLElement>(`[data-seg="${value}"]`);
+    if (el) setBox({ x: el.offsetLeft, w: el.offsetWidth });
+  }, [value, options.length]);
+  useEffect(() => {
+    if (box) first.current = false;
+  }, [box]);
+
   return (
-    <div className="inline-flex gap-1.5">
+    <div
+      ref={wrap}
+      role="radiogroup"
+      onKeyDown={(e) => {
+        const i = options.findIndex((o) => o.id === value);
+        const d = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
+        if (!d) return;
+        e.preventDefault();
+        const next = options[(i + d + options.length) % options.length];
+        onChange(next.id);
+        wrap.current?.querySelector<HTMLElement>(`[data-seg="${next.id}"]`)?.focus();
+      }}
+      className="relative inline-flex rounded-lg bg-ink/[0.045] p-0.5"
+    >
+      {box && (
+        <span
+          aria-hidden
+          style={{ transform: `translateX(${box.x - 2}px)`, width: box.w }}
+          className={`absolute inset-y-0.5 left-0.5 rounded-md bg-elevated shadow-soft ${
+            first.current ? "" : "transition-[transform,width] duration-200 ease-[var(--ease-out)]"
+          }`}
+        />
+      )}
       {options.map((o) => (
         <button
           key={o.id}
           type="button"
+          role="radio"
+          aria-checked={value === o.id}
+          tabIndex={value === o.id ? 0 : -1}
+          data-seg={o.id}
           onClick={() => onChange(o.id)}
-          className={`rounded-md px-3 py-1.5 text-sm transition-colors ${
-            value === o.id
-              ? "bg-ink/10 font-medium text-ink"
-              : "text-dim hover:bg-ink/5 hover:text-ink"
+          className={`carter-press relative rounded-md px-3 py-1 text-sm outline-none ${
+            value === o.id ? "font-medium text-ink" : "text-dim hover:text-ink"
           }`}
         >
           {o.label}

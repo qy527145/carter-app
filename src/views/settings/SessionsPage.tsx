@@ -18,22 +18,57 @@ import { openSession } from "../../lib/sessionOps";
 import { useStore } from "../../store";
 import { Button, IconButton } from "../../components/ui/Button";
 import { Input } from "../../components/ui/Input";
-import { Badge, Card } from "../../components/ui/Panel";
+import { Badge, Card, Spinner } from "../../components/ui/Panel";
 import { AsyncBody, PageIntro } from "./AsyncBody";
 
 /** 搜索命中列表。与「列表」是两种视图，所以单独一块。 */
+/** 片段里把命中词标出来（不区分大小写，标全部出现处）。 */
+function Marked({ text, query }: { text: string; query: string }) {
+  const q = query.trim();
+  if (!q) return <>{text}</>;
+  const parts = text.split(new RegExp(`(${q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "gi"));
+  return (
+    <>
+      {parts.map((p, i) =>
+        i % 2 === 1 ? (
+          <mark key={i} className="rounded-[3px] bg-tone-orange-soft px-px text-ink">
+            {p}
+          </mark>
+        ) : (
+          p
+        ),
+      )}
+    </>
+  );
+}
+
 function SearchResults({
   hits,
+  query,
   onOpen,
   onClear,
 }: {
   hits: SearchHit[];
+  query: string;
   onOpen: (id: string) => void;
   onClear: () => void;
 }) {
   const models = useModelCatalog();
   return (
-    <div className="space-y-2">
+    <div
+      className="space-y-2"
+      // 结果之间 ↑↓ 走动；到顶再 ↑ 回到搜索框。
+      onKeyDown={(e) => {
+        if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+        const all = Array.from(e.currentTarget.querySelectorAll<HTMLElement>("[data-hit]"));
+        const i = all.indexOf(document.activeElement as HTMLElement);
+        if (i < 0) return;
+        e.preventDefault();
+        const next = i + (e.key === "ArrowDown" ? 1 : -1);
+        if (next < 0) document.querySelector<HTMLInputElement>("[data-session-search]")?.focus();
+        else all[Math.min(next, all.length - 1)].focus();
+      }}
+    >
       <div className="flex items-center gap-2 text-xs text-dim">
         <span>命中 {hits.length} 条会话</span>
         <IconButton title="清空搜索" onClick={onClear}>
@@ -41,15 +76,19 @@ function SearchResults({
         </IconButton>
       </div>
       {hits.map((h) => (
-        <Card key={h.id} onClick={() => onOpen(h.id)} className="space-y-1">
+        <Card key={h.id} onClick={() => onOpen(h.id)} className="carter-press space-y-1" data-hit>
           <div className="flex items-center gap-2">
-            <span className="truncate text-sm text-ink">{h.title || "未命名会话"}</span>
+            <span className="truncate text-sm text-ink">
+              <Marked text={h.title || "未命名会话"} query={query} />
+            </span>
             <Badge tone="blue">{h.matches} 处命中</Badge>
             <span className="ml-auto shrink-0 text-[11px] text-dim" title={fullTime(h.created_at)}>
               {relTime(h.created_at)}
             </span>
           </div>
-          <div className="text-xs leading-relaxed text-dim">{h.snippet}</div>
+          <div className="text-xs leading-relaxed text-dim">
+            <Marked text={h.snippet} query={query} />
+          </div>
           <div className="mono flex items-center gap-1.5 truncate text-[10px] text-dim/70">
             <span className="truncate" title={modelTitle(h.model, models)}>
               {displayName(h.model, models)}
@@ -130,25 +169,48 @@ export function SessionsPage() {
           className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-dim"
         />
         <Input
+          autoFocus
+          data-session-search
           value={query}
           onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Escape" && query) {
+              e.preventDefault();
+              setQuery("");
+            } else if (e.key === "ArrowDown") {
+              const first = document.querySelector<HTMLElement>("[data-hit], [data-session-row]");
+              if (first) {
+                e.preventDefault();
+                first.focus();
+              }
+            }
+          }}
           placeholder="搜索全部会话内容（跨所有目录）…"
-          className="pl-8"
+          className="pl-8 pr-8"
         />
-        {query && (
-          <button
-            onClick={() => setQuery("")}
-            aria-label="清空"
-            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-dim transition-colors hover:text-ink"
-          >
-            <X size={13} />
-          </button>
+        {searching ? (
+          <span className="absolute right-2.5 top-1/2 -translate-y-1/2">
+            <Spinner size={13} />
+          </span>
+        ) : (
+          query && (
+            <button
+              onClick={() => setQuery("")}
+              aria-label="清空"
+              className="carter-press absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-dim hover:text-ink"
+            >
+              <X size={13} />
+            </button>
+          )
         )}
       </div>
 
       {hits !== null ? (
         searching && hits.length === 0 ? (
-          <div className="py-8 text-center text-sm text-dim">搜索中…</div>
+          <div className="flex items-center justify-center gap-2 py-8 text-sm text-dim">
+            <Spinner />
+            搜索中…
+          </div>
         ) : hits.length === 0 ? (
           <div className="py-8 text-center text-sm text-dim">
             没有找到包含「{query.trim()}」的会话。
@@ -156,6 +218,7 @@ export function SessionsPage() {
         ) : (
           <SearchResults
             hits={hits}
+            query={query}
             onOpen={(id) => {
               setQuery("");
               openSession(id);
@@ -178,10 +241,10 @@ export function SessionsPage() {
                 </Button>
               </div>
 
-              <div className="space-y-4">
+              <div data-session-scope className="space-y-5">
                 {groups.map((g) => (
                   <div key={g.cwd}>
-                    <div className="mb-1 flex items-center gap-1.5 px-3 text-[11px] text-dim">
+                    <div className="sticky top-0 z-[1] mb-1 flex items-center gap-1.5 bg-base px-3 py-1 text-[11px] text-dim">
                       <Folder size={11} className="shrink-0" />
                       <span className="mono truncate" title={g.cwd}>
                         {shortenPath(g.cwd)}

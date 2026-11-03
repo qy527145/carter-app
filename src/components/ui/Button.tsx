@@ -42,7 +42,7 @@ export function Button({
 }: Props) {
   return (
     <button
-      className={`inline-flex shrink-0 items-center justify-center font-medium transition-colors outline-none disabled:cursor-not-allowed disabled:opacity-40 ${SIZES[size]} ${VARIANTS[variant]} ${className}`}
+      className={`carter-press inline-flex shrink-0 items-center justify-center font-medium outline-none disabled:cursor-not-allowed disabled:opacity-40 ${SIZES[size]} ${VARIANTS[variant]} ${className}`}
       {...rest}
     />
   );
@@ -55,7 +55,7 @@ export function IconButton({
 }: ButtonHTMLAttributes<HTMLButtonElement>) {
   return (
     <button
-      className={`inline-flex shrink-0 items-center justify-center rounded-md p-1.5 text-dim transition-colors outline-none hover:bg-ink/5 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40 ${className}`}
+      className={`carter-press inline-flex shrink-0 items-center justify-center rounded-md p-1.5 text-dim outline-none hover:bg-ink/5 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40 ${className}`}
       {...rest}
     />
   );

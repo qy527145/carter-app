@@ -19,16 +19,19 @@ import {
   ChevronRight,
   CircleCheck,
   Copy,
+  ArrowDown,
   Eraser,
   FileText,
   GitBranch,
   LoaderCircle,
   Megaphone,
   MessagesSquare,
+  MoreHorizontal,
   Pencil,
   Radar,
   RotateCcw,
   ScanSearch,
+  Share,
   Target,
   Terminal,
   TriangleAlert,
@@ -45,8 +48,10 @@ import { displayName, modelTitle, useModelCatalog } from "../lib/modelLabel";
 import {
   ASSISTANT_CHAT_ID,
   clearChanges,
+  export_,
   fork,
   regenerate,
+  rename,
   retryReply,
 } from "../lib/sessionOps";
 import { TOAST_MS, toastError } from "../lib/toast";
@@ -741,7 +746,7 @@ function ActionChip({
     <button
       onClick={onClick}
       title={title ?? label}
-      className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-dim transition-colors hover:bg-ink/5 hover:text-ink"
+      className="carter-press inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-dim hover:bg-ink/5 hover:text-ink"
     >
       {icon}
       {label}
@@ -1381,20 +1386,40 @@ function MessageList() {
   const scrollRef = useRef<HTMLDivElement>(null);
   // 用户往上翻时不要把他拽回底部 —— 只在「本来就在底部」时跟随。
   const stick = useRef(true);
+  // 离底部够远时浮出「回到最新」—— 翻回去看了一眼，不该靠拖滚动条找回来。
+  const [away, setAway] = useState(false);
 
   useEffect(() => {
     const el = scrollRef.current;
     if (el && stick.current) el.scrollTop = el.scrollHeight;
   }, [turns, streaming]);
 
+  // 换会话：直接落到底部，并复位「跟随」—— 上一条会话里翻到中间的状态不该带过来。
+  useEffect(() => {
+    stick.current = true;
+    setAway(false);
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [sessionId]);
+
   const onScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
-    stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+    const gap = el.scrollHeight - el.scrollTop - el.clientHeight;
+    stick.current = gap < 48;
+    setAway(gap > 400);
+  };
+
+  const toBottom = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    stick.current = true;
+    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
   };
 
   return (
-    <div ref={scrollRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto px-4 py-6">
+    <div className="relative flex min-h-0 flex-1 flex-col">
+    <div ref={scrollRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto px-4 py-6 [overflow-anchor:none]">
       <div className="mx-auto max-w-3xl">
         {sessionId === ASSISTANT_CHAT_ID && (
           <PastEpisodes
@@ -1430,6 +1455,22 @@ function MessageList() {
           />
         )}
       </div>
+    </div>
+      {/* 「回到最新」：贴着输入框上沿居中浮着。生成中且不在底部时带一个点 ——
+          告诉人下面还在出字。不用时淡出并让出点击。 */}
+      <button
+        onClick={toBottom}
+        tabIndex={away ? 0 : -1}
+        aria-hidden={!away}
+        title="回到最新"
+        className={`carter-press absolute bottom-3 left-1/2 z-10 flex -translate-x-1/2 items-center gap-1.5 rounded-full bg-elevated px-3 py-1.5 text-xs text-dim shadow-lift ring-1 ring-edge transition-[opacity,translate] duration-200 ease-[var(--ease-out)] hover:text-ink ${
+          away ? "translate-y-0 opacity-100" : "pointer-events-none translate-y-2 opacity-0"
+        }`}
+      >
+        {streaming && <span className="size-1.5 animate-pulse rounded-full bg-tone-blue" />}
+        <ArrowDown size={12} />
+        回到最新
+      </button>
     </div>
   );
 }
@@ -1546,7 +1587,7 @@ function AssistantHeader() {
       ]
     : [];
   return (
-    <div className="flex h-10 shrink-0 items-center gap-2 border-b border-edge px-4">
+    <div className="flex h-11 shrink-0 items-center gap-2 border-b border-edge px-4">
       <Radar size={14} className="shrink-0 text-tone-blue" />
       <span className="shrink-0 text-sm font-medium text-ink">卡特助理</span>
       <span className="truncate text-xs text-dim">{facts.join(" · ")}</span>
@@ -1739,26 +1780,122 @@ function NoticeBanner() {
   );
 }
 
-/** 顶部条：当前会话标题 + 呈现密度 + 打开报文面板的入口。 */
+/**
+ * 顶部条：当前会话标题 + 呈现密度 + 打开报文面板的入口。
+ *
+ * 标题**点一下就能改**：会话名是对话管理里最常改的东西，不该要人回到侧栏、
+ * 找到那一行再右键。还没落盘的新对话（列表里没有这一条）不给改 —— 后端没有文件可写。
+ */
 function ChatHeader() {
   const sessionId = useStore((s) => s.sessionId);
   const sessions = useStore((s) => s.sessions);
   const openInspector = useStore((s) => s.openInspector);
-  const title = sessions.find((s) => s.id === sessionId)?.title;
+  const menu = useContextMenu();
+  const row = sessions.find((s) => s.id === sessionId);
+  const title = row?.title;
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const settled = useRef(false);
 
   if (sessionId === ASSISTANT_CHAT_ID) return <AssistantHeader />;
 
+  const startEdit = () => {
+    if (!row || !sessionId) return;
+    settled.current = false;
+    setDraft(title || "");
+    setEditing(true);
+  };
+  const finish = (commit: boolean) => {
+    if (settled.current) return;
+    settled.current = true;
+    setEditing(false);
+    const t = draft.trim();
+    if (commit && sessionId && t && t !== title) void rename(sessionId, t);
+  };
+
+  const sessionMenu = (): MenuEntry[] =>
+    sessionId && row
+      ? [
+          { label: "重命名", icon: <Pencil size={12} />, onSelect: startEdit },
+          {
+            label: "复制一份",
+            icon: <GitBranch size={12} />,
+            onSelect: () => void fork(sessionId),
+          },
+          "separator",
+          {
+            label: "导出 Markdown",
+            icon: <Share size={12} />,
+            onSelect: () => void export_(sessionId, "markdown"),
+          },
+          {
+            label: "导出 JSON",
+            icon: <FileText size={12} />,
+            onSelect: () => void export_(sessionId, "json"),
+          },
+          "separator",
+          {
+            label: "查看 HTTP 报文",
+            icon: <ScanSearch size={12} />,
+            onSelect: () => openInspector(null),
+          },
+        ]
+      : [];
+
   return (
-    <div className="flex h-10 shrink-0 items-center gap-2 border-b border-edge px-4">
-      <span className="truncate text-sm text-dim">{title || "新对话"}</span>
-      <div className="ml-auto flex items-center gap-2">
-        <ModePill />
+    <div className="flex h-11 shrink-0 items-center gap-2 border-b border-edge px-4">
+      {editing ? (
+        <input
+          autoFocus
+          value={draft}
+          aria-label="会话名称"
+          onFocus={(e) => e.currentTarget.select()}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={() => finish(true)}
+          onKeyDown={(e) => {
+            if (e.nativeEvent.isComposing) return;
+            if (e.key === "Enter") finish(true);
+            if (e.key === "Escape") finish(false);
+          }}
+          className="carter-field -ml-1.5 w-80 max-w-[60%] rounded-md border border-edge-strong bg-elevated px-1.5 py-0.5 text-sm font-medium text-ink outline-none"
+        />
+      ) : (
+        <button
+          onClick={startEdit}
+          disabled={!row}
+          title={row ? "点击重命名" : "发出第一句话后可以重命名"}
+          className="group/title -ml-1.5 flex min-w-0 items-center gap-1.5 rounded-md px-1.5 py-0.5 text-left outline-none enabled:hover:bg-ink/[0.045]"
+        >
+          <span className={`truncate text-sm ${title ? "font-medium text-ink" : "text-dim"}`}>
+            {title || "新对话"}
+          </span>
+          {row && (
+            <Pencil
+              size={11}
+              className="shrink-0 text-dim opacity-0 transition-opacity group-hover/title:opacity-100"
+            />
+          )}
+        </button>
+      )}
+      <div className="ml-auto flex items-center gap-1">
+        <ModePill className="mr-1" />
         <IconButton
           disabled={!sessionId}
           onClick={() => openInspector(null)}
           title="查看本次会话抓到的 HTTP 报文"
         >
           <ScanSearch size={15} />
+        </IconButton>
+        <IconButton
+          disabled={!row}
+          title="会话操作"
+          aria-label="会话操作"
+          onClick={(e) => {
+            const r = e.currentTarget.getBoundingClientRect();
+            menu.open({ x: r.right, y: r.bottom + 4, align: "end" }, sessionMenu());
+          }}
+        >
+          <MoreHorizontal size={15} />
         </IconButton>
       </div>
     </div>

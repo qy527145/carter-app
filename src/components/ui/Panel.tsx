@@ -23,29 +23,97 @@ export function Modal({
   footer?: ReactNode;
   width?: number;
 }) {
-  // Escape 关闭。挂在 document 上而不是面板上：用户可能正停在某个输入框里。
+  const bodyRef = useRef<HTMLDivElement>(null);
+  // 按下时是否落在背板上。只有「按下与松开都在背板」才算点背板 ——
+  // 在输入框里拖选文字、拖到面板外松手，不该把整个模态关掉。
+  const downOnScrim = useRef(false);
+  // onClose 往往是内联箭头函数，每次渲染都换引用；用 ref 接住，
+  // 免得 effect 每次渲染都重挂一遍监听、把焦点又抢回第一个控件。
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+
   useEffect(() => {
+    // 打开时把焦点放进面板：优先 autoFocus 的那个，其次第一个输入控件，
+    // 最后是面板本身。关闭时还给打开前的那个元素。
+    const prev = document.activeElement as HTMLElement | null;
+    const body = bodyRef.current;
+    if (body && !body.contains(document.activeElement)) {
+      const first =
+        body.querySelector<HTMLElement>("[autofocus], [data-autofocus]") ??
+        body.querySelector<HTMLElement>("input:not([disabled]), textarea:not([disabled]), select");
+      (first ?? body).focus();
+    }
+
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      // Escape 关闭。挂在 document 上而不是面板上：用户可能正停在某个输入框里。
+      // 只让最上面那一层响应 —— 模态里再弹确认框时，Esc 只关确认框。
+      const layers = document.querySelectorAll("[data-modal-layer]");
+      if (layers[layers.length - 1] !== body?.parentElement) return;
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        closeRef.current();
+        return;
+      }
+      // Tab 困在面板里：模态是「必须先处理这里」，焦点跑回底下的页面就等于穿帮。
+      if (e.key === "Tab" && body) {
+        const items = Array.from(
+          body.querySelectorAll<HTMLElement>(
+            'button:not([disabled]), [href], input:not([disabled]), select, textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+          ),
+        ).filter((el) => el.offsetParent !== null);
+        if (items.length === 0) return;
+        const first = items[0];
+        const last = items[items.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
     };
     document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [onClose]);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      if (prev && prev.isConnected) prev.focus();
+    };
+  }, []);
 
   return (
     <div
-      className="carter-modal-scrim fixed inset-0 z-40 flex items-center justify-center bg-black/50"
-      onClick={onClose}
+      data-modal-layer
+      className="carter-modal-scrim fixed inset-0 z-40 flex items-center justify-center bg-black/40 backdrop-blur-[2px]"
+      onMouseDown={(e) => {
+        downOnScrim.current = e.target === e.currentTarget;
+      }}
+      onClick={(e) => {
+        if (downOnScrim.current && e.target === e.currentTarget) onClose();
+        downOnScrim.current = false;
+      }}
     >
       <div
-        // 面板内的点击不该冒泡到背板上去（否则在输入框里选中文字、拖到边缘松手就关了）。
-        onClick={(e) => e.stopPropagation()}
+        ref={bodyRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        tabIndex={-1}
         style={{ width }}
         // 比 base 亮一档：模态是「浮在最上面」的那一层，去掉边框之后
         // 全靠这个明度差和背板拉开。里面的 Card 比它略暗一档，仍然分得清。
-        className="carter-modal-body flex max-h-[85vh] max-w-[92vw] flex-col rounded-xl bg-elevated p-5 shadow-2xl"
+        className="carter-modal-body flex max-h-[85vh] max-w-[92vw] flex-col rounded-xl bg-elevated p-5 shadow-2xl ring-1 ring-edge outline-none"
       >
-        <h2 className="mb-4 text-base font-semibold">{title}</h2>
+        <div className="mb-4 flex items-start gap-3">
+          <h2 className="min-w-0 flex-1 text-base font-semibold">{title}</h2>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="关闭"
+            className="carter-press -mr-1.5 -mt-1 shrink-0 rounded-md p-1 text-dim hover:bg-ink/5 hover:text-ink"
+          >
+            <X size={15} />
+          </button>
+        </div>
         <div className="min-h-0 flex-1 overflow-y-auto pr-1">{children}</div>
         {footer && <div className="mt-4 flex justify-end gap-2">{footer}</div>}
       </div>
@@ -74,17 +142,20 @@ export function ConfirmDialog({
   return (
     <Modal title={title} onClose={onCancel} width={440}>
       <div className="text-sm leading-relaxed text-dim">{message}</div>
-      <div className="mt-4 flex justify-end gap-2">
+      <div className="mt-5 flex items-center justify-end gap-2">
         <button
           onClick={onCancel}
-          className="rounded-md bg-ink/5 px-3 py-1.5 text-sm text-dim transition-colors hover:bg-ink/10 hover:text-ink"
+          // 破坏性动作默认停在「取消」上：手快按回车不该把东西删了。
+          data-autofocus={danger ? true : undefined}
+          className="carter-press rounded-md bg-ink/5 px-3 py-1.5 text-sm text-dim outline-none hover:bg-ink/10 hover:text-ink"
         >
           取消
         </button>
         <button
           onClick={onConfirm}
           disabled={busy}
-          className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors disabled:opacity-40 ${
+          data-autofocus={danger ? undefined : true}
+          className={`carter-press inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium outline-none disabled:opacity-40 ${
             danger
               ? "border border-[var(--error-border)] bg-[var(--error-bg)] text-[var(--danger)] hover:opacity-90"
               : "bg-accent text-[var(--accent-contrast)] hover:opacity-90"
@@ -140,26 +211,35 @@ export function Card({
   className = "",
   dashed = false,
   onClick,
+  ...rest
 }: {
   children: ReactNode;
   className?: string;
   dashed?: boolean;
   onClick?: () => void;
+  /** 透传 data-* 属性（键盘导航之类按它找元素）。 */
+  [data: `data-${string}`]: unknown;
 }) {
   const cls = `rounded-xl ${
     dashed ? "border border-dashed border-edge" : "bg-card"
   } px-4 py-3 text-left ${
-    onClick ? "w-full cursor-pointer transition-colors hover:bg-ink/[0.03]" : ""
+    onClick
+      ? "w-full cursor-pointer transition-colors outline-none hover:bg-ink/[0.03] focus-visible:ring-2 focus-visible:ring-edge-strong"
+      : ""
   } ${className}`;
 
   if (onClick) {
     return (
-      <button type="button" onClick={onClick} className={cls}>
+      <button type="button" onClick={onClick} className={cls} {...rest}>
         {children}
       </button>
     );
   }
-  return <div className={cls}>{children}</div>;
+  return (
+    <div className={cls} {...rest}>
+      {children}
+    </div>
+  );
 }
 
 // ---------------------------------------------------------------------------
