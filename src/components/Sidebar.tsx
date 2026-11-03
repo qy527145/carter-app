@@ -105,6 +105,8 @@ function ProjectGroups({
   }, [currentCwd]);
 
   const setView = useStore((s) => s.setView);
+  const setTeamCwd = useStore((s) => s.setTeamCwd);
+  const home = useStore((s) => s.appInfo?.default_cwd ?? "");
   // 待确认删除的那一组。
   const [deleting, setDeleting] = useState<{ cwd: string; count: number } | null>(null);
   const groups = groupByProject(sessions);
@@ -159,6 +161,21 @@ function ProjectGroups({
               >
                 <Plus size={12} />
               </IconButton>
+              {/* 直达这个项目的目标与任务 —— 不用先开一条它的对话再切页。
+                  家目录不是项目（助理住在那），不给这个入口。 */}
+              {g.cwd !== home && !gone && (
+                <IconButton
+                  title={`查看 ${baseName(g.cwd)} 的目标与任务`}
+                  aria-label="查看此项目的目标与任务"
+                  onClick={() => {
+                    setTeamCwd(g.cwd);
+                    setView("team");
+                  }}
+                  className="hidden p-1 group-hover/project:inline-flex"
+                >
+                  <Target size={12} />
+                </IconButton>
+              )}
               {/* 删除是低频又危险的动作，悬停才露出来，免得与「+」挨着被误点。 */}
               <IconButton
                 title={`删除 ${g.cwd} 下的全部 ${g.sessions.length} 条会话`}
@@ -252,6 +269,8 @@ function AssistantEntry() {
 function TeamEntry() {
   const setView = useStore((s) => s.setView);
   const view = useStore((s) => s.view);
+  // 显示正在看哪个项目：入口本身就回答「点进去会看到谁的团队」。
+  const teamCwd = useStore((s) => s.teamCwd);
   return (
     <button
       onClick={() => setView("team")}
@@ -261,6 +280,11 @@ function TeamEntry() {
     >
       <Target size={14} className={view === "team" ? "text-tone-violet" : ""} />
       目标与任务
+      {teamCwd && (
+        <span className="ml-auto min-w-0 truncate text-[10px] font-normal text-dim" title={teamCwd}>
+          {baseName(teamCwd)}
+        </span>
+      )}
     </button>
   );
 }

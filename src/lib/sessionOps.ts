@@ -293,6 +293,28 @@ export async function startInDirectory(cwd: string): Promise<void> {
   }
 }
 
+/**
+ * 去某个项目里对话：接上那个项目**最近的一条**会话，没有就新开一条。
+ *
+ * 团队页「回到对话」「交给卡特」都走这里 —— 从团队页出去，本意是「在这个项目里
+ * 接着干」，而不是回到刚才那条（可能是助理、可能是别的项目的）对话。
+ * `draft` 放进输入框而不是直接发出：从看板上点出来的话，用户多半还想补两句。
+ */
+export async function openProjectChat(cwd: string, draft?: string): Promise<void> {
+  const store = useStore.getState();
+  store.setView("chat");
+  if (store.sessionId !== ASSISTANT_CHAT_ID && store.cwd === cwd && store.sessionId) {
+    if (draft !== undefined) store.setComposerDraft(draft);
+    return;
+  }
+  const latest = store.sessions
+    .filter((s) => s.cwd === cwd && s.id !== ASSISTANT_CHAT_ID)
+    .sort((a, b) => b.updated_at - a.updated_at)[0];
+  if (latest) await replaceSession({ resume: false, resumeId: latest.id });
+  else await startInDirectory(cwd);
+  if (draft !== undefined) useStore.getState().setComposerDraft(draft);
+}
+
 // ---------------------------------------------------------------------------
 // 长任务目标（/goal）
 // ---------------------------------------------------------------------------

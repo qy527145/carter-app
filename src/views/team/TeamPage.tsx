@@ -16,19 +16,25 @@
 // 布局引擎更可控，也不会为了「力导向好看」把顺序抖动掉 —— 团队图每次打开都长得
 // 不一样，人就记不住东西在哪。
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   ArrowRight,
+  Check,
+  ChevronDown,
   CircleAlert,
+  Folder,
+  FolderOpen,
   GitBranch,
   GitMerge,
   Kanban,
   LayoutGrid,
-  Link2,
   ListChecks,
   LoaderCircle,
+  MessageSquare,
   Plus,
   RefreshCw,
+  Send,
   Sparkles,
   Target,
   Users,
@@ -37,13 +43,16 @@ import {
 import {
   teamInitialize,
   teamOverview,
-  teamSetRemote,
+  teamStatus,
   teamSync,
   type TeamBoard,
   type TeamGoal,
   type TeamOverview,
+  type TeamStatus,
   type TeamTask,
 } from "../../lib/api";
+import { baseName } from "../../lib/format";
+import { ASSISTANT_CHAT_ID, openProjectChat } from "../../lib/sessionOps";
 import { toastError, toastOk } from "../../lib/toast";
 import { useStore } from "../../store";
 import {
@@ -57,29 +66,82 @@ import {
 
 type Tab = "graph" | "board" | "log";
 
+/**
+ * 能挑的项目：有过对话的目录（按最近用过排）+ 当前正在看的那个。
+ *
+ * 家目录不算项目 —— 助理对话住在那里，团队目录建在 `~` 下等于把整台机器当成一个
+ * 仓库，几乎一定不是本意。真要用，可以走「选择其他目录…」显式挑。
+ */
+function useProjects(): string[] {
+  const sessions = useStore((s) => s.sessions);
+  const home = useStore((s) => s.appInfo?.default_cwd ?? "");
+  const teamCwd = useStore((s) => s.teamCwd);
+  return useMemo(() => {
+    const latest = new Map<string, number>();
+    for (const s of sessions) {
+      if (s.id === ASSISTANT_CHAT_ID || !s.cwd || s.cwd === home || !s.cwd_exists) continue;
+      latest.set(s.cwd, Math.max(latest.get(s.cwd) ?? 0, s.updated_at));
+    }
+    const out = [...latest].sort((a, b) => b[1] - a[1]).map(([cwd]) => cwd);
+    if (teamCwd && !latest.has(teamCwd)) out.unshift(teamCwd);
+    return out;
+  }, [sessions, home, teamCwd]);
+}
+
+/** 弹系统目录选择框。取消返回 `null`。 */
+async function pickDirectory(): Promise<string | null> {
+  try {
+    const dir = await openDialog({ directory: true, multiple: false, title: "选择项目目录" });
+    return typeof dir === "string" && dir ? dir : null;
+  } catch (e) {
+    toastError(e);
+    return null;
+  }
+}
+
 export function TeamPage() {
-  const cwd = useStore((s) => s.cwd);
-  const setView = useStore((s) => s.setView);
+  const cwd = useStore((s) => s.teamCwd);
+  const setTeamCwd = useStore((s) => s.setTeamCwd);
   const [data, setData] = useState<TeamOverview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [tab, setTab] = useState<Tab>("graph");
-  /** 正在编辑远端地址。`null` = 没打开。 */
-  const [remoteDraft, setRemoteDraft] = useState<string | null>(null);
   const [picked, setPicked] = useState<string | null>(null);
 
+  // 只认最后一次请求的结果：快速换项目时，慢的那个回来不能把新项目的数据盖掉。
+  const seq = useRef(0);
   const load = useCallback(async () => {
     if (!cwd) return;
+    const mine = ++seq.current;
+    setLoading(true);
     try {
-      setData(await teamOverview(cwd));
+      const next = await teamOverview(cwd);
+      if (mine !== seq.current) return;
+      setData(next);
       setError(null);
     } catch (e) {
+      if (mine !== seq.current) return;
+      setData(null);
       setError(String(e));
+    } finally {
+      if (mine === seq.current) setLoading(false);
     }
   }, [cwd]);
 
+  // 换项目：先清掉旧的，别让上一个项目的目标在新标题下闪一帧。
   useEffect(() => {
+    setData(null);
+    setError(null);
+    setPicked(null);
     void load();
+  }, [load]);
+
+  // 团队数据在磁盘上，别处（对话里的模型、git pull）随时会改。回到窗口时对一次。
+  useEffect(() => {
+    const onFocus = () => void load();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
   }, [load]);
 
   // 「初始化」只在真的没有团队目录时出现 —— 那时后端会拒绝 overview。
@@ -120,146 +182,88 @@ export function TeamPage() {
     }
   }
 
-  async function doSetRemote() {
-    if (!cwd || remoteDraft === null) return;
-    setBusy(true);
-    try {
-      toastOk(await teamSetRemote(cwd, remoteDraft));
-      setRemoteDraft(null);
-      await load();
-    } catch (e) {
-      toastError(e);
-    } finally {
-      setBusy(false);
-    }
-  }
-
   const activeGoal = useMemo(() => {
     if (!data) return null;
     return data.goals.find((g) => g.id === picked) ?? data.goals[0] ?? null;
   }, [data, picked]);
 
+  /** 去这个项目的对话里，把一段话摆进输入框。 */
+  const askCarter = useCallback(
+    (draft?: string) => {
+      if (cwd) void openProjectChat(cwd, draft);
+    },
+    [cwd],
+  );
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <header className="flex shrink-0 items-center gap-3 border-b border-edge px-5 py-2.5">
-        <div className="flex size-6 items-center justify-center rounded-md bg-ink text-[var(--accent-contrast)]">
-          <Target size={13} />
-        </div>
-        <div className="min-w-0">
-          <div className="truncate text-sm font-semibold tracking-tight">
-            {data?.name || "团队"}
-          </div>
-          <div className="mono truncate text-[10px] text-dim">
-            {data?.root || cwd || "—"}
-          </div>
-        </div>
+        <ProjectSwitcher current={cwd} teamName={data?.name} onPick={setTeamCwd} />
 
-        <div className="ml-2 flex items-center gap-1 rounded-lg bg-card p-0.5">
-          <TabButton active={tab === "graph"} onClick={() => setTab("graph")} icon={<GitBranch size={12} />}>
-            任务图
-          </TabButton>
-          <TabButton active={tab === "board"} onClick={() => setTab("board")} icon={<Kanban size={12} />}>
-            看板
-          </TabButton>
-          <TabButton active={tab === "log"} onClick={() => setTab("log")} icon={<ListChecks size={12} />}>
-            动态
-          </TabButton>
-        </div>
+        {data && (
+          <div className="flex items-center gap-1 rounded-lg bg-card p-0.5">
+            <TabButton active={tab === "graph"} onClick={() => setTab("graph")} icon={<GitBranch size={12} />}>
+              任务图
+            </TabButton>
+            <TabButton active={tab === "board"} onClick={() => setTab("board")} icon={<Kanban size={12} />}>
+              看板
+              {data.boards.length > 0 && <Count n={data.boards.length} />}
+            </TabButton>
+            <TabButton active={tab === "log"} onClick={() => setTab("log")} icon={<ListChecks size={12} />}>
+              动态
+            </TabButton>
+          </div>
+        )}
 
         <div className="ml-auto flex items-center gap-1.5">
-          {data?.remote ? (
-            <button
-              onClick={() => setRemoteDraft(data.remote ?? "")}
-              title={`${data.remote}\n点击修改`}
-              className="mono hidden max-w-[16rem] truncate text-[10px] text-dim transition-colors hover:text-ink xl:block"
-            >
-              {data.remote}
-            </button>
-          ) : (
-            <button
-              onClick={() => setRemoteDraft("")}
-              title="团队数据目前只在本地。填一个仓库地址，别人就能同步到了。"
-              className="flex items-center gap-1 rounded-full bg-tone-orange-soft px-2 py-1 text-[10px] text-tone-orange transition-opacity hover:opacity-80"
-            >
-              <Link2 size={11} />
-              配远端
-            </button>
-          )}
           {data?.identity && (
             <span
-              title={data.identity}
-              className="flex items-center gap-1 rounded-full bg-card px-2 py-1 text-[10px] text-dim"
+              title={`以 ${data.identity} 的身份认领与提交`}
+              className="hidden items-center gap-1 rounded-full bg-card px-2 py-1 text-[10px] text-dim lg:flex"
             >
               <Avatar identity={data.identity} size={14} />
               {displayName(data.identity)}
             </span>
           )}
-          <IconAction onClick={() => void load()} title="重新读取">
-            <RefreshCw size={13} className={busy ? "animate-spin" : ""} />
-          </IconAction>
-          <IconAction onClick={() => void doSync()} title="同步远端（只做快进）">
-            <GitMerge size={13} />
-          </IconAction>
-          <button
-            onClick={() => setView("chat")}
-            className="rounded-md px-2 py-1 text-xs text-dim transition-colors hover:bg-ink/5 hover:text-ink"
-          >
-            回到对话
-          </button>
+          {data && (
+            <>
+              <IconAction onClick={() => void load()} title="重新读取">
+                <RefreshCw size={13} className={loading ? "animate-spin" : ""} />
+              </IconAction>
+              <IconAction
+                onClick={() => void doSync()}
+                title={data.remote ? `同步远端 ${data.remote}（只做快进）` : "同步远端（还没配远端）"}
+              >
+                <GitMerge size={13} className={busy ? "animate-pulse" : ""} />
+              </IconAction>
+            </>
+          )}
+          {cwd && (
+            <button
+              onClick={() => askCarter()}
+              title={`打开 ${baseName(cwd)} 最近的一条对话`}
+              className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-dim transition-colors hover:bg-ink/5 hover:text-ink"
+            >
+              <MessageSquare size={12} />
+              去对话
+            </button>
+          )}
         </div>
       </header>
 
-      {needsInit ? (
+      {!cwd ? (
+        <ChooseProject onPick={setTeamCwd} />
+      ) : needsInit ? (
         <InitPanel onInit={doInit} busy={busy} cwd={cwd} />
       ) : error ? (
         <div className="p-6 text-sm text-danger">{error}</div>
       ) : !data ? (
         <div className="flex flex-1 items-center justify-center text-sm text-dim">
           <LoaderCircle size={14} className="mr-2 animate-spin" />
-          正在读取团队目录…
+          正在读取 {baseName(cwd)} 的团队目录…
         </div>
       ) : (
         <div className="min-h-0 flex-1 overflow-y-auto">
-          {remoteDraft !== null && (
-            <div className="mx-5 mt-4 rounded-xl bg-card p-3 shadow-soft">
-              <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium">
-                <Link2 size={12} />
-                团队同步的远端仓库
-              </div>
-              <p className="mb-2 text-[11px] leading-relaxed text-dim">
-                所有人指向同一个 git 仓库，目标与任务才能互相同步。
-                远端不必叫 <span className="mono">origin</span>，已有的任何一个都会被用上；
-                配好之后会立刻把当前分支推上去。
-              </p>
-              <div className="flex gap-1.5">
-                <input
-                  autoFocus
-                  value={remoteDraft}
-                  onChange={(e) => setRemoteDraft(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") void doSetRemote();
-                    if (e.key === "Escape") setRemoteDraft(null);
-                  }}
-                  placeholder="git@github.com:acme/team.git"
-                  className="mono min-w-0 flex-1 rounded-md bg-bubble px-2 py-1.5 text-[11px] outline-none"
-                />
-                <button
-                  onClick={() => void doSetRemote()}
-                  disabled={busy || remoteDraft.trim() === ""}
-                  className="shrink-0 rounded-md bg-ink px-3 py-1.5 text-[11px] font-medium text-[var(--accent-contrast)] transition-opacity hover:opacity-90 disabled:opacity-40"
-                >
-                  保存并推送
-                </button>
-                <button
-                  onClick={() => setRemoteDraft(null)}
-                  className="shrink-0 rounded-md px-2 py-1.5 text-[11px] text-dim transition-colors hover:bg-ink/5 hover:text-ink"
-                >
-                  取消
-                </button>
-              </div>
-            </div>
-          )}
-
           {data.warnings.length > 0 && (
             <div className="mx-5 mt-4 rounded-lg bg-warn-bg px-3 py-2 text-[11px] text-ink">
               <div className="mb-0.5 flex items-center gap-1.5 font-medium">
@@ -275,12 +279,194 @@ export function TeamPage() {
           )}
 
           {tab === "graph" && (
-            <GraphTab data={data} goal={activeGoal} onPick={setPicked} />
+            <GraphTab data={data} goal={activeGoal} onPick={setPicked} onAsk={askCarter} />
           )}
-          {tab === "board" && <BoardTab boards={data.boards} />}
+          {tab === "board" && <BoardTab boards={data.boards} onAsk={askCarter} />}
           {tab === "log" && <LogTab data={data} />}
         </div>
       )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 项目切换
+// ---------------------------------------------------------------------------
+
+/**
+ * 标题位置就是项目切换器 —— 「我在看哪个项目的团队」是这一页最重要的上下文，
+ * 它应当既是标题、又能直接换，而不是要先绕回侧栏开一条那个项目的对话。
+ */
+function ProjectSwitcher({
+  current,
+  teamName,
+  onPick,
+}: {
+  current: string;
+  teamName?: string;
+  onPick: (cwd: string) => void;
+}) {
+  const projects = useProjects();
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: PointerEvent) => {
+      if (!wrapRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("pointerdown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  const title = teamName || (current ? baseName(current) : "选择项目");
+
+  return (
+    <div ref={wrapRef} className="relative min-w-0">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        title={current || "选择要查看的项目"}
+        className="flex min-w-0 items-center gap-2 rounded-lg px-1.5 py-1 text-left transition-colors hover:bg-ink/5"
+      >
+        <div className="flex size-6 shrink-0 items-center justify-center rounded-md bg-ink text-[var(--accent-contrast)]">
+          <Target size={13} />
+        </div>
+        <div className="min-w-0">
+          <div className="flex items-center gap-1 text-sm font-semibold tracking-tight">
+            <span className="truncate">{title}</span>
+            <ChevronDown size={13} className="shrink-0 text-dim" />
+          </div>
+          {current && (
+            <div className="mono max-w-[18rem] truncate text-[10px] text-dim">{current}</div>
+          )}
+        </div>
+      </button>
+
+      {open && (
+        <div className="absolute left-0 top-[calc(100%+4px)] z-50 w-[20rem] rounded-xl bg-card py-1 shadow-lift">
+          <div className="px-3 pb-1 pt-1.5 text-[10px] font-medium uppercase tracking-wider text-dim">
+            项目
+          </div>
+          <ProjectList
+            projects={projects}
+            current={current}
+            onPick={(cwd) => {
+              setOpen(false);
+              onPick(cwd);
+            }}
+            dense
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * 项目列表，每行带团队目录的状态（几个目标 / 没初始化）。
+ *
+ * 状态是逐个异步查的：查的是磁盘上的 `.carter/`，项目多时一次性等全部回来会让
+ * 菜单晚一拍才出现。先出名字，状态随后补上。
+ */
+function ProjectList({
+  projects,
+  current,
+  onPick,
+  dense = false,
+}: {
+  projects: string[];
+  current: string;
+  onPick: (cwd: string) => void;
+  dense?: boolean;
+}) {
+  const [status, setStatus] = useState<Record<string, TeamStatus | null>>({});
+  useEffect(() => {
+    let alive = true;
+    for (const p of projects) {
+      teamStatus(p)
+        .then((st) => alive && setStatus((m) => ({ ...m, [p]: st })))
+        .catch(() => alive && setStatus((m) => ({ ...m, [p]: null })));
+    }
+    return () => {
+      alive = false;
+    };
+  }, [projects]);
+
+  async function other() {
+    const dir = await pickDirectory();
+    if (dir) onPick(dir);
+  }
+
+  return (
+    <div className={dense ? "max-h-80 overflow-y-auto" : ""}>
+      {projects.length === 0 && (
+        <div className="px-3 py-2 text-xs text-dim">还没有在任何项目里对过话。</div>
+      )}
+      {projects.map((p) => {
+        const st = status[p];
+        const active = p === current;
+        return (
+          <button
+            key={p}
+            onClick={() => onPick(p)}
+            title={p}
+            className={`flex w-full items-center gap-2 text-left transition-colors hover:bg-ink/5 ${
+              dense ? "px-3 py-1.5" : "rounded-lg px-3 py-2"
+            }`}
+          >
+            <Folder size={13} className={`shrink-0 ${st ? "text-tone-violet" : "text-dim"}`} />
+            <div className="min-w-0 flex-1">
+              <div className={`truncate text-xs ${active ? "font-medium text-ink" : "text-ink/90"}`}>
+                {st?.name || baseName(p)}
+              </div>
+              <div className="mono truncate text-[10px] text-dim">{p}</div>
+            </div>
+            <span className="shrink-0 text-[10px] text-dim">
+              {st === undefined ? "" : st ? `${st.goals} 个目标` : "未初始化"}
+            </span>
+            {active && <Check size={12} className="shrink-0 text-ink" />}
+          </button>
+        );
+      })}
+      <div className="my-1 border-t border-edge" />
+      <button
+        onClick={() => void other()}
+        className={`flex w-full items-center gap-2 text-left text-xs text-dim transition-colors hover:bg-ink/5 hover:text-ink ${
+          dense ? "px-3 py-1.5" : "rounded-lg px-3 py-2"
+        }`}
+      >
+        <FolderOpen size={13} className="shrink-0" />
+        选择其他目录…
+      </button>
+    </div>
+  );
+}
+
+/** 还没挑过项目时的落地页：直接把项目列出来，一点就进。 */
+function ChooseProject({ onPick }: { onPick: (cwd: string) => void }) {
+  const projects = useProjects();
+  return (
+    <div className="flex flex-1 items-center justify-center p-8">
+      <div className="w-full max-w-lg rounded-2xl bg-card p-5 shadow-soft">
+        <div className="mb-1 flex items-center gap-2 text-sm font-semibold">
+          <Target size={15} className="text-tone-violet" />
+          看哪个项目的目标与任务？
+        </div>
+        <p className="mb-3 text-xs leading-relaxed text-dim">
+          目标、任务和看板跟着项目走，存在项目的 <span className="mono">.carter/</span> 目录里，
+          随 git 与团队同步。
+        </p>
+        <div className="-mx-2">
+          <ProjectList projects={projects} current="" onPick={onPick} />
+        </div>
+      </div>
     </div>
   );
 }
@@ -346,18 +532,22 @@ function GraphTab({
   data,
   goal,
   onPick,
+  onAsk,
 }: {
   data: TeamOverview;
   goal: TeamGoal | null;
   onPick: (id: string) => void;
+  onAsk: (draft?: string) => void;
 }) {
   if (data.goals.length === 0) {
     return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-2 py-24 text-sm text-dim">
-        <Target size={20} />
-        还没有目标
-        <div className="text-xs">在对话里说「把这件事拆成第一阶段」，让卡特助理建一个。</div>
-      </div>
+      <Empty
+        icon={<Target size={20} />}
+        title="还没有目标"
+        hint="目标由卡特在对话里帮你建：说清要做成什么，它会拆成任务、理好先后。"
+        action="让卡特建一个目标"
+        onAction={() => onAsk("帮我在团队目录里建一个目标：")}
+      />
     );
   }
 
@@ -382,7 +572,7 @@ function GraphTab({
 
       {/* 图 */}
       <div className="min-w-0 flex-1 p-5">
-        {goal ? <GoalGraph goal={goal} /> : null}
+        {goal ? <GoalGraph goal={goal} onAsk={onAsk} /> : null}
       </div>
     </div>
   );
@@ -426,7 +616,7 @@ function GoalCard({
   );
 }
 
-function GoalGraph({ goal }: { goal: TeamGoal }) {
+function GoalGraph({ goal, onAsk }: { goal: TeamGoal; onAsk: (draft?: string) => void }) {
   const layers = useMemo(() => layerize(goal.tasks), [goal.tasks]);
 
   // 泳道 = 依赖深度。同一层内按 `order`（后端已经排好）—— 保持稳定，不抖动。
@@ -465,12 +655,25 @@ function GoalGraph({ goal }: { goal: TeamGoal }) {
           {goal.counts.doing > 0 && (
             <span style={{ color: "var(--tone-blue)" }}>{goal.counts.doing} 进行中</span>
           )}
+          <button
+            onClick={() =>
+              onAsk(
+                goal.tasks.length === 0
+                  ? `把目标「${goal.title}」（${goal.id}）拆成任务，理好依赖。`
+                  : `看一下目标「${goal.title}」（${goal.id}）的进展，接下来该推进哪件？`,
+              )
+            }
+            className="ml-1 flex items-center gap-1 rounded-md bg-ink/5 px-2 py-1 text-[11px] text-dim transition-colors hover:bg-ink/10 hover:text-ink"
+          >
+            <Sparkles size={11} />
+            {goal.tasks.length === 0 ? "让卡特拆解" : "问问卡特"}
+          </button>
         </div>
       </div>
 
       {goal.tasks.length === 0 ? (
         <div className="rounded-xl bg-card p-6 text-center text-xs text-dim">
-          这个目标还没有任务。在对话里让它拆一下。
+          这个目标还没有任务。点右上角「让卡特拆解」，它会在这个项目的对话里拆好。
         </div>
       ) : (
         <div className="relative flex gap-4 overflow-x-auto pb-2">
@@ -480,7 +683,7 @@ function GoalGraph({ goal }: { goal: TeamGoal }) {
                 {i === 0 ? "起点" : `第 ${i} 层`}
               </div>
               {lane.map((t) => (
-                <TaskNode key={t.id} task={t} byId={byId} />
+                <TaskNode key={t.id} task={t} byId={byId} goal={goal} onAsk={onAsk} />
               ))}
               {lane.length === 0 && (
                 <div className="rounded-lg border border-dashed border-edge px-2 py-6 text-center text-[10px] text-dim">
@@ -528,10 +731,15 @@ function GoalGraph({ goal }: { goal: TeamGoal }) {
 function TaskNode({
   task,
   byId,
+  goal,
+  onAsk,
 }: {
   task: TeamTask;
   byId: Map<string, TeamTask>;
+  goal: TeamGoal;
+  onAsk: (draft?: string) => void;
 }) {
+  const closed = task.status === "done" || task.status === "dropped";
   const tone = statusTone(task.status);
   const parent = task.parent_id ? byId.get(task.parent_id) : null;
 
@@ -590,6 +798,27 @@ function TaskNode({
       <div className="mt-1.5 flex items-center gap-1.5 text-[10px] text-dim">
         <span className="mono truncate">{task.id}</span>
         {task.estimate_hours ? <span>· {task.estimate_hours}h</span> : null}
+        {/* 悬停才露出来：每张卡常驻一个按钮，整屏就是一片按钮。 */}
+        {!closed && (
+          <button
+            onClick={() =>
+              onAsk(
+                `接着做这个任务：\n\n` +
+                  `- 任务：${task.title}\n` +
+                  `- 任务 id：${task.id}\n` +
+                  `- 所属目标：${goal.title}（${goal.id}）\n` +
+                  `- 当前状态：${task.status_label}\n` +
+                  (task.blocked_reason ? `- 受阻原因：${task.blocked_reason}\n` : "") +
+                  `\n先看一眼任务的具体要求（acceptance 里写了验收标准），再动手。`,
+              )
+            }
+            title="去这个项目的对话里，把任务摆进输入框"
+            className="ml-auto hidden shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-dim transition-colors hover:bg-ink/5 hover:text-ink group-hover:flex"
+          >
+            <Send size={10} />
+            交给卡特
+          </button>
+        )}
       </div>
     </div>
   );
@@ -599,14 +828,22 @@ function TaskNode({
 // 看板
 // ---------------------------------------------------------------------------
 
-function BoardTab({ boards }: { boards: TeamBoard[] }) {
+function BoardTab({
+  boards,
+  onAsk,
+}: {
+  boards: TeamBoard[];
+  onAsk: (draft?: string) => void;
+}) {
   if (boards.length === 0) {
     return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-2 py-24 text-sm text-dim">
-        <LayoutGrid size={20} />
-        还没有看板
-        <div className="text-xs">让它建一块「十月回顾」，或者在任何一张卡上开始聊。</div>
-      </div>
+      <Empty
+        icon={<LayoutGrid size={20} />}
+        title="还没有看板"
+        hint="看板用来做回顾与自由讨论，比如「本周回顾」「下阶段想法」。"
+        action="让卡特建一块看板"
+        onAction={() => onAsk("帮我建一块回顾看板：")}
+      />
     );
   }
   return (
@@ -723,6 +960,42 @@ function LogTab({ data }: { data: TeamOverview }) {
 // ---------------------------------------------------------------------------
 // 小件
 // ---------------------------------------------------------------------------
+
+/** 空状态：说清这里会放什么，并给一个能直接把事办了的按钮。 */
+function Empty({
+  icon,
+  title,
+  hint,
+  action,
+  onAction,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  hint: string;
+  action?: string;
+  onAction?: () => void;
+}) {
+  return (
+    <div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 py-24 text-center text-sm text-dim">
+      {icon}
+      <div className="text-ink">{title}</div>
+      <div className="max-w-sm text-xs leading-relaxed">{hint}</div>
+      {action && onAction && (
+        <button
+          onClick={onAction}
+          className="mt-2 flex items-center gap-1.5 rounded-lg bg-ink px-3 py-1.5 text-xs font-medium text-[var(--accent-contrast)] transition-opacity hover:opacity-90"
+        >
+          <Sparkles size={12} />
+          {action}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function Count({ n }: { n: number }) {
+  return <span className="text-[10px] tabular-nums text-dim">{n}</span>;
+}
 
 function TabButton({
   active,
