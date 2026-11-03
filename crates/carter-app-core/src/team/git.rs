@@ -268,8 +268,15 @@ fn parse_events(raw: &str) -> Vec<Event> {
 
 /// 打一条空提交。**不 push** —— 推送由 [`push`] 单独决定，认领那条路径要
 /// 「push 失败 = 认领失败」的语义，而评论可以攒着一起推。
+///
+/// `team_rel` 是团队目录相对仓库根的路径。提交**只限定在它上面**：不加 pathspec 的
+/// `git commit --allow-empty` 会把用户自己暂存、还没打算提交的无关文件一并卷进这条
+/// 「评论」里 —— 用户毫无察觉，事后在 `git log` 里看到一条叫 carter/comment 的提交
+/// 改了他的业务代码。带上 `-- <团队目录>` 之后，团队目录没改动时是纯空提交，
+/// 有改动（认领顺带写了 assignee）时只提交团队目录，其余暂存原样留着。
 pub fn commit_event(
     root: &Path,
+    team_rel: &str,
     kind: EventKind,
     target: Option<&str>,
     goal_id: Option<&str>,
@@ -295,7 +302,7 @@ pub fn commit_event(
         format!("{subject}\n\n{}\n\n{trailer}\n", body.trim())
     };
 
-    git(root, &["commit", "--allow-empty", "-m", &message])?;
+    git(root, &["commit", "--allow-empty", "-m", &message, "--", team_rel])?;
     // 取刚打的那条的短 SHA（HEAD 就是它）。
     Ok(git(root, &["rev-parse", "--short", "HEAD"]).unwrap_or_default())
 }

@@ -502,6 +502,7 @@ impl TeamTool {
                     let _ = git::stage_team(root, &rel);
                     git::commit_event(
                         root,
+                        &rel,
                         kind,
                         Some(&task.id),
                         Some(&task.goal_id),
@@ -556,6 +557,7 @@ impl TeamTool {
                 }
                 git::commit_event(
                     root,
+                    &team_rel(root, store.root())?,
                     EventKind::Comment,
                     Some(&target),
                     Some(&goal),
