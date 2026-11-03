@@ -766,6 +766,11 @@ async fn approve_assistant_decision(
 }
 
 #[tauri::command]
+fn new_assistant_episode(shell: State<'_, Arc<AppShell>>) -> Result<(), String> {
+    carter_app_core::assistant::chat::new_episode(shell.inner())
+}
+
+#[tauri::command]
 fn dismiss_assistant_decision(
     shell: State<'_, Arc<AppShell>>,
     decision_id: String,
@@ -1783,6 +1788,7 @@ pub fn run() {
             assistant_ticket_action,
             approve_assistant_decision,
             dismiss_assistant_decision,
+            new_assistant_episode,
             reassess_assistant_decision,
             refresh_model_catalog,
             list_catalog_models,

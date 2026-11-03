@@ -119,6 +119,17 @@ pub fn push_proposal(shell: &Arc<AppShell>, d: &Decision) -> bool {
     record(shell, proposal_text(d))
 }
 
+/// 面板上的「开新一期」：之前的对话不再进上下文，只留纪要与记忆（见 `Command::NewEpisode`）。
+/// 对话没在跑就先开起来 —— 盘上的本期历史照样要收进存档。
+pub fn new_episode(shell: &Arc<AppShell>) -> Result<(), String> {
+    ensure(shell)?;
+    if shell.send(CHAT_SESSION_ID, Command::NewEpisode) {
+        Ok(())
+    } else {
+        Err("助理对话没在运行".into())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

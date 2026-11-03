@@ -314,7 +314,9 @@ export type Command =
   /** 手动压缩上下文（`/compact`）。生成中发的话排队，这一轮跑完再压。 */
   | { type: "compact" }
   /** 清空底栏的变更条，从下一轮起重新统计。生成中发的话排队，这一轮跑完再清。 */
-  | { type: "clear_changes" };
+  | { type: "clear_changes" }
+  /** 助理对话立刻开新一期（之前的对话只留纪要与记忆）。别的会话收到时什么都不做。 */
+  | { type: "new_episode" };
 
 /** `/goal` 的动作。拼写由输入框那一侧解析一次，后端只认结构化枚举。 */
 export type GoalCommand =
@@ -982,6 +984,14 @@ export function saveAssistantMemory(id: string | null, text: string): Promise<vo
 
 export function getAssistantEpisode(number: number): Promise<MessageView[]> {
   return invoke<MessageView[]>("get_assistant_episode", { number });
+}
+
+/**
+ * 助理对话立刻开新一期：之前的原话进往期存档、整理出纪要与记忆，之后不再进上下文。
+ * 正在说话时排队，这一轮跑完再切；完成时会话发 `assistant_episode`。
+ */
+export function newAssistantEpisode(): Promise<void> {
+  return invoke<void>("new_assistant_episode");
 }
 
 export function saveAssistantSettings(settings: AssistantSettings): Promise<void> {

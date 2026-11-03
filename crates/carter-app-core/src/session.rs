@@ -875,6 +875,7 @@ impl Runner {
                 self.compact(false).await;
             }
             Command::Record { text } => self.record_only(text),
+            Command::NewEpisode => self.close_episode(true).await,
             // 空闲时才走到这里（生成中收到的排队等这一轮跑完），所以下一轮的号
             // 就是 `user_turns` —— 起点从它开始，已经跑完的轮次都算「清空之前」。
             Command::ClearChanges => {
@@ -1031,9 +1032,17 @@ impl Runner {
     /// 结束一期 = 原始消息另存进往期存档、用副模型整理出纪要与记忆、历史清空。
     /// 清空走 carter 的 `Compacted` 记录（空快照），会话文件只追加不改写，重启时
     /// 照样只加载本期。整理失败不挡这句话：纪要退成一句「整理失败」，历史照样切。
-    async fn maybe_close_episode(&mut self) {
+    ///
+    /// `force`：用户在面板上点了「开新一期」（`Command::NewEpisode`），不看切期条件。
+    async fn close_episode(&mut self, force: bool) {
         use crate::assistant::memory;
-        if self.ctx.handle.id != crate::assistant::CHAT_SESSION_ID || self.thread.messages.is_empty() {
+        if self.ctx.handle.id != crate::assistant::CHAT_SESSION_ID {
+            return;
+        }
+        if self.thread.messages.is_empty() {
+            if force {
+                self.notice("这一期还没有对话，不用切");
+            }
             return;
         }
         let now = crate::protocol::now_ms() + self.ctx.handle.clock_skew_ms.load(Ordering::SeqCst);
@@ -1045,8 +1054,13 @@ impl Runner {
         let turns = crate::view::user_turn_count(&self.thread.messages);
         let used = self.history_tokens() + self.overhead;
         let window = u64::from(self.ctx.model.context_window);
-        let Some(why) = memory::should_close(last_at, now, turns, used, window) else {
-            return;
+        let why = if force {
+            "手动开新一期"
+        } else {
+            let Some(why) = memory::should_close(last_at, now, turns, used, window) else {
+                return;
+            };
+            why
         };
         self.settle_history();
         let messages = self.thread.messages.clone();
@@ -1138,7 +1152,7 @@ impl Runner {
         // 助理对话：用户开口前先看这一期该不该收。汇报（`record_only`）不走这里 ——
         // 只有用户的话才开新的一期。
         if !crate::assistant::is_injected(&raw) {
-            self.maybe_close_episode().await;
+            self.close_episode(false).await;
         }
         // 用户亲口说话了：这一轮不再是哪封信的回信，跨会话的跳数从头数。
         if !crate::assistant::is_injected(&raw)
