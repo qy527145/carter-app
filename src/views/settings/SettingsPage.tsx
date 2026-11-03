@@ -136,7 +136,7 @@ export function SettingsPage() {
             返回
           </button>
         </div>
-        <div className="px-4 pb-2 pt-1 text-base font-semibold tracking-tight">设置</div>
+        <div className="px-4 pb-3 pt-1 text-[16px] font-semibold tracking-tight">设置</div>
         <div
           ref={navRef}
           role="tablist"
@@ -160,7 +160,7 @@ export function SettingsPage() {
                       aria-selected={on}
                       tabIndex={on ? 0 : -1}
                       onClick={() => setTab(t.id)}
-                      className={`carter-press relative flex items-center gap-2 rounded-md px-3 py-1.5 text-left text-sm outline-none ${
+                      className={`carter-press relative flex items-center gap-2 rounded-md px-3 py-1.5 text-left text-sm ${
                         on
                           ? "bg-ink/[0.08] font-medium text-ink"
                           : "text-dim hover:bg-ink/[0.045] hover:text-ink"
@@ -180,7 +180,7 @@ export function SettingsPage() {
       <div ref={scrollRef} className="min-w-0 flex-1 overflow-y-auto [scrollbar-gutter:stable]">
         {/* key 让换页时重挂这一层，`.carter-enter` 才会重放 —— 页面是「换了一块」，
             不是原地变内容。只淡入 + 4px，快到不挡手。 */}
-        <div key={tab} role="tabpanel" className="carter-enter mx-auto max-w-2xl px-8 py-8">
+        <div key={tab} role="tabpanel" className="carter-enter carter-settings mx-auto max-w-2xl px-8 py-8">
           {tab === "channels" && <ChannelsPage />}
           {tab === "connectors" && <ConnectorsPage />}
           {tab === "models" && <ModelsPage />}

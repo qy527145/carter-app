@@ -45,7 +45,7 @@ export function AppearancePage() {
 
   return (
     <>
-      <h1 className="mb-4 text-base font-semibold">外观</h1>
+      <h1 className="mb-4 text-[16px] font-semibold">外观</h1>
 
       <Section title="主题">
         <Card>

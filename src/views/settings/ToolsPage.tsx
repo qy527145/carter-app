@@ -89,7 +89,7 @@ export function ToolsPage() {
 
   return (
     <>
-      <h1 className="mb-4 text-base font-semibold">工具</h1>
+      <h1 className="mb-4 text-[16px] font-semibold">工具</h1>
 
       <PageIntro>
         这里列的是

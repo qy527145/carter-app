@@ -213,7 +213,7 @@ export function McpPage() {
   return (
     <>
       <div className="mb-4 flex items-center gap-2">
-        <h1 className="text-base font-semibold">MCP</h1>
+        <h1 className="text-[16px] font-semibold">MCP</h1>
         <Button
           variant="primary"
           size="sm"

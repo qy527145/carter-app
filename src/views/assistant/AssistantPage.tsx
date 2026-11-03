@@ -244,7 +244,7 @@ function Header({ settings }: { settings: AssistantSettings }) {
   return (
     <div className="mb-4 flex items-center gap-2">
       <Radar size={16} className="text-tone-blue" />
-      <h1 className="text-base font-semibold">常驻助理</h1>
+      <h1 className="text-[16px] font-semibold">常驻助理</h1>
       {settings.paused && <Badge tone="orange">已暂停</Badge>}
       <span className="ml-auto flex items-center gap-2">
         <Button size="sm" onClick={() => void openAssistantChat()}>

@@ -196,13 +196,34 @@ function Menu({
 
   // 焦点落到菜单上，方向键 / Esc 才有地方可去；收起时还给原来那个元素 ——
   // 用键盘唤起的菜单按 Esc 退出后，焦点不该掉到 body 上。
+  //
+  // 首帧菜单还是 `visibility: hidden`（在量尺寸），对隐藏元素 focus() 是静默失败的 ——
+  // 所以等定位好、真正可见了再聚焦。另挂一个 document 级的 Esc 兜底：焦点万一
+  // 没进来（比如被别的元素抢走），Esc 也照样能关。
+  const prevFocus = useRef(document.activeElement as HTMLElement | null);
+  // 唤起时焦点是否落在某个具体元素上且正显示键盘焦点环 —— 据此判断是不是键盘唤起的。
+  const byKeyboard = useRef(prevFocus.current?.matches(":focus-visible") ?? false).current;
+  const visible = pos !== null;
   useEffect(() => {
-    const prev = document.activeElement as HTMLElement | null;
-    ref.current?.focus();
-    return () => {
-      if (prev && prev.isConnected && document.activeElement === document.body) prev.focus();
+    if (visible) ref.current?.focus({ preventScroll: true });
+  }, [visible]);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !ref.current?.contains(document.activeElement)) {
+        e.preventDefault();
+        onClose();
+      }
     };
-  }, []);
+    document.addEventListener("keydown", onKey, true);
+    return () => {
+      document.removeEventListener("keydown", onKey, true);
+      // 只有键盘唤起时才把焦点还回去：鼠标右键之后程序化 focus 会让那一行
+      // 挂上 focus-visible 的描边，看起来像被「选中」了。
+      const prev = prevFocus.current;
+      const lost = !document.activeElement || document.activeElement === document.body;
+      if (byKeyboard && prev && prev.isConnected && lost) prev.focus({ preventScroll: true });
+    };
+  }, [onClose]);
 
   // 滚动、缩放、切窗口都会让菜单和它指向的东西错位，直接收起。
   useEffect(() => {
@@ -219,6 +240,7 @@ function Menu({
   const onKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
     if (e.key === "Escape") {
       e.preventDefault();
+      e.stopPropagation();
       onClose();
       return;
     }

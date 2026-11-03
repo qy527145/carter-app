@@ -153,7 +153,7 @@ export function SessionsPage() {
 
   return (
     <>
-      <h1 className="mb-4 text-base font-semibold">会话</h1>
+      <h1 className="mb-4 text-[16px] font-semibold">会话</h1>
 
       <PageIntro>
         这里是<strong className="font-medium text-ink">全部</strong>会话，按工作目录分组，

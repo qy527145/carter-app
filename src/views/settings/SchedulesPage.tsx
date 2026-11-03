@@ -335,7 +335,7 @@ export function SchedulesPage() {
   return (
     <>
       <div className="mb-4 flex items-center gap-2">
-        <h1 className="text-base font-semibold">定时任务</h1>
+        <h1 className="text-[16px] font-semibold">定时任务</h1>
         <Button
           variant="primary"
           size="sm"

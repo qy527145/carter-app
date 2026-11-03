@@ -59,7 +59,7 @@ export function SidePanel() {
   };
 
   return (
-    <div className="fixed inset-y-0 right-0 z-30 flex w-[min(30rem,46vw)] flex-col border-l border-edge bg-sidebar shadow-2xl">
+    <div className="carter-drawer fixed inset-y-0 right-0 z-30 flex w-[min(30rem,46vw)] flex-col border-l border-edge bg-sidebar shadow-2xl">
       <div className="flex h-11 shrink-0 items-center gap-2 border-b border-edge px-3">
         <Globe size={14} className="shrink-0 text-tone-violet" />
         <span className="text-sm text-ink">侧边聊天</span>

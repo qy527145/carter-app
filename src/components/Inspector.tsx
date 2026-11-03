@@ -504,7 +504,7 @@ export function Inspector() {
   return (
     // 用 vw 兜底：窗口窄时（默认只有 800px）也要留下一截对话可见，
     // 否则「抽屉」就变成了全屏、失去了与对话对照的意义。
-    <div className="fixed inset-y-0 right-0 z-40 flex w-[min(78rem,92vw)] flex-col border-l border-edge bg-sidebar shadow-2xl">
+    <div className="carter-drawer fixed inset-y-0 right-0 z-40 flex w-[min(78rem,92vw)] flex-col border-l border-edge bg-sidebar shadow-2xl">
       <div className="flex h-11 shrink-0 items-center gap-2 border-b border-edge px-3">
         <FileSearch size={15} className="text-dim" />
         <span className="text-sm font-semibold">报文</span>

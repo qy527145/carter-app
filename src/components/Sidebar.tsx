@@ -435,10 +435,14 @@ export function Sidebar() {
       if (k === "k") {
         e.preventDefault();
         setCollapsed(false);
-        requestAnimationFrame(() => {
+        // 侧栏开着时**同步**聚焦：按下 ⌘K 紧接着打字，延一帧的话头几个字会落到别处。
+        // 收着的时候 input 还是 inert，只能等展开那一帧再聚焦。
+        const focus = () => {
           searchRef.current?.focus();
           searchRef.current?.select();
-        });
+        };
+        focus();
+        if (document.activeElement !== searchRef.current) requestAnimationFrame(focus);
       } else if (k === "b" && !e.shiftKey) {
         e.preventDefault();
         setCollapsed((c) => !c);

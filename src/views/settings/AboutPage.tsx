@@ -27,7 +27,7 @@ export function AboutPage() {
 
   return (
     <>
-      <h1 className="mb-1 text-base font-semibold">关于</h1>
+      <h1 className="mb-1 text-[16px] font-semibold">关于</h1>
       <div className="mb-5 text-xs text-dim">
         {appInfo ? `${appInfo.name} v${appInfo.version}` : "…"}
       </div>

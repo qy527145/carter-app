@@ -245,7 +245,7 @@ function Row({
             aria-current={active ? "true" : undefined}
             // 右侧给悬停按钮留出位置：按钮浮在上面而不是挤占布局，
             // 鼠标划过时标题不会被突然截短一截、整行跳一下。
-            className={`min-w-0 flex-1 select-none text-left outline-none ${pad} rounded-md focus-visible:ring-2 focus-visible:ring-edge-strong`}
+            className={`min-w-0 flex-1 select-none rounded-md text-left ${pad}`}
           >
             <div className="flex items-center gap-1.5">
               {running && (

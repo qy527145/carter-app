@@ -91,7 +91,7 @@ export function TaskDrawer({
     <div className="fixed inset-0 z-30 flex justify-end" onClick={onClose}>
       <aside
         onClick={(e) => e.stopPropagation()}
-        className="flex h-full w-[26rem] max-w-[92vw] flex-col border-l border-edge bg-elevated shadow-2xl"
+        className="carter-drawer flex h-full w-[26rem] max-w-[92vw] flex-col border-l border-edge bg-elevated shadow-2xl"
       >
         <header className="flex items-start gap-2 border-b border-edge px-4 py-3">
           <div className="min-w-0 flex-1">

@@ -56,7 +56,7 @@ export function ChangesPage() {
 
   return (
     <>
-      <h1 className="mb-4 text-base font-semibold">变更</h1>
+      <h1 className="mb-4 text-[16px] font-semibold">变更</h1>
 
       <PageIntro>
         输入框上方的变更条会汇总「到目前为止改了哪些文件」（可随时清空、重新统计）。这份清单来自对工作目录的
