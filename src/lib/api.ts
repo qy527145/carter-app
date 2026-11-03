@@ -126,6 +126,7 @@ export type SessionEvent =
       auto: boolean;
     }
   | { type: "notice"; message: string }
+  | { type: "assistant_episode"; number: number }
   /** 会话标题自动生成好了。前端据此刷新会话列表（侧栏那一行 + 顶部标题）。 */
   | { type: "title"; title: string }
   | { type: "idle" }
@@ -872,8 +873,26 @@ export type AssistantTicket = {
   runs: number;
 };
 
+export type AssistantMemory = {
+  id: string;
+  text: string;
+  source: string;
+  created_at: number;
+  updated_at: number;
+};
+
+export type AssistantEpisode = {
+  number: number;
+  started_at: number;
+  ended_at: number;
+  summary: string;
+  turns: number;
+};
+
 export type AssistantView = {
   settings: AssistantSettings;
+  memories: AssistantMemory[];
+  episodes: AssistantEpisode[];
   sources: AssistantSource[];
   /** 新的在前。 */
   decisions: AssistantDecision[];
@@ -893,6 +912,15 @@ export type TicketAction =
 
 export function getAssistant(): Promise<AssistantView> {
   return invoke<AssistantView>("get_assistant");
+}
+
+/** 改长期记忆：`text` 为空 = 删掉，`id` 为空 = 新增。 */
+export function saveAssistantMemory(id: string | null, text: string): Promise<void> {
+  return invoke<void>("save_assistant_memory", { id, text });
+}
+
+export function getAssistantEpisode(number: number): Promise<MessageView[]> {
+  return invoke<MessageView[]>("get_assistant_episode", { number });
 }
 
 export function saveAssistantSettings(settings: AssistantSettings): Promise<void> {

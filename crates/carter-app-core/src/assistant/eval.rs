@@ -223,10 +223,21 @@ pub fn resolve(
 
 /// 调一次模型，拿回原样的文本。
 pub async fn ask(provider: &dyn LlmProvider, model: &ModelInfo, user: String) -> Result<String, String> {
+    ask_with(provider, model, SYSTEM, user, MAX_TOKENS).await
+}
+
+/// 一次不带工具的模型调用，拿回全文。评估与助理对话的整理（`memory.rs`）共用。
+pub async fn ask_with(
+    provider: &dyn LlmProvider,
+    model: &ModelInfo,
+    system: &str,
+    user: String,
+    max_tokens: u32,
+) -> Result<String, String> {
     let mut wire = WireRequest::new(model.api_name.clone());
-    wire.system = vec![Block::text(SYSTEM)];
+    wire.system = vec![Block::text(system)];
     wire.messages = vec![WireMessage::user_text(user)];
-    wire.max_tokens = Some(MAX_TOKENS.min(model.max_output_tokens.max(1)));
+    wire.max_tokens = Some(max_tokens.min(model.max_output_tokens.max(1)));
     wire.meta = RequestMeta {
         session_id: Some("assistant".into()),
         ..Default::default()

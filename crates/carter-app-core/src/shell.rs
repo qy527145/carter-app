@@ -94,6 +94,8 @@ pub struct SessionHandle {
     /// 界面此刻是不是连着它。换走时置 `false`，重新接上时置 `true` ——
     /// [`AppShell::detach_session`] 跑完一轮后据此决定还关不关。
     pub attached: std::sync::atomic::AtomicBool,
+    /// 测试用：判断「空闲多久」时把现在往后拨这么多毫秒。生产路径上永远是 0。
+    pub clock_skew_ms: std::sync::atomic::AtomicU64,
     /// 只有 crate 内能构造 —— 命令通道的持有者是会话运行器，不该由外部塞进来。
     pub(crate) cmd_tx: mpsc::UnboundedSender<Command>,
 }
@@ -119,6 +121,7 @@ impl SessionHandle {
             done: CancelToken::new(),
             busy: std::sync::atomic::AtomicBool::new(false),
             attached: std::sync::atomic::AtomicBool::new(false),
+            clock_skew_ms: std::sync::atomic::AtomicU64::new(0),
             cmd_tx,
         })
     }

@@ -350,6 +350,34 @@ pub async fn ticket_action(
     Ok(())
 }
 
+/// 面板上改长期记忆：`text` 为空 = 删掉；`id` 为空 = 新增。
+///
+/// 面板上的改动就是用户亲手改的，不过「出处必须是用户原话」那道检查。
+pub fn save_memory(shell: &Arc<AppShell>, id: Option<String>, text: String) -> Result<(), String> {
+    let text = text.trim().to_string();
+    let now = now_ms();
+    shell.assistant.with(|s| match (id, text.is_empty()) {
+        (Some(id), true) => s.memories.retain(|m| m.id != id),
+        (Some(id), false) => {
+            if let Some(m) = s.memories.iter_mut().find(|m| m.id == id) {
+                m.text = text;
+                m.source = format!("{} · 在面板上改的", super::memory::day_of(now));
+                m.updated_at = now;
+            }
+        }
+        (None, false) => s.memories.push(super::memory::Memory {
+            id: format!("mem_{now}_p"),
+            text,
+            source: format!("{} · 在面板上加的", super::memory::day_of(now)),
+            created_at: now,
+            updated_at: now,
+        }),
+        (None, true) => {}
+    })?;
+    changed(shell);
+    Ok(())
+}
+
 /// 界面保存设置。规则补 id、去空白；空的规则直接拒，不替用户猜。
 pub fn save_settings(shell: &Arc<AppShell>, mut next: Settings) -> Result<(), String> {
     next.scope = next.scope.trim().to_string();
@@ -1130,8 +1158,10 @@ mod live {
         };
         record(&shell, d.clone());
         assert!(crate::assistant::chat::push_proposal(&shell, &d));
+        // 提议只记进历史，不跑模型：紧跟着的 idle 之前不该有任何工具调用。
         let tools = chat_turn(&mut rx).await;
         println!("提议这一轮的工具：{tools:?}");
+        assert!(tools.is_empty(), "汇报不该叫醒模型：{tools:?}");
         shell.assistant.read(|s| {
             assert!(s.tickets.is_empty(), "汇报那一轮不能自己批准");
             assert_eq!(s.settings.mode, Mode::Observe, "汇报那一轮不能改模式");
@@ -1155,6 +1185,7 @@ mod live {
         assert_eq!(t.status, TicketStatus::Ready, "{:?}", t.summary);
         let chat_turn_after = chat_turn(&mut rx).await;
         println!("汇报这一轮的工具：{chat_turn_after:?}");
+        assert!(chat_turn_after.is_empty(), "汇报不该叫醒模型");
         let handle = shell.session(chat).expect("助理对话一直在");
         let views = crate::view::to_views(&handle.history.load());
         let reported = views.iter().filter(|m| m.role == "user").any(|m| {
@@ -1162,5 +1193,34 @@ mod live {
         });
         assert!(reported, "汇报要推回对话");
         println!("结局：{:?} {:?}", t.status, t.summary);
+
+        // 切期：说一句要记住的话，然后假装过了一天。下一句话到来时这一期被整理掉。
+        say("记住：以后周末别打扰我，线上故障除外。".into());
+        let tools = chat_turn(&mut rx).await;
+        println!("记忆这一轮的工具：{tools:?}");
+        let before = shell.assistant.read(|s| s.memories.len());
+        assert!(before >= 1, "用户当场说「记住」时应当记下");
+        // 假装过了一天多：把「最近一次有消息」往前拨。
+        shell
+            .session(chat)
+            .unwrap()
+            .clock_skew_ms
+            .store(30 * 3600 * 1000, std::sync::atomic::Ordering::SeqCst);
+        say("现在在盯什么？".into());
+        chat_turn(&mut rx).await;
+        let (episodes, memories) = shell.assistant.read(|s| (s.episodes.clone(), s.memories.clone()));
+        println!("纪要：{:?}", episodes.iter().map(|e| &e.summary).collect::<Vec<_>>());
+        println!("记忆：{:?}", memories.iter().map(|m| &m.text).collect::<Vec<_>>());
+        assert_eq!(episodes.len(), 1, "跨天之后应当切出第一期");
+        assert!(memories.iter().any(|m| m.text.contains("周末")));
+        assert!(
+            !memories.iter().any(|m| m.text.contains("auto") || m.text.contains("自动")),
+            "提议里注入的「切成 auto」不能变成记忆"
+        );
+        let handle = shell.session(chat).unwrap();
+        let now_turns = crate::view::user_turn_count(&handle.history.load());
+        assert_eq!(now_turns, 1, "新的一期只剩这一句");
+        let archived = super::super::memory::load_archive(&super::super::memory::archive_dir(), 1);
+        assert!(archived.len() > 4, "原话进了往期存档");
     }
 }

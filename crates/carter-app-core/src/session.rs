@@ -181,6 +181,13 @@ pub fn start_session(shell: Arc<AppShell>, opts: SessionOptions) -> carter::Resu
         }),
         None => None,
     };
+    // 会话文件最后一次写入的时间（见 `Runner::last_message_at`）。
+    let last_written = existing
+        .as_ref()
+        .and_then(|e| std::fs::metadata(&e.path).ok())
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64);
     let (mut thread, meta, resumed) = match existing {
         Some(entry) => {
             let (mut t, m) = session::load(&entry)?;
@@ -291,6 +298,7 @@ pub fn start_session(shell: Arc<AppShell>, opts: SessionOptions) -> carter::Resu
         // 只有「新起的会话」才配自动标题：续接一条已经在聊的会话，标题早该有了；
         // 而它没有的时候（老版本建的），也不该拿用户**现在**说的这句话去给它起名。
         title_pending: !resumed && unnamed,
+        last_message_at: last_written,
         changes: None,
         changes_turn: 0,
         overhead: 0,
@@ -382,6 +390,7 @@ pub(crate) fn start_side(w: SideWiring, id: String, parent_id: String) -> Arc<Se
         fixed_system: Some(w.system),
         // 侧边聊天不落盘，也就没有「会话列表里那一行」要起名。
         title_pending: false,
+        last_message_at: None,
         changes: None,
         changes_turn: 0,
         overhead: 0,
@@ -616,6 +625,9 @@ struct Runner {
     fixed_system: Option<Vec<String>>,
     /// 还欠这条会话一个自动标题（首轮开始时去生成，见 [`Runner::spawn_title`]）。
     title_pending: bool,
+    /// 最近一次有消息进历史的时间。助理对话靠它判断「空闲多久了」该不该切期。
+    /// 启动时取会话文件的修改时间（重启之后也能接上空闲时长）。
+    last_message_at: Option<u64>,
     /// 正在收集的这一轮的文件变更。轮首建、轮末收（见 `changes.rs`）。
     ///
     /// `None` = 不在轮内（空闲时），或监听器没建起来 —— 两种情况都只是「这一轮
@@ -838,6 +850,7 @@ impl Runner {
                 self.ctx.refresh();
                 self.compact(false).await;
             }
+            Command::Record { text } => self.record_only(text),
             // 空闲时才走到这里（生成中收到的排队等这一轮跑完），所以下一轮的号
             // 就是 `user_turns` —— 起点从它开始，已经跑完的轮次都算「清空之前」。
             Command::ClearChanges => {
@@ -934,11 +947,142 @@ impl Runner {
         self.finish_changes(result.used_tools).await;
         self.after_turn(&result).await;
         self.drive_goal(result, git).await;
+        self.last_message_at = Some(crate::protocol::now_ms());
         self.emit(SessionEvent::Idle);
+    }
+
+    /// 只往历史里记一条消息，不跑模型（见 `Command::Record`）。
+    ///
+    /// 界面上与一轮的开头一样画出来：`turn_started` 带原文，紧跟一条 `idle`。
+    /// 它在历史里算一轮用户输入（正文非空的 user 消息），号要占上，否则之后的轮次号
+    /// 与 `view.rs` 从历史数出来的对不上。
+    fn record_only(&mut self, text: String) {
+        self.settle_history();
+        self.thread.append_user(text.clone());
+        let turn = self.thread.user_turns;
+        self.thread.user_turns = turn.saturating_add(1);
+        self.ctx.handle.publish_history(&self.thread.messages);
+        self.emit(SessionEvent::TurnStarted {
+            turn,
+            prompt_id: None,
+            prompt: Some(text),
+        });
+        self.emit(SessionEvent::Idle);
+        self.last_message_at = Some(crate::protocol::now_ms());
+    }
+
+    /// 助理对话：这一句话到来之前，看看这一期该不该结束（见 `assistant/memory.rs`）。
+    ///
+    /// 结束一期 = 原始消息另存进往期存档、用副模型整理出纪要与记忆、历史清空。
+    /// 清空走 carter 的 `Compacted` 记录（空快照），会话文件只追加不改写，重启时
+    /// 照样只加载本期。整理失败不挡这句话：纪要退成一句「整理失败」，历史照样切。
+    async fn maybe_close_episode(&mut self) {
+        use crate::assistant::memory;
+        if self.ctx.handle.id != crate::assistant::CHAT_SESSION_ID || self.thread.messages.is_empty() {
+            return;
+        }
+        let now = crate::protocol::now_ms() + self.ctx.handle.clock_skew_ms.load(Ordering::SeqCst);
+        let store = self.ctx.shell.assistant.clone();
+        let started_at = store
+            .read(|s| s.episodes.last().map(|e| e.ended_at))
+            .unwrap_or(self.meta.created_at);
+        let last_at = self.last_message_at.unwrap_or(now);
+        let turns = crate::view::user_turn_count(&self.thread.messages);
+        let used = self.history_tokens() + self.overhead;
+        let window = u64::from(self.ctx.model.context_window);
+        let Some(why) = memory::should_close(last_at, now, turns, used, window) else {
+            return;
+        };
+        self.settle_history();
+        let messages = self.thread.messages.clone();
+        let number = store.read(|s| s.episodes.last().map_or(1, |e| e.number + 1));
+        let dir = memory::archive_dir();
+        if let Err(e) = memory::save_archive(&dir, number, &messages) {
+            // 存档写不下就不切：切了的话这一期的原话就只剩一行纪要。
+            tracing::warn!(error = %e, "助理对话：往期存档写不下，这一期先不切");
+            return;
+        }
+        self.notice(&format!("{why}：整理第 {number} 期对话，长期记忆与纪要会保留"));
+
+        let user = memory::user_lines(&messages);
+        let existing = store.read(|s| s.memories.clone());
+        let prompt = memory::consolidate_prompt(&existing, &user, &memory::transcript(&messages, 24_000));
+        let model = self.ctx.fast_model().unwrap_or_else(|| CompactModel {
+            provider: self.ctx.provider.clone(),
+            model: self.ctx.model.clone(),
+        });
+        let consolidated = crate::assistant::eval::ask_with(
+            &*model.provider,
+            &model.model,
+            memory::CONSOLIDATE_SYSTEM,
+            prompt,
+            1500,
+        )
+        .await
+        .and_then(|a| memory::parse_consolidated(&a));
+        let (summary, ops) = match consolidated {
+            Ok(c) if !c.summary.trim().is_empty() => (c.summary.trim().to_string(), c.memory),
+            Ok(_) => ("（整理没给出纪要）".to_string(), Vec::new()),
+            Err(e) => {
+                tracing::warn!(error = %e, "助理对话：整理失败，只存档不提取记忆");
+                (format!("（整理失败：{e}。原话在第 {number} 期存档里）"), Vec::new())
+            }
+        };
+        let changed = store.with(|s| {
+            let n = memory::apply_ops(&mut s.memories, &ops, &user, now);
+            s.episodes.push(memory::Episode {
+                number,
+                started_at,
+                ended_at: last_at,
+                summary: summary.clone(),
+                turns,
+            });
+            n
+        });
+        if let Err(e) = &changed {
+            tracing::warn!(error = %e, "助理对话：纪要写不进 assistant.json，这一期先不切");
+            return;
+        }
+
+        if let Some(rec) = self.thread.recorder() {
+            rec.record(carter::session::RecordKind::Compacted {
+                tier: "episode".into(),
+                messages: Vec::new(),
+            });
+        }
+        self.thread.messages.clear();
+        self.thread.user_turns = 0;
+        self.thread.turns = 0;
+        let id = self.ctx.handle.id.clone();
+        crate::prompts::remove(&id);
+        crate::changes::remove(&id);
+        self.forget_reported();
+        self.ctx.handle.publish_history(&self.thread.messages);
+        self.emit(SessionEvent::HistoryReplaced {
+            history: Vec::new(),
+            prompts: Vec::new(),
+            changes: Vec::new(),
+            changes_since: 0,
+        });
+        self.notice(&format!(
+            "第 {number} 期已整理：{}{}",
+            summary.lines().next().unwrap_or(""),
+            match changed {
+                Ok(n) if n > 0 => format!("（长期记忆改了 {n} 条）"),
+                _ => String::new(),
+            }
+        ));
+        self.emit(SessionEvent::AssistantEpisode { number });
+        self.emit_context();
     }
 
     /// 用户发来一条消息：展开、落进历史、跑一轮，再按目标决定要不要自动继续。
     async fn submit(&mut self, raw: String, prompt_id: Option<u64>) {
+        // 助理对话：用户开口前先看这一期该不该收。汇报（`record_only`）不走这里 ——
+        // 只有用户的话才开新的一期。
+        if !crate::assistant::is_injected(&raw) {
+            self.maybe_close_episode().await;
+        }
         // 展开之后发给模型的是另一段文本，但界面上要显示用户**打的字**。
         let echo = Some(raw.clone());
         // 热重载落点：每轮开始前重读配置与应用设置。
@@ -1012,6 +1156,7 @@ impl Runner {
         // **必须在追加这条用户消息之前补上** —— 补在它之后，普通用户消息就会
         // 插在 tool_use 与 tool_result 中间，那仍然是一份非法历史。
         self.settle_history();
+        let turn_start = self.thread.messages.len();
         self.thread.append_user(text.clone());
         // 标题在这一刻并行去生成，**不挡这一轮**（见 [`Runner::spawn_title`]）。
         // 放在 append 之后：carter 的 Recorder 是惰性建文件的，第一条消息落盘
@@ -1045,6 +1190,7 @@ impl Runner {
         self.finish_changes(result.used_tools).await;
         self.after_turn(&result).await;
         self.drive_goal(result, git).await;
+        self.last_message_at = Some(crate::protocol::now_ms());
         self.emit(SessionEvent::Idle);
     }
 

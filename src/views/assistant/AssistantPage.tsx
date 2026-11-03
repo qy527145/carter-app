@@ -34,6 +34,10 @@ import {
 import {
   approveAssistantDecision,
   assistantTicketAction,
+  getAssistantEpisode,
+  saveAssistantMemory,
+  type AssistantEpisode,
+  type AssistantMemory,
   deleteAssistantSource,
   dismissAssistantDecision,
   pollAssistantSource,
@@ -218,6 +222,7 @@ export function AssistantPage() {
 
         <SourcesSection sources={a.sources} busy={a.busy} />
         <RulesSection settings={a.settings} />
+        <MemorySection memories={a.memories ?? []} episodes={a.episodes ?? []} />
         <HistorySection decisions={a.decisions} ended={ended} />
       </div>
     </div>
@@ -898,6 +903,215 @@ function SettingsEditor({
 // ---------------------------------------------------------------------------
 // 记录
 // ---------------------------------------------------------------------------
+
+/**
+ * 助理对话的长期记忆与往期纪要（见后端 `assistant/memory.rs`）。
+ *
+ * 记忆是模型每轮都会读的东西，必须能看见、能改、能删 —— 否则一条记错的「用户希望……」
+ * 会悄悄影响以后所有的判断。每条带着出处（用户哪天说的哪句话），删之前能判断。
+ */
+function MemorySection({
+  memories,
+  episodes,
+}: {
+  memories: AssistantMemory[];
+  episodes: AssistantEpisode[];
+}) {
+  const [adding, setAdding] = useState(false);
+  const [draft, setDraft] = useState("");
+  const add = () => {
+    const t = draft.trim();
+    if (!t) return;
+    saveAssistantMemory(null, t)
+      .then(() => {
+        setDraft("");
+        setAdding(false);
+      })
+      .catch(toastError);
+  };
+  return (
+    <Section
+      title="长期记忆"
+      action={
+        <Button size="sm" onClick={() => setAdding((x) => !x)}>
+          <Plus size={12} />
+          添加
+        </Button>
+      }
+    >
+      <p className="mb-2 text-[11px] text-dim">
+        助理对话每天（或空闲几小时后）整理成一期：原话进往期存档，只把你说过的偏好与约定记在这里，
+        每轮都会带给模型。也可以在对话里直接说「记住……」。
+      </p>
+      {adding && (
+        <div className="mb-2 flex gap-2">
+          <Input
+            autoFocus
+            value={draft}
+            placeholder="例如：周末别打扰我，线上故障除外"
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") add();
+              if (e.key === "Escape") setAdding(false);
+            }}
+          />
+          <Button size="sm" variant="primary" disabled={!draft.trim()} onClick={add}>
+            保存
+          </Button>
+        </div>
+      )}
+      {memories.length === 0 && !adding ? (
+        <div className="text-xs text-dim">还没有。</div>
+      ) : (
+        <div className="space-y-1">
+          {memories.map((m) => (
+            <MemoryRow key={m.id} m={m} />
+          ))}
+        </div>
+      )}
+      {episodes.length > 0 && (
+        <div className="mt-3">
+          <Disclosure title={`往期纪要（${episodes.length} 期）`}>
+            <div className="space-y-1.5 pt-2">
+              {[...episodes].reverse().map((e) => (
+                <EpisodeRow key={e.number} e={e} />
+              ))}
+            </div>
+          </Disclosure>
+        </div>
+      )}
+    </Section>
+  );
+}
+
+function MemoryRow({ m }: { m: AssistantMemory }) {
+  const [editing, setEditing] = useState(false);
+  const [text, setText] = useState(m.text);
+  const [confirm, setConfirm] = useState(false);
+  const save = () => {
+    const t = text.trim();
+    if (!t || t === m.text) {
+      setEditing(false);
+      return;
+    }
+    saveAssistantMemory(m.id, t)
+      .then(() => setEditing(false))
+      .catch(toastError);
+  };
+  return (
+    <div className="group flex items-start gap-2 rounded-md px-2 py-1.5 hover:bg-ink/[0.03]">
+      <div className="min-w-0 flex-1">
+        {editing ? (
+          <Input
+            autoFocus
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            onBlur={save}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") save();
+              if (e.key === "Escape") {
+                setText(m.text);
+                setEditing(false);
+              }
+            }}
+          />
+        ) : (
+          <div className="text-sm text-ink">{m.text}</div>
+        )}
+        <div className="mt-0.5 truncate text-[11px] text-dim" title={m.source}>
+          {m.source}
+        </div>
+      </div>
+      <span className="flex shrink-0 gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+        <IconButton title="改" onClick={() => setEditing(true)}>
+          <Pencil size={12} />
+        </IconButton>
+        <IconButton title="删掉" onClick={() => setConfirm(true)}>
+          <Trash size={12} />
+        </IconButton>
+      </span>
+      {confirm && (
+        <ConfirmDialog
+          title="删掉这条记忆"
+          danger
+          confirmLabel="删掉"
+          message={<>助理之后就不再按「{m.text}」行事了。</>}
+          onCancel={() => setConfirm(false)}
+          onConfirm={() => {
+            setConfirm(false);
+            saveAssistantMemory(m.id, "").catch(toastError);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+/** 一期的纪要；点开看那一期的原话（往期存档）。 */
+function EpisodeRow({ e }: { e: AssistantEpisode }) {
+  const [open, setOpen] = useState(false);
+  const [lines, setLines] = useState<{ who: string; text: string }[] | null>(null);
+  const toggle = () => {
+    const next = !open;
+    setOpen(next);
+    if (next && lines === null) {
+      getAssistantEpisode(e.number)
+        .then((msgs) =>
+          setLines(
+            msgs
+              .map((m) => ({
+                who: m.role === "user" ? "你" : "助理",
+                text: m.blocks
+                  .filter((b) => b.kind === "text")
+                  .map((b) => (b as { text: string }).text)
+                  .join("\n")
+                  .trim(),
+              }))
+              .filter((l) => l.text)
+              .map((l) =>
+                l.text.startsWith("【助理汇报】") || l.text.startsWith("【新事件】")
+                  ? { who: "汇报", text: l.text }
+                  : l,
+              ),
+          ),
+        )
+        .catch((err) => {
+          setLines([]);
+          toastError(err);
+        });
+    }
+  };
+  return (
+    <div className="rounded-md px-2 py-1.5 text-[11px] hover:bg-ink/[0.03]">
+      <button onClick={toggle} className="flex w-full items-start gap-2 text-left">
+        <ChevronRight
+          size={11}
+          className={`mt-0.5 shrink-0 text-dim transition-transform ${open ? "rotate-90" : ""}`}
+        />
+        <span className="shrink-0 text-dim" title={`${fullTime(e.started_at)} ~ ${fullTime(e.ended_at)}`}>
+          第 {e.number} 期 · {relTime(e.ended_at)}
+        </span>
+        <span className="min-w-0 flex-1 whitespace-pre-wrap text-ink/80">{e.summary}</span>
+      </button>
+      <Collapse open={open}>
+        <div className="mt-1.5 max-h-80 space-y-1 overflow-y-auto border-l border-edge pl-3">
+          {lines === null ? (
+            <Loading />
+          ) : lines.length === 0 ? (
+            <div className="text-dim">这一期的存档读不出来。</div>
+          ) : (
+            lines.map((l, i) => (
+              <div key={i} className="whitespace-pre-wrap break-words">
+                <span className="text-dim">{l.who}：</span>
+                <span className="text-ink/80">{l.text}</span>
+              </div>
+            ))
+          )}
+        </div>
+      </Collapse>
+    </div>
+  );
+}
 
 function HistorySection({
   decisions,

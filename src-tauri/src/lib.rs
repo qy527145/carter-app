@@ -4,7 +4,7 @@
 //! 把错误转成字符串。真正的状态与编排在 `carter-app-core` 里，那里不依赖 Tauri，
 //! 可以脱离 webview 测。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -680,6 +680,22 @@ use carter_app_core::assistant::runtime as assistant;
 #[tauri::command]
 fn get_assistant(shell: State<'_, Arc<AppShell>>) -> assistant::AssistantView {
     assistant::view(&shell)
+}
+
+#[tauri::command]
+fn save_assistant_memory(
+    shell: State<'_, Arc<AppShell>>,
+    id: Option<String>,
+    text: String,
+) -> Result<(), String> {
+    assistant::save_memory(shell.inner(), id, text)
+}
+
+/// 往期存档里第 `number` 期的原始对话（面板上展开那一期时看）。
+#[tauri::command]
+fn get_assistant_episode(number: u32) -> Vec<carter_app_core::view::MessageView> {
+    use carter_app_core::assistant::memory;
+    carter_app_core::view::to_views(&memory::load_archive(&memory::archive_dir(), number))
 }
 
 #[tauri::command]
@@ -1705,6 +1721,8 @@ pub fn run() {
             // 常驻助理
             get_assistant,
             save_assistant_settings,
+            save_assistant_memory,
+            get_assistant_episode,
             save_assistant_source,
             delete_assistant_source,
             poll_assistant_source,

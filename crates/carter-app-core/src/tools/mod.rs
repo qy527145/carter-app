@@ -87,7 +87,9 @@ use agent::AgentTool;
 use ask_user::{AskRequest, AskUserTool};
 use assistant_config::{AssistantConfigTool, Kind as ConfigKind};
 use assistant_report::AssistantReportTool;
-use assistant_ticket::{AssistantTicketTool, Kind as TicketKind};
+use assistant_ticket::{
+    AssistantMemoryTool, AssistantRecallTool, AssistantTicketTool, Kind as TicketKind,
+};
 use background::{BackgroundShells, BashOutputTool, KillShellTool};
 use bash::{PlatformBash, ShellCwd};
 use control::RunningTools;
@@ -366,6 +368,9 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
         for kind in [TicketKind::Reply, TicketKind::Act, TicketKind::Proposal] {
             push(Arc::new(AssistantTicketTool::new(shell.clone(), kind)), &mut tools);
         }
+        // 长期记忆与往期检索（见 `assistant/memory.rs`）。
+        push(Arc::new(AssistantMemoryTool::new(store.clone())), &mut tools);
+        push(Arc::new(AssistantRecallTool::new(store.clone())), &mut tools);
     }
 
     tools

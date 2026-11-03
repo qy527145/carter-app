@@ -98,21 +98,17 @@ pub fn proposal_text(d: &Decision) -> String {
     s
 }
 
-/// 往助理对话里送一段话。对话没在跑就先开起来；开不起来返回 false，
+/// 往助理对话里记一条汇报。对话没在跑就先开起来；开不起来返回 false，
 /// 调用方还有系统通知兜底。
+///
+/// 只记、不跑模型（`Command::Record`）：用户不在场时那一轮没人看，汇报却会把上下文
+/// 越撑越大。用户下次开口时，模型连同这期间的汇报一起看到。
 fn push(shell: &Arc<AppShell>, text: String) -> bool {
     if let Err(e) = ensure(shell) {
         tracing::warn!(error = %e, "助理：开不出助理对话，汇报只走系统通知");
         return false;
     }
-    shell.send(
-        CHAT_SESSION_ID,
-        Command::SendPrompt {
-            text,
-            id: None,
-            interject: false,
-        },
-    )
+    shell.send(CHAT_SESSION_ID, Command::Record { text })
 }
 
 pub fn push_report(shell: &Arc<AppShell>, t: &Ticket) -> bool {

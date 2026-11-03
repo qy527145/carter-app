@@ -492,6 +492,9 @@ export function reduceConv(c: Conv, e: SessionEvent, sessionId?: string): Partia
     }
     case "notice":
       return { notice: e.message };
+    // 面板的记忆与纪要由事件层去重拉（见 `lib/events.ts`），对话这边不用动。
+    case "assistant_episode":
+      return {};
     case "title":
       // 标题不是对话内容，是会话列表里那一行的属性 —— 由事件层去重拉列表
       // （见 `lib/events.ts`）。这里什么都不用改。
