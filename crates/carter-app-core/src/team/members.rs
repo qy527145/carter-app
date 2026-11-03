@@ -232,6 +232,65 @@ pub fn load(team_root: &Path) -> Roster {
     out
 }
 
+/// 读全部成员：工作区里的，**加上**其他分支（本地与远端）上已经提交了的。
+///
+/// 成员文件是状态、跟着分支走。只读工作区的话，张三在 `main` 上加入，李四在
+/// `feature/x` 上就不知道有张三 —— @ 不到他，也没法把任务派给他，直到合并。
+/// 名单本来就只增不减、一人一个文件，把各分支上的并起来不会有歧义：同一个 id
+/// 以工作区里的为准（那是本机最新写下的），其余分支上的按提交时间取最新的一份。
+pub fn load_all(store: &super::store::Store) -> Roster {
+    let mut out = load(store.root());
+    let root = store.project_root();
+    let dir = format!("{}/{MEMBERS_DIR}", team_rel(store));
+    // 所有分支上碰过成员目录的提交里出现过的成员文件。`--name-only` 列文件名，
+    // 每个文件取最新那次提交里的内容。
+    let Ok(raw) = super::git::git(
+        root,
+        &[
+            "log",
+            "--branches",
+            "--remotes",
+            "--format=%x1e%H",
+            "--name-only",
+            "--diff-filter=AM",
+            "--",
+            &dir,
+        ],
+    ) else {
+        return out;
+    };
+    let mut seen: std::collections::HashSet<String> =
+        out.members.iter().map(|m| m.id.clone()).collect();
+    for chunk in raw.split('\u{1e}') {
+        let mut lines = chunk.lines().map(str::trim).filter(|l| !l.is_empty());
+        let Some(sha) = lines.next() else { continue };
+        for path in lines {
+            let Some(id) = path
+                .rsplit('/')
+                .next()
+                .and_then(|f| f.strip_suffix(".json"))
+            else {
+                continue;
+            };
+            // `log` 新的在前：第一次见到的就是最新的那份。
+            if !valid_member_id(id) || !seen.insert(id.to_string()) {
+                continue;
+            }
+            let Ok(text) = super::git::git(root, &["show", &format!("{sha}:{path}")]) else {
+                continue;
+            };
+            if let Ok(m) = super::store::parse_json::<Member>(&text) {
+                if m.id == id {
+                    out.members.push(m);
+                }
+            }
+        }
+    }
+    out.members
+        .sort_by(|a, b| a.joined_at.cmp(&b.joined_at).then_with(|| a.id.cmp(&b.id)));
+    out
+}
+
 /// 原子写一个成员文件。
 pub fn save(team_root: &Path, m: &Member) -> Result<(), String> {
     if !valid_member_id(&m.id) {
@@ -292,6 +351,65 @@ pub fn join(team_root: &Path, identity: &Identity, how: Join) -> Result<(Member,
             Ok((m, false))
         }
     }
+}
+
+/// 加入并让别人知道：写成员文件 → **只提交成员目录** → 广播一条 `join`。
+///
+/// 只提交成员目录、不连带别的：用户工作区里可能有一堆还没打算提交的团队改动
+/// （模型刚建了一半的任务），加入这个动作不该替他把那些也提交了。
+///
+/// 已经在名单里时什么都不做，返回那个成员。
+pub fn join_and_announce(
+    store: &super::store::Store,
+    how: Join,
+    via: Option<&str>,
+) -> Result<(Member, bool), String> {
+    let root = store.project_root();
+    let me = super::git::local_identity(root)?;
+    let (m, created) = join(store.root(), &me, how)?;
+    // 「我是 X 的另一台机器」也改了文件（追加了邮箱），一样要提交。
+    let changed = created || load(store.root()).by_id(&m.id).is_some_and(|x| x.has_email(&me.email));
+    if changed && super::git::in_repo(root) {
+        let rel = team_rel(store);
+        let dir = format!("{rel}/{MEMBERS_DIR}");
+        super::git::stage_team(root, &dir)?;
+        let subject = if created {
+            format!("chore(carter): {} 加入团队", m.name)
+        } else {
+            format!("chore(carter): {} 添加一台机器", m.name)
+        };
+        super::git::commit_team(root, &dir, &subject)?;
+        if created {
+            super::events::append(
+                root,
+                &super::events::Draft {
+                    kind: super::events::EventKind::JOIN.into(),
+                    from: Some(m.id.clone()),
+                    to: vec![super::events::EVERYONE.into()],
+                    via: via.map(str::to_string),
+                    subject: format!("carter/join {}", m.name),
+                    ..Default::default()
+                },
+            )?;
+            let _ = super::events::push(root);
+        }
+    }
+    Ok((m, created))
+}
+
+fn team_rel(store: &super::store::Store) -> String {
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let (repo, team) = (canon(store.project_root()), canon(store.root()));
+    team.strip_prefix(&repo)
+        .ok()
+        .map(|p| {
+            p.components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("/")
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| super::store::DIR.to_string())
 }
 
 /// 改自己的称呼。

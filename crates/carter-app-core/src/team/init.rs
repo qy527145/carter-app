@@ -183,27 +183,9 @@ fn create_skeleton(
         steps.push("写入 .gitignore（忽略 .cache/）".into());
     }
 
-    // .gitattributes：**把脚本钉成 LF。**
-    //
-    // Windows 上 `core.autocrlf=true`（Git for Windows 的默认值）检出时会把文本文件
-    // 转成 CRLF。对 `.sh` 来说这是致命的：shebang 变成 `#!/bin/sh\r`，内核找不到
-    // 解释器，连 Git Bash 都报 "bad interpreter: No such file or directory"。
-    // 这个错误出现在**别人**的机器上、而不是提交它的人那里，所以最容易拖很久。
-    //
-    // 只钉脚本与技能，不碰数据：JSON 用 CRLF 也能解析，钉了反而制造无谓的 diff。
-    let attrs = root.join(".gitattributes");
-    if !attrs.is_file() {
-        std::fs::write(
-            &attrs,
-            "# 脚本必须是 LF：CRLF 会让 shebang 变成 `#!/bin/sh\\r`，直接跑不起来。\n\
-             # 这个问题只在 Windows 检出的那份上出现，所以必须写在仓库里。\n\
-             bin/* text eol=lf\n\
-             *.sh text eol=lf\n",
-        )
-        .map_err(|e| format!("写 {} 失败：{e}", attrs.display()))?;
-        steps.push("写入 .gitattributes（脚本固定 LF）".into());
-    }
-
+    // 不再写 `.gitattributes`：它当初只为把 `bin/carter-team` 钉成 LF（CRLF 会弄坏
+    // shebang），脚本已经不装了。已有仓库里的那份不删 —— 它无害，用户也可能往里
+    // 加过自己的规则。
     // 技能：只补缺。用户改过的 SKILL.md 不会被覆盖。
     let skills_dir = root.join("skills");
     if !skills_dir.is_dir() {
@@ -212,6 +194,11 @@ fn create_skeleton(
     let written = skills::install_builtin(&skills_dir)?;
     if !written.is_empty() {
         steps.push(format!("内置技能：{}", written.join("、")));
+    }
+    // 旧版初始化装过的命令行脚本：现在一切走 `team` 工具，留着它只会让 agent
+    // 多一条走不通（Windows）或行为不一致的路。
+    if let Some(note) = skills::retire_script(project_root)? {
+        steps.push(note);
     }
 
     Ok(())
@@ -354,6 +341,41 @@ mod tests {
         let tracked = String::from_utf8_lossy(&tracked.stdout);
         assert!(tracked.contains("team.json"), "team.json 要在 git 里");
         assert!(tracked.contains(".carter/skills"), "技能要在 git 里");
+    }
+
+    /// 用旧版应用初始化过的仓库：重新初始化要删掉我们装的脚本、把教 agent 调脚本的
+    /// 旧技能换成新版，而用户改过的技能原样保留。
+    #[test]
+    fn reinit_retires_the_script_and_upgrades_script_era_skills() {
+        let dir = repo("legacy");
+        initialize(&dir, Some("t")).unwrap();
+        let root = dir.join(DIR);
+        // 造一个旧仓库的样子：v2 脚本 + v1 的 carter-task + 用户改过的 carter-goal。
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        std::fs::write(
+            root.join("bin/carter-team"),
+            "#!/bin/sh\n# carter-team-version: 2\nset -eu\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("skills/carter-task/SKILL.md"),
+            "---\nname: carter-task\ndescription: 需要拆解任务、更新任务状态、认领任务、或者回答……\n---\n.carter/bin/carter-team task new …\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("skills/carter-goal/SKILL.md"),
+            "---\nname: carter-goal\ndescription: 我们组自己的目标约定\n---\n",
+        )
+        .unwrap();
+
+        let out = initialize(&dir, None).unwrap();
+        assert!(!root.join("bin").exists(), "旧脚本与空的 bin/ 都该没了：{:?}", out.steps);
+        let task = std::fs::read_to_string(root.join("skills/carter-task/SKILL.md")).unwrap();
+        assert!(task.contains("\"action\": \"task_new\""), "carter-task 要换成教工具的新版");
+        assert!(!task.contains("bin/carter-team"));
+        let goal = std::fs::read_to_string(root.join("skills/carter-goal/SKILL.md")).unwrap();
+        assert!(goal.contains("我们组自己的"), "用户改过的技能不能动");
+        assert!(out.steps.iter().any(|s| s.contains("carter-task（v1")), "{:?}", out.steps);
     }
 
     #[test]

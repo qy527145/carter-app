@@ -585,6 +585,23 @@ pub fn read(root: &Path, limit: usize) -> Vec<Event> {
     out
 }
 
+/// 按**链上的顺序**（子在前、父在后）读事件链上的事件，不按时间重排。
+///
+/// 认领的裁决要用它：链的顺序是推送时排出来的，全团队看到的都一样；提交时间
+/// 来自各人的本机时钟，两台机器差几秒就能把先后颠倒过来。
+pub fn chain(root: &Path, limit: usize) -> Vec<Event> {
+    if !git::git_available() || !git::in_repo(root) {
+        return Vec::new();
+    }
+    let count = format!("-n{limit}");
+    git(
+        root,
+        &["log", &count, "--topo-order", "--glob=refs/carter", LOG_FORMAT],
+    )
+    .map(|raw| parse_log(&raw, false).into_iter().map(|(_, e)| e).collect())
+    .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

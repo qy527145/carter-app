@@ -16,7 +16,7 @@
 //! * [`members`] —— 成员名单：`members/<id>.json`，一人一文件，git 邮箱只用来认人。
 //! * [`inbox`] —— 从事件流里挑出「跟我有关」的那些，界面与观察员共用。
 //! * [`init`] —— 初始化：`git init` + 建骨架 + 首次提交 + 自动建同步观察源。
-//! * [`skills`] —— 内置技能与 `carter-team` 薄壳命令。
+//! * [`skills`] —— 内置技能：教 agent 用 `team` 工具读写团队目录。
 //! * [`validate`] —— 语义校验：坏文件在哪、该怎么改。写路径与 `team` 工具都走它。
 //!
 //! ## 与 Bibrain 的关系
@@ -46,7 +46,7 @@ pub mod validate;
 
 pub use init::{InitOutcome, initialize};
 pub use model::{
-    Board, BoardColumn, BoardGroup, Card, Category, CategoryFile, Counts, Goal, GoalStatus, GoalView,
+    Board, Category, CategoryFile, Counts, Goal, GoalStatus, GoalView,
     Identity, Kind, Priority, Task, TaskStatus, TaskView, TeamMeta, between, new_id, valid_id,
 };
 pub use store::{Loaded, Store};

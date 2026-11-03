@@ -114,7 +114,7 @@ pub fn my_task_ids(store: &Store, roster: &Roster, me: &Identity) -> std::collec
 
 /// 读这个项目里跟本机有关的最近 `limit` 条。
 pub fn read(store: &Store, me: &Identity, limit: usize) -> Vec<InboxItem> {
-    let roster = super::members::load(store.root());
+    let roster = super::members::load_all(store);
     let mine = my_task_ids(store, &roster, me);
     // 多读一些再筛：大部分事件跟我无关。
     let evs = events::read(store.project_root(), limit.saturating_mul(5).max(100));
@@ -169,7 +169,7 @@ pub fn observe(cwd: &Path, limit: usize) -> Result<String, String> {
     let store = Store::discover(cwd).ok_or("这个目录没有团队目录")?;
     let me = super::git::local_identity(store.project_root())?;
     let _ = events::fetch(store.project_root());
-    let roster = super::members::load(store.root());
+    let roster = super::members::load_all(&store);
     let titles = task_titles(&store);
     let items = read(&store, &me, limit);
     // 旧的在前：观察源按行比对，新事件追加在末尾读起来更自然。

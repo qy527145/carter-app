@@ -19,7 +19,7 @@
 //! ## 为什么与 `Store` 分开
 //!
 //! `Store` 管读写，它的错误是「读不到 / 写不进」。这里管**语义**：id 与目录名对不对、
-//! 父子是不是成环、依赖指向的任务在不在、看板的卡片挂的列存不存在。
+//! 父子是不是成环、依赖指向的任务在不在、看板关联的目标存不存在。
 //!
 //! 分开还有一个实际好处：校验器吃的是**已经解析好的结构 + 原始 JSON**，不碰文件系统。
 //! 于是它能在「还没写盘之前」就验一遍，坏数据根本没机会落地。
@@ -218,81 +218,28 @@ pub fn check_task(path: &str, task: &Task) -> Vec<Issue> {
     out
 }
 
-/// 一块看板。
-pub fn check_board(path: &str, board: &Board) -> Vec<Issue> {
+/// 一块看板。HTML 本身不验 —— 那是自由版式；只验列表与关联要用到的那两处元信息。
+pub fn check_board(path: &str, board: &Board, goal_ids: &HashSet<String>) -> Vec<Issue> {
     let mut out = Vec::new();
-    if !valid_id(Kind::Board, &board.id) {
-        out.push(Issue::new(path, format!("id `{}` 不合法", board.id)));
-    }
-    if board.title.trim().is_empty() {
-        out.push(Issue::new(path, "看板没有标题"));
-    }
-    if board.columns.is_empty() {
+    if html_title(&board.html).is_none_or(|t| t.is_empty()) {
         out.push(
-            Issue::new(path, "一列都没有")
-                .with_fix("至少给一列，否则卡片没地方放"),
+            Issue::new(path, "页面没有 <title>")
+                .with_fix("在 <head> 里加一个 <title>，列表里显示的就是它"),
         );
     }
-    let mut ids = HashSet::new();
-    for col in &board.columns {
-        if col.id.trim().is_empty() {
-            out.push(Issue::new(path, "有一列的 id 是空的").with_fix("每列都要一个稳定的 id"));
-        }
-        if !ids.insert(col.id.as_str()) {
+    if let Some(g) = board.goal_id.as_deref() {
+        if !goal_ids.contains(g) {
             out.push(
-                Issue::new(path, format!("列 id `{}` 重复", col.id))
-                    .with_fix("同一块看板里列 id 必须唯一"),
+                Issue::new(path, format!("carter-goal 指向的目标 `{g}` 不存在"))
+                    .with_fix("改成一个现有目标的 id，或者把那条 <meta> 去掉"),
             );
-        }
-        if col.name.trim().is_empty() {
-            out.push(Issue::new(path, format!("列 `{}` 没有名字", col.id)));
-        }
-    }
-    let mut gids = HashSet::new();
-    for g in &board.groups {
-        if !gids.insert(g.id.as_str()) {
-            out.push(Issue::new(path, format!("分组 id `{}` 重复", g.id)));
-        }
-    }
-    out
-}
-
-/// 一张卡。
-pub fn check_card(path: &str, card: &Card, board: Option<&Board>) -> Vec<Issue> {
-    let mut out = Vec::new();
-    if !valid_id(Kind::Card, &card.id) {
-        out.push(Issue::new(path, format!("id `{}` 不合法", card.id)));
-    }
-    if card.text.trim().is_empty() {
-        out.push(Issue::new(path, "卡片正文是空的").with_fix("一张卡至少要有一句话"));
-    }
-    if let Some(b) = board {
-        if !b.columns.iter().any(|c| c.id == card.column_id) {
-            let legal = b
-                .columns
-                .iter()
-                .map(|c| c.id.as_str())
-                .collect::<Vec<_>>()
-                .join(" / ");
-            out.push(
-                Issue::new(path, format!("column_id `{}` 在这块看板里不存在", card.column_id))
-                    .with_fix(format!("这一列是 {legal} 之一")),
-            );
-        }
-        if let Some(g) = card.group_id.as_deref() {
-            if !b.groups.iter().any(|x| x.id == g) {
-                out.push(
-                    Issue::new(path, format!("group_id `{g}` 在这块看板里不存在"))
-                        .with_fix("去掉它，或者先在 board.json 的 groups 里加一个"),
-                );
-            }
         }
     }
     out
 }
 
 // ---------------------------------------------------------------------------
-// 跨实体：整个目标 / 整块看板
+// 跨实体：整个目标
 // ---------------------------------------------------------------------------
 
 /// 一个目标下的全部任务：父子成环、依赖成环、引用了不存在的任务。
@@ -403,36 +350,8 @@ fn find_cycle<'a>(
     None
 }
 
-/// 一块看板的卡片：列 / 分组引用，以及同一列里顺序值撞车。
-pub fn check_card_set(board: &Board, cards: &[Card]) -> Vec<Issue> {
-    let mut out = Vec::new();
-    for c in cards {
-        out.extend(check_card(&card_path(&board.id, &c.id), c, Some(board)));
-    }
-    // 同一列里两张卡顺序完全一样：界面上会按 id 兜底排，但「谁在前」就变成随机的了。
-    let mut seen: HashMap<(&str, u64), &str> = HashMap::new();
-    for c in cards {
-        // 浮点没法直接当 map 键，用位模式。
-        let key = (c.column_id.as_str(), c.order.to_bits());
-        if let Some(prev) = seen.insert(key, c.id.as_str()) {
-            out.push(
-                Issue::new(
-                    card_path(&board.id, c.id.as_str()),
-                    format!("与 {} 在 `{}` 列里顺序值相同（{}）", prev, c.column_id, c.order),
-                )
-                .with_fix("改一个 order，让同一列里不再撞"),
-            );
-        }
-    }
-    out
-}
-
 fn task_path(goal_id: &str, task_id: &str) -> String {
     format!("goals/{goal_id}/tasks/{task_id}.json")
-}
-
-fn card_path(board_id: &str, card_id: &str) -> String {
-    format!("boards/{board_id}/cards/{card_id}.json")
 }
 
 // ---------------------------------------------------------------------------
@@ -459,6 +378,7 @@ pub fn check_store(store: &super::store::Store) -> Report {
     }
 
     // 每个目标 + 它下面的任务。
+    let mut goal_ids = HashSet::new();
     let goals_dir = store.root().join("goals");
     if let Ok(entries) = std::fs::read_dir(&goals_dir) {
         for entry in entries.flatten() {
@@ -481,6 +401,7 @@ pub fn check_store(store: &super::store::Store) -> Report {
             }
 
             checked += 1;
+            goal_ids.insert(goal_id.to_string());
             let goal_file = dir.join("goal.json");
             match std::fs::read_to_string(&goal_file)
                 .map_err(|e| e.to_string())
@@ -546,65 +467,26 @@ pub fn check_store(store: &super::store::Store) -> Report {
         }
     }
 
-    // 看板 + 卡片。
-    let boards_dir = store.root().join("boards");
-    if let Ok(entries) = std::fs::read_dir(&boards_dir) {
+    // 看板。
+    let boards = store.boards();
+    for (path, why) in &boards.issues {
+        issues.push(Issue::new(path.clone(), why.clone()));
+    }
+    for board in &boards.items {
+        checked += 1;
+        issues.extend(check_board(&format!("boards/{}.html", board.id), board, &goal_ids));
+    }
+    // 旧版的 `boards/<id>/board.json` 目录：现在不读了，留着只会让人以为它还有用。
+    if let Ok(entries) = std::fs::read_dir(store.root().join("boards")) {
         for entry in entries.flatten() {
             let dir = entry.path();
-            if !dir.is_dir() {
-                continue;
+            if dir.is_dir() && dir.join("board.json").is_file() {
+                let name = dir.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                issues.push(
+                    Issue::new(format!("boards/{name}/"), "旧格式的看板（board.json + cards/），已经不显示了")
+                        .with_fix(format!("让卡特把它改写成 boards/{name}.html，再删掉这个目录")),
+                );
             }
-            let Some(board_id) = dir.file_name().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            if !valid_id(Kind::Board, board_id) {
-                issues.push(Issue::new(
-                    format!("boards/{board_id}"),
-                    "目录名不是一个合法的看板 id",
-                ));
-                continue;
-            }
-            checked += 1;
-            let board = match std::fs::read_to_string(dir.join("board.json"))
-                .map_err(|e| e.to_string())
-                .and_then(|raw| super::store::parse_json::<Board>(&raw))
-            {
-                Err(e) => {
-                    issues.push(Issue::new(
-                        format!("boards/{board_id}/board.json"),
-                        format!("解析失败：{e}"),
-                    ));
-                    continue;
-                }
-                Ok(b) => b,
-            };
-            issues.extend(check_board(&format!("boards/{board_id}/board.json"), &board));
-
-            let mut cards = Vec::new();
-            if let Ok(files) = std::fs::read_dir(dir.join("cards")) {
-                for f in files.flatten() {
-                    let p = f.path();
-                    if p.extension().and_then(|s| s.to_str()) != Some("json") {
-                        continue;
-                    }
-                    checked += 1;
-                    let Some(stem) = p.file_stem().and_then(|s| s.to_str()).map(str::to_string)
-                    else {
-                        continue;
-                    };
-                    match std::fs::read_to_string(&p)
-                        .map_err(|e| e.to_string())
-                        .and_then(|raw| super::store::parse_json::<Card>(&raw))
-                    {
-                        Err(e) => issues.push(Issue::new(
-                            format!("boards/{board_id}/cards/{stem}.json"),
-                            format!("解析失败：{e}"),
-                        )),
-                        Ok(card) => cards.push(card),
-                    }
-                }
-            }
-            issues.extend(check_card_set(&board, &cards));
         }
     }
 
@@ -687,13 +569,28 @@ mod tests {
     }
 
     #[test]
-    fn cards_must_point_at_a_real_column() {
-        let b = Board::new("回顾", &me());
-        let mut card = Card::new(&b.id, "col-nope", "一句话", &me());
-        card.column_id = "col-nope".into();
-        let issues = check_card("", &card, Some(&b));
-        assert_eq!(issues.len(), 1);
-        assert!(issues[0].render().contains("col-todo"), "要列出合法的列");
+    fn boards_need_a_title_and_a_real_goal() {
+        let root = tmp("board");
+        let store = super::super::store::Store::open(&root);
+        store.save_meta(&TeamMeta::new("t", &me())).unwrap();
+        let g = Goal::new("g", &me());
+        store.save_goal(&g).unwrap();
+        store
+            .save_board("b-ok", &stamp_board("<p>x</p>", Some("好的"), Some(&g.id)))
+            .unwrap();
+        store.save_board("b-bare", "<p>x</p>").unwrap();
+        store
+            .save_board("b-dangling", &stamp_board("<p>x</p>", Some("t"), Some("g-gone")))
+            .unwrap();
+        // 旧格式留下的目录。
+        std::fs::create_dir_all(root.join("boards/b-old/cards")).unwrap();
+        std::fs::write(root.join("boards/b-old/board.json"), "{}").unwrap();
+
+        let text = check_store(&store).render();
+        assert!(!text.contains("b-ok"), "{text}");
+        assert!(text.contains("boards/b-bare.html") && text.contains("<title>"), "{text}");
+        assert!(text.contains("g-gone"), "{text}");
+        assert!(text.contains("boards/b-old/") && text.contains("旧格式"), "{text}");
     }
 
     /// 这正是用户遇到的那一次：`"P3"` 写进文件，而某个版本的应用只认 `"p3"`。

@@ -1755,6 +1755,7 @@ pub fn run() {
             team_status,
             team_initialize,
             team_overview,
+            team_board_html,
             team_my_tasks,
             team_commit,
             team_sync,
@@ -1962,21 +1963,15 @@ fn team_overview(cwd: String) -> Result<TeamOverview, String> {
     for (path, why) in &boards_loaded.issues {
         warnings.push(format!("{path}：{why}"));
     }
-    let mut boards = Vec::new();
-    for board in boards_loaded.items {
-        let cards = store.cards(&board.id);
-        for (path, why) in &cards.issues {
-            warnings.push(format!("{path}：{why}"));
-        }
-        boards.push(BoardRow {
-            id: board.id.clone(),
-            title: board.title.clone(),
-            description: board.description.clone(),
-            goal_id: board.goal_id.clone(),
-            columns: board.columns.clone(),
-            cards: cards.items,
-        });
-    }
+    let boards = boards_loaded
+        .items
+        .into_iter()
+        .map(|b| BoardRow {
+            id: b.id,
+            title: b.title,
+            goal_id: b.goal_id,
+        })
+        .collect();
 
     let meta = store.meta().ok();
     let identity = carter_app_core::team::git::local_identity(store.project_root()).ok();
@@ -2043,14 +2038,21 @@ struct TaskRow {
     due_at: Option<u64>,
 }
 
+/// 全景里只带看板的元信息：正文是一整页 HTML，切到看板页、选中那一块时再取
+/// （见 [`team_board_html`]），不必每次刷新全景都把所有页面搬一遍。
 #[derive(Serialize)]
 struct BoardRow {
     id: String,
     title: String,
-    description: String,
     goal_id: Option<String>,
-    columns: Vec<carter_app_core::team::BoardColumn>,
-    cards: Vec<carter_app_core::team::Card>,
+}
+
+/// 一块看板的整页 HTML。
+#[tauri::command]
+fn team_board_html(cwd: String, board_id: String) -> Result<String, String> {
+    let store = carter_app_core::team::Store::discover(Path::new(&cwd))
+        .ok_or("这个项目还没有初始化团队目录")?;
+    store.board(&board_id).map(|b| b.html)
 }
 
 /// 我名下的未完成任务。消息框下方的待办条用它。

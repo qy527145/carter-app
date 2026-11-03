@@ -1,5 +1,8 @@
 //! `team`：让模型直接读写 `.carter/` 里的目标、任务、看板。
 //!
+//! 看板是一整页 HTML（见 `model.rs` 的 [`Board`]）：工具只负责发号、补标题与关联、
+//! 原子写盘，版式全由模型决定。
+//!
 //! ## 为什么要有这个工具
 //!
 //! 技能里教模型「用 `.carter/bin/carter-team` 命令」，但那条路在三种情况下会断：
@@ -121,14 +124,17 @@ impl Tool for TeamTool {
                         "goal_new", "goal_update",
                         "task_new", "task_update", "task_status", "task_claim", "task_release",
                         "comment", "events", "check", "sync",
-                        "board_new", "card_new", "card_move"
+                        "board_list", "board_new", "board_update"
                     ],
-                    "description": "要做什么。先看 action 的分组：读用 overview / my_tasks / events；目标用 goal_*；任务用 task_*；看板用 board_* / card_*。"
+                    "description": "要做什么。先看 action 的分组：读用 overview / my_tasks / events；目标用 goal_*；任务用 task_*；看板用 board_*。"
                 },
                 "goal_id": { "type": "string", "description": "目标 id（g- 开头）。goal_* 与 task_new 必填。" },
                 "task_id": { "type": "string", "description": "任务 id（t- 开头）。task_* 必填。" },
-                "board_id": { "type": "string", "description": "看板 id（b- 开头）。card_* 必填。" },
-                "card_id": { "type": "string", "description": "卡片 id（k- 开头）。" },
+                "board_id": { "type": "string", "description": "看板 id（boards/ 下的文件名，不带 .html）。board_update 必填。" },
+                "html": {
+                    "type": "string",
+                    "description": "看板的整页 HTML（board_new 必填；board_update 给了就整页替换）。自由排版，样式与脚本都内联；格式约定见 carter-board 技能。"
+                },
                 "title": { "type": "string", "description": "标题。goal_new / task_new 必填；*_update 用它改名。" },
                 "description": { "type": "string", "description": "说明。目标写「为什么做、做到什么算完」，任务写做法。" },
                 "status": {
@@ -141,7 +147,7 @@ impl Tool for TeamTool {
                     "type": "array", "items": { "type": "string" },
                     "description": "前置任务 id 列表（要等它们先完成）。与 parent_id 是两件事，别混。"
                 },
-                "assignee": { "type": "string", "description": "负责人，写成 `名字 <邮箱>`，与 git 提交身份一致。传空串表示取消认领。" },
+                "assignee": { "type": "string", "description": "负责人，写成 `名字 <邮箱>`，与 git 提交身份一致。task_* 里是任务负责人，goal_update 里是目标负责人；传空串表示清掉。" },
                 "estimate_hours": { "type": "number", "description": "估时（小时）。" },
                 "deliverable": { "type": "string", "description": "交付物：一句话说清交什么。" },
                 "acceptance": {
@@ -149,8 +155,7 @@ impl Tool for TeamTool {
                     "description": "验收标准，每条都要可验证（「cargo test 通过」而不是「质量好」）。"
                 },
                 "blocked_reason": { "type": "string", "description": "受阻原因。status = blocked 时填。" },
-                "text": { "type": "string", "description": "卡片正文（card_new 必填）或评论正文（comment 必填）。" },
-                "column_id": { "type": "string", "description": "列 id。card_new / card_move 用；不给就落在第一列。" },
+                "text": { "type": "string", "description": "评论正文（comment 必填）。" },
                 "limit": { "type": "integer", "description": "events 取多少条，默认 30。" }
             },
             "required": ["action"]
@@ -174,13 +179,40 @@ impl TeamTool {
             .trim()
             .to_string();
 
+        // 不认识的参数直接报错，不静默忽略。
+        //
+        // 拼错一个字段（`prioirty`、`depend_on`）时，忽略它等于这次调用「成功了但没做
+        // 那件事」—— 模型会以为优先级已经改了，而它根本没被读到。合法的名字取自
+        // `parameters()` 那份 schema，加字段只改一处。
+        if let Some(obj) = args.as_object() {
+            let schema = self.parameters();
+            let known = schema
+                .get("properties")
+                .and_then(Value::as_object)
+                .ok_or("team 工具的参数表坏了")?;
+            let unknown: Vec<&str> = obj
+                .keys()
+                .map(String::as_str)
+                .filter(|k| !known.contains_key(*k))
+                .collect();
+            if !unknown.is_empty() {
+                let mut legal: Vec<&str> = known.keys().map(String::as_str).collect();
+                legal.sort_unstable();
+                return Err(format!(
+                    "不认识的参数：{}。这次调用没有执行。合法的参数有：{}",
+                    unknown.join("、"),
+                    legal.join(" / ")
+                ));
+            }
+        }
+
         let s = args.get("status").and_then(Value::as_str);
         let title = args.get("title").and_then(Value::as_str);
         let desc = args.get("description").and_then(Value::as_str);
         let goal_id = args.get("goal_id").and_then(Value::as_str);
         let task_id = args.get("task_id").and_then(Value::as_str);
         let board_id = args.get("board_id").and_then(Value::as_str);
-        let card_id = args.get("card_id").and_then(Value::as_str);
+        let html = args.get("html").and_then(Value::as_str);
         let text = args.get("text").and_then(Value::as_str);
 
         match action.as_str() {
@@ -284,6 +316,14 @@ impl TeamTool {
                         "状态只能是 active / paused / done / archived，收到 `{s}`"
                     ))?;
                 }
+                // 负责人：与任务的 assignee 同一个写法，空串 = 清掉。
+                if let Some(o) = args.get("assignee").and_then(Value::as_str) {
+                    goal.owner = if o.trim().is_empty() {
+                        None
+                    } else {
+                        Some(o.trim().to_string())
+                    };
+                }
                 goal.touch(&me);
                 self.check_goal(&store, &goal)?;
                 store.save_goal(&goal)?;
@@ -359,11 +399,16 @@ impl TeamTool {
                 store.save_task(&task)?;
                 self.stage(&store);
 
-                let mut msg = format!("已新建任务「{}」。\nid = {}", task.title, task.id);
+                // `id = …` 必须**单独一行**：技能让模型从回灌里取这一行拿到新 id，
+                // 后面再跟半句说明就会一起被取走。
+                let mut msg = format!("已新建任务「{}」。\nid = {}\n", task.title, task.id);
                 if !task.depends_on.is_empty() {
-                    msg.push_str(&format!(" 等 {} 之后才能开始。", task.depends_on.join("、")));
+                    msg.push_str(&format!(
+                        "要等 {} 完成才能开始。\n",
+                        task.depends_on.join("、")
+                    ));
                 }
-                Ok(msg)
+                Ok(msg.trim_end().to_string())
             }
 
             "task_update" => {
@@ -597,124 +642,76 @@ impl TeamTool {
                 Ok(out.join("\n"))
             }
 
+            "board_list" => {
+                let store = self.store()?;
+                let boards = store.boards();
+                let mut out: Vec<String> = boards
+                    .items
+                    .iter()
+                    .map(|b| {
+                        let goal = b.goal_id.as_deref().map(|g| format!(" · 关联 {g}")).unwrap_or_default();
+                        format!("- {}  ({}){goal}  boards/{}.html", b.title, b.id, b.id)
+                    })
+                    .collect();
+                if out.is_empty() {
+                    out.push("还没有看板。用 board_new 建一块。".into());
+                }
+                for (p, why) in &boards.issues {
+                    out.push(format!("（{p} 读不出来：{why}）"));
+                }
+                Ok(out.join("\n"))
+            }
+
             "board_new" => {
                 let store = self.store()?;
-                let me = self.me()?;
-                let title = title.ok_or("board_new 需要 title")?;
-                let mut board = Board::new(title.trim(), &me);
-                board.description = desc.unwrap_or("").trim().to_string();
-                if let Some(g) = goal_id.filter(|g| !g.trim().is_empty()) {
+                let title = title.map(str::trim).filter(|t| !t.is_empty()).ok_or("board_new 需要 title")?;
+                let body = html.map(str::trim).filter(|h| !h.is_empty()).ok_or(
+                    "board_new 需要 html：整页内容由你来写（格式见 carter-board 技能）",
+                )?;
+                let goal = goal_id.map(str::trim).filter(|g| !g.is_empty());
+                if let Some(g) = goal {
                     store.goal(g)?;
-                    board.goal_id = Some(g.to_string());
                 }
-                // 回顾看板的列和别人不一样，这里按标题判一下，省得模型还要多调一次。
-                if title.contains("回顾") || title.to_ascii_lowercase().contains("retro") {
-                    board.columns = ["做得好的", "要改的", "待跟进"]
-                        .into_iter()
-                        .enumerate()
-                        .map(|(i, name)| BoardColumn {
-                            id: format!("col-{}", i + 1),
-                            name: name.into(),
-                            order: i as f64 + 1.0,
-                            wip_limit: None,
-                        })
-                        .collect();
-                }
-                store.save_board(&board)?;
+                let id = new_id(Kind::Board);
+                store.save_board(&id, &stamp_board(body, Some(title), goal))?;
                 self.stage(&store);
-                Ok(format!(
-                    "已新建看板「{}」。\nid = {}\n列：{}",
-                    board.title,
-                    board.id,
-                    board
-                        .columns
-                        .iter()
-                        .map(|c| c.name.as_str())
-                        .collect::<Vec<_>>()
-                        .join(" / ")
-                ))
+                Ok(format!("已新建看板「{title}」。\nid = {id}\n文件：.carter/boards/{id}.html"))
             }
 
-            "card_new" => {
+            "board_update" => {
                 let store = self.store()?;
-                let me = self.me()?;
-                let bid = board_id.ok_or("card_new 需要 board_id")?;
-                let body = text.ok_or("card_new 需要 text")?.trim();
-                if body.is_empty() {
-                    return Err("text 不能为空".into());
+                let bid = board_id.ok_or("board_update 需要 board_id")?.trim();
+                let old = store.board(bid)?;
+                let goal = goal_id.map(str::trim).filter(|g| !g.is_empty());
+                if let Some(g) = goal {
+                    store.goal(g)?;
                 }
-                let board = store.board(bid)?;
-                let col = match args.get("column_id").and_then(Value::as_str) {
-                    Some(c) if !c.trim().is_empty() => board
-                        .columns
-                        .iter()
-                        .find(|x| x.id == c.trim())
-                        .ok_or(format!("看板里没有列 `{c}`"))?
-                        .id
-                        .clone(),
-                    _ => board
-                        .columns
-                        .iter()
-                        .min_by(|a, b| a.order.partial_cmp(&b.order).unwrap_or(std::cmp::Ordering::Equal))
-                        .map(|c| c.id.clone())
-                        .ok_or("这块看板一列都没有")?,
+                let new_title = title.map(str::trim).filter(|t| !t.is_empty());
+                if html.is_none() && new_title.is_none() && goal.is_none() {
+                    return Err("board_update 至少要给 html / title / goal_id 之一".into());
+                }
+                let body = match html.map(str::trim) {
+                    Some("") => return Err("html 不能是空的；要删看板请让用户直接删文件".into()),
+                    Some(h) => h.to_string(),
+                    None => old.html.clone(),
                 };
-                let mut card = Card::new(&board.id, &col, body, &me);
-                card.order = store
-                    .cards(&board.id)
-                    .items
-                    .iter()
-                    .filter(|c| c.column_id == card.column_id)
-                    .map(|c| c.order)
-                    .fold(0.0f64, f64::max)
-                    + 1.0;
-                if let Some(t) = task_id.filter(|t| !t.trim().is_empty()) {
-                    self.locate_task(&store, &json!({"task_id": t}))?;
-                    card.task_id = Some(t.to_string());
-                }
-                store.save_card(&card)?;
+                // 换了整页却漏写 <title> / 关联：沿用旧的，免得看板名字退化成 id、关联悄悄丢掉。
+                // 新页面自己写了的，以新页面为准。
+                let replaced = html.is_some();
+                let keep_title = (replaced && html_title(&body).is_none()).then_some(old.title.as_str());
+                let keep_goal = (replaced && html_meta(&body, "carter-goal").is_none())
+                    .then_some(old.goal_id.as_deref())
+                    .flatten();
+                let goal = goal.or(keep_goal);
+                store.save_board(&old.id, &stamp_board(&body, new_title.or(keep_title), goal))?;
                 self.stage(&store);
-                Ok(format!("已加卡片。\nid = {}", card.id))
-            }
-
-            "card_move" => {
-                let store = self.store()?;
-                let me = self.me()?;
-                let bid = board_id.ok_or("card_move 需要 board_id")?;
-                let cid = card_id.ok_or("card_move 需要 card_id")?;
-                let board = store.board(bid)?;
-                let target = args
-                    .get("column_id")
-                    .and_then(Value::as_str)
-                    .ok_or("card_move 需要 column_id")?;
-                if !board.columns.iter().any(|c| c.id == target) {
-                    return Err(format!("看板里没有列 `{target}`"));
-                }
-                let mut card = store
-                    .cards(bid)
-                    .items
-                    .into_iter()
-                    .find(|c| c.id == cid)
-                    .ok_or(format!("找不到卡片 {cid}"))?;
-                card.column_id = target.to_string();
-                card.order = store
-                    .cards(bid)
-                    .items
-                    .iter()
-                    .filter(|c| c.column_id == target)
-                    .map(|c| c.order)
-                    .fold(0.0f64, f64::max)
-                    + 1.0;
-                card.touch(&me);
-                store.save_card(&card)?;
-                self.stage(&store);
-                Ok("卡片已移动。".into())
+                Ok(format!("看板「{}」已更新。", new_title.unwrap_or(&old.title)))
             }
 
             other => Err(format!(
                 "不认识的 action `{other}`。可用的：overview / my_tasks / goal_new / goal_update / \
                  task_new / task_update / task_status / task_claim / task_release / comment / events / \
-                 check / sync / board_new / card_new / card_move"
+                 check / sync / board_list / board_new / board_update"
             )),
         }
     }
@@ -1049,23 +1046,74 @@ mod tests {
     }
 
     #[test]
-    fn a_board_can_be_created_and_cards_moved() {
+    fn a_board_is_one_html_page_that_can_be_rewritten() {
         let dir = project("board");
         let t = TeamTool::new(dir.clone());
-        let out = call(&t, json!({"action": "board_new", "title": "十月回顾"}));
+        let gid = id_of(&call(&t, json!({"action": "goal_new", "title": "g"})));
+        let out = call(
+            &t,
+            json!({
+                "action": "board_new", "title": "十月回顾", "goal_id": gid,
+                "html": "<!doctype html><html><head></head><body><h1>做得好的</h1></body></html>"
+            }),
+        );
         let bid = id_of(&out);
 
         let store = Store::open(dir.join(".carter"));
         let board = store.board(&bid).unwrap();
-        assert_eq!(board.columns.len(), 3);
-        assert_eq!(board.columns[0].name, "做得好的", "回顾看板要用回顾的列");
+        assert_eq!(board.title, "十月回顾", "标题由工具补进 <title>");
+        assert_eq!(board.goal_id.as_deref(), Some(gid.as_str()));
+        assert!(board.html.contains("<h1>做得好的</h1>"));
 
-        let out = call(&t, json!({"action": "card_new", "board_id": bid, "text": "拆成一实体一文件很值"}));
-        let kid = id_of(&out);
-        call(&t, json!({"action": "card_move", "board_id": bid, "card_id": kid, "column_id": "col-3"}));
+        // 整页替换时漏写了 <title>：沿用旧标题与关联，不能退化成 id。
+        call(&t, json!({"action": "board_update", "board_id": bid, "html": "<p>改过了</p>"}));
+        let board = store.board(&bid).unwrap();
+        assert_eq!(board.title, "十月回顾");
+        assert_eq!(board.goal_id.as_deref(), Some(gid.as_str()));
+        assert!(board.html.contains("改过了"));
 
-        let cards = store.cards(&bid).items;
-        assert_eq!(cards[0].column_id, "col-3");
+        // 只改名不动正文。
+        call(&t, json!({"action": "board_update", "board_id": bid, "title": "十月复盘"}));
+        let board = store.board(&bid).unwrap();
+        assert_eq!(board.title, "十月复盘");
+        assert!(board.html.contains("改过了"));
+
+        assert!(call(&t, json!({"action": "board_list"})).contains("十月复盘"));
+        assert!(t.run(&json!({"action": "board_new", "title": "空"})).is_err(), "没有 html 要拒绝");
+        assert!(t.run(&json!({"action": "board_update", "board_id": "../x", "html": "x"})).is_err());
+    }
+
+    /// 拼错参数名时整次调用不执行，并列出合法参数 —— 否则「改优先级」会静默成功、
+    /// 实际什么都没改。
+    #[test]
+    fn a_misspelled_parameter_is_rejected_not_ignored() {
+        let dir = project("typo");
+        let t = TeamTool::new(dir.clone());
+        let gid = id_of(&call(&t, json!({"action": "goal_new", "title": "g"})));
+        let err = t
+            .run(&json!({"action": "goal_update", "goal_id": gid, "prioirty": "P0"}))
+            .unwrap_err();
+        assert!(err.contains("prioirty"), "{err}");
+        assert!(err.contains("priority"), "要列出合法的参数名：{err}");
+        let store = Store::discover(&dir).unwrap();
+        assert_eq!(store.goal(&gid).unwrap().priority, Priority::P2, "被拒的调用不能有副作用");
+
+        // 单个依赖照样能写（脚本时代的那个 bug 不该在工具里出现）。
+        let a = id_of(&call(&t, json!({"action": "task_new", "goal_id": gid, "title": "a"})));
+        let b = id_of(&call(&t, json!({"action": "task_new", "goal_id": gid, "title": "b", "depends_on": [a]})));
+        assert_eq!(store.task(&gid, &b).unwrap().depends_on, vec![a]);
+    }
+
+    #[test]
+    fn goal_update_can_set_and_clear_the_owner() {
+        let dir = project("owner");
+        let t = TeamTool::new(dir.clone());
+        let gid = id_of(&call(&t, json!({"action": "goal_new", "title": "g"})));
+        call(&t, json!({"action": "goal_update", "goal_id": gid, "assignee": "张三 <z@example.com>"}));
+        let store = Store::discover(&dir).unwrap();
+        assert_eq!(store.goal(&gid).unwrap().owner.as_deref(), Some("张三 <z@example.com>"));
+        call(&t, json!({"action": "goal_update", "goal_id": gid, "assignee": ""}));
+        assert_eq!(store.goal(&gid).unwrap().owner, None);
     }
 
     #[test]

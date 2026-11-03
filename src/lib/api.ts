@@ -1850,35 +1850,12 @@ export type TeamGoal = {
   tasks: TeamTask[];
 };
 
-export type TeamBoardColumn = {
-  id: string;
-  name: string;
-  order: number;
-  wip_limit: number | null;
-};
-
-export type TeamCard = {
-  id: string;
-  board_id: string;
-  column_id: string;
-  group_id: string | null;
-  text: string;
-  task_id: string | null;
-  votes: number;
-  order: number;
-  created_at: number;
-  created_by: string;
-  updated_at: number | null;
-  updated_by: string | null;
-};
-
+/** 一块看板的元信息。正文是一整页 HTML，用 [`teamBoardHtml`] 按需取。 */
 export type TeamBoard = {
+  /** `boards/` 下的文件名，不带 `.html`。 */
   id: string;
   title: string;
-  description: string;
   goal_id: string | null;
-  columns: TeamBoardColumn[];
-  cards: TeamCard[];
 };
 
 export type TeamEvent = {
@@ -1935,6 +1912,11 @@ export function teamInitialize(
 /** 全景：目标 + 任务树 + 看板 + 最近事件。界面一次拉完。 */
 export function teamOverview(cwd: string): Promise<TeamOverview> {
   return invoke<TeamOverview>("team_overview", { cwd });
+}
+
+/** 一块看板的整页 HTML。 */
+export function teamBoardHtml(cwd: string, boardId: string): Promise<string> {
+  return invoke<string>("team_board_html", { cwd, boardId });
 }
 
 /** 我名下未完成的任务。消息框下方的待办条用它。 */

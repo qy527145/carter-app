@@ -276,6 +276,29 @@ function InlineImage({ token }: { token: string }) {
 // ---------------------------------------------------------------------------
 
 /**
+ * 输入框跟内容长高，到 `max-h-48`（192px）为止，再长就在框内滚动。
+ *
+ * 不撑高的话多行文本只能在一行里上下滚动，几行以上的内容就只看得见其中一行 ——
+ * 写长提示词时要来回滚着看自己写了什么。上限是必要的：不限高的话一段几百行的
+ * 粘贴会把对话流整个挤出窗口，而那时输入框本身也失去了「一瞥即可读」的意义。
+ * 上限写死成 192 而不是交给 `max-h-48`：下面要把算出来的高度写成行内样式，
+ * 而行内的 `height` 在 `max-height` 之下才守得住，两者得是同一个数。
+ *
+ * 先把 height 设成 `auto` 再读 `scrollHeight`：留着上一次的行内高度去读，
+ * 读到的就是**那一高度**下换行后的结果，删掉几行也不会变矮。
+ */
+const COMPOSER_MAX_H = 192;
+
+function growComposer(ta: HTMLTextAreaElement | null) {
+  if (!ta) return;
+  ta.style.height = "auto";
+  const full = ta.scrollHeight;
+  ta.style.height = `${Math.min(full, COMPOSER_MAX_H)}px`;
+  // 到了上限才需要滚动条；没到上限时留着 auto 会在某些行高下闪一条滚动条。
+  ta.style.overflowY = full > COMPOSER_MAX_H ? "auto" : "hidden";
+}
+
+/**
  * 光标前若是一个 `@引用`，返回 `@` 的位置与之后的查询词；否则 null。
  *
  * 从光标往回找最近的一个 `@`，中间不能有空白 —— 有空白说明那个 `@` 已经是
@@ -335,6 +358,19 @@ export function Composer() {
   const enqueuePrompt = useStore((s) => s.enqueuePrompt);
 
   const taRef = useRef<HTMLTextAreaElement>(null);
+
+  // 内容变了就把框撑到合适高度。挂在这里而不是 `onChange` 里，是因为文本还会从
+  // 别的路径进来（分叉的草稿、菜单插入的 `@目录/`、清空），逐处调用总会漏一处。
+  useEffect(() => {
+    growComposer(taRef.current);
+  }, [text]);
+
+  // 窗口变窄 → 同样一段话多折几行。不重量的话框会停在旧高度上、内容被切掉一截。
+  useEffect(() => {
+    const onResize = () => growComposer(taRef.current);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
 
   const connected = sessionId !== null;
   const disabled = !connected || pendingAsk !== null;
@@ -562,8 +598,6 @@ export function Composer() {
     setText("");
     setAttachments([]);
     setFileQuery(null);
-    const el = taRef.current;
-    if (el) el.style.height = "auto";
     ops.send(sessionId, payload, { id, interject }).catch((e) => setNotice(String(e)));
   };
 
@@ -571,8 +605,6 @@ export function Composer() {
     setText("");
     setAttachments([]);
     setFileQuery(null);
-    const el = taRef.current;
-    if (el) el.style.height = "auto";
   };
 
   const cancel = () => {

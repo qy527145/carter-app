@@ -78,7 +78,6 @@ pub enum Kind {
     Goal,
     Task,
     Board,
-    Card,
     Category,
 }
 
@@ -88,7 +87,6 @@ impl Kind {
             Kind::Goal => "g",
             Kind::Task => "t",
             Kind::Board => "b",
-            Kind::Card => "k",
             Kind::Category => "cat",
         }
     }
@@ -98,7 +96,6 @@ impl Kind {
             Kind::Goal => "目标",
             Kind::Task => "任务",
             Kind::Board => "看板",
-            Kind::Card => "卡片",
             Kind::Category => "分类",
         }
     }
@@ -587,168 +584,189 @@ impl Task {
 // 看板
 // ---------------------------------------------------------------------------
 
-/// 看板的一列。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BoardColumn {
-    pub id: String,
-    pub name: String,
-    #[serde(default)]
-    pub order: f64,
-    /// 这一列最多放几张卡。`None` = 不限。
-    ///
-    /// 只有回顾类看板真的用得着（「待改进」一列堆到 20 张就说明这次回顾没收敛），
-    /// 但存成通用字段比留一个 `is_retro` 特判更好 —— 特判会让看板多出一种只对
-    /// 某些看板成立的行为，而数据本身不需要知道自己是回顾还是别的。
-    #[serde(default)]
-    pub wip_limit: Option<u32>,
-}
-
-/// 看板里的一个主题分组（回顾里的「做得好的 / 要改的 / 待跟进」也能这么放）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BoardGroup {
-    pub id: String,
-    pub name: String,
-    #[serde(default)]
-    pub order: f64,
-    #[serde(default)]
-    pub color: Option<String>,
-}
-
-/// 一块看板：回顾、风险板、待决事项，都行。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// 一块看板：`boards/<id>.html`，一整页自由排版的 HTML。
+///
+/// ## 为什么是一页 HTML，而不是「列 + 卡片」的结构化数据
+///
+/// 看板的典型用途是回顾、风险盘点、阶段小结 —— 它是**一次性的产物**：做一次、
+/// 大家看、偶尔补两笔，不会被多人高频并发地改。结构化成列与卡片换来的是
+/// 「每张卡一个文件、git 不冲突」，可这个好处只在高频并发写时才兑现；代价却
+/// 每次都要付：版式只有一种（横排几列）、卡片只能是一句纯文本，想放一张表、
+/// 一段对比、一幅图都放不下。所以看板交给模型直接写整页，界面只负责安全地显示。
+///
+/// 元信息就放在页面自己身上，不另起一份 JSON：标题是 `<title>`，关联目标是
+/// `<meta name="carter-goal" content="g-…">`。两份文件迟早会对不上，一份不会。
+///
+/// 这个结构**不落盘**：它是读 `.html` 时派生出来的视图。
+#[derive(Debug, Clone, Serialize)]
 pub struct Board {
-    #[serde(default = "schema_version")]
-    pub schema_version: u32,
-    #[serde(default = "kind_board")]
-    pub kind: String,
+    /// 文件名去掉 `.html`。工具新建的是 `b-…`，人手放进来的可以叫别的。
     pub id: String,
     pub title: String,
-    #[serde(default)]
-    pub description: String,
-    /// 关联的目标。`None` = 跨目标的团队级看板（回顾通常是这样）。
-    #[serde(default)]
     pub goal_id: Option<String>,
-    #[serde(default = "default_columns")]
-    pub columns: Vec<BoardColumn>,
-    #[serde(default)]
-    pub groups: Vec<BoardGroup>,
-    #[serde(default)]
-    pub created_at: u64,
-    #[serde(default)]
-    pub created_by: String,
-    #[serde(default)]
-    pub updated_at: Option<u64>,
-    #[serde(default)]
-    pub updated_by: Option<String>,
-}
-
-fn kind_board() -> String {
-    "board".into()
-}
-
-/// 新建看板时的默认三列：起手就能用，用户不必先想清楚列怎么分。
-fn default_columns() -> Vec<BoardColumn> {
-    [
-        ("col-todo", "待办"),
-        ("col-doing", "进行中"),
-        ("col-done", "完成"),
-    ]
-    .into_iter()
-    .enumerate()
-    .map(|(i, (id, name))| BoardColumn {
-        id: id.into(),
-        name: name.into(),
-        order: i as f64 + 1.0,
-        wip_limit: None,
-    })
-    .collect()
+    pub html: String,
 }
 
 impl Board {
-    pub fn new(title: impl Into<String>, by: &Identity) -> Self {
-        let now = crate::protocol::now_ms();
+    pub fn parse(id: &str, html: String) -> Self {
         Self {
-            schema_version: SCHEMA_VERSION,
-            kind: "board".into(),
-            id: new_id(Kind::Board),
-            title: title.into(),
-            description: String::new(),
-            goal_id: None,
-            columns: default_columns(),
-            groups: Vec::new(),
-            created_at: now,
-            created_by: by.as_key(),
-            updated_at: None,
-            updated_by: None,
+            id: id.to_string(),
+            title: html_title(&html)
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| id.to_string()),
+            goal_id: html_meta(&html, "carter-goal").filter(|g| !g.is_empty()),
+            html,
         }
     }
+}
 
-    pub fn touch(&mut self, by: &Identity) {
-        self.updated_at = Some(crate::protocol::now_ms());
-        self.updated_by = Some(by.as_key());
+/// 看板文件名（不含 `.html`）合不合法。
+///
+/// 比 [`valid_id`] 宽：人手放进来的看板可以叫 `2026-q4-retro.html`。要守住的只是
+/// 「它是 `boards/` 下的一个文件名」—— 不能带路径分隔符、不能以点开头。
+pub fn valid_board_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && !id.starts_with('.')
+        && id
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// `<title>` 里的文字。不是完整的 HTML 解析 —— 看板是我们自己（或模型按技能）写的，
+/// 只要求「第一个 `<title>` 到 `</title>` 之间」这一种写法。
+pub fn html_title(html: &str) -> Option<String> {
+    let lower = html.to_ascii_lowercase();
+    let open = lower.find("<title")?;
+    let start = open + lower[open..].find('>')? + 1;
+    let end = start + lower[start..].find("</title")?;
+    Some(unescape(html[start..end].trim()))
+}
+
+/// `<meta name="…" content="…">` 的 content。属性顺序、引号种类都放宽。
+pub fn html_meta(html: &str, name: &str) -> Option<String> {
+    let lower = html.to_ascii_lowercase();
+    let mut from = 0;
+    while let Some(i) = lower[from..].find("<meta") {
+        let tag_start = from + i;
+        let tag_end = tag_start + lower[tag_start..].find('>')?;
+        let tag = &html[tag_start..tag_end];
+        if attr(tag, "name").is_some_and(|n| n.eq_ignore_ascii_case(name)) {
+            return attr(tag, "content").map(|c| unescape(c.trim()));
+        }
+        from = tag_end;
     }
+    None
 }
 
-/// 看板上的一张卡。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Card {
-    #[serde(default = "schema_version")]
-    pub schema_version: u32,
-    #[serde(default = "kind_card")]
-    pub kind: String,
-    pub id: String,
-    pub board_id: String,
-    pub column_id: String,
-    #[serde(default)]
-    pub group_id: Option<String>,
-    pub text: String,
-    /// 关联的任务。可选 —— 回顾里大多数卡片是「话」而不是「活」。
-    #[serde(default)]
-    pub task_id: Option<String>,
-    /// 点赞数。回顾里用它投票挑出最该跟进的那几条。
-    #[serde(default)]
-    pub votes: i64,
-    #[serde(default)]
-    pub order: f64,
-    #[serde(default)]
-    pub created_at: u64,
-    #[serde(default)]
-    pub created_by: String,
-    #[serde(default)]
-    pub updated_at: Option<u64>,
-    #[serde(default)]
-    pub updated_by: Option<String>,
+fn attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    let lower = tag.to_ascii_lowercase();
+    let mut from = 0;
+    while let Some(i) = lower[from..].find(name) {
+        let at = from + i;
+        from = at + name.len();
+        // 只认独立的属性名：`content` 里的 `name` 不算。
+        let before = lower[..at].chars().last();
+        if !before.is_some_and(|c| c.is_whitespace()) {
+            continue;
+        }
+        let rest = tag[from..].trim_start();
+        let Some(rest) = rest.strip_prefix('=') else { continue };
+        let rest = rest.trim_start();
+        let quote = rest.chars().next()?;
+        if quote == '"' || quote == '\'' {
+            let body = &rest[1..];
+            return body.find(quote).map(|e| &body[..e]);
+        }
+        let e = rest.find(|c: char| c.is_whitespace() || c == '/').unwrap_or(rest.len());
+        return Some(&rest[..e]);
+    }
+    None
 }
 
-fn kind_card() -> String {
-    "card".into()
+/// 转义标题与 meta 里会出现的那几个实体。
+pub fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
-impl Card {
-    pub fn new(board_id: &str, column_id: &str, text: impl Into<String>, by: &Identity) -> Self {
-        let now = crate::protocol::now_ms();
-        Self {
-            schema_version: SCHEMA_VERSION,
-            kind: "card".into(),
-            id: new_id(Kind::Card),
-            board_id: board_id.to_string(),
-            column_id: column_id.to_string(),
-            group_id: None,
-            text: text.into(),
-            task_id: None,
-            votes: 0,
-            order: now as f64,
-            created_at: now,
-            created_by: by.as_key(),
-            updated_at: None,
-            updated_by: None,
+fn unescape(s: &str) -> String {
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&")
+}
+
+/// 把标题与关联目标写进页面：已有的替换，没有的补进 `<head>`。
+///
+/// 工具新建 / 更新看板时用它 —— 模型交来的 HTML 未必记得写 `<title>`，
+/// 而列表里显示的名字就靠它。
+pub fn stamp_board(html: &str, title: Option<&str>, goal_id: Option<&str>) -> String {
+    let mut out = html.to_string();
+    if let Some(t) = title.map(str::trim).filter(|t| !t.is_empty()) {
+        let tag = format!("<title>{}</title>", escape_html(t));
+        out = match find_element(&out, "title") {
+            Some((s, e)) => format!("{}{tag}{}", &out[..s], &out[e..]),
+            None => insert_in_head(&out, &tag),
+        };
+    }
+    if let Some(g) = goal_id.map(str::trim).filter(|g| !g.is_empty()) {
+        let tag = format!("<meta name=\"carter-goal\" content=\"{}\">", escape_html(g));
+        out = match find_meta(&out, "carter-goal") {
+            Some((s, e)) => format!("{}{tag}{}", &out[..s], &out[e..]),
+            None => insert_in_head(&out, &tag),
+        };
+    }
+    out
+}
+
+/// `<name …>…</name>` 的字节区间。
+fn find_element(html: &str, name: &str) -> Option<(usize, usize)> {
+    let lower = html.to_ascii_lowercase();
+    let s = lower.find(&format!("<{name}"))?;
+    let close = format!("</{name}");
+    let c = s + lower[s..].find(&close)?;
+    let e = c + lower[c..].find('>')? + 1;
+    Some((s, e))
+}
+
+fn find_meta(html: &str, name: &str) -> Option<(usize, usize)> {
+    let lower = html.to_ascii_lowercase();
+    let mut from = 0;
+    while let Some(i) = lower[from..].find("<meta") {
+        let s = from + i;
+        let e = s + lower[s..].find('>')? + 1;
+        if attr(&html[s..e - 1], "name").is_some_and(|n| n.eq_ignore_ascii_case(name)) {
+            return Some((s, e));
+        }
+        from = e;
+    }
+    None
+}
+
+/// 把一段标记插到 `<head>` 开头；没有 `<head>` 就插在 `<html>` / doctype 之后，
+/// 都没有就放最前面 —— 解析器会把它归进隐式的 head。
+///
+/// 不能无条件放最前面：doctype 之前有任何东西，页面就掉进怪异模式。
+pub fn insert_in_head(html: &str, tag: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    for open in ["<head", "<html", "<!doctype"] {
+        if let Some(s) = lower.find(open) {
+            // `<header>` 不是 `<head>`。
+            let next = lower[s + open.len()..].chars().next();
+            if !next.is_some_and(|c| c == '>' || c.is_whitespace()) {
+                continue;
+            }
+            if let Some(e) = lower[s..].find('>') {
+                let at = s + e + 1;
+                return format!("{}{tag}{}", &html[..at], &html[at..]);
+            }
         }
     }
-
-    pub fn touch(&mut self, by: &Identity) {
-        self.updated_at = Some(crate::protocol::now_ms());
-        self.updated_by = Some(by.as_key());
-    }
+    format!("{tag}{html}")
 }
 
 /// 目标分类字典：阶段、模块这类「横向」的划分。
@@ -960,6 +978,48 @@ mod tests {
         assert_eq!(c.percent(), 50, "放弃的不进分母");
         let empty = Counts::default();
         assert_eq!(empty.percent(), 0);
+    }
+
+    #[test]
+    fn board_meta_is_read_from_the_page_itself() {
+        let html = r#"<!doctype html><html><head>
+            <meta charset="utf-8">
+            <meta content='g-abc' name="carter-goal">
+            <TITLE> 十月回顾 &amp; 计划 </TITLE></head><body>…</body></html>"#;
+        let b = Board::parse("b-x", html.into());
+        assert_eq!(b.title, "十月回顾 & 计划");
+        assert_eq!(b.goal_id.as_deref(), Some("g-abc"), "属性顺序、引号种类都要认");
+        // 没写标题就退回文件名，列表里不至于出现一行空白。
+        assert_eq!(Board::parse("b-y", "<p>hi</p>".into()).title, "b-y");
+    }
+
+    #[test]
+    fn stamping_replaces_or_inserts_without_breaking_the_doctype() {
+        let html = "<!DOCTYPE html><html><head><title>旧</title></head><body><header>h</header></body></html>";
+        let out = stamp_board(html, Some("新 <标题>"), Some("g-1"));
+        assert!(out.starts_with("<!DOCTYPE html>"), "doctype 前面不能塞东西：{out}");
+        assert!(out.contains("<title>新 &lt;标题&gt;</title>"));
+        assert!(!out.contains("旧"));
+        assert_eq!(html_meta(&out, "carter-goal").as_deref(), Some("g-1"));
+        // 再盖一次是替换，不是叠加。
+        let again = stamp_board(&out, Some("三"), Some("g-2"));
+        assert_eq!(again.matches("<title>").count(), 1);
+        assert_eq!(again.matches("carter-goal").count(), 1);
+        assert_eq!(html_meta(&again, "carter-goal").as_deref(), Some("g-2"));
+
+        // 只有片段、没有 head：照样能补上，而且不会误认 `<header>`。
+        let frag = stamp_board("<header>x</header><p>y</p>", Some("t"), None);
+        assert!(frag.starts_with("<title>t</title>"), "{frag}");
+    }
+
+    #[test]
+    fn board_ids_are_plain_file_names() {
+        assert!(valid_board_id("b-abc-1234"));
+        assert!(valid_board_id("2026-q4-retro"));
+        assert!(valid_board_id("十月回顾"));
+        for bad in ["", ".hidden", "../x", "a/b", "a\\b", "a b"] {
+            assert!(!valid_board_id(bad), "`{bad}` 不该合法");
+        }
     }
 }
 

@@ -6,7 +6,8 @@
 //   用横向泳道（层 = 依赖深度）而不是纵树：依赖是「从左往右推进」的，横向读起来
 //   与「进度条」是同一个方向。父子的缩进画在节点标题上，不参与泳道计算 ——
 //   父子是「拆解」，依赖是「先后」，两套约束不该抢同一个轴。
-// * **看板** —— 回顾与自由讨论。列是「结论的形状」，与任务状态无关。
+// * **看板** —— 回顾、小结这类一次性的产物。每块是卡特写的一整页 HTML，版式随内容，
+//   不再是固定的「几列卡片」；在沙箱里渲染（见 BoardFrame.tsx）。
 // * **动态** —— 空提交那条通道的原始记录：谁认领了、谁说了什么。它是唯一一处
 //   能看到「为什么这么改」的地方，所以单独给一屏，而不是塞在侧栏角落里。
 //
@@ -42,6 +43,7 @@ import {
 } from "lucide-react";
 
 import {
+  teamBoardHtml,
   teamInitialize,
   teamOverview,
   teamSetRemote,
@@ -57,6 +59,7 @@ import { baseName } from "../../lib/format";
 import { ASSISTANT_CHAT_ID, openProjectChat } from "../../lib/sessionOps";
 import { toastError, toastOk } from "../../lib/toast";
 import { useStore } from "../../store";
+import { BoardFrame } from "./BoardFrame";
 import {
   avatarHue,
   displayName,
@@ -359,7 +362,9 @@ export function TeamPage() {
           {tab === "graph" && (
             <GraphTab data={data} goal={activeGoal} onPick={setPicked} onAsk={askCarter} />
           )}
-          {tab === "board" && <BoardTab boards={data.boards} onAsk={askCarter} />}
+          {tab === "board" && (
+            <BoardTab cwd={cwd} boards={data.boards} version={data} onAsk={askCarter} />
+          )}
           {tab === "log" && <LogTab data={data} />}
         </div>
       )}
@@ -906,82 +911,100 @@ function TaskNode({
 // 看板
 // ---------------------------------------------------------------------------
 
+/**
+ * 看板：左边一列看板名，右边是选中那一块的整页 HTML（沙箱里渲染，见 BoardFrame）。
+ *
+ * 正文按需取：全景里只有元信息。`version` 跟着全景刷新变 —— 回到窗口、同步之后
+ * 全景会重拉一次，正文也跟着重读，别人刚推上来的改动立刻能看到。
+ */
 function BoardTab({
+  cwd,
   boards,
+  version,
   onAsk,
 }: {
+  cwd: string;
   boards: TeamBoard[];
+  version: unknown;
   onAsk: (draft?: string) => void;
 }) {
-  if (boards.length === 0) {
+  const [picked, setPicked] = useState<string | null>(null);
+  const active = boards.find((b) => b.id === picked) ?? boards[boards.length - 1] ?? null;
+  const [page, setPage] = useState<{ id: string; html: string } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!active) return;
+    let live = true;
+    teamBoardHtml(cwd, active.id)
+      .then((html) => {
+        if (!live) return;
+        // 内容没变就不换对象：srcdoc 一变 iframe 就重载，滚动位置与页面状态全丢。
+        setPage((prev) => (prev?.id === active.id && prev.html === html ? prev : { id: active.id, html }));
+        setError(null);
+      })
+      .catch((e) => live && setError(String(e)));
+    return () => {
+      live = false;
+    };
+  }, [cwd, active?.id, version]);
+
+  if (!active) {
     return (
       <Empty
         icon={<LayoutGrid size={20} />}
         title="还没有看板"
-        hint="看板用来做回顾与自由讨论，比如「本周回顾」「下阶段想法」。"
+        hint="看板是一整页由卡特排版的页面：回顾、阶段小结、风险盘点、方案对比都行。"
         action="让卡特建一块看板"
         onAction={() => onAsk("帮我建一块回顾看板：")}
       />
     );
   }
   return (
-    <div className="space-y-6 p-5">
-      {boards.map((b) => (
-        <div key={b.id}>
-          <div className="mb-2 flex items-baseline gap-2">
-            <h3 className="text-sm font-semibold tracking-tight">{b.title}</h3>
-            <span className="mono text-[10px] text-dim">{b.id}</span>
-            {b.goal_id && (
-              <span className="text-[10px] text-dim">· 关联 {b.goal_id}</span>
-            )}
+    <div className="flex min-h-full gap-4 p-5">
+      <div className="w-[12rem] shrink-0 space-y-0.5">
+        {[...boards].reverse().map((b) => (
+          <button
+            key={b.id}
+            onClick={() => setPicked(b.id)}
+            className={`block w-full rounded-lg px-2.5 py-1.5 text-left transition-colors ${
+              b.id === active.id ? "bg-card shadow-soft" : "hover:bg-ink/[0.04]"
+            }`}
+          >
+            <div className="truncate text-xs font-medium">{b.title}</div>
+            <div className="mono truncate text-[10px] text-dim">
+              {b.id}
+              {b.goal_id && ` · ${b.goal_id}`}
+            </div>
+          </button>
+        ))}
+        <button
+          onClick={() => onAsk(`帮我改一下看板「${active.title}」（${active.id}）：`)}
+          className="mt-2 flex w-full items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[11px] text-dim transition-colors hover:bg-ink/[0.04] hover:text-ink"
+        >
+          <Sparkles size={12} />
+          让卡特改这块看板
+        </button>
+        <button
+          onClick={() => onAsk("帮我建一块看板：")}
+          className="flex w-full items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[11px] text-dim transition-colors hover:bg-ink/[0.04] hover:text-ink"
+        >
+          <Plus size={12} />
+          新建看板
+        </button>
+      </div>
+      <div className="min-w-0 flex-1">
+        {error ? (
+          <div className="rounded-xl bg-card p-4 text-xs text-danger">{error}</div>
+        ) : page?.id === active.id ? (
+          <BoardFrame html={page.html} title={active.title} />
+        ) : (
+          <div className="flex items-center justify-center py-24 text-xs text-dim">
+            <LoaderCircle size={14} className="mr-2 animate-spin" />
+            正在读取看板…
           </div>
-          <div className="flex gap-3 overflow-x-auto pb-2">
-            {[...b.columns]
-              .sort((x, y) => x.order - y.order)
-              .map((col) => {
-                const cards = b.cards.filter((c) => c.column_id === col.id);
-                const over = col.wip_limit != null && cards.length > col.wip_limit;
-                return (
-                  <div key={col.id} className="w-[16rem] shrink-0 rounded-xl bg-card p-2">
-                    <div className="mb-1.5 flex items-center gap-1.5 px-1">
-                      <span className="text-[11px] font-medium">{col.name}</span>
-                      <span className="text-[10px] text-dim tabular-nums">{cards.length}</span>
-                      {col.wip_limit != null && (
-                        <span
-                          className="text-[10px] tabular-nums"
-                          style={{ color: over ? "var(--danger)" : "var(--text-dim)" }}
-                        >
-                          / {col.wip_limit}
-                        </span>
-                      )}
-                    </div>
-                    <div className="space-y-1.5">
-                      {cards.map((c) => (
-                        <div
-                          key={c.id}
-                          className="rounded-lg bg-elevated p-2 text-[11px] leading-snug shadow-soft"
-                        >
-                          <div>{c.text}</div>
-                          <div className="mt-1.5 flex items-center gap-1.5 text-[10px] text-dim">
-                            <Avatar identity={c.created_by} size={13} />
-                            <span>{displayName(c.created_by)}</span>
-                            {c.votes !== 0 && <span>· {c.votes} 票</span>}
-                            {c.task_id && <span className="mono">· {c.task_id}</span>}
-                          </div>
-                        </div>
-                      ))}
-                      {cards.length === 0 && (
-                        <div className="rounded-lg border border-dashed border-edge py-4 text-center text-[10px] text-dim">
-                          空
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-          </div>
-        </div>
-      ))}
+        )}
+      </div>
     </div>
   );
 }

@@ -11,9 +11,7 @@
 //!     <goal-id>/
 //!       goal.json
 //!       tasks/<task-id>.json
-//!   boards/<board-id>/
-//!     board.json
-//!     cards/<card-id>.json
+//!   boards/<board-id>.html          一块看板 = 一整页 HTML
 //!   skills/                         内置技能（carter 已经会扫这里）
 //!   .cache/                         派生数据，不进 git
 //!     index.json                    成员表 + 跨目标汇总
@@ -124,12 +122,8 @@ impl Store {
         self.root.join("boards")
     }
 
-    fn board_dir(&self, board_id: &str) -> PathBuf {
-        self.boards_dir().join(board_id)
-    }
-
-    fn cards_dir(&self, board_id: &str) -> PathBuf {
-        self.board_dir(board_id).join("cards")
+    fn board_file(&self, board_id: &str) -> PathBuf {
+        self.boards_dir().join(format!("{board_id}.html"))
     }
 
     // -----------------------------------------------------------------------
@@ -438,92 +432,47 @@ impl Store {
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            if !path.is_dir() {
+            if !path.is_file() || path.extension().and_then(|s| s.to_str()) != Some("html") {
                 continue;
             }
-            let file = path.join("board.json");
-            if !file.is_file() {
+            let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if !valid_board_id(id) {
+                out.push_issue(&path, &self.root, "文件名不能带空格或以点开头");
                 continue;
             }
-            match read_json::<Board>(&file) {
-                Ok(b) => out.items.push(b),
-                Err(e) => out.push_issue(&file, &self.root, e),
+            match read_html(&path) {
+                Ok(html) => out.items.push(Board::parse(id, html)),
+                Err(e) => out.push_issue(&path, &self.root, e),
             }
         }
-        out.items.sort_by(|a, b| {
-            a.title
-                .cmp(&b.title)
-                .then_with(|| a.created_at.cmp(&b.created_at))
-        });
+        // 按 id 排：工具建的 id 以时间戳开头，字典序就是创建序，新的在后。
+        out.items.sort_by(|a, b| a.id.cmp(&b.id));
         out
     }
 
     pub fn board(&self, board_id: &str) -> Result<Board, String> {
-        if !valid_id(Kind::Board, board_id) {
+        if !valid_board_id(board_id) {
             return Err(format!("看板 id `{board_id}` 不合法"));
         }
-        read_json(&self.board_dir(board_id).join("board.json"))
+        read_html(&self.board_file(board_id))
+            .map(|html| Board::parse(board_id, html))
             .map_err(|e| format!("读不到看板 {board_id}：{e}"))
     }
 
-    pub fn save_board(&self, board: &Board) -> Result<(), String> {
-        if !valid_id(Kind::Board, &board.id) {
-            return Err(format!("看板 id `{}` 不合法", board.id));
+    pub fn save_board(&self, board_id: &str, html: &str) -> Result<(), String> {
+        if !valid_board_id(board_id) {
+            return Err(format!("看板 id `{board_id}` 不合法"));
         }
-        write_json(&self.board_dir(&board.id).join("board.json"), board)
+        write_atomic(&self.board_file(board_id), html.as_bytes())
     }
 
     pub fn delete_board(&self, board_id: &str) -> Result<(), String> {
-        if !valid_id(Kind::Board, board_id) {
+        if !valid_board_id(board_id) {
             return Err(format!("看板 id `{board_id}` 不合法"));
         }
-        let dir = self.board_dir(board_id);
-        std::fs::remove_dir_all(&dir).map_err(|e| format!("删 {} 失败：{e}", dir.display()))
-    }
-
-    pub fn cards(&self, board_id: &str) -> Loaded<Card> {
-        let mut out = Loaded::default();
-        if !valid_id(Kind::Board, board_id) {
-            out.issues.push((board_id.into(), "看板 id 不合法".into()));
-            return out;
-        }
-        let Ok(entries) = std::fs::read_dir(self.cards_dir(board_id)) else {
-            return out;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("json") {
-                continue;
-            }
-            match read_json::<Card>(&path) {
-                Ok(c) => out.items.push(c),
-                Err(e) => out.push_issue(&path, &self.root, e),
-            }
-        }
-        // 列内按 order，列间按看板里声明的列顺序 —— 界面直接照着渲染。
-        out.items.sort_by(|a, b| {
-            a.column_id
-                .cmp(&b.column_id)
-                .then_with(|| a.order.partial_cmp(&b.order).unwrap_or(std::cmp::Ordering::Equal))
-        });
-        out
-    }
-
-    pub fn save_card(&self, card: &Card) -> Result<(), String> {
-        if !valid_id(Kind::Board, &card.board_id) || !valid_id(Kind::Card, &card.id) {
-            return Err("id 不合法".into());
-        }
-        write_json(
-            &self.cards_dir(&card.board_id).join(format!("{}.json", card.id)),
-            card,
-        )
-    }
-
-    pub fn delete_card(&self, board_id: &str, card_id: &str) -> Result<(), String> {
-        if !valid_id(Kind::Board, board_id) || !valid_id(Kind::Card, card_id) {
-            return Err("id 不合法".into());
-        }
-        let path = self.cards_dir(board_id).join(format!("{card_id}.json"));
+        let path = self.board_file(board_id);
         std::fs::remove_file(&path).map_err(|e| format!("删 {} 失败：{e}", path.display()))
     }
 
@@ -580,16 +529,39 @@ pub(crate) fn parse_json<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T,
 }
 
 fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("建目录失败：{e}"))?;
-    }
     // 两空格缩进 + 结尾换行：这份文件主要是给人看、给 git diff 看的，
     // 压缩成一行的 JSON 在 review 时等于不可读。
     let mut json = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
     json.push('\n');
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, &json).map_err(|e| format!("写 {} 失败：{e}", tmp.display()))?;
+    write_atomic(path, json.as_bytes())
+}
+
+/// 先写 `<name>.tmp` 再改名：崩在中途也不会留下半截文件。
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("建目录失败：{e}"))?;
+    }
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    std::fs::write(&tmp, bytes).map_err(|e| format!("写 {} 失败：{e}", tmp.display()))?;
     std::fs::rename(&tmp, path).map_err(|e| format!("改名到 {} 失败：{e}", path.display()))
+}
+
+/// 读一块看板。冲突标记同样单独报 —— 合并冲突留在 HTML 里，页面会照样渲染出来，
+/// 只是中间夹着几行 `<<<<<<<`，没人会第一时间意识到那是没解决的冲突。
+fn read_html(path: &Path) -> Result<String, String> {
+    let raw = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    if has_conflict_markers(&raw) {
+        return Err("文件里有未解决的 git 冲突标记（<<<<<<<），先解决冲突再继续".into());
+    }
+    Ok(raw)
+}
+
+/// 只认行首的标记：HTML 正文里出现一串 `>>>>>>>` 并不罕见（箭头装饰）。
+pub(crate) fn has_conflict_markers(raw: &str) -> bool {
+    raw.lines()
+        .any(|l| l.starts_with("<<<<<<< ") || l.starts_with(">>>>>>> ") || l == "=======")
 }
 
 // ---------------------------------------------------------------------------
@@ -729,22 +701,33 @@ mod tests {
     }
 
     #[test]
-    fn boards_store_cards_per_column_in_order() {
+    fn boards_are_html_files_with_meta_in_the_page() {
         let s = seed(&tmp("board"));
-        let b = Board::new("回顾", &me());
-        s.save_board(&b).unwrap();
+        let html = "<!doctype html><html><head><title>回顾</title>\
+                    <meta name=\"carter-goal\" content=\"g-1\"></head><body>x</body></html>";
+        s.save_board("b-1", html).unwrap();
+        s.save_board("b-0", "<p>没写标题</p>").unwrap();
+        // 不是 .html 的东西不当看板。
+        std::fs::write(s.root().join("boards/README.md"), "说明").unwrap();
 
-        let first = b.columns[0].id.clone();
-        let mut c1 = Card::new(&b.id, &first, "一", &me());
-        c1.order = 2.0;
-        let mut c2 = Card::new(&b.id, &first, "二", &me());
-        c2.order = 1.0;
-        s.save_card(&c1).unwrap();
-        s.save_card(&c2).unwrap();
+        let loaded = s.boards();
+        assert!(loaded.issues.is_empty(), "{:?}", loaded.issues);
+        assert_eq!(
+            loaded.items.iter().map(|b| b.id.as_str()).collect::<Vec<_>>(),
+            ["b-0", "b-1"]
+        );
+        assert_eq!(loaded.items[1].title, "回顾");
+        assert_eq!(loaded.items[1].goal_id.as_deref(), Some("g-1"));
+        assert_eq!(loaded.items[0].title, "b-0");
 
-        let loaded = s.cards(&b.id);
-        assert_eq!(loaded.items.len(), 2);
-        assert_eq!(loaded.items[0].text, "二", "按 order 排，不按写入先后");
+        std::fs::write(
+            s.root().join("boards/b-2.html"),
+            "<p>a</p>\n<<<<<<< HEAD\n<p>b</p>\n=======\n<p>c</p>\n>>>>>>> x\n",
+        )
+        .unwrap();
+        let loaded = s.boards();
+        assert_eq!(loaded.issues.len(), 1, "冲突没解决的看板要单独报出来");
+        assert!(loaded.issues[0].1.contains("冲突"));
     }
 
     #[test]
@@ -753,6 +736,7 @@ mod tests {
         assert!(s.goal("../../etc/passwd").is_err());
         assert!(s.task("g-1", "../x").is_err());
         assert!(s.board("b-x/../../y").is_err());
+        assert!(s.save_board("../escape", "x").is_err());
     }
 
     #[test]
