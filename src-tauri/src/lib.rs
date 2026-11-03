@@ -2223,12 +2223,16 @@ struct TeamPeople {
 }
 
 /// 加入团队。`member_id` 给了 = 「我是这个人，这是我的另一台机器」；否则用 `name` 新建。
+///
+/// 加入之后顺手补上「团队消息」观察源：在这台机器上加入了，才需要在这台机器上收
+/// 消息。旧版初始化的团队（以及 clone 下来、没在本机初始化过的）原本没有这条源。
 #[tauri::command]
 fn team_join(
+    shell: State<'_, Arc<AppShell>>,
     cwd: String,
     name: Option<String>,
     member_id: Option<String>,
-) -> Result<carter_app_core::team::members::Member, String> {
+) -> Result<TeamJoined, String> {
     use carter_app_core::team::members::{Join, join_and_announce};
     let store = team_store(&cwd)?;
     let how = match member_id.filter(|s| !s.trim().is_empty()) {
@@ -2237,7 +2241,31 @@ fn team_join(
             name: name.unwrap_or_default(),
         },
     };
-    join_and_announce(&store, how, None).map(|(m, _)| m)
+    let (m, _) = join_and_announce(&store, how, None)?;
+    let label = store
+        .meta()
+        .map(|meta| meta.name)
+        .ok()
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| {
+            store
+                .project_root()
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "项目".into())
+        });
+    // 收不到提醒不该让加入失败：团队页里照样能看到消息。把原因交给界面说一句。
+    let inbox_source =
+        carter_app_core::team::init::create_inbox_source(shell.inner(), store.project_root(), &label)
+            .err();
+    Ok(TeamJoined { member: m, inbox_source })
+}
+
+#[derive(Serialize)]
+struct TeamJoined {
+    member: carter_app_core::team::members::Member,
+    /// 消息观察源没建成的原因。`None` = 建好了（卡特助理会定时送达）。
+    inbox_source: Option<String>,
 }
 
 /// 改自己在这个团队里的称呼。只改本地文件，随下一次提交走。

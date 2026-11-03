@@ -195,13 +195,16 @@ export function JoinDialog({ cwd, onClose }: { cwd: string; onClose: () => void 
   const submit = useCallback(async () => {
     setBusy(true);
     try {
-      if (asExisting) {
-        await teamJoin(cwd, { memberId: asExisting });
-        toastOk("已加入（本机邮箱挂到了这个名下）");
-      } else {
-        const m = await teamJoin(cwd, { name });
-        toastOk(`已以「${m.name}」的身份加入`);
-      }
+      const out = asExisting
+        ? await teamJoin(cwd, { memberId: asExisting })
+        : await teamJoin(cwd, { name });
+      toastOk(
+        asExisting
+          ? `已以「${out.member.name}」的身份加入（本机邮箱挂到了这个名下）`
+          : `已以「${out.member.name}」的身份加入`,
+      );
+      // 观察源没建成只影响「后台提醒」，团队页里照样看得到消息 —— 说一句，不算失败。
+      if (out.inbox_source) toastError(`加入了，但消息提醒没开起来：${out.inbox_source}`);
       if (remember && name.trim() && settings) {
         const next = { ...settings, nickname: name.trim() };
         setSettings(next);

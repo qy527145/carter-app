@@ -2005,8 +2005,8 @@ export function teamPeople(cwd: string): Promise<TeamPeople> {
 export function teamJoin(
   cwd: string,
   join: { name: string } | { memberId: string },
-): Promise<TeamMember> {
-  return invoke<TeamMember>("team_join", {
+): Promise<{ member: TeamMember; inbox_source: string | null }> {
+  return invoke<{ member: TeamMember; inbox_source: string | null }>("team_join", {
     cwd,
     name: "name" in join ? join.name : null,
     memberId: "memberId" in join ? join.memberId : null,
