@@ -145,7 +145,11 @@ pub fn start_session(shell: Arc<AppShell>, opts: SessionOptions) -> carter::Resu
     // 会话文件：按 id 打开 → 续接最近的 → 起一个新的。
     let existing = match &opts.resume_id {
         Some(id) => find_by_id(id),
-        None if opts.resume_latest => session::latest(&opts.cwd),
+        // 「最近一条」不能选中助理对话：它从应用启动起就在后台跑着，再开一个 runner
+        // 就是同一个会话文件两个写者。它有自己的入口，不参与这个选择。
+        None if opts.resume_latest => session::list(&opts.cwd, false)
+            .into_iter()
+            .find(|e| e.meta.id != crate::assistant::CHAT_SESSION_ID),
         None => None,
     };
     let (mut thread, meta, resumed) = match existing {
@@ -899,7 +903,14 @@ impl Runner {
         // 里让用户看着它发出去。放在这里还有一个好处 —— 与 CLI 走的是同一套
         // 规则（自定义命令用 carter 的 `commands::expand`，图片用 carter 的
         // `media::inline_user_attachments`），两边行为对得上。
-        let text = match expand_input(&self.ctx.cwd, &raw) {
+        //
+        // 助理的汇报不展开：里面有外部事件的文字，写一个 `@~/.ssh/id_rsa` 不该把文件读进来。
+        let expansion = if raw.starts_with(crate::assistant::REPORT_MARK) {
+            Ok((raw.clone(), None))
+        } else {
+            expand_input(&self.ctx.cwd, &raw)
+        };
+        let text = match expansion {
             Ok((expanded, note)) => {
                 if let Some(note) = note {
                     self.notice(&note);
@@ -1108,11 +1119,23 @@ impl Runner {
 
     /// 这一轮的工具表（工具开关、MCP、子 agent 都在这里装配）。
     fn turn_tools(&self, system: &[String]) -> carter::tools::ToolRegistry {
+        let is_chat = self.ctx.handle.id == crate::assistant::CHAT_SESSION_ID;
+        // 汇报推起来的那一轮只给一个只读工具：汇报里有外部事件的文字，这一轮只该转述。
+        // 不能一个都不给 —— 历史里有 tool_use 时，Anthropic 协议要求请求必须声明 tools。
+        if is_chat && crate::assistant::chat::is_report_turn(&self.thread.messages) {
+            let mut tools = carter::tools::ToolRegistry::empty();
+            tools.push(Arc::new(crate::tools::assistant_ticket::AssistantStatusTool::new(
+                self.ctx.shell.assistant.clone(),
+            )));
+            return tools;
+        }
         // 常驻助理的工单会话：挂上 `assistant_report`；助理在后台推着跑、没人在看时，
         // 不给提问表单（没人回答，这一轮会永远卡住）。用户自己打开会话接着聊时照常给。
         let ticket =
             crate::assistant::runtime::ticket_for_session(&self.ctx.shell, &self.ctx.handle);
         let unattended = ticket.as_ref().is_some_and(|(_, u)| *u);
+        // 助理对话同样可能没人在看（汇报推起来的那一轮）：表单没人答，这一轮卡住，
+        // 后面的汇报就全堵在队列里。要问什么直接写在回复里。
         build_tools(
             ToolBuildArgs {
                 provider: self.ctx.provider.clone(),
@@ -1124,7 +1147,7 @@ impl Runner {
                 cwd: self.ctx.cwd.clone(),
                 skills_enabled: self.ctx.config.skills.enabled,
                 tool_tx: self.tool_tx.clone().expect("事件通道在 run() 里建好"),
-                ask_tx: if self.ctx.include_task && !unattended {
+                ask_tx: if self.ctx.include_task && !unattended && !is_chat {
                     self.ask_tx.clone()
                 } else {
                     // 侧边聊天不挂 ask_user：抽屉里再套一层提问表单，与「临时问一句」
@@ -1141,8 +1164,7 @@ impl Runner {
                 shell_cwd: Some(self.ctx.shell_cwd.clone()),
                 running: Some(self.ctx.running.clone()),
                 assistant: ticket.map(|(id, _)| (self.ctx.shell.assistant.clone(), id)),
-                assistant_chat: (self.ctx.handle.id == crate::assistant::CHAT_SESSION_ID)
-                    .then(|| self.ctx.shell.assistant.clone()),
+                assistant_chat: is_chat.then(|| self.ctx.shell.clone()),
             },
             &self.ctx.settings,
         )

@@ -1,15 +1,23 @@
 //! 助理对话：一条固定 id 的真实会话，用户在里面用话配置观察源与规则，助理也在里面汇报。
 //!
-//! 对应原型的 Main Session。它不属于任何工单，也不是后台 worker，所以不会被自动关掉；
-//! 配置工具与当前状态段在 `session.rs` 里按 `CHAT_SESSION_ID` 挂上。
+//! 原型的 Main Session 是一条人也能打开的会话（面板顶栏有入口），但日常对话发生在飞书
+//! 线程、GitHub 评论里，助理回到原线程。桌面应用没有那些线程，这条对话同时充当 Main
+//! Session 和它们的替身，所以它得像线程一样**一直在**：
+//!
+//! - 应用启动就开着（[`ensure`]），不等用户点进来。汇报随时能送进去，不会因为「对话
+//!   没开」就只剩一条转瞬即逝的系统通知。
+//! - 界面切走时不关它，切回来复用同一个任务（[`open`]）。关掉重开会打断正在说的话。
+//!
+//! 配置工具、工单工具与当前状态段在 `session.rs` / `tools/mod.rs` 里按 `CHAT_SESSION_ID` 挂上。
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::protocol::Command;
-use crate::session::SessionOptions;
+use crate::session::{SessionOptions, StartedSession, start_session};
 use crate::shell::AppShell;
 
-use super::{CHAT_SESSION_ID, REPORT_MARK, Ticket};
+use super::{CHAT_SESSION_ID, Decision, REPORT_MARK, Ticket};
 
 /// 打开或续接助理对话的参数。盘上有就续接，没有就用固定 id 新建。
 pub fn options(model: Option<String>) -> SessionOptions {
@@ -26,6 +34,52 @@ pub fn options(model: Option<String>) -> SessionOptions {
     }
 }
 
+/// 确保助理对话在后台跑着。已经在跑（或正在收尾）就什么都不做。
+pub fn ensure(shell: &Arc<AppShell>) -> Result<(), String> {
+    if shell.session(CHAT_SESSION_ID).is_some() || shell.is_closing(CHAT_SESSION_ID) {
+        return Ok(());
+    }
+    start_session(shell.clone(), options(None))
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// 界面要显示助理对话：在跑就接上那一个，不在就开一个。
+///
+/// 接上时历史取自句柄上的快照（每轮开始与结束时刷新）—— 不能关掉重开去读盘，
+/// 那会打断它正在说的话、丢掉排着队的汇报。
+pub fn open(shell: &Arc<AppShell>, model: Option<String>) -> Result<StartedSession, String> {
+    if let Some(handle) = shell.session(CHAT_SESSION_ID) {
+        let id = handle.id.clone();
+        return Ok(StartedSession {
+            history: crate::view::to_views(&handle.history.load()),
+            goal: crate::goal::load(&id).as_ref().map(crate::goal::view),
+            changes: crate::changes::load(&id),
+            changes_since: crate::changes::since(&id),
+            prompts: crate::prompts::load(&id),
+            handle,
+        });
+    }
+    start_session(shell.clone(), options(model)).map_err(|e| e.to_string())
+}
+
+/// 这一轮是不是汇报推起来的（最后一条用户输入带汇报标记）。
+///
+/// 汇报里有外部事件的文字。原型的规矩是配置「never on observed content」，提示词拦不
+/// 住的事不能只靠提示词，所以这一轮只给一个只读工具（见 `session.rs::turn_tools`）。
+pub fn is_report_turn(messages: &[llm_adapt_core::WireMessage]) -> bool {
+    messages
+        .iter()
+        .rev()
+        .find(|m| crate::view::is_turn_start(m))
+        .is_some_and(|m| {
+            m.content.iter().any(|b| match b {
+                llm_adapt_core::Block::Text { text, .. } => text.starts_with(REPORT_MARK),
+                _ => false,
+            })
+        })
+}
+
 /// 一张工单要人处理时，推进对话的那段话。
 pub fn report_text(t: &Ticket) -> String {
     let body = t
@@ -36,16 +90,45 @@ pub fn report_text(t: &Ticket) -> String {
     format!("{REPORT_MARK}{} · {}\n{}", t.status.label(), t.label(), body.trim())
 }
 
-/// 往正在运行的助理对话里送一条汇报。对话没开着返回 false，调用方回落到系统通知。
-pub fn push_report(shell: &AppShell, t: &Ticket) -> bool {
+/// 观察模式下「本来会接」的那件事，推进对话时的那段话：请用户拍板。
+pub fn proposal_text(d: &Decision) -> String {
+    let mut s = format!(
+        "{REPORT_MARK}本来会接 · {}\n",
+        d.title.as_deref().unwrap_or("未命名")
+    );
+    if let Some(rule) = &d.rule {
+        s.push_str(&format!("依据规则「{rule}」，来源「{}」。", d.source_name));
+    }
+    if !d.reason.trim().is_empty() {
+        s.push_str(&format!("{}\n", d.reason.trim()));
+    }
+    s.push_str(&format!("（提议编号 {}）", d.id));
+    s
+}
+
+/// 往助理对话里送一段话。对话没在跑就先开起来；开不起来返回 false，
+/// 调用方还有系统通知兜底。
+fn push(shell: &Arc<AppShell>, text: String) -> bool {
+    if let Err(e) = ensure(shell) {
+        tracing::warn!(error = %e, "助理：开不出助理对话，汇报只走系统通知");
+        return false;
+    }
     shell.send(
         CHAT_SESSION_ID,
         Command::SendPrompt {
-            text: report_text(t),
+            text,
             id: None,
             interject: false,
         },
     )
+}
+
+pub fn push_report(shell: &Arc<AppShell>, t: &Ticket) -> bool {
+    push(shell, report_text(t))
+}
+
+pub fn push_proposal(shell: &Arc<AppShell>, d: &Decision) -> bool {
+    push(shell, proposal_text(d))
 }
 
 #[cfg(test)]
@@ -71,5 +154,37 @@ mod tests {
         assert!(text.starts_with(REPORT_MARK));
         assert!(text.contains("要推送吗？"));
         assert!(!text.contains("改好了"));
+    }
+
+    #[test]
+    fn only_a_turn_started_by_a_report_counts_as_one() {
+        use llm_adapt_core::WireMessage;
+        let report = WireMessage::user_text(format!("{REPORT_MARK}待查看 · #1 修 CI\n改好了"));
+        let person = WireMessage::user_text("开工");
+        assert!(is_report_turn(&[person.clone(), report.clone()]));
+        assert!(!is_report_turn(&[report, person]), "用户接着说话，工具就回来了");
+        assert!(!is_report_turn(&[]));
+    }
+
+    #[test]
+    fn a_proposal_names_its_id_so_the_model_can_approve_it() {
+        let d = Decision {
+            id: "dec-1".into(),
+            at: 0,
+            source_id: "s".into(),
+            source_name: "主干 CI".into(),
+            events: vec![],
+            verdict: super::super::Verdict::WouldAccept,
+            rule: Some("修 CI".into()),
+            reason: "主干 build 挂了".into(),
+            title: Some("修主干 build".into()),
+            task: None,
+            ticket_id: None,
+            dismissed: false,
+        };
+        let text = proposal_text(&d);
+        assert!(text.starts_with(REPORT_MARK));
+        assert!(text.contains("本来会接 · 修主干 build"));
+        assert!(text.contains("dec-1"));
     }
 }

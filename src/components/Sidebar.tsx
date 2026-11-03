@@ -22,7 +22,13 @@ import {
 import { setAppSettings, type AppSettings, type SessionRow, type ThemePref } from "../lib/api";
 import { baseName } from "../lib/format";
 import { modelSearchText, useModelCatalog } from "../lib/modelLabel";
-import { newSession, removeProject, startInDirectory } from "../lib/sessionOps";
+import {
+  ASSISTANT_CHAT_ID,
+  newSession,
+  openAssistantChat,
+  removeProject,
+  startInDirectory,
+} from "../lib/sessionOps";
 import { groupByProject, SessionList } from "./SessionList";
 import { Button, IconButton } from "./ui/Button";
 import { Input } from "./ui/Input";
@@ -203,24 +209,26 @@ function ProjectGroups({
 }
 
 /**
- * 常驻助理的入口。角标是要人处理的件数 —— 健康的时候什么都不显示（原型的「面板只显示
- * 要人处理的」）；在跑的工单只用一个小点表示「它在干活」。
+ * 常驻助理的入口：放在「新对话」下面，点开就是和它的对话（面板从对话顶部进）。
+ * 角标是要人处理的件数 —— 健康的时候什么都不显示（原型的「面板只显示要人处理的」）；
+ * 在跑的工单只用一个小点表示「它在干活」。
  */
 function AssistantEntry() {
   const view = useStore((s) => s.view);
-  const setView = useStore((s) => s.setView);
+  const sessionId = useStore((s) => s.sessionId);
   const a = useStore((s) => s.assistant);
+  const active = view === "assistant" || (view === "chat" && sessionId === ASSISTANT_CHAT_ID);
   const attention = a?.attention ?? 0;
   const working = a?.tickets.some((t) => t.status === "working") ?? false;
   return (
     <button
-      onClick={() => setView("assistant")}
+      onClick={() => void openAssistantChat()}
       className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors ${
-        view === "assistant" ? "bg-ink/10 font-medium text-ink" : "text-dim hover:bg-ink/5"
+        active ? "bg-ink/10 font-medium text-ink" : "text-ink hover:bg-ink/5"
       }`}
     >
-      <Radar size={14} />
-      助理
+      <Radar size={14} className="text-tone-blue" />
+      卡特助理
       {a?.settings.paused && <span className="text-[10px] text-dim">已暂停</span>}
       <span className="ml-auto flex items-center gap-1.5">
         {working && (
@@ -288,13 +296,15 @@ export function Sidebar() {
   const q = query.trim().toLowerCase();
   // 模型的三种写法都能搜到（引用 / 展示名 / 实际名）—— 用户记得住的往往不是
   // 配置里那个块名。
+  // 助理对话有自己的入口，不混在项目的会话列表里。
+  const listed = sessions.filter((s) => s.id !== ASSISTANT_CHAT_ID);
   const shown = q
-    ? sessions.filter(
+    ? listed.filter(
         (s) =>
           (s.title ?? "").toLowerCase().includes(q) ||
           modelSearchText(s.model, models).includes(q),
       )
-    : sessions;
+    : listed;
 
   return (
     <>
@@ -318,6 +328,9 @@ export function Sidebar() {
             <Plus size={14} />
             新对话
           </Button>
+          <div className="mt-1.5">
+            <AssistantEntry />
+          </div>
         </div>
 
         {/* 常驻，不按会话条数隐藏 —— 会话列表短的时候藏起来省不了多少地方，
@@ -339,10 +352,10 @@ export function Sidebar() {
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
-          {sessions.length === 0 && (
+          {listed.length === 0 && (
             <div className="px-2 py-6 text-center text-xs text-dim">暂无历史会话</div>
           )}
-          {shown.length === 0 && sessions.length > 0 && (
+          {shown.length === 0 && listed.length > 0 && (
             <div className="px-2 py-6 text-center text-xs text-dim">没有匹配的会话</div>
           )}
           <ProjectGroups
@@ -356,7 +369,6 @@ export function Sidebar() {
         {/* 底部：设置 + 主题。设置放在这里而不是顶部导航里 —— 它是「偶尔去一次」
             的地方，占着顶部第一屏的位置不值当；而左下角是这类入口的常规位置。 */}
         <div className="space-y-1 border-t border-edge p-2">
-          <AssistantEntry />
           <button
             onClick={() => setView("settings")}
             className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors ${

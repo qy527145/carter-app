@@ -353,10 +353,13 @@ mod tests {
     use super::*;
 
     fn store() -> Arc<AssistantStore> {
+        // 不能只靠时间戳：并行的测试会落在同一毫秒，共用一个目录与同一个 `.tmp` 文件。
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "carter-configtool-{}-{}",
+            "carter-configtool-{}-{}-{}",
             std::process::id(),
-            now_ms()
+            now_ms(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&dir).unwrap();
         AssistantStore::open(dir.join("assistant.json"))

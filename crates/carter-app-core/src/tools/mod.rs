@@ -57,6 +57,7 @@ pub mod agent;
 pub mod ask_user;
 pub mod assistant_config;
 pub mod assistant_report;
+pub mod assistant_ticket;
 pub mod background;
 pub mod bash;
 pub mod control;
@@ -86,6 +87,7 @@ use agent::AgentTool;
 use ask_user::{AskRequest, AskUserTool};
 use assistant_config::{AssistantConfigTool, Kind as ConfigKind};
 use assistant_report::AssistantReportTool;
+use assistant_ticket::{AssistantTicketTool, Kind as TicketKind};
 use background::{BackgroundShells, BashOutputTool, KillShellTool};
 use bash::{PlatformBash, ShellCwd};
 use control::RunningTools;
@@ -137,8 +139,11 @@ pub struct ToolBuildArgs {
     pub live: Option<Arc<crate::shell::LiveLog>>,
     /// 这条会话是常驻助理某张工单的执行会话：挂上 `assistant_report`。
     pub assistant: Option<(Arc<crate::assistant::AssistantStore>, String)>,
-    /// 这条会话就是「助理对话」本身：挂上观察源 / 规则 / 模式的配置工具。
-    pub assistant_chat: Option<Arc<crate::assistant::AssistantStore>>,
+    /// 这条会话就是「助理对话」本身：挂上配置工具与工单工具。
+    ///
+    /// 给的是整个外壳而不是 `AssistantStore`：对话里回一句话要能投递到工单的执行会话，
+    /// 那条路在 `runtime::ticket_action` 上，需要会话注册表。
+    pub assistant_chat: Option<Arc<crate::shell::AppShell>>,
 }
 
 /// 按设置挑出要保留的工具（不含 `task`、不含 `ask_user_question`）。
@@ -344,9 +349,10 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
         push(Arc::new(AssistantReportTool::new(store, ticket_id)), &mut tools);
     }
 
-    // 助理对话的配置工具。同样在快照之后：工单的执行会话与子 agent 都不该
-    // 顺手改掉接单规则。
-    if let Some(store) = assistant_chat {
+    // 助理对话的工具。同样在快照之后：工单的执行会话与子 agent 都不该
+    // 顺手改掉接单规则，也不该替别的工单投递消息。
+    if let Some(shell) = assistant_chat {
+        let store = shell.assistant.clone();
         for kind in [
             ConfigKind::SourceSave,
             ConfigKind::SourceDelete,
@@ -355,6 +361,10 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
             ConfigKind::Mode,
         ] {
             push(Arc::new(AssistantConfigTool::new(store.clone(), kind)), &mut tools);
+        }
+        // 回话与收尾：没有这两个，用户在这条对话里回答工单的问题等于自言自语。
+        for kind in [TicketKind::Reply, TicketKind::Act, TicketKind::Proposal] {
+            push(Arc::new(AssistantTicketTool::new(shell.clone(), kind)), &mut tools);
         }
     }
 

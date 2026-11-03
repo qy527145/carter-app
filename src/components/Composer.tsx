@@ -652,7 +652,9 @@ export function Composer() {
                   ? "请先回答上面的问题"
                   : busy
                     ? "可以接着说：Enter 排队，⌘/Ctrl+Enter 插队"
-                    : "输入消息   / 命令   @ 引用文件/目录   可直接粘贴图片"
+                    : sessionId === ops.ASSISTANT_CHAT_ID
+                      ? "告诉助理要盯什么、什么事可以替你做，或回答它的问题"
+                      : "输入消息   / 命令   @ 引用文件/目录   可直接粘贴图片"
             }
             className="max-h-48 min-h-14 w-full resize-none bg-transparent px-4 pb-1 pt-3.5 text-[15px] leading-relaxed text-ink outline-none placeholder:text-dim disabled:opacity-50"
           />
@@ -660,7 +662,8 @@ export function Composer() {
           {/* 输入框下的一行：模型、工作目录、发送。 */}
           <div className="flex items-center gap-2 px-2.5 pb-2">
             <ModelPicker modelRef={modelRef} />
-            <CwdPicker cwd={cwd} />
+            {/* 助理对话不属于哪个项目，换目录等于另开一条，不给这个入口。 */}
+            {sessionId !== ops.ASSISTANT_CHAT_ID && <CwdPicker cwd={cwd} />}
             {pasting && <LoaderCircle size={13} className="animate-spin text-dim" />}
             <span className="flex-1" />
             <ContextRing />

@@ -80,14 +80,7 @@ async function replaceSession(args: {
   const store = useStore.getState();
   const prev = store.sessionId;
   store.resetSession();
-  if (prev) {
-    // 会话可能已经自己结束了，关不掉不算错。
-    try {
-      await api.closeSession(prev);
-    } catch {
-      /* ignore */
-    }
-  }
+  await closeUnlessChat(prev);
   try {
     const created = await api.createSession(args);
     // 按 id 打开时，后端找不到该 id 不会报错，而是**静默新建** —— 返回值会是
@@ -114,14 +107,9 @@ export async function openAssistantChat(): Promise<void> {
   store.setView("chat");
   if (store.sessionId === ASSISTANT_CHAT_ID) return;
   const prev = store.sessionId;
+  cwdBeforeChat = store.cwd;
   store.resetSession();
-  if (prev) {
-    try {
-      await api.closeSession(prev);
-    } catch {
-      /* 已经自己结束了 */
-    }
-  }
+  await closeUnlessChat(prev);
   try {
     const created = await api.openAssistantChat();
     useStore.getState().beginSession(created);
@@ -134,6 +122,22 @@ export async function openAssistantChat(): Promise<void> {
 /** 助理对话的固定会话 id，与后端 `assistant::CHAT_SESSION_ID` 一致。 */
 export const ASSISTANT_CHAT_ID = "assistant";
 
+/** 进助理对话之前所在的目录。助理对话住在家目录，从它「新对话」不该被带过去。 */
+let cwdBeforeChat = "";
+
+/**
+ * 换走时关掉旧会话 —— 助理对话除外：它要一直在后台，汇报才有地方送。
+ * 会话可能已经自己结束了，关不掉不算错。
+ */
+async function closeUnlessChat(id: string | null): Promise<void> {
+  if (!id || id === ASSISTANT_CHAT_ID) return;
+  try {
+    await api.closeSession(id);
+  } catch {
+    /* 已经自己结束了 */
+  }
+}
+
 /**
  * 新建会话并切到对话视图。
  *
@@ -144,7 +148,8 @@ export const ASSISTANT_CHAT_ID = "assistant";
 export function newSession(): void {
   const store = useStore.getState();
   store.setView("chat");
-  void replaceSession({ resume: false, cwd: store.cwd || null });
+  const cwd = store.sessionId === ASSISTANT_CHAT_ID ? cwdBeforeChat : store.cwd;
+  void replaceSession({ resume: false, cwd: cwd || null });
 }
 
 /**
@@ -158,6 +163,11 @@ export function openSession(id: string): void {
   const store = useStore.getState();
   store.setView("chat");
   if (id === store.sessionId) return;
+  // 从「会话」页点到助理对话：走它自己的入口接上，不关掉重开。
+  if (id === ASSISTANT_CHAT_ID) {
+    void openAssistantChat();
+    return;
+  }
   void replaceSession({ resume: false, resumeId: id });
 }
 
@@ -272,13 +282,7 @@ export async function startInDirectory(cwd: string): Promise<void> {
   try {
     const created = await api.createSession({ cwd, resume: false });
     // 新会话建好之后再关旧的：万一新建失败，用户手上还留着原来那条对话。
-    if (prev) {
-      try {
-        await api.closeSession(prev);
-      } catch {
-        /* 已经自己结束了 */
-      }
-    }
+    await closeUnlessChat(prev);
     store.beginSession(created);
     await refreshSessions();
     toastOk(`已在 ${cwd} 新开会话`);

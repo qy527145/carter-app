@@ -23,7 +23,9 @@ import {
   FileText,
   GitBranch,
   LoaderCircle,
+  Megaphone,
   Pencil,
+  Radar,
   RotateCcw,
   ScanSearch,
   Target,
@@ -36,7 +38,13 @@ import { useStore, type Item, type Turn } from "../store";
 import { copyText } from "../lib/clipboard";
 import { useConversationMode } from "../lib/conversationMode";
 import { displayName, modelTitle, useModelCatalog } from "../lib/modelLabel";
-import { clearChanges, fork, regenerate, retryReply } from "../lib/sessionOps";
+import {
+  ASSISTANT_CHAT_ID,
+  clearChanges,
+  fork,
+  regenerate,
+  retryReply,
+} from "../lib/sessionOps";
 import { TOAST_MS } from "../lib/toast";
 import { FilePreviewModal } from "./FilePreview";
 import { MarkdownImage, MarkdownLink, MarkdownPre, transformMarkdownUrl } from "./Media";
@@ -1037,6 +1045,26 @@ function UserTurn({
   );
 }
 
+/** 与后端 `assistant::REPORT_MARK` 逐字对应。 */
+const REPORT_MARK = "【助理汇报】";
+
+/** 一条汇报：第一行是「状态 · 工单」，后面是正文。靠左，是助理在说话。 */
+function ReportTurn({ text }: { text: string }) {
+  const rest = text.slice(REPORT_MARK.length);
+  const cut = rest.indexOf("\n");
+  const title = cut < 0 ? rest : rest.slice(0, cut);
+  const body = cut < 0 ? "" : rest.slice(cut + 1).trim();
+  return (
+    <div className="rounded-xl border border-edge bg-card px-3.5 py-2.5">
+      <div className="flex items-center gap-1.5 text-xs font-medium text-tone-blue">
+        <Megaphone size={12} className="shrink-0" />
+        <span className="truncate">{title}</span>
+      </div>
+      {body && <div className="mt-1 whitespace-pre-wrap break-words text-sm text-ink">{body}</div>}
+    </div>
+  );
+}
+
 function TurnView({
   turn,
   isLast,
@@ -1059,6 +1087,8 @@ function TurnView({
   onFork?: () => void;
 }) {
   if (turn.role === "user") {
+    // 助理自己送进来的汇报：不是用户说的话，不画成用户气泡，也不给重试 / 分叉。
+    if (turn.text.startsWith(REPORT_MARK)) return <ReportTurn text={turn.text} />;
     return <UserTurn turn={turn} onRetry={onRetry} retryAsks={retryAsks} onFork={onFork} />;
   }
   return (
@@ -1189,7 +1219,7 @@ function MessageList() {
     <div ref={scrollRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto px-4 py-6">
       <div className="mx-auto max-w-3xl">
         {turns.length === 0 ? (
-          <EmptyState />
+          sessionId === ASSISTANT_CHAT_ID ? <AssistantEmptyState /> : <EmptyState />
         ) : (
           <TurnList
             turns={turns}
@@ -1209,6 +1239,66 @@ function MessageList() {
           />
         )}
       </div>
+    </div>
+  );
+}
+
+const ASSISTANT_EXAMPLES = [
+  "帮我盯着主干 CI，挂了就看看原因，能修就修",
+  "有人给我提 PR 时告诉我，先别动手",
+  "现在在盯什么？有什么要我处理的？",
+];
+
+/** 助理对话的开场：说清它是什么，给几句能直接发的话。点一下填进输入框。 */
+function AssistantEmptyState() {
+  const setDraft = useStore((s) => s.setComposerDraft);
+  return (
+    <div className="flex flex-col items-center py-20 text-center">
+      <div className="mb-5 flex size-11 items-center justify-center rounded-xl bg-ink text-[var(--accent-contrast)]">
+        <Radar size={22} />
+      </div>
+      <div className="mb-1.5 text-[22px] font-semibold tracking-tight">卡特助理</div>
+      <div className="mb-5 text-sm text-dim">
+        告诉我要盯什么、什么事可以替你做。有事我会回到这里找你。
+      </div>
+      <div className="flex w-full max-w-md flex-col gap-1.5">
+        {ASSISTANT_EXAMPLES.map((x) => (
+          <button
+            key={x}
+            onClick={() => setDraft(x)}
+            className="rounded-lg border border-edge px-3 py-2 text-left text-sm text-dim transition-colors hover:bg-ink/5 hover:text-ink"
+          >
+            {x}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** 助理对话的顶部条：它是谁、现在什么状态、要人处理几件，以及去面板的入口。 */
+function AssistantHeader() {
+  const a = useStore((s) => s.assistant);
+  const setView = useStore((s) => s.setView);
+  const running = a?.tickets.filter((t) => t.status === "working").length ?? 0;
+  const facts = a
+    ? [
+        a.settings.paused ? "已暂停" : a.settings.mode === "auto" ? "自动接单" : "只观察",
+        `盯着 ${a.sources.filter((s) => s.enabled).length} 个观察源`,
+        ...(running > 0 ? [`${running} 张工单在跑`] : []),
+      ]
+    : [];
+  return (
+    <div className="flex h-10 shrink-0 items-center gap-2 border-b border-edge px-4">
+      <Radar size={14} className="shrink-0 text-tone-blue" />
+      <span className="shrink-0 text-sm font-medium text-ink">卡特助理</span>
+      <span className="truncate text-xs text-dim">{facts.join(" · ")}</span>
+      <button
+        onClick={() => setView("assistant")}
+        className="ml-auto shrink-0 rounded-md px-2 py-1 text-xs text-dim transition-colors hover:bg-ink/5 hover:text-ink"
+      >
+        {a && a.attention > 0 ? `面板 · ${a.attention} 件待处理` : "面板"}
+      </button>
     </div>
   );
 }
@@ -1373,6 +1463,8 @@ function ChatHeader() {
   const sessions = useStore((s) => s.sessions);
   const openInspector = useStore((s) => s.openInspector);
   const title = sessions.find((s) => s.id === sessionId)?.title;
+
+  if (sessionId === ASSISTANT_CHAT_ID) return <AssistantHeader />;
 
   return (
     <div className="flex h-10 shrink-0 items-center gap-2 border-b border-edge px-4">
