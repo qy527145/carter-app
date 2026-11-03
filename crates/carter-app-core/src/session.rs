@@ -975,7 +975,7 @@ impl Runner {
         let result = self.run_one_turn(git.clone()).await;
         self.settle_history();
         self.finish_changes(result.used_tools).await;
-        self.emit_turn_ended(&result);
+        self.emit_turn_ended(turn, &result);
         self.after_turn(&result).await;
         self.drive_goal(result, git).await;
         self.last_message_at = Some(crate::protocol::now_ms());
@@ -1237,15 +1237,18 @@ impl Runner {
         }
         // 轮末的记忆建议要看用户**打的原文**（`@文件` 展开前）。
         let raw = echo.clone();
+        // 轮次号在**进 run_turn 之前**记下：carter 的 `run_turn` 一进去就把
+        // `thread.user_turns` 加一（见 `changes_turn` 的同一段说明），轮末再读就成了
+        // 下一轮的号 —— 完成时刻会被记到下一轮上，这一轮的回答永远等不到它。
+        let turn = self.thread.user_turns;
         let started_at = crate::protocol::now_ms();
         // 时间按轮落盘：切走再回来、重启之后显示的还是当时的那个数，而不是
         // 「重开会话的时刻」。老会话没有这份记录，界面就不显示时间。
-        if let Err(e) = crate::timeline::started(&self.ctx.handle.id, self.thread.user_turns, started_at)
-        {
+        if let Err(e) = crate::timeline::started(&self.ctx.handle.id, turn, started_at) {
             tracing::warn!("记录本轮开始时刻失败：{e}");
         }
         self.emit(SessionEvent::TurnStarted {
-            turn: self.thread.user_turns,
+            turn,
             prompt_id,
             prompt: echo,
             started_at,
@@ -1256,7 +1259,7 @@ impl Runner {
         // 不必等用户下一次发消息。
         self.settle_history();
         self.finish_changes(result.used_tools).await;
-        self.emit_turn_ended(&result);
+        self.emit_turn_ended(turn, &result);
         if !result.failed && !result.user_cancelled {
             if let Some(raw) = raw.as_deref() {
                 self.spawn_memory_suggest(raw, turn_start);
@@ -1270,15 +1273,18 @@ impl Runner {
 
     /// 记下这一轮跑完的时刻并发给界面。
     ///
+    /// `turn` 必须由调用方在**进 `run_turn` 之前**取好传进来：carter 一进去就把
+    /// `thread.user_turns` 加一，在这里现读会拿到下一轮的号（见 `run_sequence`）。
+    ///
     /// 三条路径（正常响应、失败、被中断）都走这里：回答是不完整的也要显示时间 ——
     /// 界面上少一处时间比显示一个不完整回答的结束时刻更让人困惑。
-    fn emit_turn_ended(&mut self, result: &TurnResult) {
+    fn emit_turn_ended(&mut self, turn: u32, result: &TurnResult) {
         let at = crate::protocol::now_ms();
-        if let Err(e) = crate::timeline::ended(&self.ctx.handle.id, self.thread.user_turns, at) {
+        if let Err(e) = crate::timeline::ended(&self.ctx.handle.id, turn, at) {
             tracing::warn!("记录本轮结束时刻失败：{e}");
         }
         self.emit(SessionEvent::TurnEnded {
-            turn: self.thread.user_turns,
+            turn,
             at,
             failed: result.failed,
             cancelled: result.user_cancelled,
@@ -1780,14 +1786,14 @@ impl Runner {
                     self.thread.append_user(goal::CONTINUE_PROMPT);
                     self.ctx.handle.publish_history(&self.thread.messages);
                     self.begin_changes();
+                    // 同 `run_sequence`：`user_turns` 在进 `run_turn` 之后就被加一了。
+                    let turn = self.thread.user_turns;
                     let started_at = crate::protocol::now_ms();
-                    if let Err(e) =
-                        crate::timeline::started(&self.ctx.handle.id, self.thread.user_turns, started_at)
-                    {
+                    if let Err(e) = crate::timeline::started(&self.ctx.handle.id, turn, started_at) {
                         tracing::warn!("记录本轮开始时刻失败：{e}");
                     }
                     self.emit(SessionEvent::TurnStarted {
-                        turn: self.thread.user_turns,
+                        turn,
                         // 自动继续没有用户消息编号 —— 界面据此画分隔条而不是气泡。
                         prompt_id: None,
                         prompt: None,
@@ -1796,7 +1802,7 @@ impl Runner {
                     result = self.run_one_turn(git.clone()).await;
                     self.settle_history();
                     self.finish_changes(result.used_tools).await;
-                    self.emit_turn_ended(&result);
+                    self.emit_turn_ended(turn, &result);
                     if self.ctx.handle.close.is_cancelled() {
                         return;
                     }
