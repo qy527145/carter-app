@@ -36,8 +36,8 @@ import {
   X,
 } from "lucide-react";
 
-import { useStore, type Item, type Turn } from "../store";
-import type { TurnTime } from "../lib/api";
+import { historyToTurns, useStore, type Item, type Turn } from "../store";
+import { getAssistantEpisode, newAssistantEpisode, type TurnTime } from "../lib/api";
 import { copyText } from "../lib/clipboard";
 import { useConversationMode } from "../lib/conversationMode";
 import { fmtDuration, fullTime, msgTime } from "../lib/format";
@@ -49,7 +49,7 @@ import {
   regenerate,
   retryReply,
 } from "../lib/sessionOps";
-import { TOAST_MS } from "../lib/toast";
+import { TOAST_MS, toastError } from "../lib/toast";
 import { FilePreviewModal } from "./FilePreview";
 import { MarkdownImage, MarkdownLink, MarkdownPre, transformMarkdownUrl } from "./Media";
 import { AskForm } from "./AskForm";
@@ -357,8 +357,37 @@ function ItemView({
     case "image":
       return <ImageCard item={item} />;
     case "note":
+      if (item.cursor) return <CursorLine label={item.text} />;
       return <div className="whitespace-pre-wrap text-xs text-dim">{item.text}</div>;
   }
+}
+
+/** 一段波浪线（CSS mask 画，颜色跟着文字走）。 */
+const WAVE_MASK =
+  "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='6'%3E%3Cpath d='M0 3 Q3 0 6 3 T12 3' fill='none' stroke='black' stroke-width='1.2'/%3E%3C/svg%3E\")";
+
+function Wave() {
+  return (
+    <span
+      aria-hidden
+      className="h-1.5 min-w-6 flex-1 bg-current opacity-50"
+      style={{ maskImage: WAVE_MASK, WebkitMaskImage: WAVE_MASK, maskRepeat: "repeat-x", WebkitMaskRepeat: "repeat-x" }}
+    />
+  );
+}
+
+/**
+ * 上下文起点：压缩、助理对话开新一期。线以上的内容模型不再看到原文 ——
+ * 界面上照样留着能翻，只用这条线把「还算数」和「已经翻篇」分开。
+ */
+export function CursorLine({ label, title }: { label: string; title?: string }) {
+  return (
+    <div className="flex items-center gap-3 text-[11px] text-dim" title={title}>
+      <Wave />
+      <span className="max-w-[70%] shrink-0 truncate">{label}</span>
+      <Wave />
+    </div>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1348,6 +1377,7 @@ function MessageList() {
   const streaming = generating || direct !== undefined;
   const cwd = useStore((s) => s.cwd);
   const sessionId = useStore((s) => s.sessionId);
+  const hasEpisodes = useStore((s) => (s.assistant?.episodes.length ?? 0) > 0);
   const scrollRef = useRef<HTMLDivElement>(null);
   // 用户往上翻时不要把他拽回底部 —— 只在「本来就在底部」时跟随。
   const stick = useRef(true);
@@ -1366,8 +1396,20 @@ function MessageList() {
   return (
     <div ref={scrollRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto px-4 py-6">
       <div className="mx-auto max-w-3xl">
+        {sessionId === ASSISTANT_CHAT_ID && (
+          <PastEpisodes
+            onGrow={() => {
+              const el = scrollRef.current;
+              if (el && stick.current) el.scrollTop = el.scrollHeight;
+            }}
+          />
+        )}
         {turns.length === 0 ? (
-          sessionId === ASSISTANT_CHAT_ID ? <AssistantEmptyState /> : <EmptyState />
+          sessionId === ASSISTANT_CHAT_ID ? (
+            hasEpisodes ? null : <AssistantEmptyState />
+          ) : (
+            <EmptyState />
+          )
         ) : (
           <TurnList
             turns={turns}
@@ -1398,6 +1440,71 @@ const ASSISTANT_EXAMPLES = [
   "现在在盯什么？有什么要我处理的？",
 ];
 
+/** 一开始带出最近几期的原话；更早的点「再往前看」。 */
+const EPISODES_SHOWN = 2;
+
+/**
+ * 助理对话的往期原话，画在本期上面，每期末尾一条波浪线（游标）。
+ *
+ * 切期之后模型只看得到纪要与记忆，但人还要能往回翻 —— 原话在往期存档里，
+ * 这里只读地画出来，不给重试、分叉这些改历史的入口。
+ */
+function PastEpisodes({ onGrow }: { onGrow: () => void }) {
+  const episodes = useStore((s) => s.assistant?.episodes) ?? [];
+  const [shown, setShown] = useState(EPISODES_SHOWN);
+  const [loaded, setLoaded] = useState<Record<number, Turn[]>>({});
+  const visible = episodes.slice(-shown);
+  const missing = visible.filter((e) => !(e.number in loaded)).map((e) => e.number);
+  const key = missing.join(",");
+
+  useEffect(() => {
+    if (!key) return;
+    let alive = true;
+    Promise.all(
+      missing.map((n) =>
+        getAssistantEpisode(n)
+          .then((h) => [n, historyToTurns(h)] as const)
+          .catch(() => [n, [] as Turn[]] as const),
+      ),
+    ).then((got) => {
+      if (!alive) return;
+      setLoaded((p) => ({ ...p, ...Object.fromEntries(got) }));
+      onGrow();
+    });
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+
+  if (episodes.length === 0) return null;
+  return (
+    <div className="mb-6 flex flex-col gap-6">
+      {episodes.length > shown && (
+        <button
+          onClick={() => setShown((n) => n + EPISODES_SHOWN)}
+          className="self-center rounded-md px-2 py-1 text-xs text-dim hover:bg-ink/5 hover:text-ink"
+        >
+          再往前看（还有 {episodes.length - shown} 期）
+        </button>
+      )}
+      {visible.map((e) => (
+        <div key={e.number} className="flex flex-col gap-6">
+          {loaded[e.number]?.length ? (
+            <div className="opacity-70">
+              <TurnList turns={loaded[e.number]} streaming={false} showPayload={false} />
+            </div>
+          ) : null}
+          <CursorLine
+            label={`第 ${e.number} 期到此 · 以上不再进上下文 · ${e.summary.split("\n")[0]}`}
+            title={`${fullTime(e.started_at)} ~ ${fullTime(e.ended_at)}\n${e.summary}`}
+          />
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /** 助理对话的开场：说清它是什么，给几句能直接发的话。点一下填进输入框。 */
 function AssistantEmptyState() {
   const setDraft = useStore((s) => s.setComposerDraft);
@@ -1425,10 +1532,11 @@ function AssistantEmptyState() {
   );
 }
 
-/** 助理对话的顶部条：它是谁、现在什么状态、要人处理几件，以及去面板的入口。 */
+/** 助理对话的顶部条：它是谁、现在什么状态、要人处理几件，开新一期，以及去面板的入口。 */
 function AssistantHeader() {
   const a = useStore((s) => s.assistant);
   const setView = useStore((s) => s.setView);
+  const [confirmNew, setConfirmNew] = useState(false);
   const running = a?.tickets.filter((t) => t.status === "working").length ?? 0;
   const facts = a
     ? [
@@ -1443,11 +1551,36 @@ function AssistantHeader() {
       <span className="shrink-0 text-sm font-medium text-ink">卡特助理</span>
       <span className="truncate text-xs text-dim">{facts.join(" · ")}</span>
       <button
+        onClick={() => setConfirmNew(true)}
+        title="之前的对话整理成纪要，不再进上下文"
+        className="ml-auto flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-xs text-dim transition-colors hover:bg-ink/5 hover:text-ink"
+      >
+        <Eraser size={12} />
+        开新一期
+      </button>
+      <button
         onClick={() => setView("assistant")}
-        className="ml-auto shrink-0 rounded-md px-2 py-1 text-xs text-dim transition-colors hover:bg-ink/5 hover:text-ink"
+        className="shrink-0 rounded-md px-2 py-1 text-xs text-dim transition-colors hover:bg-ink/5 hover:text-ink"
       >
         {a && a.attention > 0 ? `面板 · ${a.attention} 件待处理` : "面板"}
       </button>
+      {confirmNew && (
+        <ConfirmDialog
+          title="开新一期对话"
+          confirmLabel="开新一期"
+          message={
+            <>
+              之前的对话整理成一条纪要，你说过的偏好记进长期记忆，原话存进往期存档（面板「往期纪要」里能翻）。
+              之后助理只看纪要与记忆，不再带着原话。正在说话的话，等这一轮说完再切。
+            </>
+          }
+          onCancel={() => setConfirmNew(false)}
+          onConfirm={() => {
+            setConfirmNew(false);
+            newAssistantEpisode().catch(toastError);
+          }}
+        />
+      )}
     </div>
   );
 }

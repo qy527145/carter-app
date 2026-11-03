@@ -74,7 +74,8 @@ export type Item =
     }
   | { kind: "server"; rawType: string; summary: string }
   | { kind: "image"; mediaType: string; hash: string | null }
-  | { kind: "note"; text: string };
+  /** 说明文字。`cursor` = 上下文起点（压缩、开新一期），画成一条波浪分隔线。 */
+  | { kind: "note"; text: string; cursor?: boolean };
 
 export type Turn =
   // `turn` 是**这一轮提问**的序号（0 起）。用户气泡本身也要它 —— 回答下面的
@@ -686,7 +687,7 @@ export function historyToTurns(
       .filter((x): x is Item => x !== null);
     const first = items[0];
     if (first?.kind === "text" && first.text.startsWith(SUMMARY_PREFIX)) {
-      items.unshift({ kind: "note", text: "较早的对话已压缩成下面这段摘要，模型此后看到的就是它。" });
+      items.unshift({ kind: "note", cursor: true, text: "较早的对话已压缩成下面这段摘要，模型从这里看起" });
     }
     if (items.length) {
       // `turn` 由后端算好（见 `view.rs`）—— 界面上「这条回答对应哪次请求」全靠它，

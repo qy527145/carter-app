@@ -17,7 +17,6 @@ import {
   ChevronRight,
   CircleAlert,
   Eye,
-  Eraser,
   ListChecks,
   MessageSquare,
   Pause,
@@ -36,7 +35,6 @@ import {
   approveAssistantDecision,
   assistantTicketAction,
   getAssistantEpisode,
-  newAssistantEpisode,
   saveAssistantMemory,
   type AssistantEpisode,
   type AssistantMemory,
@@ -237,7 +235,6 @@ export function AssistantPage() {
 
 function Header({ settings }: { settings: AssistantSettings }) {
   const [busy, setBusy] = useState(false);
-  const [confirmNew, setConfirmNew] = useState(false);
   const save = (patch: Partial<AssistantSettings>) => {
     setBusy(true);
     saveAssistantSettings({ ...settings, ...patch })
@@ -253,9 +250,6 @@ function Header({ settings }: { settings: AssistantSettings }) {
         <Button size="sm" onClick={() => void openAssistantChat()}>
           和助理聊
         </Button>
-        <IconButton title="开新一期：之前的对话不再进上下文" onClick={() => setConfirmNew(true)}>
-          <Eraser size={12} />
-        </IconButton>
         <Segmented<"observe" | "auto">
           value={settings.mode}
           onChange={(mode) => save({ mode })}
@@ -269,25 +263,6 @@ function Header({ settings }: { settings: AssistantSettings }) {
           {settings.paused ? "恢复" : "暂停"}
         </Button>
       </span>
-      {confirmNew && (
-        <ConfirmDialog
-          title="开新一期对话"
-          confirmLabel="开新一期"
-          message={
-            <>
-              之前的对话整理成一条纪要，你说过的偏好记进长期记忆，原话存进往期存档（下面「往期纪要」里能翻）。
-              之后助理只看纪要与记忆，不再带着原话。正在说话的话，等这一轮说完再切。
-            </>
-          }
-          onCancel={() => setConfirmNew(false)}
-          onConfirm={() => {
-            setConfirmNew(false);
-            newAssistantEpisode()
-              .then(() => toastOk("正在整理这一期，完成后从新的一期开始"))
-              .catch(toastError);
-          }}
-        />
-      )}
     </div>
   );
 }
