@@ -93,7 +93,7 @@ use assistant_ticket::{
 use background::{BackgroundShells, BashOutputTool, KillShellTool};
 use bash::{PlatformBash, ShellCwd};
 use control::RunningTools;
-use cwd::{CwdScoped, ProjectMemoryGuard};
+use cwd::CwdScoped;
 use goal_update::GoalUpdateTool;
 use grep::EmbeddedGrep;
 use multi_skill::MultiRootSkill;
@@ -203,9 +203,9 @@ pub fn substitute_with(
         // 文件工具：相对路径按会话的 cwd 解析。原实现（行号、图片、截断…）全部保留，
         // 只是在执行前把 `path` 改写成绝对路径。
         name if CwdScoped::applies_to(name) => Arc::new(CwdScoped::new(t, cwd.to_path_buf())),
-        // save_memory 没有 path 参数可改写，目标路径是内部按 scope 算的 —— 项目级作用域
-        // 在桌面应用里必然是错的，明确拒绝掉。
-        "save_memory" => Arc::new(ProjectMemoryGuard::new(t)),
+        // save_memory 的项目级记忆默认跟随**进程** cwd（命令行下就是项目根），桌面应用
+        // 里那是启动目录（从 Finder 启动就是 `/`）—— 换成绑定会话 cwd 的那一份。
+        "save_memory" => Arc::new(carter::tools::SaveMemory::new(cwd.to_path_buf())),
         // `skill` 换成多根实现：技能页加的扫描路径与项目级目录就在这里生效。
         // cwd 是构造期传入的会话工作目录，项目根由它往上找。
         "skill" => Arc::new(MultiRootSkill::new(Scan::from_settings_at(

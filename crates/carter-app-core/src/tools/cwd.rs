@@ -134,61 +134,6 @@ impl Tool for CwdScoped {
     }
 }
 
-/// 挡住 `save_memory` 的**项目级**作用域。
-///
-/// `save_memory` 没有 `path` 参数可以改写 —— 目标路径是它内部按 `scope` 算出来的
-/// （`carter/tools/save_memory.rs::target_for`）：`kind=facts, scope=project` 直接
-/// `PathBuf::from("CARTER.md")`，又是一个相对路径。命令行下那等于项目根目录，
-/// 桌面应用下等于**进程**的 cwd（从资源管理器启动就是 `C:\Windows\System32`）。
-///
-/// 而且 `scope` 的**默认值就是 `project`** —— 模型只要省略这个参数就会踩中。
-///
-/// 这里选择**明确拒绝**而不是放过。写错地方的记忆比没有记忆更坏：用户以为记住了，
-/// 下次却找不到。错误信息里直接把替代方案给出来（`scope=global`，或者用 `write_file`
-/// 写 `<cwd>/CARTER.md` —— 后者是可行的，因为 `write_file` 已经被 [`CwdScoped`]
-/// 按会话 cwd 解析了）。
-pub struct ProjectMemoryGuard {
-    inner: Arc<dyn Tool>,
-}
-
-impl ProjectMemoryGuard {
-    pub fn new(inner: Arc<dyn Tool>) -> Self {
-        Self { inner }
-    }
-}
-
-#[async_trait::async_trait]
-impl Tool for ProjectMemoryGuard {
-    fn name(&self) -> &str {
-        self.inner.name()
-    }
-
-    fn description(&self) -> &str {
-        self.inner.description()
-    }
-
-    fn parameters(&self) -> Value {
-        self.inner.parameters()
-    }
-
-    async fn execute(&self, args: Value) -> ToolResult {
-        let kind = args.get("kind").and_then(Value::as_str).unwrap_or("facts");
-        // 默认值就是 "project" —— 省略参数也会走到这里。
-        let scope = args.get("scope").and_then(Value::as_str).unwrap_or("project");
-
-        if kind == "facts" && scope == "project" {
-            return ToolResult::err(
-                "桌面应用里 `scope = \"project\"` 不可用：项目记忆要写到工作目录下的 \
-                 CARTER.md，而工具运行时的进程工作目录与会话的工作目录不是一回事 —— \
-                 写进去多半会落在一个你完全没预期的位置。\
-                 改用 `scope = \"global\"`（写进 ~/.carter/facts.md），\
-                 或者直接用 write_file 写 `CARTER.md`（它已经按会话的工作目录解析）。",
-            );
-        }
-        self.inner.execute(args).await
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,56 +249,6 @@ mod tests {
         }
         for n in ["bash", "todo_write", "task", "save_memory", "ask_user_question"] {
             assert!(!CwdScoped::applies_to(n), "{n} 不该被改写参数");
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // save_memory 的项目级作用域
-    // -----------------------------------------------------------------------
-
-    struct MemoryEcho;
-    #[async_trait::async_trait]
-    impl Tool for MemoryEcho {
-        fn name(&self) -> &str {
-            "save_memory"
-        }
-        fn description(&self) -> &str {
-            ""
-        }
-        fn parameters(&self) -> Value {
-            json!({})
-        }
-        async fn execute(&self, _: Value) -> ToolResult {
-            ToolResult::ok("要是走到了这里，说明真的写盘了")
-        }
-    }
-
-    /// **省略 `scope` 也会被挡住** —— carter 的默认值就是 `project`，
-    /// 模型只要不写这个参数就会踩中「写到了进程 cwd」。
-    #[tokio::test]
-    async fn project_scope_is_refused_even_when_scope_is_omitted() {
-        let t = ProjectMemoryGuard::new(Arc::new(MemoryEcho));
-        let res = t.execute(json!({"content": "记住这件事"})).await;
-        assert!(!res.ok, "项目级作用域不该放过去：{}", res.content);
-        assert!(res.content.contains("scope"), "错误信息要给出替代方案：{}", res.content);
-        assert!(res.content.contains("global"), "{}", res.content);
-    }
-
-    /// 全局作用域不受影响 —— 它写的是 `~/.carter/facts.md`，绝对路径，本来就没问题。
-    #[tokio::test]
-    async fn global_scope_passes_through() {
-        let t = ProjectMemoryGuard::new(Arc::new(MemoryEcho));
-        let res = t.execute(json!({"content": "x", "scope": "global"})).await;
-        assert!(res.ok, "{}", res.content);
-    }
-
-    /// profile / skill 的目标路径本来就是绝对的，不该被误伤。
-    #[tokio::test]
-    async fn other_kinds_are_not_touched() {
-        let t = ProjectMemoryGuard::new(Arc::new(MemoryEcho));
-        for kind in ["profile", "skill"] {
-            let res = t.execute(json!({"content": "x", "kind": kind})).await;
-            assert!(res.ok, "{kind} 不该被挡：{}", res.content);
         }
     }
 }

@@ -1177,6 +1177,8 @@ impl Runner {
                 tracing::warn!("记录用户原文失败：{e}");
             }
         }
+        // 轮末的记忆建议要看用户**打的原文**（`@文件` 展开前）。
+        let raw = echo.clone();
         self.emit(SessionEvent::TurnStarted {
             turn: self.thread.user_turns,
             prompt_id,
@@ -1188,6 +1190,11 @@ impl Runner {
         // 不必等用户下一次发消息。
         self.settle_history();
         self.finish_changes(result.used_tools).await;
+        if !result.failed && !result.user_cancelled {
+            if let Some(raw) = raw.as_deref() {
+                self.spawn_memory_suggest(raw, turn_start);
+            }
+        }
         self.after_turn(&result).await;
         self.drive_goal(result, git).await;
         self.last_message_at = Some(crate::protocol::now_ms());
@@ -1280,6 +1287,48 @@ impl Runner {
             }
             recorder.record(carter::session::RecordKind::Title { title: title.clone() });
             emit(&shell, &session_id, SessionEvent::Title { title });
+        });
+    }
+
+    /// 轮末看看用户这句话里有没有值得长期记住的东西，有就交给界面请用户确认
+    /// （见 `memory_suggest.rs`）。与标题一样**不挡下一轮**、失败就静默。
+    ///
+    /// 只在用户亲自打字的主会话里做：侧边聊天、助理对话、工单会话里的话不是
+    /// 「用户对这个项目的长期要求」，后两者还常常没人在看，弹了也没人点。
+    fn spawn_memory_suggest(&mut self, user_text: &str, turn_start: usize) {
+        use crate::memory_suggest as ms;
+        if self.fixed_system.is_some()
+            || self.ctx.handle.id == crate::assistant::CHAT_SESSION_ID
+            || crate::assistant::runtime::ticket_for_session(&self.ctx.shell, &self.ctx.handle)
+                .is_some()
+            || !ms::worth_checking(user_text)
+        {
+            return;
+        }
+        let turn = self.thread.messages.get(turn_start..).unwrap_or_default();
+        // 模型自己已经记过了：同一件事再问一遍是打扰。
+        if ms::saved_in(turn) {
+            return;
+        }
+        let reply = ms::reply_text(turn);
+        let model = self.ctx.fast_model().unwrap_or_else(|| CompactModel {
+            provider: self.ctx.provider.clone(),
+            model: self.ctx.model.clone(),
+        });
+        let existing = carter::memory::load(&self.ctx.cwd);
+        let shell = self.ctx.shell.clone();
+        let session_id = self.ctx.handle.id.clone();
+        let user_text = user_text.to_string();
+        tokio::spawn(async move {
+            match ms::suggest(&*model.provider, &model.model, &session_id, &user_text, &reply, &existing)
+                .await
+            {
+                Ok(candidates) if !candidates.is_empty() => {
+                    emit(&shell, &session_id, SessionEvent::MemorySuggestion { candidates });
+                }
+                Ok(_) => {}
+                Err(e) => tracing::debug!("记忆建议没生成出来：{e}"),
+            }
         });
     }
 

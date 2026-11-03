@@ -371,6 +371,11 @@ pub enum SessionEvent {
     /// 助理对话刚结束了一期（见 `assistant/memory.rs`）：历史已清空，面板的记忆与
     /// 纪要要重拉。
     AssistantEpisode { number: u32 },
+    /// 这一轮里有值得长期记住的东西，请用户确认（见 `memory_suggest.rs`）。
+    /// 轮末异步到达，可能晚于 `idle`。确认走 `accept_memory` 命令，不经过会话。
+    MemorySuggestion {
+        candidates: Vec<crate::memory_suggest::MemoryCandidate>,
+    },
     /// 会话标题自动生成好了（首轮之后）。前端据此刷新会话列表 ——
     /// 侧栏那一行与顶部标题都取自同一份列表，刷新一处两处都对。
     Title { title: String },

@@ -309,6 +309,18 @@ async fn detach_session(shell: State<'_, Arc<AppShell>>, session_id: String) -> 
     Ok(())
 }
 
+/// 用户在记忆建议条上点了「记住」。项目级记忆写进会话的工作目录（`cwd`）。
+///
+/// 不经过会话任务：写一个文件不需要排在正在跑的那一轮后面，而且建议可能在会话
+/// 已经关掉之后才被点。
+#[tauri::command]
+fn accept_memory(
+    cwd: String,
+    candidate: carter_app_core::memory_suggest::MemoryCandidate,
+) -> Result<String, String> {
+    carter_app_core::memory_suggest::accept(Path::new(&cwd), &candidate)
+}
+
 /// 列举会话。`all = false` 只看 `cwd`（不给就是默认目录），`true` 跨所有项目。
 #[tauri::command]
 fn list_sessions(all: bool, cwd: Option<String>) -> Vec<SessionRow> {
@@ -1691,6 +1703,7 @@ pub fn run() {
             open_assistant_chat,
             create_side_session,
             send_command,
+            accept_memory,
             close_session,
             list_sessions,
             rename_session,

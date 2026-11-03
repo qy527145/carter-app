@@ -52,6 +52,7 @@ import { MarkdownImage, MarkdownLink, MarkdownPre, transformMarkdownUrl } from "
 import { AskForm } from "./AskForm";
 import { Composer, MessageImages } from "./Composer";
 import { GoalBar } from "./GoalBar";
+import { MemorySuggestBar } from "./MemorySuggestBar";
 import { ModePill } from "./ModePill";
 import { Glyph, ServerCard, ToolCard } from "./toolcards/ToolCard";
 import { IconButton } from "./ui/Button";
@@ -1557,6 +1558,7 @@ export function ChatView() {
       <AskForm />
       {/* 目标条贴着输入框：它和「我要它干什么」是一件事，读起来是一句话。 */}
       <GoalBar />
+      <MemorySuggestBar />
       <Composer />
     </div>
   );

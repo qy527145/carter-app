@@ -8,7 +8,7 @@ edition = "2024"
 
 [workspace.dependencies]
 # 底层 harness：agent 循环、工具、会话、技能、MCP。
-carter = "0.1.5"
+carter = "0.1.6"
 # 线协议底座：三协议编解码、SSE、内容块装配。经由 carter 传递进来，但视图层
 # 要直接用 IR 类型，所以显式依赖一次。版本必须与 carter 依赖的那个一致 ——
 # 两个新类型共存会在类型检查上炸（同一个 crate 的两个版本是两套类型）。

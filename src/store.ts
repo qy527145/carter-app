@@ -36,6 +36,7 @@ import type {
   LiveView,
   ContextView,
   GoalView,
+  MemoryCandidate,
   MessageView,
   SessionEvent,
   SessionRow,
@@ -135,6 +136,8 @@ export type Conv = {
   context: ContextView | null;
   /** 正在压缩上下文（环换成转圈）。 */
   compacting: boolean;
+  /** 等用户确认的候选记忆（输入框上方那一条）。空 = 不显示。 */
+  memorySuggestions: MemoryCandidate[];
 };
 
 /**
@@ -237,6 +240,8 @@ type Store = Conv & {
   /** 后端明确失败时的兜底：别让界面永远停在「正在生成」。 */
   clearStreaming: () => void;
   setNotice: (m: string | null) => void;
+  /** 记忆建议条上处理完一条（记住或忽略），把它从条上拿掉。 */
+  dropMemorySuggestion: (content: string) => void;
   clearPendingForm: () => void;
   openInspector: (turn?: number | null) => void;
   closeInspector: () => void;
@@ -495,6 +500,16 @@ export function reduceConv(c: Conv, e: SessionEvent, sessionId?: string): Partia
     // 面板的记忆与纪要由事件层去重拉（见 `lib/events.ts`），对话这边不用动。
     case "assistant_episode":
       return {};
+    case "memory_suggestion":
+      // 上一批还没处理完又来一批：合在一起，内容相同的只留一条。
+      return {
+        memorySuggestions: [
+          ...c.memorySuggestions,
+          ...e.candidates.filter(
+            (n) => !c.memorySuggestions.some((o) => o.content === n.content),
+          ),
+        ],
+      };
     case "title":
       // 标题不是对话内容，是会话列表里那一行的属性 —— 由事件层去重拉列表
       // （见 `lib/events.ts`）。这里什么都不用改。
@@ -716,6 +731,7 @@ const emptyConversation: Conv = {
   changesSkip: 0,
   context: null,
   compacting: false,
+  memorySuggestions: [],
 };
 
 /** 主对话那部分状态（`Conv` 的字段藏在 store 里，还原出来给 reducer 用）。 */
@@ -734,6 +750,7 @@ function convOf(s: Conv): Conv {
     changesSkip: s.changesSkip,
     context: s.context,
     compacting: s.compacting,
+    memorySuggestions: s.memorySuggestions,
   };
 }
 
@@ -823,6 +840,11 @@ export const useStore = create<Store>((set) => ({
   addUserTurn: (text) => set((s) => ({ turns: [...s.turns, { role: "user", text }] })),
 
   setNotice: (notice) => set({ notice }),
+
+  dropMemorySuggestion: (content) =>
+    set((s) => ({
+      memorySuggestions: s.memorySuggestions.filter((c) => c.content !== content),
+    })),
 
   clearPendingForm: () => set({ pendingForm: null }),
 

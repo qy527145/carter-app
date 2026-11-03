@@ -127,6 +127,11 @@ export type SessionEvent =
     }
   | { type: "notice"; message: string }
   | { type: "assistant_episode"; number: number }
+  /**
+   * 这一轮里有值得长期记住的东西，请用户确认。轮末异步到达（可能晚于 `idle`）。
+   * 确认走 `acceptMemory`，不经过会话。
+   */
+  | { type: "memory_suggestion"; candidates: MemoryCandidate[] }
   /** 会话标题自动生成好了。前端据此刷新会话列表（侧栏那一行 + 顶部标题）。 */
   | { type: "title"; title: string }
   | { type: "idle" }
@@ -502,6 +507,19 @@ export function openAssistantChat(model?: string | null): Promise<CreatedSession
  */
 export function sendCommand(sessionId: string, command: Command): Promise<void> {
   return invoke<void>("send_command", { sessionId, command });
+}
+
+/** 一条候选记忆。字段与 `save_memory` 的参数同名同义。 */
+export type MemoryCandidate = {
+  content: string;
+  kind: "facts" | "profile";
+  /** `profile` 时恒为 `user`。 */
+  scope: "project" | "user";
+};
+
+/** 把用户确认过的一条候选写进记忆。项目级的写进 `cwd/CARTER.md`。返回给用户看的一句话。 */
+export function acceptMemory(cwd: string, candidate: MemoryCandidate): Promise<string> {
+  return invoke<string>("accept_memory", { cwd, candidate });
 }
 
 export function closeSession(sessionId: string): Promise<void> {
