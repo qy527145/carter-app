@@ -154,10 +154,13 @@ impl Tool for Recorded {
         // 把这次调用的控制句柄放进 task-local，工具（`bash`）执行时才能读到
         // 「用户按了中断 / 转后台」。包装层是唯一知道 `call_id` 的地方 —— 界面
         // 按钮回传的就是这个 id。
-        let res = match &self.running {
+        let mut res = match &self.running {
             Some(running) => running.scope(&call_id, self.inner.execute(args)).await,
             None => self.inner.execute(args).await,
         };
+        // 这一轮进行中到的跨会话来信，搭这条结果送进去（见 `peers.rs`）。界面卡片上
+        // 也照样带着 —— 模型看到了什么，用户就该看到什么。
+        crate::peers::drain_into(&mut res.content);
         if let Some(live) = &self.live {
             live.tool_finished(&call_id, &res.content);
         }

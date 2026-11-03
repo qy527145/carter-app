@@ -96,6 +96,9 @@ pub struct SessionHandle {
     pub attached: std::sync::atomic::AtomicBool,
     /// 测试用：判断「空闲多久」时把现在往后拨这么多毫秒。生产路径上永远是 0。
     pub clock_skew_ms: std::sync::atomic::AtomicU64,
+    /// 别的会话发来的信（见 `peers.rs`）。放在句柄上而不走命令通道：正在跑的那一轮
+    /// 要在工具返回时就能取走它，命令通道那时是会话任务自己在读。
+    pub inbox: Arc<crate::peers::Inbox>,
     /// 只有 crate 内能构造 —— 命令通道的持有者是会话运行器，不该由外部塞进来。
     pub(crate) cmd_tx: mpsc::UnboundedSender<Command>,
 }
@@ -122,6 +125,7 @@ impl SessionHandle {
             busy: std::sync::atomic::AtomicBool::new(false),
             attached: std::sync::atomic::AtomicBool::new(false),
             clock_skew_ms: std::sync::atomic::AtomicU64::new(0),
+            inbox: Arc::default(),
             cmd_tx,
         })
     }
@@ -214,6 +218,8 @@ pub struct AppShell {
     pub schedules: Arc<crate::schedules::ScheduleStore>,
     /// 常驻助理的状态。理由同 `schedules`：由后台循环自己写，不进配置热重载那条路。
     pub assistant: Arc<crate::assistant::AssistantStore>,
+    /// 跨会话消息：信的编号、收信时被唤起的会话（见 `peers.rs`）。
+    pub peers: crate::peers::PeerHub,
     pub sessions: DashMap<String, Arc<SessionHandle>>,
     /// 已经发出关闭信号、但任务还没退出的会话 id。
     ///
@@ -235,6 +241,7 @@ impl AppShell {
             )),
             schedules: crate::schedules::ScheduleStore::open_default(),
             assistant: crate::assistant::AssistantStore::open_default(),
+            peers: Default::default(),
             sessions: DashMap::new(),
             closing: Mutex::new(HashSet::new()),
             events,

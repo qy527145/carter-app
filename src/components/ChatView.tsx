@@ -24,6 +24,7 @@ import {
   GitBranch,
   LoaderCircle,
   Megaphone,
+  MessagesSquare,
   Pencil,
   Radar,
   RotateCcw,
@@ -1108,6 +1109,49 @@ function BackgroundDoneTurn({ text }: { text: string }) {
   );
 }
 
+/** 与后端 `peers::PEER_MARK` 逐字对应。 */
+const PEER_MARK = "【跨会话】";
+
+/**
+ * 另一条会话发来的信（或回执）：第一行是「来自 xxx · m3」，后面是给模型看的说明与
+ * `<来信>` 正文。界面只摊开正文，那段说明折在「原文」里。
+ */
+function PeerTurn({ text }: { text: string }) {
+  const rest = text.slice(PEER_MARK.length);
+  const cut = rest.indexOf("\n");
+  const title = cut < 0 ? rest : rest.slice(0, cut);
+  const letters = [...text.matchAll(/<(来信|回执)([^>]*)>\n([\s\S]*?)\n<\/\1>/g)].map((m) => ({
+    receipt: m[1] === "回执",
+    from: /from="([^"]*)"/.exec(m[2])?.[1] ?? "",
+    body: m[3],
+  }));
+  return (
+    <div className="rounded-xl border border-edge bg-card px-3.5 py-2.5">
+      <div className="flex items-center gap-1.5 text-xs font-medium text-tone-blue">
+        <MessagesSquare size={12} className="shrink-0" />
+        <span className="truncate">跨会话 · {title}</span>
+      </div>
+      {letters.map((l, i) => (
+        <div key={i} className="mt-1.5">
+          {letters.length > 1 && <div className="text-xs text-dim">{l.from}</div>}
+          <div className={`whitespace-pre-wrap break-words text-sm ${l.receipt ? "text-dim" : "text-ink"}`}>
+            {l.body}
+          </div>
+        </div>
+      ))}
+      <details className="group mt-1.5">
+        <summary className="flex cursor-pointer list-none items-center gap-1 text-xs text-dim">
+          <ChevronRight size={11} className="shrink-0 transition-transform group-open:rotate-90" />
+          模型看到的原文
+        </summary>
+        <pre className="mt-1 max-h-80 overflow-auto whitespace-pre-wrap break-words font-mono text-xs text-dim">
+          {text}
+        </pre>
+      </details>
+    </div>
+  );
+}
+
 function TurnView({
   turn,
   isLast,
@@ -1134,6 +1178,7 @@ function TurnView({
     if (turn.text.startsWith(REPORT_MARK)) return <ReportTurn mark={REPORT_MARK} text={turn.text} />;
     if (turn.text.startsWith(EVENT_MARK)) return <ReportTurn mark={EVENT_MARK} text={turn.text} />;
     if (turn.text.startsWith(DONE_MARK)) return <BackgroundDoneTurn text={turn.text} />;
+    if (turn.text.startsWith(PEER_MARK)) return <PeerTurn text={turn.text} />;
     return <UserTurn turn={turn} onRetry={onRetry} retryAsks={retryAsks} onFork={onFork} />;
   }
   return (

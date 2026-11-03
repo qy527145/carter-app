@@ -157,6 +157,8 @@ export type AppEvent =
   /** 托盘菜单点了「助理面板」：切过去。 */
   | { type: "assistant_open" }
   | { type: "assistant_turn_ended"; session_id: string }
+  /** 一条会话给另一条发了信（跨会话消息）。收信方可能刚在后台被续接起来。 */
+  | { type: "peer_message"; from: string; to: string; preview: string }
   /**
    * IM 连接器底层命令的一行输出（安装脚本 / 登录流程）。弹窗里的日志框逐行追加。
    */

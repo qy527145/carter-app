@@ -65,6 +65,7 @@ pub mod cwd;
 pub mod goal_update;
 pub mod grep;
 pub mod multi_skill;
+pub mod peer;
 pub mod record;
 pub mod schedule;
 
@@ -146,6 +147,9 @@ pub struct ToolBuildArgs {
     /// 给的是整个外壳而不是 `AssistantStore`：对话里回一句话要能投递到工单的执行会话，
     /// 那条路在 `runtime::ticket_action` 上，需要会话注册表。
     pub assistant_chat: Option<Arc<crate::shell::AppShell>>,
+    /// 挂上跨会话的三个工具（`list_sessions` / `send_message` / `read_session`）。
+    /// 只有主对话给：子 agent、侧边聊天、助理对话都不该替这条会话对外说话。
+    pub peers: Option<Arc<crate::shell::AppShell>>,
 }
 
 /// 按设置挑出要保留的工具（不含 `task`、不含 `ask_user_question`）。
@@ -244,6 +248,7 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
         live,
         assistant,
         assistant_chat,
+        peers,
     } = args;
 
     // ui_tx 传 None：carter 的 ask_user 会一并注册进来，而我们用自己的那个
@@ -371,6 +376,16 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
         // 长期记忆与往期检索（见 `assistant/memory.rs`）。
         push(Arc::new(AssistantMemoryTool::new(store.clone())), &mut tools);
         push(Arc::new(AssistantRecallTool::new(store.clone())), &mut tools);
+    }
+
+    // 跨会话消息。在快照之后：子 agent 看不到主对话，替它对外说话只会说半截情况。
+    if let Some(shell) = peers {
+        for kind in [peer::Kind::List, peer::Kind::Send, peer::Kind::Read] {
+            let t = peer::PeerTool::new(shell.clone(), session_id.clone(), kind);
+            if settings.tool_enabled(t.name()) {
+                push(Arc::new(t), &mut tools);
+            }
+        }
     }
 
     tools

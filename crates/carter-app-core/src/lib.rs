@@ -22,6 +22,7 @@
 //! * [`inspect`] —— 抓到的报文解回 IR，供报文面板按语义渲染。
 //! * [`title`] —— 首轮之后用副模型起会话标题（含「别思考」的那层包装）。
 //! * [`memory_suggest`] —— 轮末从用户的话里提炼候选记忆，交给用户确认后写入。
+//! * [`peers`] —— 跨会话消息：一条会话里的模型给另一条发信、看它说到哪了。
 //! * [`platform`] —— 操作系统与 shell 探测（bash 工具的跨平台基础）。
 //! * [`assistant`] —— 常驻助理：盯观察源、按规则接单、在后台会话里做完（移植自 dsh-superagent）。
 
@@ -39,6 +40,7 @@ pub mod inspect;
 pub mod input;
 pub mod memory_suggest;
 pub mod paths;
+pub mod peers;
 pub mod platform;
 pub mod preview;
 pub mod prompts;

@@ -1063,6 +1063,27 @@ fn list_tools(shell: State<'_, Arc<AppShell>>, cwd: Option<String>) -> Vec<ToolR
         }
     }
 
+    // 跨会话的三个工具。只展示说明，不会真的执行 —— 发信方 id 给空串即可。
+    {
+        use carter::tools::Tool as _;
+        use carter_app_core::tools::peer::{Kind, PeerTool};
+        for (kind, note) in [
+            (Kind::List, "列出本机可以发信的其他对话"),
+            (Kind::Send, "给另一条对话发一段话，对方空闲时立刻处理、忙时在下次工具返回时读到"),
+            (Kind::Read, "旁观另一条对话最近说了什么，不打扰它"),
+        ] {
+            let t = PeerTool::new(shell.inner().clone(), String::new(), kind);
+            rows.push(ToolRow {
+                enabled: settings.tool_enabled(t.name()),
+                toggleable: true,
+                note: Some(note.into()),
+                name: t.name().to_string(),
+                description: t.description().to_string(),
+                parameters: t.parameters(),
+            });
+        }
+    }
+
     // 定时任务工具。它要一份任务表 —— 用壳里那份**同一个** `Arc`，而不是新开一个：
     // 设置页与模型改的必须是同一份数据。
     {

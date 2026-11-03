@@ -206,6 +206,13 @@ pub enum AppEvent {
     AssistantOpen,
     /// 一条助理的执行会话跑完了一轮。界面据此拉起（或刷新）常驻的助理对话。
     AssistantTurnEnded { session_id: String },
+    /// 一条会话给另一条发了信（见 `peers.rs`）。界面据此刷新侧栏（收信方可能刚被续接起来），
+    /// 并在用户没看着收信方时提示一句。
+    PeerMessage {
+        from: String,
+        to: String,
+        preview: String,
+    },
     /// IM 连接器（钉钉等）底层命令的一行输出。
     ///
     /// 安装要下载几十 MB、登录要等人扫码，静默几分钟用户只会以为按钮没反应。

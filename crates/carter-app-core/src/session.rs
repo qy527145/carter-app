@@ -727,6 +727,8 @@ impl Runner {
         // 等这一轮（以及排在前面的用户消息）跑完再起新的一轮 —— 与 Claude Code 一样，
         // 模型起完后台命令就可以收工，结束了再被叫回来，而不是守着它轮询。
         let mut done_rx = self.ctx.shells.subscribe();
+        // 别的会话发来的信。同样只在空闲时取；正在跑的那一轮里由工具结果捎带（见 `peers.rs`）。
+        let inbox = self.ctx.handle.inbox.clone();
 
         loop {
             let cmd = match self.queued.pop_front() {
@@ -744,6 +746,11 @@ impl Runner {
                                 Some(text) => Command::SendPrompt { text, id: None, interject: false },
                                 None => continue,
                             }
+                        },
+                        _ = inbox.notified() => match inbox.take_prompt() {
+                            Some(text) => Command::SendPrompt { text, id: None, interject: false },
+                            // 这一轮里已经搭着工具结果送过了。
+                            None => continue,
                         },
                         // 显式关闭。光靠上面那条 `None` 是不够的 —— 会话任务自己攥着一个
                         // `Arc<SessionHandle>`，它持有发送端，所以 `recv()` 永远不会返回
@@ -770,6 +777,8 @@ impl Runner {
         drop(self.tool_tx.take());
         drop(self.ask_tx.take());
         let _ = forwarder.await;
+        // 没读的信退回去、等着回执的告诉一声 —— 否则发信方会一直以为对方会回。
+        crate::peers::on_exit(&self.ctx.shell, &self.ctx.handle);
         // 只摘**自己**那一条。按 id 摘的话，`close_session` 等超时之后已经开起来的
         // 接班 runner 会被一起摘掉 —— 注册表里看不到它，别人又按 id 开出第三个，
         // 同一个会话文件就有了多个写者。
@@ -1083,6 +1092,13 @@ impl Runner {
         if !crate::assistant::is_injected(&raw) {
             self.maybe_close_episode().await;
         }
+        // 用户亲口说话了：这一轮不再是哪封信的回信，跨会话的跳数从头数。
+        if !crate::assistant::is_injected(&raw)
+            && !raw.starts_with(crate::tools::background::DONE_MARK)
+            && !raw.starts_with(crate::peers::PEER_MARK)
+        {
+            self.ctx.handle.inbox.reset_hops();
+        }
         // 展开之后发给模型的是另一段文本，但界面上要显示用户**打的字**。
         let echo = Some(raw.clone());
         // 热重载落点：每轮开始前重读配置与应用设置。
@@ -1098,9 +1114,10 @@ impl Runner {
         // `media::inline_user_attachments`），两边行为对得上。
         //
         // 助理的汇报不展开：里面有外部事件的文字，写一个 `@~/.ssh/id_rsa` 不该把文件读进来。
-        // 后台命令的完成通知同理：里面是命令输出。
+        // 后台命令的完成通知同理：里面是命令输出。别的会话的来信也是别人写的字。
         let expansion = if crate::assistant::is_injected(&raw)
             || raw.starts_with(crate::tools::background::DONE_MARK)
+            || raw.starts_with(crate::peers::PEER_MARK)
         {
             Ok((raw.clone(), None))
         } else {
@@ -1301,6 +1318,7 @@ impl Runner {
             || self.ctx.handle.id == crate::assistant::CHAT_SESSION_ID
             || crate::assistant::runtime::ticket_for_session(&self.ctx.shell, &self.ctx.handle)
                 .is_some()
+            || user_text.starts_with(crate::peers::PEER_MARK)
             || !ms::worth_checking(user_text)
         {
             return;
@@ -1412,6 +1430,7 @@ impl Runner {
                 running: Some(self.ctx.running.clone()),
                 assistant: ticket.map(|(id, _)| (self.ctx.shell.assistant.clone(), id)),
                 assistant_chat: is_chat.then(|| self.ctx.shell.clone()),
+                peers: (self.ctx.include_task && !is_chat).then(|| self.ctx.shell.clone()),
             },
             &self.ctx.settings,
         )
@@ -1489,7 +1508,8 @@ impl Runner {
                 window: self.ctx.model.context_window,
                 reported: self.reported.clone(),
             };
-            let turn = run_turn(
+            // 包一层收件箱：这一轮里每次工具返回都顺手把新到的信送进去。
+            let turn = crate::peers::scope(self.ctx.handle.inbox.clone(), run_turn(
                 &mut self.thread,
                 &tap,
                 &self.ctx.model,
@@ -1919,7 +1939,11 @@ impl Runner {
     fn emit(&self, event: SessionEvent) {
         match event {
             SessionEvent::TurnStarted { .. } => self.ctx.handle.busy.store(true, Ordering::SeqCst),
-            SessionEvent::Idle => self.ctx.handle.busy.store(false, Ordering::SeqCst),
+            SessionEvent::Idle => {
+                self.ctx.handle.busy.store(false, Ordering::SeqCst);
+                // 这一轮读过信、发信方要回执的，现在送（历史快照此时已经是这一轮的结尾）。
+                crate::peers::on_idle(&self.ctx.shell, &self.ctx.handle);
+            }
             _ => {}
         }
         emit(&self.ctx.shell, &self.ctx.handle.id, event);

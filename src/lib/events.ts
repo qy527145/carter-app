@@ -132,6 +132,12 @@ export function useAppEvents() {
         useStore.getState().setView("assistant");
         return;
       }
+      if (payload.type === "peer_message") {
+        // 收信方可能是刚在后台续接起来的盘上会话：刷新侧栏，让它的「运行中」状态出现。
+        // 不切过去，理由同定时任务。
+        void refreshSessions();
+        return;
+      }
       if (payload.type === "assistant_turn_ended") {
         // 助理对话这一轮跑完了：它可能刚用配置工具改了观察源、规则或模式，面板要跟上。
         void refreshAssistant();
