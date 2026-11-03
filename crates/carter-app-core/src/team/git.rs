@@ -393,7 +393,7 @@ pub fn commit_turn_if_team(cwd: &Path, turn: u32) {
 
 /// 有没有远端可推。
 pub fn has_remote(root: &Path) -> bool {
-    git_ok(root, &["remote", "get-url", "origin"])
+    remote_url(root).is_some()
 }
 
 pub fn current_branch(root: &Path) -> Result<String, String> {
@@ -430,6 +430,18 @@ pub fn commit_team(root: &Path, team_rel: &str, message: &str) -> Result<Option<
 ///
 /// 首次推一个还没有 upstream 的分支时要 `-u`，否则用户下次还得自己设。这里先试
 /// `push`，失败再试 `push -u origin <branch>`：前者是常态，后者是首次。
+/// 实时问 git「远端是什么」，而不是读 `team.json` 里那份。
+///
+/// `team.json` 的 `remote` 是**初始化那一刻**的快照。之后用户 `git remote add
+/// origin ...` 不会回填它 —— 于是界面上会显示「没有远端」，而 git 那边明明配好了。
+/// 以 git 为准：那份配置才是 `fetch` / `push` 真正看的东西。
+pub fn remote_url(root: &Path) -> Option<String> {
+    git(root, &["remote", "get-url", "origin"])
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 pub fn push(root: &Path) -> Result<String, String> {
     if !has_remote(root) {
         return Err("没有配置远端（origin），只在本地记录".into());

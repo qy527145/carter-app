@@ -13,6 +13,7 @@
 //! * [`git`] —— git 通道：空提交事件、快进同步、认领的裁决。
 //! * [`init`] —— 初始化：`git init` + 建骨架 + 首次提交 + 自动建同步观察源。
 //! * [`skills`] —— 内置技能与 `carter-team` 薄壳命令。
+//! * [`validate`] —— 语义校验：坏文件在哪、该怎么改。写路径与 `team` 工具都走它。
 //!
 //! ## 与 Bibrain 的关系
 //!
@@ -34,6 +35,7 @@ pub mod model;
 pub mod skills;
 pub mod store;
 pub mod tool;
+pub mod validate;
 
 pub use init::{InitOutcome, initialize};
 pub use model::{
@@ -41,4 +43,5 @@ pub use model::{
     Identity, Kind, Priority, Task, TaskStatus, TaskView, TeamMeta, between, new_id, valid_id,
 };
 pub use store::{Loaded, Store};
+pub use validate::{Issue, Report};
 pub use tool::TeamTool;

@@ -36,6 +36,37 @@ use serde::{Deserialize, Serialize};
 /// 文件格式版本。读到更高的版本要明确报错，而不是按旧结构硬解。
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// 给「字符串当枚举」的类型实现 `Serialize` / `Deserialize`：写时用 `as_str()`
+/// 的规范形式，读时走 `parse()`（它本来就大小写不敏感）。
+///
+/// 这个宏存在的原因是踩过一次坑：`Priority` 用 `#[serde(rename_all = "snake_case")]`
+/// 派生，写出 `"p2"`、也只认 `"p2"`；而脚本与技能文档写的是 `"P2"`。两边各自都对，
+/// 合起来就是「数据建出来了、界面读不出来」，报错还只说到 `unknown variant`。
+///
+/// 派生宏生成的是**精确匹配**，而 `parse()` 是有意宽容的 —— 用同一个入口，
+/// 就不会出现「校验说没问题、serde 说不认识」这种两套规则并存的局面。
+macro_rules! string_enum {
+    ($ty:ty) => {
+        impl Serialize for $ty {
+            fn serialize<S: ::serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                s.serialize_str(self.as_str())
+            }
+        }
+        impl<'de> ::serde::Deserialize<'de> for $ty {
+            fn deserialize<D: ::serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                let raw = <String as ::serde::Deserialize>::deserialize(d)?;
+                Self::parse(&raw)
+                    .ok_or_else(|| ::serde::de::Error::custom($crate::team::model::bad_value(&raw, &<$ty>::allowed())))
+            }
+        }
+    };
+}
+
+/// 认不出的值时给的一句话：既说收到了什么，也说合法的有哪些。
+pub fn bad_value(raw: &str, allowed: &str) -> String {
+    format!("认不出 `{raw}`，只能是 {allowed}")
+}
+
 // ---------------------------------------------------------------------------
 // id
 // ---------------------------------------------------------------------------
@@ -193,8 +224,7 @@ impl fmt::Display for Identity {
 // 目标
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GoalStatus {
     /// 正在推进。
     Active,
@@ -206,7 +236,14 @@ pub enum GoalStatus {
     Archived,
 }
 
+string_enum!(GoalStatus);
+
 impl GoalStatus {
+    /// 合法的写法。与 `parse` 同源，界面与错误信息都从这里取。
+    pub fn allowed() -> String {
+        "active / paused / done / archived".to_string()
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             GoalStatus::Active => "active",
@@ -241,14 +278,26 @@ impl GoalStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// 优先级。
+///
+/// **序列化一律大写 `P0`..`P3`，反序列化大小写都认。**
+///
+/// 这条不对齐过一次：这个枚举原先用 `rename_all = "snake_case"`，于是 Rust 写出
+/// `"p2"`、也只认 `"p2"`；而 `carter-team` 脚本与技能文档写的都是人习惯的大写
+/// `"P2"`。两边各自都对，合到一起就是「目标建出来了、界面读不出来」——
+/// 报错还只说到 `unknown variant`，看不出真正的原因是大小写。
+///
+/// 现在往**大写**这一边收：它是人写、脚本写、issue 里写的形式。旧文件里的
+/// `"p2"` 照样读得进来，下次写回时自动变成 `"P2"`，不需要迁移。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Priority {
     P0,
     P1,
     P2,
     P3,
 }
+
+string_enum!(Priority);
 
 impl Default for Priority {
     fn default() -> Self {
@@ -274,6 +323,11 @@ impl Priority {
             "P3" | "LOW" => Priority::P3,
             _ => return None,
         })
+    }
+
+    /// 合法的写法，拼进错误信息里。与 `parse` 认的那几种同源。
+    pub fn allowed() -> String {
+        "P0 / P1 / P2 / P3".to_string()
     }
 
     /// 排序用：数越小越靠前。
@@ -375,8 +429,7 @@ impl Goal {
 // 任务
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskStatus {
     /// 还没开始。
     Todo,
@@ -390,7 +443,14 @@ pub enum TaskStatus {
     Dropped,
 }
 
+string_enum!(TaskStatus);
+
 impl TaskStatus {
+    /// 合法的写法。与 `parse` 同源。
+    pub fn allowed() -> String {
+        "todo / doing / blocked / done / dropped".to_string()
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             TaskStatus::Todo => "todo",
@@ -900,5 +960,41 @@ mod tests {
         assert_eq!(c.percent(), 50, "放弃的不进分母");
         let empty = Counts::default();
         assert_eq!(empty.percent(), 0);
+    }
+}
+
+#[cfg(test)]
+mod enum_tests {
+    use super::*;
+
+    /// 这正是用户遇到的那个 bug：脚本写 `"P3"`，而旧实现只认 `"p3"`。
+    #[test]
+    fn upper_case_priority_is_accepted() {
+        let p: Priority = serde_json::from_str("\"P3\"").unwrap();
+        assert_eq!(p, Priority::P3);
+    }
+
+    /// 旧文件里的 `"p2"` 必须继续读得进来，否则这次修法会让已有数据全废。
+    #[test]
+    fn lower_case_priority_still_reads() {
+        let p: Priority = serde_json::from_str("\"p2\"").unwrap();
+        assert_eq!(p, Priority::P2);
+        // 写回去统一成大写，下次保存就自动归一了。
+        assert_eq!(serde_json::to_string(&p).unwrap(), "\"P2\"");
+    }
+
+    #[test]
+    fn bad_priority_names_the_legal_values() {
+        let e = serde_json::from_str::<Priority>("\"急\"").unwrap_err().to_string();
+        assert!(e.contains("P0 / P1 / P2 / P3"), "{e}");
+    }
+
+    #[test]
+    fn statuses_go_the_same_way() {
+        assert_eq!(serde_json::from_str::<TaskStatus>("\"Done\"").unwrap(), TaskStatus::Done);
+        assert_eq!(serde_json::from_str::<TaskStatus>("\"doing\"").unwrap(), TaskStatus::Doing);
+        assert_eq!(serde_json::to_string(&TaskStatus::Blocked).unwrap(), "\"blocked\"");
+        assert_eq!(serde_json::from_str::<GoalStatus>("\"ARCHIVED\"").unwrap(), GoalStatus::Archived);
+        assert_eq!(serde_json::to_string(&GoalStatus::Done).unwrap(), "\"done\"");
     }
 }

@@ -572,7 +572,7 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
 ///
 /// merge 冲突没解决时文件里会有 `<<<<<<<` —— 这时 serde 报的是「expected value
 /// at line 1 column 1」，没人能从中看出是冲突没解决。
-fn parse_json<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T, String> {
+pub(crate) fn parse_json<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T, String> {
     if raw.contains("<<<<<<<") || raw.contains(">>>>>>>") {
         return Err("文件里有未解决的 git 冲突标记（<<<<<<<），先解决冲突再继续".into());
     }

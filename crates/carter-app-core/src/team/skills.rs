@@ -124,14 +124,53 @@ description: 项目里有 .carter/ 团队目录时，先读这一篇了解目标
 4. **依赖不能成环。** 加依赖时命令会验；验不过就换一种拆法。
 5. **别动 `id` 字段、别改文件名。** 文件名就是 id。
 
+## 枚举值的写法（踩过坑，照这里写）
+
+**大小写都认，但写的时候一律按下面这几种写法**，别自己发明：
+
+| 字段 | 合法的值 |
+|---|---|
+| `priority` | `P0` `P1` `P2` `P3`（大写 P） |
+| 任务 `status` | `todo` `doing` `blocked` `done` `dropped` |
+| 目标 `status` | `active` `paused` `done` `archived` |
+
+`priority` 曾经因为大小写不一致出过事：脚本写 `"P3"`、某版应用只认 `"p3"`，
+结果是「目标建出来了、界面读不出来」，报错只说到 `unknown variant`。
+现在读取两边都认，但你写的时候请用上表的规范形式 —— 归一化只在写回时发生。
+
+## 改完要校验
+
+写任何东西之后，跑一次：
+
+```sh
+.carter/bin/carter-team check
+```
+
+它会逐个文件检查：能不能解析、id 与文件名/目录名是否一致、owner 是不是
+`名字 <邮箱>`、受阻任务有没有写原因、父子与依赖有没有成环、卡片挂的列存不存在。
+
+**输出里每条问题后面括号里就是该怎么改**。照着改，然后**再跑一次 check**，
+直到它说「校验通过」为止 —— 不要停在「我改过了，应该行了」。
+
+模型走 `team` 工具时不需要手动跑：写操作本身就在落盘前验过一遍，失败的话
+回灌给你的就是这份带「怎么改」的清单。
+
 ## 先看现状再动手
 
 ```sh
 .carter/bin/carter-team list            # 目标 + 任务全景（给人看的）
 .carter/bin/carter-team mine            # 我名下的任务
+.carter/bin/carter-team check           # 全库校验
+.carter/bin/carter-team sync            # 拉远端（只做快进）
 ```
 
 回答用户之前先看一眼，比凭印象说「应该还没做」可靠得多。
+
+## 同步需要有远端
+
+`sync` 与认领的 push 都要求这个仓库配了 `origin`。没有远端时团队数据只在本地，
+所有改动照样落盘、照样提交，只是传不出去 —— 这时不要反复重试同步，也不要
+自己编一个远端地址。
 "#;
 
 const CARTER_GOAL: &str = r#"---
@@ -444,6 +483,7 @@ usage() {
   task release <任务>
   task edit <任务> [--title 标题] [--priority P] [--assignee 人的邮箱]
   comment <任务|目标> <正文>    打一条空提交（永不冲突的事件流）
+  check                         校验全部文件（id / 枚举 / 依赖环 / 卡片列）
   log [数量]                    最近的事件
   sync                          拉取远端的更新（只做快进）
 EOF
@@ -651,6 +691,56 @@ case "$cmd" in
     if p=$(find_task "$target" 2>/dev/null); then goal=$(jq -r .goal_id "$p"); fi
     event comment "$target" "$goal" "carter/comment $target" "$body"
     echo "已记录评论" ;;
+
+  check)
+    # 脚本侧的校验只做「能被 jq 判出来」的那几类：JSON 合法性、必填字段、
+    # 枚举值写法、id 与文件名一致、依赖指向不存在的任务。
+    # 更细的（父子环、卡片列引用）由应用里的校验器负责 —— 这条命令的用途是
+    # 「不进本应用、只 clone 了仓库」的人也能自查一遍。
+    #
+    # 问题先攒进一个临时文件再统一数。**不能直接自增计数器**：`jq ... | while read`
+    # 里那个 while 跑在子 shell，`bad=$((bad+1))` 出了管道就没了 ——
+    # 表现为「明明两个问题、只说发现 1 个」。
+    errfile=$(mktemp)
+    trap 'rm -f "$errfile"' EXIT INT TERM
+    err() { printf '%s\n' "$1" >> "$errfile"; }
+
+    for g in "$TEAM"/goals/*/; do
+      [ -d "$g" ] || continue
+      gid=$(basename "$g")
+      f="$g/goal.json"
+      if [ ! -f "$f" ]; then err "$gid：缺 goal.json"; continue; fi
+      if ! jq -e . "$f" >/dev/null 2>&1; then err "$gid/goal.json：不是合法 JSON"; continue; fi
+      jq -r 'select((.id|type)!="string" or .title=="") | "\(.id // "?" )：缺 id 或标题"' "$f" | while read -r l; do err "$l"; done
+      jq -r 'select(.priority|IN("P0","P1","P2","P3")|not) | "priority 写成了 \(.priority)（应为 P0..P3）"' "$f" | while read -r l; do err "$gid/goal.json：$l"; done
+      jq -r 'select(.status|IN("active","paused","done","archived")|not) | "status 写成了 \(.status)"' "$f" | while read -r l; do err "$gid/goal.json：$l"; done
+      id_in_file=$(jq -r '.id // ""' "$f")
+      [ "$id_in_file" = "$gid" ] || err "$gid：文件里的 id 是 $id_in_file，与目录名不一致"
+
+      for t in "$g"/tasks/*.json; do
+        [ -f "$t" ] || continue
+        tid=$(basename "$t" .json)
+        if ! jq -e . "$t" >/dev/null 2>&1; then err "$gid/tasks/$tid.json：不是合法 JSON"; continue; fi
+        jq -r 'select(.title=="") | "缺标题"' "$t" | while read -r l; do err "$gid/tasks/$tid.json：$l"; done
+        jq -r 'select(.status|IN("todo","doing","blocked","done","dropped")|not) | "status 写成了 \(.status)（应为 todo/doing/blocked/done/dropped）"' "$t" | while read -r l; do err "$gid/tasks/$tid.json：$l"; done
+        jq -r 'select(.priority|IN("P0","P1","P2","P3")|not) | "priority 写成了 \(.priority)（应为 P0..P3）"' "$t" | while read -r l; do err "$gid/tasks/$tid.json：$l"; done
+        jq -r 'select(.status=="blocked" and (.blocked_reason//"" | length)==0) | "受阻但没写 blocked_reason"' "$t" | while read -r l; do err "$gid/tasks/$tid.json：$l"; done
+        id_in_file=$(jq -r '.id // ""' "$t")
+        [ "$id_in_file" = "$tid" ] || err "$gid/tasks/$tid.json：文件里的 id 是 $id_in_file，与文件名不一致"
+        # 依赖必须指向同一目标里真实存在的任务。
+        for d in $(jq -r '.depends_on[]?' "$t"); do
+          [ -f "$g/tasks/$d.json" ] || err "$gid/tasks/$tid.json：依赖的 $d 不存在"
+        done
+      done
+    done
+
+    if [ ! -s "$errfile" ]; then
+      echo "校验通过"
+    else
+      cat "$errfile" >&2
+      echo "发现 $(wc -l < "$errfile" | tr -d ' ') 个问题（上面那些行就是；改完再跑一次）" >&2
+      exit 1
+    fi ;;
 
   log)
     n="${1:-20}"

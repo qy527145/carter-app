@@ -120,7 +120,7 @@ impl Tool for TeamTool {
                         "overview", "my_tasks",
                         "goal_new", "goal_update",
                         "task_new", "task_update", "task_status", "task_claim", "task_release",
-                        "comment", "events",
+                        "comment", "events", "check",
                         "board_new", "card_new", "card_move"
                     ],
                     "description": "要做什么。先看 action 的分组：读用 overview / my_tasks / events；目标用 goal_*；任务用 task_*；看板用 board_* / card_*。"
@@ -187,6 +187,11 @@ impl TeamTool {
             "overview" => {
                 let store = self.store()?;
                 Ok(self.overview(&store))
+            }
+
+            "check" => {
+                let store = self.store()?;
+                Ok(super::validate::check_store(&store).render())
             }
 
             "my_tasks" => {
@@ -723,25 +728,45 @@ impl TeamTool {
         Err(format!("找不到任务 {id}"))
     }
 
-    fn check_goal(&self, _store: &Store, goal: &Goal) -> Result<(), String> {
-        if goal.title.trim().is_empty() {
-            return Err("目标要有标题".into());
+    /// 写之前的统一闸门：把校验器的话原样回灌给模型。
+    ///
+    /// 回灌的不是「失败了」，而是**具体哪里不对、该怎么改**（见 `validate::Issue`）。
+    /// 差别很实际：只说「失败」时模型会原样重试一次，再失败一次，第三次开始瞎猜；
+    /// 说了「owner 得是 `名字 <邮箱>` 的形式」它一次就能改对。
+    ///
+    /// 错误里带上原来的参数形状，模型不需要回头翻自己上一条调用。
+    fn gate(&self, issues: Vec<super::validate::Issue>) -> Result<(), String> {
+        if issues.is_empty() {
+            return Ok(());
         }
-        if goal.title.chars().count() > 200 {
-            return Err("标题太长了（超过 200 字）—— 一句话说清范围就够了".into());
+        let mut out = String::from("这次改动没有写进文件，先按下面的说明改：");
+        for (i, issue) in issues.iter().enumerate() {
+            out.push_str(&format!("\n{}. {}", i + 1, issue.render()));
         }
-        Ok(())
+        Err(out)
     }
 
+    fn check_goal(&self, _store: &Store, goal: &Goal) -> Result<(), String> {
+        self.gate(super::validate::check_goal("", goal))
+    }
+
+    /// 任务：单体征 + 跨任务（依赖成环、指向不存在的任务）。
+    ///
+    /// 跨任务那部分必须在**写之前**做：成环一旦落盘，`ready` 会永远算成「等着」，
+    /// 界面上表现为任务永远开不了工，而且看不出原因。
     fn check_task(&self, store: &Store, task: &Task) -> Result<(), String> {
-        if task.title.trim().is_empty() {
-            return Err("任务要有标题".into());
-        }
-        if task.title.chars().count() > 200 {
-            return Err("标题太长了（超过 200 字）".into());
-        }
-        store.validate_deps(&task.goal_id, task)?;
-        Ok(())
+        let mut issues = super::validate::check_task("", task);
+        // 候选版本一起参与跨任务检查：新增 / 改动的依赖要和不写下去的现状一起验。
+        let mut peers: Vec<Task> = store
+            .tasks(&task.goal_id)
+            .items
+            .into_iter()
+            .filter(|t| t.id != task.id)
+            .collect();
+        peers.push(task.clone());
+        issues.extend(super::validate::check_task_set(&task.goal_id, &peers));
+        // 没有文件路径可指的那些（`path` 为空）对模型没用，统一挂在当前这次改动上。
+        self.gate(issues)
     }
 
     /// 全景：目标 + 每个目标的任务树 + 进度。

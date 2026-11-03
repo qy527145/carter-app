@@ -1983,7 +1983,10 @@ fn team_overview(cwd: String) -> Result<TeamOverview, String> {
     Ok(TeamOverview {
         root: store.root().to_string_lossy().to_string(),
         name: meta.as_ref().map(|m| m.name.clone()).unwrap_or_default(),
-        remote: meta.and_then(|m| m.remote),
+        // 实时问 git，不读 `team.json` 里那份初始化时的快照 ——
+        // 用户之后 `git remote add` 不会回填那个字段。
+        remote: carter_app_core::team::git::remote_url(store.project_root())
+            .or_else(|| meta.and_then(|m| m.remote)),
         identity: identity.map(|i| i.as_key()),
         goals,
         boards,
@@ -2136,5 +2139,11 @@ fn team_commit(cwd: String, message: String) -> Result<Option<String>, String> {
 fn team_sync(cwd: String) -> Result<String, String> {
     let store = carter_app_core::team::Store::discover(Path::new(&cwd))
         .ok_or("这个项目还没有初始化团队目录")?;
-    carter_app_core::team::git::sync(store.project_root())
+    let root = store.project_root();
+    // 「没有远端」不是错误，是一个还没配好的状态。用红色报错去说这件事，
+    // 会让人觉得同步坏了；实际是团队仓库本来就只在本地。
+    if !carter_app_core::team::git::has_remote(root) {
+        return Ok("还没有配远端，团队仓库目前只在本地。配好后（git remote add origin …）再点一次即可。".into());
+    }
+    carter_app_core::team::git::sync(root)
 }
