@@ -830,27 +830,33 @@ impl Runner {
                     self.kick_goal().await;
                 }
             }
-            Command::SetModel { model } => match switch_model(&self.ctx, &model) {
-                Ok(resolved) => {
-                    self.ctx.model = resolved.model;
-                    self.ctx.provider = resolved.provider;
-                    self.ctx.unsupported_server_tools = resolved.unsupported_server_tools;
-                    self.ctx
-                        .handle
-                        .model
-                        .store(Arc::new(self.ctx.model.clone()));
-                    // 换模型要同时告诉前端两件事：真正发给上游的名字（`Notice` 里
-                    // 那句话用它），以及 `渠道/显示名`（界面上的模型标签用它）。
-                    self.emit(SessionEvent::ModelChanged {
-                        model: self.ctx.model.api_name.clone(),
-                        model_ref: self.ctx.model.key.clone(),
-                    });
-                    self.notice(&format!("模型已切换为 {}", self.ctx.model.api_name));
-                    // 窗口大小跟着模型变，百分比要重算。
-                    self.emit_context();
+            // 先重读配置再解析：`ctx.config` 是开会话时的快照，而换模型常常紧跟在
+            // 「在设置页改了默认模型 / 加了个模型」之后 —— 不刷新的话，新加的模型
+            // 会在旧配置里查不到，或者渠道改过的地址还用着旧的。
+            Command::SetModel { model } => {
+                self.ctx.refresh();
+                match switch_model(&self.ctx, &model) {
+                    Ok(resolved) => {
+                        self.ctx.model = resolved.model;
+                        self.ctx.provider = resolved.provider;
+                        self.ctx.unsupported_server_tools = resolved.unsupported_server_tools;
+                        self.ctx
+                            .handle
+                            .model
+                            .store(Arc::new(self.ctx.model.clone()));
+                        // 换模型要同时告诉前端两件事：真正发给上游的名字（`Notice` 里
+                        // 那句话用它），以及 `渠道/显示名`（界面上的模型标签用它）。
+                        self.emit(SessionEvent::ModelChanged {
+                            model: self.ctx.model.api_name.clone(),
+                            model_ref: self.ctx.model.key.clone(),
+                        });
+                        self.notice(&format!("模型已切换为 {}", self.ctx.model.api_name));
+                        // 窗口大小跟着模型变，百分比要重算。
+                        self.emit_context();
+                    }
+                    Err(e) => self.error(&format!("切换模型失败：{e}")),
                 }
-                Err(e) => self.error(&format!("切换模型失败：{e}")),
-            },
+            }
             // 排队中的消息真正轮到它时走到这里。`interject` 在这里没有意义
             // （已经没有正在跑的轮次可以打断了），直接当普通消息处理。
             Command::SendPrompt { text, id, .. } => self.submit(text, id).await,

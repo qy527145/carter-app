@@ -12,6 +12,7 @@ import {
   listModels,
   setCompaction,
   refreshModelCatalog,
+  sendCommand,
   setDefaultModel,
   setFastModel,
   type CompactionSettings,
@@ -20,6 +21,7 @@ import {
 import { capabilityLabel, fmtPrice, fmtTokens } from "../../lib/format";
 import { reasoningDisplay } from "../../lib/protocols";
 import { toastError, toastOk } from "../../lib/toast";
+import { useStore } from "../../store";
 import { useAsync } from "../../lib/useAsync";
 import { Button, IconButton } from "../../components/ui/Button";
 import { Segmented, Switch } from "../../components/ui/Input";
@@ -262,6 +264,12 @@ export function ModelsPage() {
                     setDefaultModel(m.reference)
                       .then(() => {
                         toastOk(`默认模型已设为 ${m.reference}`);
+                        // 配置只管新对话；已开着的会话要收到 set_model 才会换，
+                        // 否则「切了模型」对正在聊的这条不生效。
+                        const sid = useStore.getState().sessionId;
+                        if (sid) {
+                          sendCommand(sid, { type: "set_model", model: m.reference }).catch(toastError);
+                        }
                         state.reload();
                       })
                       .catch(toastError);
