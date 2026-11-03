@@ -142,13 +142,13 @@ pub struct ToolBuildArgs {
     pub live: Option<Arc<crate::shell::LiveLog>>,
     /// 这条会话是常驻助理某张工单的执行会话：挂上 `assistant_report`。
     pub assistant: Option<(Arc<crate::assistant::AssistantStore>, String)>,
-    /// 这条会话就是「助理对话」本身：挂上配置工具与工单工具。
+    /// 这条会话就是「助理对话」本身：只挂助理那一套工具，其余一概不给（见 [`build_tools`]）。
     ///
-    /// 给的是整个外壳而不是 `AssistantStore`：对话里回一句话要能投递到工单的执行会话，
-    /// 那条路在 `runtime::ticket_action` 上，需要会话注册表。
+    /// 给的是整个外壳而不是 `AssistantStore`：派单、收尾、给工单写信都要开会话、
+    /// 找会话，那些路需要会话注册表。
     pub assistant_chat: Option<Arc<crate::shell::AppShell>>,
     /// 挂上跨会话的三个工具（`list_sessions` / `send_message` / `read_session`）。
-    /// 只有主对话给：子 agent、侧边聊天、助理对话都不该替这条会话对外说话。
+    /// 只有主对话给：子 agent、侧边聊天都不该替这条会话对外说话。
     pub peers: Option<Arc<crate::shell::AppShell>>,
 }
 
@@ -251,19 +251,6 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
         peers,
     } = args;
 
-    // ui_tx 传 None：carter 的 ask_user 会一并注册进来，而我们用自己的那个
-    // （见模块头的说明）。传 None 之后 carter 就不加它了。
-    let full = carter_build_tools(
-        skills_enabled,
-        provider.clone(),
-        model.clone(),
-        agent_cfg.clone(),
-        base_system.clone(),
-        cancel.clone(),
-        mcp_tools,
-        None,
-    );
-
     let seq = Arc::new(AtomicU64::new(0));
     let mut tools = ToolRegistry::empty();
     // `agent` 要自己发进度事件，而 `push` 闭包把这两个吃掉了 —— 先各留一份。
@@ -277,6 +264,47 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
                 .with_running(running.clone()),
         ));
     };
+
+    // 助理对话是大脑，不是手：只给配置、派单、收尾、记忆和与工单通信的工具。
+    // 没有 bash / 文件 / `agent` / MCP —— 要动手的事派成工单，由独立的执行会话去做
+    // （见 `assistant_ticket.rs` 模块头）。工具开关管不到这几个：关掉它们助理就瘫了。
+    if let Some(shell) = assistant_chat {
+        let store = shell.assistant.clone();
+        for kind in [
+            ConfigKind::SourceSave,
+            ConfigKind::SourceDelete,
+            ConfigKind::RuleSave,
+            ConfigKind::RuleDelete,
+            ConfigKind::Mode,
+        ] {
+            push(Arc::new(AssistantConfigTool::new(store.clone(), kind)), &mut tools);
+        }
+        for kind in [TicketKind::Dispatch, TicketKind::Act, TicketKind::Proposal] {
+            push(Arc::new(AssistantTicketTool::new(shell.clone(), kind)), &mut tools);
+        }
+        // 长期记忆与往期检索（见 `assistant/memory.rs`）。
+        push(Arc::new(AssistantMemoryTool::new(store.clone())), &mut tools);
+        push(Arc::new(AssistantRecallTool::new(store)), &mut tools);
+        // 与工单通信：给工单补话（`to="#3"`）、看它做到哪了。不给 `list_sessions` ——
+        // 工单一览已经在系统提示的「现状」里，别的会话也不是助理该联系的。
+        for kind in [peer::Kind::Send, peer::Kind::Read] {
+            push(Arc::new(peer::PeerTool::new(shell.clone(), session_id.clone(), kind)), &mut tools);
+        }
+        return tools;
+    }
+
+    // ui_tx 传 None：carter 的 ask_user 会一并注册进来，而我们用自己的那个
+    // （见模块头的说明）。传 None 之后 carter 就不加它了。
+    let full = carter_build_tools(
+        skills_enabled,
+        provider.clone(),
+        model.clone(),
+        agent_cfg.clone(),
+        base_system.clone(),
+        cancel.clone(),
+        mcp_tools,
+        None,
+    );
 
     for t in filter_tools(&full, settings) {
         push(
@@ -356,32 +384,12 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
         push(Arc::new(AssistantReportTool::new(store, ticket_id)), &mut tools);
     }
 
-    // 助理对话的工具。同样在快照之后：工单的执行会话与子 agent 都不该
-    // 顺手改掉接单规则，也不该替别的工单投递消息。
-    if let Some(shell) = assistant_chat {
-        let store = shell.assistant.clone();
-        for kind in [
-            ConfigKind::SourceSave,
-            ConfigKind::SourceDelete,
-            ConfigKind::RuleSave,
-            ConfigKind::RuleDelete,
-            ConfigKind::Mode,
-        ] {
-            push(Arc::new(AssistantConfigTool::new(store.clone(), kind)), &mut tools);
-        }
-        // 回话与收尾：没有这两个，用户在这条对话里回答工单的问题等于自言自语。
-        for kind in [TicketKind::Reply, TicketKind::Act, TicketKind::Proposal] {
-            push(Arc::new(AssistantTicketTool::new(shell.clone(), kind)), &mut tools);
-        }
-        // 长期记忆与往期检索（见 `assistant/memory.rs`）。
-        push(Arc::new(AssistantMemoryTool::new(store.clone())), &mut tools);
-        push(Arc::new(AssistantRecallTool::new(store.clone())), &mut tools);
-    }
-
     // 团队目录（目标 / 任务 / 看板）。在快照之后：子 agent 拿的是主对话工具表的
     // 快照，让它们顺手改团队账本等于「派出去的人各自改同一本账」——
     // 而它们本来就该把结果交回来由主对话记。侧边聊天同样不该挂（见 `team::tool::attach`）。
-    if settings.tool_enabled("team") {
+    // 只在初始化过团队目录的项目里挂：普通项目里它只是一段每轮下发、永远用不上的说明，
+    // 模型还会被它引着去建团队目标。初始化是在界面上点的，下一轮装配时就能看到。
+    if settings.tool_enabled("team") && crate::team::store::Store::discover(&cwd).is_some() {
         push(crate::team::tool::attach(&cwd), &mut tools);
     }
 

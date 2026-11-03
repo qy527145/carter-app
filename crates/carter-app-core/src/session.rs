@@ -687,7 +687,8 @@ impl Runner {
         //
         // 它在会话开头连一次就不再重连 —— 所以界面上改了 MCP 配置要**新开会话**
         // 才生效，这与「工具开关下一条消息就生效」不同，界面上分开提示。
-        let mcp_mgr = if self.ctx.include_task {
+        // 助理对话不连：它只有助理那一套工具（见 `tools::build_tools`），连上也用不到。
+        let mcp_mgr = if self.ctx.include_task && self.ctx.handle.id != crate::assistant::CHAT_SESSION_ID {
             let (mgr, tools) = carter::mcp::McpManager::start(&self.ctx.config.mcp).await;
             self.mcp_tools = tools;
             Some(mgr)

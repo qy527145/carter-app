@@ -356,7 +356,7 @@ function TicketCard({ t }: { t: AssistantTicket }) {
       )}
 
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-dim">
-        <span>规则「{t.rule}」</span>
+        {t.rule ? <span>规则「{t.rule}」</span> : null}
         <span>来源「{t.source_name}」</span>
         <span title={fullTime(t.updated_at)}>{relTime(t.updated_at)}</span>
         <span className="mono truncate">{t.cwd}</span>

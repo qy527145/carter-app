@@ -29,7 +29,17 @@
 //! ## 信不是指令
 //!
 //! 对方模型写的字和观察源的事件一样是外部文字：不展开 `@文件`、不进记忆提取、界面上
-//! 画成卡片而不是用户气泡；助理对话不收（它的配置工具只听用户亲口说的话）。
+//! 画成卡片而不是用户气泡。
+//!
+//! ## 助理与工单
+//!
+//! 助理对话与它派出去的工单之间也用 `send_message`，但不走收件箱，走工单那条路：
+//!
+//! * 助理 → 工单：`to` 填工单编号（`#3`），经 `runtime::deliver` 送进执行会话 —— 工单停着
+//!   时要重新排队开工、跑完照常汇报，这套状态只有工单认得。助理对话只能给工单写信。
+//! * 工单 → 助理：`to` 填 `assistant`，记进助理对话但**不叫醒**它（与汇报同一种待遇）：
+//!   助理对话的配置工具只听用户亲口说的话，不能让一封信推着它跑一轮。只收助理自己派出去
+//!   的工单的信。
 
 use std::collections::{HashSet, VecDeque};
 use std::future::Future;
@@ -353,6 +363,15 @@ pub fn resolve(shell: &AppShell, me: &str, to: &str) -> Result<Peer, String> {
     if to.is_empty() {
         return Err("缺少收信方".into());
     }
+    // 工单编号（`#3`）：换成它的执行会话。助理对话手里只有编号。
+    if to.starts_with('#') {
+        let sid = shell
+            .assistant
+            .read(|s| s.find_ticket(to).map(|t| t.session_id.clone()))
+            .ok_or_else(|| format!("没有工单 {to}"))?
+            .ok_or_else(|| format!("工单 {to} 还没开工，没有会话可看"))?;
+        return resolve(shell, me, &sid);
+    }
     let mut pool = list(shell, me, true);
     // 自己也要能认出来（好给出「不能发给自己」而不是「找不到」）。
     if !pool.iter().any(|p| p.id == me) {
@@ -440,12 +459,19 @@ pub fn send(shell: &Arc<AppShell>, me: &str, req: SendRequest<'_>) -> Result<Str
         return Err("message 不能为空".into());
     }
     let mine = shell.session(me).ok_or("发信的会话已经不在了")?;
+    // 助理与它派出去的工单之间的信走工单那条路（见模块头「助理与工单」）。
+    if is_assistant_address(req.to) {
+        return to_assistant(shell, me, body);
+    }
+    if me == crate::assistant::CHAT_SESSION_ID {
+        return to_ticket(shell, req.to, body);
+    }
     let target = resolve(shell, me, req.to)?;
     if target.id == me {
         return Err("不能发给自己".into());
     }
     if target.id == crate::assistant::CHAT_SESSION_ID {
-        return Err("助理对话只听用户亲口说的话，不收别的会话的信".into());
+        return to_assistant(shell, me, body);
     }
     let hops = mine.inbox.hops() + 1;
     if hops > MAX_HOPS {
@@ -500,6 +526,59 @@ pub fn send(shell: &Arc<AppShell>, me: &str, req: SendRequest<'_>) -> Result<Str
     Ok(format!(
         "已送达 {}（消息号 {letter_id}）。{how}{back}不要轮询，也不要为了等回信空转 —— 手上没别的事就结束这一轮。",
         target.name
+    ))
+}
+
+/// `to` 指的是助理对话。
+fn is_assistant_address(to: &str) -> bool {
+    matches!(to.trim(), "assistant" | "助理" | "助理对话")
+}
+
+/// 工单的执行会话给助理写信：记进助理对话，不叫醒它。
+///
+/// 与汇报同一种待遇（同一个标记、同样只记不跑）：信里是执行会话转述的外部情况，
+/// 助理对话的配置工具只听用户亲口说的话，所以不能让一封信推着它跑一轮。用户下次
+/// 开口时模型连同这些信一起看到。只收助理自己派出去的工单 —— 别的会话没有理由
+/// 往这条对话里塞东西。
+fn to_assistant(shell: &Arc<AppShell>, me: &str, body: &str) -> Result<String, String> {
+    let label = shell
+        .assistant
+        .read(|s| s.ticket_by_session(me).map(|t| t.label()))
+        .ok_or("助理对话只收它派出去的工单的信。要找用户，直接在回复里说")?;
+    let text = format!("{}来信 · {label}\n{body}", crate::assistant::REPORT_MARK);
+    if !crate::assistant::chat::record(shell, text) {
+        return Err("助理对话开不起来，这封没有送到".into());
+    }
+    Ok("已记进助理对话。它不会因此被叫醒，用户下次开口时会一起看到；不要等回信，手上的事接着做。".into())
+}
+
+/// 助理对话给一张工单写信：按工单编号投进它的执行会话。
+///
+/// 走 `runtime::deliver` 而不是直接塞收件箱：工单停着（待查看、等拍板、受阻）时要
+/// 重新排队、开回执行会话，跑完照常汇报 —— 那套状态只有工单那条路认得。
+fn to_ticket(shell: &Arc<AppShell>, to: &str, body: &str) -> Result<String, String> {
+    use crate::assistant::runtime::{Wake, deliver, launch_queued};
+    let (id, label) = shell
+        .assistant
+        .read(|s| s.find_ticket(to).map(|t| (t.id.clone(), t.label())))
+        .ok_or_else(|| {
+            let live: Vec<String> = shell.assistant.read(|s| {
+                s.tickets.iter().filter(|t| !t.status.ended()).map(|t| t.label()).collect()
+            });
+            format!(
+                "助理对话只能给工单写信，`to` 填工单编号（如 `#3`）。找不到「{to}」，现在有的：{}",
+                if live.is_empty() { "（没有进行中的工单）".into() } else { live.join("、") }
+            )
+        })?;
+    if !deliver(shell, &id, format!("助理转达：{body}"), Wake::Person) {
+        return Err(format!("{label} 已经叫停，不再接收消息"));
+    }
+    let status = shell.assistant.read(|s| s.ticket(&id).map(|t| t.status.label()));
+    let bg = shell.clone();
+    tokio::spawn(async move { launch_queued(&bg).await });
+    Ok(format!(
+        "已送进 {label}（现在{}）。它跑完会照常汇报回这条对话；不要轮询，也不要空等。",
+        status.unwrap_or("状态未知")
     ))
 }
 
@@ -778,6 +857,88 @@ mod tests {
             notify_back: notify,
             receipt: false,
         }
+    }
+
+    /// 一个带独立 `assistant.json` 的外壳，外加挂在上面的假会话（只有命令通道，没有 runner）。
+    fn assistant_shell(ids: &[&str]) -> (Arc<AppShell>, Vec<tokio::sync::mpsc::UnboundedReceiver<crate::protocol::Command>>) {
+        static N: AtomicU32 = AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "carter-peers-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = crate::assistant::AssistantStore::open(dir.join("assistant.json"));
+        let shell = Arc::new(
+            Arc::into_inner(AppShell::new(carter::config::Config::default()))
+                .unwrap()
+                .with_assistant(store),
+        );
+        let model: carter::registry::ModelInfo = serde_json::from_str(
+            r#"{"provider":"p","api_name":"m","context_window":1000,
+                "max_output_tokens":100,"tokenizer":"t",
+                "pricing":{"input":0.0,"output":0.0}}"#,
+        )
+        .unwrap();
+        let mut rxs = Vec::new();
+        for id in ids {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let h = SessionHandle::new(id.to_string(), cwd_for(id).into(), model.clone(), None, tx);
+            shell.sessions.insert(id.to_string(), h);
+            rxs.push(rx);
+        }
+        (shell, rxs)
+    }
+
+    fn send_req<'a>(to: &'a str, body: &'a str) -> SendRequest<'a> {
+        SendRequest { to, body, reply_to: None, notify_when_idle: false }
+    }
+
+    /// 助理按编号给一张停着的工单写信：信进了工单的待送队列，工单重新排队。
+    #[tokio::test]
+    async fn the_assistant_writes_to_a_ticket_by_number() {
+        let (shell, _rx) = assistant_shell(&[crate::assistant::CHAT_SESSION_ID]);
+        let id = shell
+            .assistant
+            .with(|s| {
+                let id = s.assign_ticket("/tmp", "修登录", "x");
+                s.ticket_mut(&id).unwrap().status = crate::assistant::TicketStatus::NeedsUser;
+                id
+            })
+            .unwrap();
+        // 暂停着：只看投递与状态，不真的开执行会话。
+        shell.assistant.with(|s| s.settings.paused = true).unwrap();
+        let out = send(&shell, crate::assistant::CHAT_SESSION_ID, send_req("#1", "用 A 方案")).unwrap();
+        assert!(out.contains("#1 修登录"), "{out}");
+        let t = shell.assistant.read(|s| s.ticket(&id).cloned()).unwrap();
+        assert_eq!(t.status, crate::assistant::TicketStatus::Queued);
+        assert_eq!(t.pending, vec!["助理转达：用 A 方案".to_string()]);
+
+        let err = send(&shell, crate::assistant::CHAT_SESSION_ID, send_req("carter-app-79d8", "hi")).unwrap_err();
+        assert!(err.contains("只能给工单写信"), "{err}");
+    }
+
+    /// 工单写给助理：记进助理对话（`Record`，不跑模型）；不是工单的会话写不进去。
+    #[tokio::test]
+    async fn a_ticket_writes_to_the_assistant_without_waking_it() {
+        let (shell, mut rx) = assistant_shell(&[crate::assistant::CHAT_SESSION_ID, "1-abcd1234-w", "2-ffff0000-x"]);
+        shell
+            .assistant
+            .with(|s| {
+                let id = s.assign_ticket("/tmp", "修登录", "x");
+                s.ticket_mut(&id).unwrap().session_id = Some("1-abcd1234-w".into());
+            })
+            .unwrap();
+        send(&shell, "1-abcd1234-w", send_req("assistant", "顺手发现注册也有同样的问题")).unwrap();
+        match rx[0].try_recv().unwrap() {
+            crate::protocol::Command::Record { text } => {
+                assert!(text.starts_with(crate::assistant::REPORT_MARK), "{text}");
+                assert!(text.contains("#1 修登录") && text.contains("注册也有"), "{text}");
+            }
+            other => panic!("应当只记不跑，得到 {other:?}"),
+        }
+        let err = send(&shell, "2-ffff0000-x", send_req("assistant", "hi")).unwrap_err();
+        assert!(err.contains("只收它派出去的工单"), "{err}");
     }
 
     #[test]

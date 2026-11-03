@@ -403,11 +403,32 @@ impl State {
         self.decisions.truncate(MAX_DECISIONS);
     }
 
-    /// 开一张新工单（排队状态），返回它的 id。
+    /// 观察源命中规则后开一张新工单（排队状态），返回它的 id。
     pub fn open_ticket(
         &mut self,
         source: &Source,
         rule: &str,
+        title: &str,
+        task: &str,
+        events: Vec<String>,
+    ) -> String {
+        self.open(rule, &source.id, &source.name, &source.cwd, title, task, events)
+    }
+
+    /// 用户在助理对话里直接指派的一张工单（见 `assistant_dispatch`）。没有规则、没有事件：
+    /// 授权来自用户亲口说的那句话。
+    pub fn assign_ticket(&mut self, cwd: &str, title: &str, task: &str) -> String {
+        self.open("", "", ASSIGNED_SOURCE, cwd, title, task, Vec::new())
+    }
+
+    /// 两种来源的工单都从这里开：之后的排队、开工、汇报、续接走的是同一条路。
+    #[allow(clippy::too_many_arguments)]
+    fn open(
+        &mut self,
+        rule: &str,
+        source_id: &str,
+        source_name: &str,
+        cwd: &str,
         title: &str,
         task: &str,
         events: Vec<String>,
@@ -423,9 +444,9 @@ impl State {
             title: title.trim().to_string(),
             task: task.trim().to_string(),
             rule: rule.to_string(),
-            source_id: source.id.clone(),
-            source_name: source.name.clone(),
-            cwd: source.cwd.clone(),
+            source_id: source_id.to_string(),
+            source_name: source_name.to_string(),
+            cwd: cwd.to_string(),
             events,
             created_at: now,
             updated_at: now,
@@ -846,6 +867,9 @@ pub(crate) mod tests {
 /// 也送进这个会话。这里用固定 id 让它永远只有一条 —— 界面靠它找到，汇报靠它送进去。
 pub const CHAT_SESSION_ID: &str = "assistant";
 
+/// 用户在助理对话里直接指派的工单，`source_name` 记成这个。
+pub const ASSIGNED_SOURCE: &str = "助理对话";
+
 /// 主动汇报送进对话时加在前面的标记。模型靠它认出「这不是用户说的话」。
 pub const REPORT_MARK: &str = "【助理汇报】";
 
@@ -871,9 +895,14 @@ pub fn chat_segment(store: &AssistantStore) -> String {
          - 接单规则：一句话写清什么样的事可以替你做、做到什么程度。规则是文字，模型读。\n\
          - 接单后助理在后台另开一条会话去做（工单），做完把结局汇报回这个会话。\n\
          - 默认「只观察」：只记录本来会接的，用户批准才开工。别擅自切成自动。\n\
-         - 改完配置用一两句说清改成了什么，别复述工具调用。\n\
-         - 用户回答工单的问题时用 assistant_ticket_reply 送进去，否则那句话到不了工单；\
+         - 改完配置用一两句说清改成了什么，别复述工具调用。\n\n\
+         **你是大脑，不是手。** 你没有命令行和文件工具，也不该有：用户交代要动手的事\
+         （修 bug、查问题、改代码、整理文档……），用 assistant_dispatch 派成工单，每张工单一条\
+         独立的会话。互相独立的几件事拆开一次派；task 写得自成一体，执行会话看不到这条对话。\n\n\
+         - 给工单补话、转达用户的回答：send_message(to=\"#编号\")，否则那句话到不了工单；\
+         想看工单做到哪了用 read_session(to=\"#编号\")。\
          收尾用 assistant_ticket_act；同意或拒绝「本来会接」的提议用 assistant_proposal。\n\
+         - 工单也会用 send_message 给你写信，同样以汇报标记开头、只记不叫醒你。\n\
          - 没有提问表单：要问用户什么，直接写在回复里，一次只问一个具体问题。\n\
          - 汇报消息以 `",
     );

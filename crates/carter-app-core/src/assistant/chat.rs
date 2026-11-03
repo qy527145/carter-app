@@ -103,7 +103,7 @@ pub fn proposal_text(d: &Decision) -> String {
 ///
 /// 只记、不跑模型（`Command::Record`）：用户不在场时那一轮没人看，汇报却会把上下文
 /// 越撑越大。用户下次开口时，模型连同这期间的汇报一起看到。
-fn push(shell: &Arc<AppShell>, text: String) -> bool {
+pub(crate) fn record(shell: &Arc<AppShell>, text: String) -> bool {
     if let Err(e) = ensure(shell) {
         tracing::warn!(error = %e, "助理：开不出助理对话，汇报只走系统通知");
         return false;
@@ -112,11 +112,11 @@ fn push(shell: &Arc<AppShell>, text: String) -> bool {
 }
 
 pub fn push_report(shell: &Arc<AppShell>, t: &Ticket) -> bool {
-    push(shell, report_text(t))
+    record(shell, report_text(t))
 }
 
 pub fn push_proposal(shell: &Arc<AppShell>, d: &Decision) -> bool {
-    push(shell, proposal_text(d))
+    record(shell, proposal_text(d))
 }
 
 #[cfg(test)]

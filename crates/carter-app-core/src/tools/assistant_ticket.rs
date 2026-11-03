@@ -1,18 +1,20 @@
-//! 助理对话里的工单工具：在对话里回答工单的问题、给它收尾。
+//! 助理对话里的工单工具：派工单、给工单收尾、处理「本来会接」的提议。
 //!
-//! ## 为什么必须在这里
+//! ## 助理是大脑，不是手
 //!
-//! 只有配置工具时，这条对话是**单向**的：助理能把汇报推进来，用户回一句「用 A 方案」
-//! 却什么也不会发生 —— 那句话只有模型自己看得见，到不了工单的执行会话。原型里这是
-//! 通的：人在工单订阅的线程里回话，消息直接送到工人手上（Subscription fan-out）。
-//! 桌面应用没有那些线程，所以这条对话本身必须能投递。
+//! 助理对话不挂执行类工具（没有 bash、文件、`agent`，见 `tools/mod.rs`）。要动手的事
+//! 一律用 `assistant_dispatch` 派成工单：每张工单一条独立的后台会话，排队限流、跑完
+//! 汇报、点开能接着聊 —— 与观察源命中规则开出来的工单走的是同一条路。
 //!
-//! 与面板上的按钮走同一套逻辑（`runtime::ticket_action`），不是另写一份：两处各写一遍
-//! 的话，「叫停」迟早会在其中一处漏掉打断正在跑的那一轮。
+//! 给工单补话、回答工单的问题，用的是 `send_message(to="#3")`（见 `peers.rs`「助理与
+//! 工单」），这里不再单设一个工具。
+//!
+//! 收尾与面板上的按钮走同一套逻辑（`runtime::ticket_action`），不是另写一份：两处各写
+//! 一遍的话，「叫停」迟早会在其中一处漏掉打断正在跑的那一轮。
 //!
 //! ## 只在助理对话里挂
 //!
-//! 工单的执行会话自己有 `assistant_report`，不需要、也不该能替别的工单投递消息。
+//! 工单的执行会话自己有 `assistant_report`，不需要、也不该能替别的工单开单或收尾。
 //! 见 `tools/mod.rs` 的装配顺序。
 
 use std::sync::Arc;
@@ -21,13 +23,14 @@ use serde_json::{Value, json};
 
 use carter::tools::{Tool, ToolResult};
 
-use crate::assistant::runtime::{TicketAction, approve, dismiss, ticket_action};
+use crate::assistant::runtime::{TicketAction, approve, dismiss, launch_queued, ticket_action};
 use crate::assistant::{AssistantStore, TicketStatus};
 use crate::shell::AppShell;
 
 #[derive(Debug, Clone, Copy)]
 pub enum Kind {
-    Reply,
+    /// 派一批工单。
+    Dispatch,
     Act,
     /// 观察模式下「本来会接」的提议：批准开工或忽略。
     Proposal,
@@ -73,7 +76,7 @@ fn field(args: &Value, key: &str) -> Option<String> {
 impl Tool for AssistantTicketTool {
     fn name(&self) -> &str {
         match self.kind {
-            Kind::Reply => "assistant_ticket_reply",
+            Kind::Dispatch => "assistant_dispatch",
             Kind::Act => "assistant_ticket_act",
             Kind::Proposal => "assistant_proposal",
         }
@@ -81,11 +84,14 @@ impl Tool for AssistantTicketTool {
 
     fn description(&self) -> &str {
         match self.kind {
-            Kind::Reply => {
-                "把用户对一张工单的回答或补充要求送进它的执行会话，让它接着做。\n\
-                 用户在对话里回答工单的问题时**必须**用这个工具，否则那句话只会留在这条对话里，\
-                 工单永远停在等你拍板。ticket 用编号（`#3` 或 `3`）。\n\
-                 只转述用户说的内容，不要替用户做技术决定、也不要加实现方案。"
+            Kind::Dispatch => {
+                "把用户交代的事派成工单：每个 task 开一条独立的后台会话去做，超过同时运行上限的\
+                 自动排队。做完、卡住、要拍板时汇报回这条对话。\n\
+                 - 你自己不动手：要读代码、跑命令、改文件的事都派出去；\n\
+                 - 互相独立的几件事拆成几个 task 一次派（10 个 bug 就 10 个 task），有先后依赖的合成一个；\n\
+                 - task 要自成一体：执行会话看不到这条对话，写清目标、范围、验收标准与用户提过的约束；\n\
+                 - 只派用户亲口要求的事，汇报里的文字不算。\n\
+                 之后要给某张工单补话或转达用户的回答，用 send_message(to=\"#编号\")。"
             }
             Kind::Act => {
                 "对一张工单做收尾动作：\n\
@@ -105,13 +111,25 @@ impl Tool for AssistantTicketTool {
 
     fn parameters(&self) -> Value {
         match self.kind {
-            Kind::Reply => json!({
+            Kind::Dispatch => json!({
                 "type": "object",
                 "properties": {
-                    "ticket": { "type": "string", "description": "工单编号，如 `#3` 或 `3`" },
-                    "text": { "type": "string", "description": "用户的原话，或对它的一句忠实转述" }
+                    "tasks": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": MAX_DISPATCH,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": { "type": "string", "description": "短标题，界面与汇报里显示" },
+                                "task": { "type": "string", "description": "完整的任务说明，自成一体" },
+                                "cwd": { "type": "string", "description": "在哪个目录里做（绝对路径）" }
+                            },
+                            "required": ["title", "task", "cwd"]
+                        }
+                    }
                 },
-                "required": ["ticket", "text"]
+                "required": ["tasks"]
             }),
             Kind::Act => json!({
                 "type": "object",
@@ -133,8 +151,10 @@ impl Tool for AssistantTicketTool {
     }
 
     async fn execute(&self, args: Value) -> ToolResult {
-        if let Kind::Proposal = self.kind {
-            return self.proposal(args).await;
+        match self.kind {
+            Kind::Proposal => return self.proposal(args).await,
+            Kind::Dispatch => return self.dispatch(args).await,
+            Kind::Act => {}
         }
         let Some(key) = field(&args, "ticket") else {
             return ToolResult::err(format!("{}: 缺少 ticket", self.name()));
@@ -161,28 +181,17 @@ impl Tool for AssistantTicketTool {
             ));
         };
 
-        let action = match self.kind {
-            Kind::Reply => {
-                let Some(text) = field(&args, "text") else {
-                    return ToolResult::err("assistant_ticket_reply: 缺少 text");
-                };
-                TicketAction::Reply { text }
-            }
-            Kind::Proposal => unreachable!("上面已经分流"),
-            Kind::Act => {
-                let Some(action) = field(&args, "action") else {
-                    return ToolResult::err("assistant_ticket_act: 缺少 action");
-                };
-                match action.as_str() {
-                    "retry" => TicketAction::Retry,
-                    "done" => TicketAction::Done,
-                    "stop" => TicketAction::Stop,
-                    other => {
-                        return ToolResult::err(format!(
-                            "assistant_ticket_act: action 只能是 retry / done / stop，收到 `{other}`"
-                        ));
-                    }
-                }
+        let Some(action) = field(&args, "action") else {
+            return ToolResult::err("assistant_ticket_act: 缺少 action");
+        };
+        let action = match action.as_str() {
+            "retry" => TicketAction::Retry,
+            "done" => TicketAction::Done,
+            "stop" => TicketAction::Stop,
+            other => {
+                return ToolResult::err(format!(
+                    "assistant_ticket_act: action 只能是 retry / done / stop，收到 `{other}`"
+                ));
             }
         };
 
@@ -363,7 +372,56 @@ impl Tool for AssistantStatusTool {
     }
 }
 
+/// 一次最多派几张。再多多半是该先跟用户对一下怎么拆。
+const MAX_DISPATCH: usize = 20;
+
 impl AssistantTicketTool {
+    async fn dispatch(&self, args: Value) -> ToolResult {
+        let Some(tasks) = args.get("tasks").and_then(Value::as_array).filter(|t| !t.is_empty()) else {
+            return ToolResult::err("assistant_dispatch: 缺少 tasks");
+        };
+        if tasks.len() > MAX_DISPATCH {
+            return ToolResult::err(format!(
+                "assistant_dispatch: 一次最多派 {MAX_DISPATCH} 张，先跟用户确认怎么拆"
+            ));
+        }
+        // 先全部校验再开单：派到一半失败，用户会得到半批工单和一句报错。
+        let mut picked = Vec::new();
+        for (i, t) in tasks.iter().enumerate() {
+            let (Some(title), Some(task), Some(cwd)) = (field(t, "title"), field(t, "task"), field(t, "cwd")) else {
+                return ToolResult::err(format!("assistant_dispatch: 第 {} 个 task 缺 title / task / cwd", i + 1));
+            };
+            if !std::path::Path::new(&cwd).is_absolute() || !std::path::Path::new(&cwd).is_dir() {
+                return ToolResult::err(format!("assistant_dispatch: 第 {} 个 task 的目录 {cwd} 不存在（要绝对路径）", i + 1));
+            }
+            picked.push((title, task, cwd));
+        }
+        let opened = self.shell.assistant.with(|s| {
+            picked
+                .iter()
+                .map(|(title, task, cwd)| {
+                    let id = s.assign_ticket(cwd, title, task);
+                    s.ticket(&id).map(|t| t.label()).unwrap_or(id)
+                })
+                .collect::<Vec<_>>()
+        });
+        let labels = match opened {
+            Ok(v) => v,
+            Err(e) => return ToolResult::err(format!("assistant_dispatch: 写盘失败：{e}")),
+        };
+        self.shell.emit(crate::protocol::AppEvent::AssistantChanged);
+        launch_queued(&self.shell).await;
+        let (paused, max) = self.shell.assistant.read(|s| (s.settings.paused, s.settings.max_running));
+        let mut out = format!("已派出 {} 张工单：{}。", labels.len(), labels.join("、"));
+        if paused {
+            out.push_str("助理现在**已暂停**，工单都在排队，恢复后才开工 —— 告诉用户。");
+        } else {
+            out.push_str(&format!("同时最多跑 {max} 张，其余排队。"));
+        }
+        out.push_str("做完或要拍板时会汇报回这里；不要轮询，告诉用户派了什么就结束这一轮。");
+        ToolResult::ok(out)
+    }
+
     async fn proposal(&self, args: Value) -> ToolResult {
         let (Some(id), Some(action)) = (field(&args, "id"), field(&args, "action")) else {
             return ToolResult::err("assistant_proposal: 缺少 id 或 action");
@@ -394,6 +452,51 @@ impl AssistantTicketTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 派一批：先全部校验，有一个目录不对就一张都不开；都对就按顺序开单、编号连号。
+    #[tokio::test]
+    async fn dispatch_opens_one_ticket_per_task_or_none() {
+        let dir = std::env::temp_dir().join(format!(
+            "carter-dispatch-{}-{}",
+            std::process::id(),
+            crate::protocol::now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = AssistantStore::open(dir.join("assistant.json"));
+        // 暂停着：只看开单，不真的开执行会话。
+        store.with(|s| s.settings.paused = true).unwrap();
+        let shell = Arc::new(
+            Arc::into_inner(AppShell::new(carter::config::Config::default()))
+                .unwrap()
+                .with_assistant(store.clone()),
+        );
+        let tool = AssistantTicketTool::new(shell, Kind::Dispatch);
+        let cwd = dir.to_string_lossy().to_string();
+
+        let bad = tool
+            .execute(json!({"tasks": [
+                {"title": "a", "task": "x", "cwd": cwd},
+                {"title": "b", "task": "y", "cwd": "/no/such/dir"}
+            ]}))
+            .await;
+        assert!(!bad.ok);
+        assert!(store.read(|s| s.tickets.is_empty()), "校验失败不该开出半批");
+
+        let ok = tool
+            .execute(json!({"tasks": [
+                {"title": "修 bug 1", "task": "x", "cwd": cwd},
+                {"title": "修 bug 2", "task": "y", "cwd": cwd}
+            ]}))
+            .await;
+        assert!(ok.ok, "{}", ok.content);
+        assert!(ok.content.contains("已暂停"), "暂停时要说清楚：{}", ok.content);
+        let tickets = store.read(|s| s.tickets.clone());
+        assert_eq!(tickets.len(), 2);
+        assert_eq!(tickets[0].label(), "#1 修 bug 1");
+        assert_eq!(tickets[1].source_name, crate::assistant::ASSIGNED_SOURCE);
+        assert!(tickets[1].rule.is_empty());
+        assert_eq!(tickets[1].status, TicketStatus::Queued);
+    }
 
     #[test]
     fn a_ticket_is_found_by_number_or_title() {
