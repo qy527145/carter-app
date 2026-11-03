@@ -124,6 +124,7 @@ export function SidePanel() {
         )}
         <TurnList
           turns={side.turns}
+          times={side.times}
           streaming={side.streaming}
           showPayload={false}
           cwd={side.cwd}

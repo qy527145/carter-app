@@ -155,6 +155,7 @@ pub fn fork(id: &str, keep_before: Option<u32>) -> Result<String, String> {
     let copied = (|| -> Result<(), String> {
         crate::changes::copy(id, &meta.id, keep_before)?;
         crate::prompts::copy(id, &meta.id, keep_before)?;
+        crate::timeline::copy(id, &meta.id, keep_before)?;
         if let Some(cut) = keep_before {
             truncate_forked(&meta.id, cut)?;
         }

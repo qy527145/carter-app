@@ -37,8 +37,10 @@ import {
 } from "lucide-react";
 
 import { useStore, type Item, type Turn } from "../store";
+import type { TurnTime } from "../lib/api";
 import { copyText } from "../lib/clipboard";
 import { useConversationMode } from "../lib/conversationMode";
+import { fmtDuration, fullTime, msgTime } from "../lib/format";
 import { displayName, modelTitle, useModelCatalog } from "../lib/modelLabel";
 import {
   ASSISTANT_CHAT_ID,
@@ -721,8 +723,31 @@ function ActionChip({
 const ACTION_ROW =
   "flex flex-wrap items-center gap-1 opacity-0 transition-opacity duration-150 group-hover/msg:opacity-100 focus-within:opacity-100";
 
+/**
+ * 消息旁边那一小段时间。**常显**，不跟操作行一起悬停才出来 —— 翻一段长对话时
+ * 要一眼看出「这两句隔了多久」，每条都去悬停一下就没法用了。
+ *
+ * `at` 缺省或为 0（老会话没有时刻记录）时什么都不画，不占位。
+ */
+function MsgTime({ at, extra }: { at?: number | null; extra?: string }) {
+  if (!at) return null;
+  const label = msgTime(at);
+  if (!label) return null;
+  return (
+    <time
+      dateTime={new Date(at).toISOString()}
+      title={fullTime(at)}
+      className="shrink-0 select-none text-[11px] tabular-nums text-dim"
+    >
+      {label}
+      {extra && <span className="ml-1">· {extra}</span>}
+    </time>
+  );
+}
+
 function AssistantTurn({
   turn: t,
+  time,
   isLast,
   streaming,
   awaitingUser,
@@ -733,6 +758,8 @@ function AssistantTurn({
   onFork,
 }: {
   turn: AssistantTurnT;
+  /** 这一轮的起止时刻。回答末尾显示答完的时刻与用时。 */
+  time?: TurnTime;
   isLast: boolean;
   streaming: boolean;
   awaitingUser: boolean;
@@ -773,6 +800,13 @@ function AssistantTurn({
   // 一条动作都没有时整行不渲染：纯工具输出的回答末尾不该留一条看不见的空白。
   const showPayloadChip = showPayload && t.turn !== undefined;
   const actions = !!answer || canRetry || showPayloadChip || onFork !== undefined;
+  // 答完的时刻 + 用时。还在写的那一轮不显示（时刻还没定）；只有收尾没有开头的
+  // （`started_at` 为 0）只显示时刻，不瞎算用时。
+  const done = streaming && isLast ? null : (time?.ended_at ?? null);
+  const took =
+    done && time?.started_at && done >= time.started_at
+      ? `用时 ${fmtDuration(done - time.started_at)}`
+      : undefined;
 
   const doCopy = async () => {
     // 成功才打勾；失败时 copyText 自己会 toast。
@@ -866,7 +900,11 @@ function AssistantTurn({
       {/* 回答下面那一行小动作。悬停才浮出来，但一直占着位置 —— 否则鼠标移上来
           的一瞬间整段对话会跳一下。一条动作都没有时整行不渲染（纯工具输出的回答
           不该在末尾留一条空白）。 */}
-      {actions && (
+      {(actions || done) && (
+        <div className="flex items-center gap-2">
+          {/* 时间常显，在操作行**前面**：操作行静止时是透明的，时间不该跟着隐身。 */}
+          <MsgTime at={done} extra={took} />
+          {actions && (
         <div className={ACTION_ROW}>
           {answer && (
             <ActionChip
@@ -908,6 +946,8 @@ function AssistantTurn({
             />
           )}
         </div>
+          )}
+        </div>
       )}
       {confirmingRetry && (
         <ConfirmDialog
@@ -935,11 +975,14 @@ function AssistantTurn({
 
 function UserTurn({
   turn,
+  time,
   onRetry,
   retryAsks,
   onFork,
 }: {
   turn: Extract<Turn, { role: "user" }>;
+  /** 这一轮的起止时刻。气泡下方显示发问的时刻。 */
+  time?: TurnTime;
   /** 把这句话原样再问一遍（这一轮的回答及之后的对话丢掉）。 */
   onRetry?: () => void;
   /** 重试会顺带丢掉后面几轮对话 —— 点之前要先问一句。 */
@@ -995,7 +1038,8 @@ function UserTurn({
       <div className="max-w-[75%] break-words rounded-2xl bg-bubble px-3.5 py-2 text-sm leading-relaxed text-ink">
         <MessageImages text={turn.text} />
       </div>
-      <div className={`${ACTION_ROW} mt-1 justify-end`}>
+      <div className="mt-1 flex items-center justify-end gap-2">
+      <div className={`${ACTION_ROW} justify-end`}>
         <ActionChip
           icon={copied ? <Check size={12} className="carter-pop text-[var(--ok)]" /> : <Copy size={12} />}
           label={copied ? "已复制" : "复制"}
@@ -1023,6 +1067,9 @@ function UserTurn({
             onClick={onFork}
           />
         )}
+      </div>
+        {/* 时间常显，放在操作行**外面**：操作行静止时是透明的。 */}
+        <MsgTime at={time?.started_at} />
       </div>
       {confirmingRetry && (
         <ConfirmDialog
@@ -1154,6 +1201,7 @@ function PeerTurn({ text }: { text: string }) {
 
 function TurnView({
   turn,
+  time,
   isLast,
   streaming,
   awaitingUser,
@@ -1164,6 +1212,7 @@ function TurnView({
   onFork,
 }: {
   turn: Turn;
+  time?: TurnTime;
   isLast: boolean;
   streaming: boolean;
   awaitingUser: boolean;
@@ -1179,11 +1228,14 @@ function TurnView({
     if (turn.text.startsWith(EVENT_MARK)) return <ReportTurn mark={EVENT_MARK} text={turn.text} />;
     if (turn.text.startsWith(DONE_MARK)) return <BackgroundDoneTurn text={turn.text} />;
     if (turn.text.startsWith(PEER_MARK)) return <PeerTurn text={turn.text} />;
-    return <UserTurn turn={turn} onRetry={onRetry} retryAsks={retryAsks} onFork={onFork} />;
+    return (
+      <UserTurn turn={turn} time={time} onRetry={onRetry} retryAsks={retryAsks} onFork={onFork} />
+    );
   }
   return (
     <AssistantTurn
       turn={turn}
+      time={time}
       isLast={isLast}
       streaming={streaming}
       awaitingUser={awaitingUser}
@@ -1202,6 +1254,7 @@ function TurnView({
  */
 export function TurnList({
   turns: raw,
+  times,
   streaming,
   awaitingUser = false,
   showPayload = true,
@@ -1210,6 +1263,8 @@ export function TurnList({
   onFork,
 }: {
   turns: Turn[];
+  /** 每一轮的起止时刻（轮次号 → 时刻）。不传 = 不显示时间（侧边聊天继承来的那段）。 */
+  times?: Record<number, TurnTime>;
   streaming: boolean;
   /** 模型停下来等用户回答提问：还算这一轮，但不该再显示「正在生成」。 */
   awaitingUser?: boolean;
@@ -1247,6 +1302,7 @@ export function TurnList({
           <TurnView
             key={i}
             turn={t}
+            time={turn !== undefined ? times?.[turn] : undefined}
             isLast={i === turns.length - 1}
             streaming={streaming}
             awaitingUser={awaitingUser}
@@ -1278,6 +1334,7 @@ export function TurnList({
 
 function MessageList() {
   const stored = useStore((s) => s.turns);
+  const times = useStore((s) => s.times);
   const generating = useStore((s) => s.streaming);
   const awaitingUser = useStore((s) => s.pendingForm !== null);
   // 直发的那条先画成气泡（见 `QueuedPrompt.direct`）。`turn_started` 到了换成真的
@@ -1313,6 +1370,7 @@ function MessageList() {
         ) : (
           <TurnList
             turns={turns}
+            times={times}
             streaming={streaming}
             awaitingUser={awaitingUser}
             cwd={cwd}

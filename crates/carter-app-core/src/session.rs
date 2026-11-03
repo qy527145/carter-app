@@ -87,6 +87,11 @@ pub struct StartedSession {
     /// 界面拿它回填「编辑」框 —— 会话文件里存的是展开后的正文，回填进去等于把
     /// 整份文件内容摊在输入框里。同上：只存在应用私有目录，随历史一起带回。
     pub prompts: Vec<crate::prompts::TurnPrompt>,
+    /// 历史里每一轮的**起止时刻**（见 `timeline.rs`）。界面在消息旁边显示时间。
+    ///
+    /// 与会话文件里的 `ts` 不是一回事：那一层在折叠成消息时就丢了。老会话没有
+    /// 这份记录，界面上那几轮就不显示时间。
+    pub times: Vec<crate::timeline::TurnTime>,
     /// 接上的会话此刻正在跑一轮（见 [`attach_session`]）。新开的总是 `false`。
     pub running: bool,
     /// 正在跑的那一轮已经产出的东西（正文、工具调用）。界面接上时据此把这一轮画出来，
@@ -108,6 +113,7 @@ pub fn attach_session(shell: &AppShell, id: &str) -> Option<StartedSession> {
         changes: crate::changes::load(id),
         changes_since: crate::changes::since(id),
         prompts: crate::prompts::load(id),
+        times: crate::timeline::load(id),
         running: handle.busy.load(Ordering::SeqCst),
         live: handle.live.snapshot(),
         handle,
@@ -309,6 +315,7 @@ pub fn start_session(shell: Arc<AppShell>, opts: SessionOptions) -> carter::Resu
     let changes = crate::changes::load(&handle.id);
     let changes_since = crate::changes::since(&handle.id);
     let prompts = crate::prompts::load(&handle.id);
+    let times = crate::timeline::load(&handle.id);
     Ok(StartedSession {
         handle,
         history,
@@ -316,6 +323,7 @@ pub fn start_session(shell: Arc<AppShell>, opts: SessionOptions) -> carter::Resu
         changes,
         changes_since,
         prompts,
+        times,
         running: false,
         live: Vec::new(),
     })
@@ -906,6 +914,10 @@ impl Runner {
         if let Err(e) = crate::prompts::retract(&self.ctx.handle.id, turn + 1) {
             tracing::warn!("回退用户原文失败：{e}");
         }
+        // 时刻退到这一轮**之前**：重跑出来的这一轮会重新记自己的开始时刻。
+        if let Err(e) = crate::timeline::retract(&self.ctx.handle.id, turn) {
+            tracing::warn!("回退时刻记录失败：{e}");
+        }
         self.ctx.handle.publish_history(&self.thread.messages);
         self.emit(SessionEvent::TurnRetracted { turn });
         // `echo` 一律给 `None`：这一轮的用户气泡界面上已经有了，`TurnRetracted`
@@ -936,24 +948,34 @@ impl Runner {
         if let Err(e) = crate::prompts::retract(&id, turn + 1) {
             tracing::warn!("回退用户原文失败：{e}");
         }
+        if let Err(e) = crate::timeline::retract(&id, turn + 1) {
+            tracing::warn!("回退时刻记录失败：{e}");
+        }
         self.ctx.handle.publish_history(&self.thread.messages);
         self.emit(SessionEvent::HistoryReplaced {
             history: crate::view::to_views(&self.thread.messages),
             prompts: crate::prompts::load(&id),
             changes: crate::changes::load(&id),
             changes_since: crate::changes::since(&id),
+            times: crate::timeline::load(&id),
         });
 
         self.ctx.refresh();
         self.begin_changes();
+        let started_at = crate::protocol::now_ms();
+        if let Err(e) = crate::timeline::started(&id, turn, started_at) {
+            tracing::warn!("记录本轮开始时刻失败：{e}");
+        }
         self.emit(SessionEvent::TurnStarted {
             turn,
             prompt_id: None,
             prompt: None,
+            started_at,
         });
         let result = self.run_one_turn(git.clone()).await;
         self.settle_history();
         self.finish_changes(result.used_tools).await;
+        self.emit_turn_ended(&result);
         self.after_turn(&result).await;
         self.drive_goal(result, git).await;
         self.last_message_at = Some(crate::protocol::now_ms());
@@ -971,10 +993,27 @@ impl Runner {
         let turn = self.thread.user_turns;
         self.thread.user_turns = turn.saturating_add(1);
         self.ctx.handle.publish_history(&self.thread.messages);
+        let started_at = crate::protocol::now_ms();
+        if let Err(e) = crate::timeline::started(&self.ctx.handle.id, turn, started_at) {
+            tracing::warn!("记录本轮开始时刻失败：{e}");
+        }
         self.emit(SessionEvent::TurnStarted {
             turn,
             prompt_id: None,
             prompt: Some(text),
+            started_at,
+        });
+        // 这条不跑模型，写完就算结束 —— 时间要立刻收口，否则界面上它会一直
+        // 停在没有结束时刻的状态。
+        let at = crate::protocol::now_ms();
+        if let Err(e) = crate::timeline::ended(&self.ctx.handle.id, turn, at) {
+            tracing::warn!("记录本轮结束时刻失败：{e}");
+        }
+        self.emit(SessionEvent::TurnEnded {
+            turn,
+            at,
+            failed: false,
+            cancelled: false,
         });
         self.emit(SessionEvent::Idle);
         self.last_message_at = Some(crate::protocol::now_ms());
@@ -1065,6 +1104,7 @@ impl Runner {
         let id = self.ctx.handle.id.clone();
         crate::prompts::remove(&id);
         crate::changes::remove(&id);
+        crate::timeline::remove(&id);
         self.forget_reported();
         self.ctx.handle.publish_history(&self.thread.messages);
         self.emit(SessionEvent::HistoryReplaced {
@@ -1072,6 +1112,7 @@ impl Runner {
             prompts: Vec::new(),
             changes: Vec::new(),
             changes_since: 0,
+            times: Vec::new(),
         });
         self.notice(&format!(
             "第 {number} 期已整理：{}{}",
@@ -1196,10 +1237,18 @@ impl Runner {
         }
         // 轮末的记忆建议要看用户**打的原文**（`@文件` 展开前）。
         let raw = echo.clone();
+        let started_at = crate::protocol::now_ms();
+        // 时间按轮落盘：切走再回来、重启之后显示的还是当时的那个数，而不是
+        // 「重开会话的时刻」。老会话没有这份记录，界面就不显示时间。
+        if let Err(e) = crate::timeline::started(&self.ctx.handle.id, self.thread.user_turns, started_at)
+        {
+            tracing::warn!("记录本轮开始时刻失败：{e}");
+        }
         self.emit(SessionEvent::TurnStarted {
             turn: self.thread.user_turns,
             prompt_id,
             prompt: echo,
+            started_at,
         });
 
         let result = self.run_one_turn(git.clone()).await;
@@ -1207,6 +1256,7 @@ impl Runner {
         // 不必等用户下一次发消息。
         self.settle_history();
         self.finish_changes(result.used_tools).await;
+        self.emit_turn_ended(&result);
         if !result.failed && !result.user_cancelled {
             if let Some(raw) = raw.as_deref() {
                 self.spawn_memory_suggest(raw, turn_start);
@@ -1216,6 +1266,23 @@ impl Runner {
         self.drive_goal(result, git).await;
         self.last_message_at = Some(crate::protocol::now_ms());
         self.emit(SessionEvent::Idle);
+    }
+
+    /// 记下这一轮跑完的时刻并发给界面。
+    ///
+    /// 三条路径（正常响应、失败、被中断）都走这里：回答是不完整的也要显示时间 ——
+    /// 界面上少一处时间比显示一个不完整回答的结束时刻更让人困惑。
+    fn emit_turn_ended(&mut self, result: &TurnResult) {
+        let at = crate::protocol::now_ms();
+        if let Err(e) = crate::timeline::ended(&self.ctx.handle.id, self.thread.user_turns, at) {
+            tracing::warn!("记录本轮结束时刻失败：{e}");
+        }
+        self.emit(SessionEvent::TurnEnded {
+            turn: self.thread.user_turns,
+            at,
+            failed: result.failed,
+            cancelled: result.user_cancelled,
+        });
     }
 
     /// 历史自愈 + 界面收尾。
@@ -1713,15 +1780,23 @@ impl Runner {
                     self.thread.append_user(goal::CONTINUE_PROMPT);
                     self.ctx.handle.publish_history(&self.thread.messages);
                     self.begin_changes();
+                    let started_at = crate::protocol::now_ms();
+                    if let Err(e) =
+                        crate::timeline::started(&self.ctx.handle.id, self.thread.user_turns, started_at)
+                    {
+                        tracing::warn!("记录本轮开始时刻失败：{e}");
+                    }
                     self.emit(SessionEvent::TurnStarted {
                         turn: self.thread.user_turns,
                         // 自动继续没有用户消息编号 —— 界面据此画分隔条而不是气泡。
                         prompt_id: None,
                         prompt: None,
+                        started_at,
                     });
                     result = self.run_one_turn(git.clone()).await;
                     self.settle_history();
                     self.finish_changes(result.used_tools).await;
+                    self.emit_turn_ended(&result);
                     if self.ctx.handle.close.is_cancelled() {
                         return;
                     }
@@ -1829,6 +1904,9 @@ impl Runner {
             if let Err(e) = crate::changes::remap(&id, &remap) {
                 tracing::warn!("压缩后重排变更记录失败：{e}");
             }
+            if let Err(e) = crate::timeline::remap(&id, |t| remap.map(t)) {
+                tracing::warn!("压缩后重排时刻记录失败：{e}");
+            }
         }
         self.ctx.handle.publish_history(&self.thread.messages);
         self.emit(SessionEvent::Compacted {
@@ -1836,6 +1914,7 @@ impl Runner {
             prompts: crate::prompts::load(&id),
             changes: crate::changes::load(&id),
             changes_since: crate::changes::since(&id),
+            times: crate::timeline::load(&id),
             before,
             after,
             tier,

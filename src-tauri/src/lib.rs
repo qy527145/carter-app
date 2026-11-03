@@ -155,6 +155,8 @@ struct CreatedSession {
     changes_since: u32,
     /// 历史里每一轮用户打的原文（展开之前）。界面拿它回填「编辑」框。
     prompts: Vec<carter_app_core::prompts::TurnPrompt>,
+    /// 历史里每一轮的起止时刻。界面在消息旁边显示时间（见 `timeline.rs`）。
+    times: Vec<carter_app_core::timeline::TurnTime>,
     /// 接上的是一条正在跑的会话：界面要显示成「生成中」。
     running: bool,
     /// 正在跑的那一轮已经产出的正文与工具调用，界面先把它们画出来。
@@ -183,6 +185,7 @@ impl CreatedSession {
             changes: started.changes,
             changes_since: started.changes_since,
             prompts: started.prompts,
+            times: started.times,
             running: started.running,
             live: started
                 .live
@@ -356,6 +359,7 @@ async fn delete_session(shell: State<'_, Arc<AppShell>>, session_id: String) -> 
     carter_app_core::goal::remove(&session_id);
     carter_app_core::changes::remove(&session_id);
     carter_app_core::prompts::remove(&session_id);
+    carter_app_core::timeline::remove(&session_id);
     sessions::delete(&session_id)
 }
 
@@ -374,6 +378,7 @@ async fn delete_project(shell: State<'_, Arc<AppShell>>, cwd: String) -> Result<
         carter_app_core::goal::remove(id);
         carter_app_core::changes::remove(id);
         carter_app_core::prompts::remove(id);
+        carter_app_core::timeline::remove(id);
         sessions::delete(id)?;
     }
     Ok(ids.len())

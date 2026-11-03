@@ -279,6 +279,28 @@ pub enum SessionEvent {
         /// 没有用户发言的回答。有原文就总能画对。
         #[serde(default)]
         prompt: Option<String>,
+        /// 这一轮被问的时刻（epoch 毫秒）。界面在用户气泡旁边显示它。
+        ///
+        /// 与落盘的那份（见 `timeline.rs`）同一个数：重连、重开会话之后显示的
+        /// 时间要与当时看到的一致，不能按「界面收到事件的时刻」重新算一遍。
+        #[serde(default)]
+        started_at: u64,
+    },
+    /// 一轮跑完了（回答已经有了，或这一轮失败/被中断）。
+    ///
+    /// 与 `Idle` 分开：`Idle` 是「会话闲下来了」，一轮结束之后长任务目标可能立刻
+    /// 又推起来下一轮，那时 `Idle` 在整条自动继续链走完之前根本不会发。而每条
+    /// 回答完成后都要显示完成时刻，界面需要的是「这一轮到此为止」这个点。
+    TurnEnded {
+        turn: u32,
+        /// 跑完的时刻（epoch 毫秒）。
+        at: u64,
+        /// 这一轮失败了（界面可以把它标成红的）。
+        #[serde(default)]
+        failed: bool,
+        /// 用户中途按了停止。回答是不完整的，时间仍然要显示。
+        #[serde(default)]
+        cancelled: bool,
     },
     /// 历史被回退到第 `turn` 轮之前（用户点了「重试」）。
     ///
@@ -297,6 +319,9 @@ pub enum SessionEvent {
         prompts: Vec<crate::prompts::TurnPrompt>,
         changes: Vec<crate::changes::TurnFiles>,
         changes_since: u32,
+        /// 每一轮的起止时刻，按重建后的轮次号（见 `timeline.rs`）。
+        #[serde(default)]
+        times: Vec<crate::timeline::TurnTime>,
     },
     /// 思考增量。签名分片不会传到这里（对模型有用，对人没意义）。
     ThinkingDelta { text: String },
@@ -359,6 +384,9 @@ pub enum SessionEvent {
         changes: Vec<crate::changes::TurnFiles>,
         /// 变更条的统计起点，按新轮次号重排过。
         changes_since: u32,
+        /// 每一轮的起止时刻，按新轮次号重排过。
+        #[serde(default)]
+        times: Vec<crate::timeline::TurnTime>,
         /// 压缩前后的估算占用（只算历史消息）。
         before: u64,
         after: u64,

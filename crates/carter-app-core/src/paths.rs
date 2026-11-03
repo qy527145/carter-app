@@ -175,6 +175,14 @@ pub fn prompts_dir() -> PathBuf {
     app_home().join("prompts")
 }
 
+/// 每一轮的**起止时刻**（界面在消息旁边显示时间）的存放目录：一个会话一个文件。
+///
+/// 与 `prompts/` 同形同理由。会话文件里的消息本身不带时刻 —— carter 只在记录行
+/// 上留 `ts`，折叠成消息时就丢了。只服务界面，不进 carter 的记录格式。
+pub fn timeline_dir() -> PathBuf {
+    app_home().join("timeline")
+}
+
 /// 定时任务表。全局一份，不是一个会话一个文件 —— 它与会话无关，见 `schedules.rs`。
 pub fn schedules_path() -> PathBuf {
     app_home().join("schedules.json")

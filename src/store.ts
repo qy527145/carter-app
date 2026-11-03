@@ -44,6 +44,7 @@ import type {
   TodoView,
   TurnFiles,
   TurnPrompt,
+  TurnTime,
   UsageView,
 } from "./lib/api";
 
@@ -125,6 +126,14 @@ export type Conv = {
    * 历史里那几轮随 `create_session` 带回，实时那几轮走 `files_changed` 事件。
    */
   changed: Record<number, string[]>;
+  /**
+   * 每一轮的**起止时刻**（轮次号 → 时刻），界面在消息旁边显示时间。
+   *
+   * 按轮存而不是按消息存：一次用户输入可能对应多条助手消息（工具往返各一条），
+   * 它们的「答完」是同一个时刻。历史那几轮随 `create_session` 带回，实时那几轮
+   * 走 `turn_started` / `turn_ended`。老会话没有这份数据 —— 查不到就不显示时间。
+   */
+  times: Record<number, TurnTime>;
   /** 变更条的统计起点：只汇总轮次号 ≥ 它的那些轮（用户点过「清空」）。 */
   changesSince: number;
   /**
@@ -361,9 +370,15 @@ export function reduceConv(c: Conv, e: SessionEvent, sessionId?: string): Partia
   switch (e.type) {
     case "turn_started": {
       const last = c.turns[c.turns.length - 1];
+      // 开始时刻：重跑同一轮时以这一遍为准，上一遍的完成时刻一起清掉（与后端
+      // `timeline::started` 同一个口径）。老后端不带这个字段 —— 那时不动，界面不显示。
+      const times =
+        e.started_at != null
+          ? { ...c.times, [e.turn]: { turn: e.turn, started_at: e.started_at, ended_at: null } }
+          : c.times;
       // 末尾已经是**同号**的助手轮 → 重复事件，或就地重试接着这一轮往下写，复用。
       if (last && last.role === "assistant" && last.turn === e.turn) {
-        return { streaming: true, turns: c.turns };
+        return { streaming: true, turns: c.turns, times };
       }
       // 末尾是**另一个**助手轮 → 用户没说这句话，是长任务目标在推着模型走
       // （自动继续）。另起一条并标明，别让它跟上一轮粘成一大坨 ——
@@ -371,11 +386,13 @@ export function reduceConv(c: Conv, e: SessionEvent, sessionId?: string): Partia
       if (last && last.role === "assistant") {
         return {
           streaming: true,
+          times,
           turns: [...c.turns, { role: "assistant", turn: e.turn, items: [], auto: true }],
         };
       }
       return {
         streaming: true,
+        times,
         turns: [...c.turns, { role: "assistant", turn: e.turn, items: [] }],
       };
     }
@@ -463,11 +480,27 @@ export function reduceConv(c: Conv, e: SessionEvent, sessionId?: string): Partia
         changed: changedRecord(e.changes),
         changesSince: e.changes_since,
         changesSkip: 0,
+        times: timesRecord(e.times),
       };
     case "turn_usage":
       return { usage: e.usage, cost: e.cost };
     case "goal":
       return { goal: e.goal };
+    case "turn_ended":
+      // 这一轮答完了：记下完成时刻。**不**收生成态 —— 长任务目标会紧接着推起
+      // 下一轮，那时 `turn_started` 又把 `streaming` 打开；真正收口的是 `idle`。
+      return {
+        times: {
+          ...c.times,
+          [e.turn]: {
+            // 只有收尾没有开头（界面中途接上来的老会话）时，宁可让开始时刻
+            // 缺省成 0，也不要凭空编一个 —— 界面上会退成只显示完成时刻。
+            turn: e.turn,
+            started_at: c.times[e.turn]?.started_at ?? 0,
+            ended_at: e.at,
+          },
+        },
+      };
     case "idle":
       // 一轮收尾：解除生成态，并清掉可能还悬着的提问（模型已不再等）。
       return { streaming: false, pendingForm: null, compacting: false };
@@ -491,6 +524,7 @@ export function reduceConv(c: Conv, e: SessionEvent, sessionId?: string): Partia
         changed: changedRecord(e.changes),
         changesSince: e.changes_since,
         changesSkip: 0,
+        times: timesRecord(e.times),
         compacting: false,
         notice: `${what}（${e.tier} 摘要）：历史约 ${e.before.toLocaleString()} → ${e.after.toLocaleString()} tokens`,
       };
@@ -729,6 +763,7 @@ const emptyConversation: Conv = {
   changed: {},
   changesSince: 0,
   changesSkip: 0,
+  times: {},
   context: null,
   compacting: false,
   memorySuggestions: [],
@@ -748,6 +783,7 @@ function convOf(s: Conv): Conv {
     changed: s.changed,
     changesSince: s.changesSince,
     changesSkip: s.changesSkip,
+    times: s.times,
     context: s.context,
     compacting: s.compacting,
     memorySuggestions: s.memorySuggestions,
@@ -758,6 +794,13 @@ function convOf(s: Conv): Conv {
 function changedRecord(list: TurnFiles[]): Record<number, string[]> {
   const out: Record<number, string[]> = {};
   for (const t of list) out[t.turn] = t.files;
+  return out;
+}
+
+/** 历史里的按轮时刻 → 界面用的映射（见 `Conv.times`）。 */
+function timesRecord(list: TurnTime[] | undefined): Record<number, TurnTime> {
+  const out: Record<number, TurnTime> = {};
+  for (const t of list ?? []) out[t.turn] = t;
   return out;
 }
 
@@ -815,6 +858,7 @@ export const useStore = create<Store>((set) => ({
       streaming: c.running ?? false,
       changed: changedRecord(c.changes),
       changesSince: c.changes_since ?? 0,
+      times: timesRecord(c.times),
       // 这里**不**补当前会话那一行：续接的会话本来就在列表里；新开的会话在发出第一句
       // 之前盘上没有文件，补进去的那行一切走就会消失 —— 等 `turn_started` 时再补
       //（见 `touchSession`）。

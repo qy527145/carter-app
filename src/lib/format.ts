@@ -37,6 +37,41 @@ export function fullTime(ms: number): string {
   return Number.isNaN(d.getTime()) ? "" : d.toLocaleString("zh-CN");
 }
 
+/**
+ * 对话里消息旁边的时间：今天 `14:05`，昨天 `昨天 14:05`，今年 `03-14 14:05`，
+ * 更早带年份。
+ *
+ * 与 `relTime` 不同：消息时间要能看出「这两句隔了多久」，所以一律精确到分钟，
+ * 不说「3 分钟前」—— 那种写法放在一长串对话里会随时间漂，截图里也读不准。
+ */
+export function msgTime(ms: number): string {
+  const d = new Date(ms);
+  if (!ms || Number.isNaN(d.getTime())) return "";
+  const hm = d.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+  const today = new Date();
+  const sameDay = (a: Date, b: Date) =>
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate();
+  if (sameDay(d, today)) return hm;
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  if (sameDay(d, yesterday)) return `昨天 ${hm}`;
+  const md = d.toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit" });
+  if (d.getFullYear() === today.getFullYear()) return `${md} ${hm}`;
+  return `${d.getFullYear()}-${md} ${hm}`;
+}
+
+/** 一段耗时：`850ms` / `12s` / `3分05秒` / `1小时02分`。用在回答末尾的「用时」上。 */
+export function fmtDuration(ms: number): string {
+  if (ms < 1000) return `${Math.max(0, Math.round(ms))}ms`;
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}分${String(s % 60).padStart(2, "0")}秒`;
+  return `${Math.floor(m / 60)}小时${String(m % 60).padStart(2, "0")}分`;
+}
+
 /** 会话列表按 今天 / 昨天 / 更早 分组。 */
 export type TimeBucket = "今天" | "昨天" | "更早";
 

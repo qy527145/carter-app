@@ -52,6 +52,7 @@ pub mod shell;
 pub mod side;
 pub mod skills;
 pub mod templates;
+pub mod timeline;
 pub mod title;
 pub mod tools;
 pub mod upstream_models;

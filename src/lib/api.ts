@@ -49,6 +49,24 @@ export type SessionEvent =
       prompt_id?: number | null;
       /** 这条用户消息的原文（`/命令`、`@文件` 展开之前）。界面用它画气泡。 */
       prompt?: string | null;
+      /** 这一轮被问的时刻（epoch 毫秒）。用户气泡旁边显示它。 */
+      started_at?: number;
+    }
+  /**
+   * 一轮跑完了（回答已经有了，或这一轮失败/被中断）。
+   *
+   * 与 `idle` 分开：长任务目标会在一轮结束之后立刻推起下一轮，整条自动继续链
+   * 走完之前 `idle` 根本不会来 —— 而每条回答完成后就要显示完成时刻。
+   */
+  | {
+      type: "turn_ended";
+      turn: number;
+      /** 跑完的时刻（epoch 毫秒）。 */
+      at: number;
+      /** 这一轮失败了。 */
+      failed?: boolean;
+      /** 用户中途按了停止：回答不完整，时间照样显示。 */
+      cancelled?: boolean;
     }
   /** 当前模型变了（`/model`）。只换「当前模型」那一处显示。 */
   | { type: "model_changed"; model: string; model_ref?: string }
@@ -71,6 +89,8 @@ export type SessionEvent =
       prompts: TurnPrompt[];
       changes: TurnFiles[];
       changes_since: number;
+      /** 每一轮的起止时刻，按重建后的轮次号。 */
+      times?: TurnTime[];
     }
   | { type: "thinking_delta"; text: string }
   | { type: "text_delta"; text: string }
@@ -118,6 +138,8 @@ export type SessionEvent =
       prompts: TurnPrompt[];
       changes: TurnFiles[];
       changes_since: number;
+      /** 每一轮的起止时刻，按新轮次号重排过。 */
+      times?: TurnTime[];
       /** 压缩前后的估算占用（只算历史消息）。 */
       before: number;
       after: number;
@@ -402,6 +424,21 @@ export type TurnPrompt = {
   text: string;
 };
 
+/**
+ * 某一轮的起止时刻（epoch 毫秒）。
+ *
+ * 与会话文件里的 `ts` 不是一回事：消息本身不带时刻，那层信息折叠成消息时就丢了。
+ * 所以后端按轮另存一份（见 core 的 `timeline.rs`）。老会话没有这份记录 ——
+ * 界面上那几轮就不显示时间，别的什么都不影响。
+ */
+export type TurnTime = {
+  turn: number;
+  /** 用户发问的时刻。 */
+  started_at: number;
+  /** 这一轮跑完的时刻。`null` = 还在跑（或没跑完就被中断了）。 */
+  ended_at: number | null;
+};
+
 export type CreatedSession = {
   session_id: string;
   /** 真正发给上游的模型名。 */
@@ -421,6 +458,8 @@ export type CreatedSession = {
    * 会话文件里存的是展开后的正文，回填进去等于把整份文件内容摊在输入框里。
    */
   prompts?: TurnPrompt[];
+  /** 历史里每一轮的起止时刻。界面在消息旁边显示时间。 */
+  times?: TurnTime[];
   /** 接上的是一条正在跑的会话：显示成「生成中」，后续增量照常从事件来。 */
   running?: boolean;
   /** 正在跑的那一轮已经产出的正文与工具调用。 */
