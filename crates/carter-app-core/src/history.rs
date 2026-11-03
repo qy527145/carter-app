@@ -14,15 +14,39 @@
 //!
 //! ## 做法
 //!
-//! 在「要拿这份历史发请求」之前，按顺序扫一遍：
+//! 在「要拿这份历史发请求」之前，按顺序扫一遍，把历史**归一化**成一串自洽的
+//! 「助手调用 → 紧跟着的结果」：
 //!
-//! * 助手消息里出现 `tool_use` → 记进待配对表；
-//! * 后续用户消息里的 `tool_result` → 从待配对表里划掉；
-//! * 出现一条**带正文的用户消息**（新的一轮），或者又一条助手消息，而待配对表
-//!   非空 → 在这条消息**之前**插一条合成结果，说明「这一轮被中断了」；
-//! * 扫到末尾还有剩余 → 追加一条合成结果。
+//! * 助手消息里出现 `tool_use` → 记进待配对表，继续往下；
+//! * 用户消息里的 `tool_result`，id 还挂在待配对表上才算数（并从表里划掉）；
+//! * 出现一条**带正文的用户消息**（新的一轮），或者又一条助手消息、系统消息，
+//!   而待配对表非空 → 就在这条消息**之前**把欠的结果补齐；
+//! * 扫到末尾还有剩余 → 追加一条。
+//!
+//! ## 补什么、丢什么
+//!
+//! 只补「没结果」是不够的 —— 上游报错的形态往往是反过来的那两种，它们同样会让
+//! **之后每一条消息**都发不出去：
+//!
+//! * **多出来的结果**（`tool_result` 的 id 在待配对表里找不到）：说明它对应的调用
+//!   已经被回答过了，或者压根不在这一段历史里（两条 runner 交错写、旧版本修复过
+//!   一次又追加了真结果）。留着它就是一条「不是在回答上面那次调用」的 tool 消息，
+//!   Chat 协议直接 400 —— 所以丢掉。
+//! * **来晚了的真结果**：调用在 A 处、结果写到了后面（中间夹了一条事件或用户消息）。
+//!   这时**把真结果搬到调用后面**，而不是另补一条合成的 —— 搬完原处那条自然成了
+//!   「多出来的结果」，按上一条丢掉。搬运比合成重要得多：合成那句「工具没有执行」
+//!   会把真的执行结果盖掉，模型于是重跑一遍已经做过的动作。
+//!
+//! 一条用户消息里既有正文又有结果时，拆成「结果一条、正文一条」：Chat 协议把结果
+//! 编成独立的 `role:"tool"` 消息，夹在正文后面就不再紧跟着那次调用了。
 //!
 //! 合成结果的正文要写清楚「没有执行」，否则模型会以为工具真的跑过、只是没输出。
+//!
+//! ## 为什么要扫两遍
+//!
+//! 「来晚了的真结果」要求在第 i 条消息处就知道它后面还有没有结果，所以先把**整条
+//! 历史**里的结果收成一张 id → 位置的索引，再按顺序拼新的历史。合成的只留给索引里
+//! 也找不到的那些。
 //!
 //! ## 落盘与内存的区别
 //!
@@ -34,6 +58,8 @@
 //!
 //! 这不是妥协而是唯一正确的做法 —— 为了「文件顺序也好看」去重写整个会话文件，
 //! 会在任何一次写入失败时把一条能救回来的对话彻底弄丢。
+
+use std::collections::{HashMap, HashSet};
 
 use llm_adapt_core::{Block, Role, ToolResultContent, WireMessage};
 
@@ -52,29 +78,50 @@ pub struct RepairedCall {
 
 /// 扫一遍历史，返回其中断口被补齐的调用。没有断口时什么也不做。
 ///
-/// 见模块头：末尾的断口走 `Thread::append`（落盘），中段的只在内存里修。
+/// 见模块头：末尾的断口走 `Thread::append`（落盘），中段的、以及多余/错位的结果
+/// 只在内存里修（会话文件只追加，写不回中段）。
 pub fn repair_dangling_tool_uses(thread: &mut Thread) -> Vec<RepairedCall> {
+    // 第一遍：整条历史里**真正存在**的结果，id → 块。用来把「来晚了的真结果」搬到
+    // 调用后面 —— 合成一条假的会把真的执行结果盖掉，模型于是重跑已做过的动作。
+    //
+    // 同一个 id 出现多次时取**最后**一个：交错写入留下的旧副本通常在真结果前面。
+    let mut known: HashMap<String, Block> = HashMap::new();
+    for msg in thread.messages.iter() {
+        for b in &msg.content {
+            if let Block::ToolResult { tool_use_id, .. } = b {
+                known.insert(tool_use_id.clone(), b.clone());
+            }
+        }
+    }
+
     let mut pending: Vec<(String, String, serde_json::Value)> = Vec::new();
     let mut repaired: Vec<RepairedCall> = Vec::new();
+    // 已经用掉的 id。一个结果只能回答一次调用，第二次出现就是多余的。
+    let mut answered: HashSet<String> = HashSet::new();
     // 自愈后的消息序列。没有断口时它与原序列逐条相同 —— 那时不替换，
     // 免得白白克隆一遍整条历史。
     let mut out: Vec<WireMessage> = Vec::with_capacity(thread.messages.len() + 1);
     let mut changed = false;
 
-    let flush = |out: &mut Vec<WireMessage>,
-                 pending: &mut Vec<(String, String, serde_json::Value)>,
-                 repaired: &mut Vec<RepairedCall>| {
+    /// 把欠下的结果补齐：优先用历史里那个真结果，没有才合成「被中断」。
+    fn flush(
+        out: &mut Vec<WireMessage>,
+        pending: &mut Vec<(String, String, serde_json::Value)>,
+        repaired: &mut Vec<RepairedCall>,
+        known: &mut HashMap<String, Block>,
+        answered: &mut HashSet<String>,
+    ) {
         if pending.is_empty() {
             return;
         }
         let blocks: Vec<Block> = pending
             .drain(..)
             .map(|(id, name, input)| {
-                repaired.push(RepairedCall {
-                    id: id.clone(),
-                    name,
-                    input,
-                });
+                answered.insert(id.clone());
+                if let Some(real) = known.remove(&id) {
+                    return real;
+                }
+                repaired.push(RepairedCall { id: id.clone(), name, input });
                 Block::ToolResult {
                     tool_use_id: id,
                     content: ToolResultContent::text(INTERRUPTED_RESULT),
@@ -84,21 +131,18 @@ pub fn repair_dangling_tool_uses(thread: &mut Thread) -> Vec<RepairedCall> {
             })
             .collect();
         out.push(WireMessage::new(Role::User, blocks));
-    };
+    }
 
     for msg in thread.messages.iter() {
         match msg.role {
             Role::Assistant => {
-                // 又一条助手消息 → 上一条里没配对的调用永远等不到结果了。
+                // 又一条助手消息 → 上一条里没配对的调用等不到结果了。
                 if !pending.is_empty() {
-                    flush(&mut out, &mut pending, &mut repaired);
+                    flush(&mut out, &mut pending, &mut repaired, &mut known, &mut answered);
                     changed = true;
                 }
                 for b in &msg.content {
-                    if let Block::ToolUse {
-                        id, name, input, ..
-                    } = b
-                    {
+                    if let Block::ToolUse { id, name, input, .. } = b {
                         pending.push((id.clone(), name.clone(), input.clone()));
                     }
                 }
@@ -109,21 +153,50 @@ pub fn repair_dangling_tool_uses(thread: &mut Thread) -> Vec<RepairedCall> {
                     Block::Text { text, .. } => !text.trim().is_empty(),
                     _ => false,
                 });
-                // 带正文的用户消息 = 新的一轮。断口必须压在它前面。
+                // 带正文的用户消息 = 新的一轮。断口必须压在它前面 —— 否则结果会被
+                // 编到新那一轮的话后面去，而它回答的是上一轮的调用。
                 if has_text && !pending.is_empty() {
-                    flush(&mut out, &mut pending, &mut repaired);
+                    flush(&mut out, &mut pending, &mut repaired, &mut known, &mut answered);
                     changed = true;
                 }
+
+                let mut results: Vec<Block> = Vec::new();
+                let mut others: Vec<Block> = Vec::new();
                 for b in &msg.content {
-                    if let Block::ToolResult { tool_use_id, .. } = b {
-                        pending.retain(|(id, _, _)| id != tool_use_id);
+                    match b {
+                        // 只有还挂在待配对表上、且没被用过的才算数。其余都是「不是在
+                        // 回答上面那次调用」的孤儿结果，留着整条请求就发不出去。
+                        Block::ToolResult { tool_use_id, .. }
+                            if pending.iter().any(|(id, _, _)| id == tool_use_id)
+                                && !answered.contains(tool_use_id) =>
+                        {
+                            answered.insert(tool_use_id.clone());
+                            pending.retain(|(id, _, _)| id != tool_use_id);
+                            known.remove(tool_use_id);
+                            results.push(b.clone());
+                        }
+                        Block::ToolResult { .. } => changed = true,
+                        other => others.push(other.clone()),
                     }
                 }
-                out.push(msg.clone());
+
+                if !results.is_empty() {
+                    out.push(WireMessage::new(Role::User, results));
+                    // 正文与结果混在一条消息里：Chat 协议把结果编成独立的 tool 消息，
+                    // 夹在正文后面就不再紧跟着那次调用了 —— 拆成两条。
+                    if others.is_empty() {
+                        continue;
+                    }
+                    changed = true;
+                }
+                if others.is_empty() {
+                    continue;
+                }
+                out.push(WireMessage::new(Role::User, others));
             }
             Role::System => {
                 if !pending.is_empty() {
-                    flush(&mut out, &mut pending, &mut repaired);
+                    flush(&mut out, &mut pending, &mut repaired, &mut known, &mut answered);
                     changed = true;
                 }
                 out.push(msg.clone());
@@ -134,7 +207,7 @@ pub fn repair_dangling_tool_uses(thread: &mut Thread) -> Vec<RepairedCall> {
     // 末尾还有没配对的：这是中断最常见的形态。走 append，真正写进会话文件。
     if !pending.is_empty() {
         let before = out.len();
-        flush(&mut out, &mut pending, &mut repaired);
+        flush(&mut out, &mut pending, &mut repaired, &mut known, &mut answered);
         // 只有当整条历史逐条不变、只是尾部多了一条合成结果时，才能安全 append。
         if !changed && out.len() == before + 1 {
             if let Some(tail) = out.last() {
@@ -498,6 +571,133 @@ mod tests {
         let repaired = repair_dangling_tool_uses(&mut t);
         assert_eq!(repaired.len(), 1);
         assert_eq!(repaired[0].id, "b");
+    }
+
+    /// 没有对应调用的结果直接丢掉。
+    ///
+    /// 这是线上报错「Messages with role 'tool' must be a response to a preceding
+    /// message with 'tool_calls'」最直接的成因：两条 runner 交错写同一个会话文件，
+    /// 结果落到了下一条助手消息后面，前面的调用就被判成「前面没人调用」。
+    /// 修历史不管这个的话，之后**每一条**消息都发不出去。
+    #[test]
+    fn a_result_without_any_call_is_dropped() {
+        let mut t = thread(vec![
+            WireMessage::user_text("跑一下"),
+            WireMessage::new(Role::Assistant, vec![tool_use("call_1", "bash")]),
+            WireMessage::new(Role::User, vec![tool_result("call_1")]),
+            // 孤零零的一条结果：它的调用不在这段历史里。
+            WireMessage::new(Role::User, vec![tool_result("ghost")]),
+            WireMessage::user_text("还在吗"),
+        ]);
+        repair_dangling_tool_uses(&mut t);
+        assert_eq!(t.messages.len(), 4, "空的孤儿结果整条丢掉");
+        assert!(
+            !t.messages.iter().any(|m| m.content.iter().any(|b| matches!(
+                b,
+                Block::ToolResult { tool_use_id, .. } if tool_use_id == "ghost"
+            ))),
+            "孤儿结果必须消失：{:#?}",
+            t.messages
+        );
+        assert_eq!(t.messages[3].concat_text(), "还在吗");
+    }
+
+    /// 同一个调用被回答了两次：第二次是多余的，要丢掉。
+    ///
+    /// 交错写入下很常见 —— 两个 runner 各自把同一个结果追加了一遍。留着它同样
+    /// 是一条「前面没有对应 tool_calls」的 tool 消息。
+    #[test]
+    fn a_duplicate_result_for_the_same_call_is_dropped() {
+        let mut t = thread(vec![
+            WireMessage::user_text("跑一下"),
+            WireMessage::new(Role::Assistant, vec![tool_use("call_1", "bash")]),
+            WireMessage::new(Role::User, vec![tool_result("call_1")]),
+            WireMessage::new(Role::User, vec![tool_result("call_1")]),
+            WireMessage::user_text("还在吗"),
+        ]);
+        repair_dangling_tool_uses(&mut t);
+        assert_eq!(t.messages.len(), 4);
+        let results: Vec<_> = t
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter(|b| matches!(b, Block::ToolResult { .. }))
+            .collect();
+        assert_eq!(results.len(), 1, "同一个调用只能有一个结果：{results:#?}");
+    }
+
+    /// 结果来晚了（中间夹了一条事件消息）：**把真结果搬到调用后面**，不要再合成。
+    ///
+    /// 合成那句「工具没有执行」会把真的执行结果盖掉 —— 模型以为命令没跑，
+    /// 于是一遍遍重跑已经做过的动作。
+    #[test]
+    fn a_late_real_result_is_moved_up_instead_of_faked() {
+        let mut real = tool_result("call_1");
+        if let Block::ToolResult { content, .. } = &mut real {
+            *content = ToolResultContent::text("真结果：服务已经起来了");
+        }
+        let mut t = thread(vec![
+            WireMessage::user_text("跑一下"),
+            WireMessage::new(Role::Assistant, vec![tool_use("call_1", "bash")]),
+            // 事件消息插在中间，把调用与结果分开了。
+            WireMessage::user_text("【新事件】来源「钉钉」有新消息"),
+            WireMessage::new(Role::User, vec![real]),
+        ]);
+        let repaired = repair_dangling_tool_uses(&mut t);
+        assert!(repaired.is_empty(), "有真结果可用，不该合成");
+
+        assert_eq!(t.messages.len(), 4);
+        assert_eq!(t.messages[1].role, Role::Assistant);
+        assert_eq!(t.messages[2].role, Role::User);
+        match &t.messages[2].content[0] {
+            Block::ToolResult { content, is_error, .. } => {
+                assert!(content.as_text().contains("真结果"), "搬上来的必须是真结果");
+                assert!(!*is_error, "真结果不是错误");
+            }
+            other => panic!("调用后面必须紧跟结果，得到 {other:?}"),
+        }
+        assert_eq!(t.messages[3].concat_text(), "【新事件】来源「钉钉」有新消息");
+    }
+
+    /// 一条用户消息里既有正文又有结果：拆成两条，结果必须在正文**前面**。
+    ///
+    /// Chat 协议把结果编成独立的 `role:"tool"` 消息，夹在正文后面就不再紧跟
+    /// 那次调用了 —— 上游直接 400。
+    #[test]
+    fn text_and_results_in_one_message_are_split_with_results_first() {
+        let mut t = thread(vec![
+            WireMessage::user_text("跑一下"),
+            WireMessage::new(Role::Assistant, vec![tool_use("call_1", "bash")]),
+            WireMessage::new(
+                Role::User,
+                vec![Block::text("顺便说说"), tool_result("call_1")],
+            ),
+        ]);
+        repair_dangling_tool_uses(&mut t);
+        assert_eq!(t.messages.len(), 4, "结果一条、正文一条");
+        assert!(matches!(t.messages[2].content[0], Block::ToolResult { .. }));
+        assert_eq!(t.messages[3].concat_text(), "顺便说说");
+    }
+
+    /// 修复必须是幂等的：已经自洽的历史再过一遍，逐条不变。
+    ///
+    /// 会话文件只追加，`settle_history` 在一轮前后各调一次；第二次要是还在改，
+    /// 同一条消息就会反复被搬来搬去。
+    #[test]
+    fn repairing_twice_changes_nothing_the_second_time() {
+        let mut t = thread(vec![
+            WireMessage::user_text("跑一下"),
+            WireMessage::new(Role::Assistant, vec![tool_use("a", "read_file")]),
+            WireMessage::new(Role::User, vec![tool_result("a")]),
+            WireMessage::user_text("【新事件】来了"),
+            WireMessage::new(Role::Assistant, vec![tool_use("b", "grep")]),
+            WireMessage::new(Role::User, vec![tool_result("b"), tool_result("ghost")]),
+        ]);
+        repair_dangling_tool_uses(&mut t);
+        let once = t.messages.clone();
+        let repaired = repair_dangling_tool_uses(&mut t);
+        assert!(repaired.is_empty(), "第二次不该再补任何东西");
+        assert_eq!(t.messages, once, "第二次必须逐条不变");
     }
 
     /// 重试把历史回退到这一轮**之前**，返回时的正文正好是这一轮的提问。
