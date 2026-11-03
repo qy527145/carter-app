@@ -51,6 +51,7 @@ pub mod sessions;
 pub mod shell;
 pub mod side;
 pub mod skills;
+pub mod team;
 pub mod templates;
 pub mod timeline;
 pub mod title;
@@ -71,6 +72,7 @@ pub use protocol::{AppEvent, Command, GoalView, SessionEvent, TodoView, UsageVie
 pub use schedules::{Schedule, ScheduleKind, ScheduleStore};
 pub use session::{start_session, SessionOptions, StartedSession};
 pub use sessions::{SearchHit, SessionRow};
+pub use team::{InitOutcome, Store, TeamMeta};
 pub use shell::{AppShell, SessionHandle};
 pub use side::{start_side_session, StartedSide};
 pub use skills::SkillRow;

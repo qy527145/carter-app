@@ -1770,3 +1770,188 @@ export function addMailAccount(vendor: string, d: MailAccountDraft): Promise<voi
 export function removeMailAccount(vendor: string, name: string): Promise<void> {
   return invoke<void>("remove_mail_account", { vendor, name });
 }
+
+// ---------------------------------------------------------------------------
+// 团队目录（目标 / 任务 / 看板）
+// ---------------------------------------------------------------------------
+
+/**
+ * 这个工作目录（或它上面某一层）的团队目录状态。
+ *
+ * `null` = 还没初始化。界面上「初始化」与「展示」是两种完全不同的样子，
+ * 所以这一条要能明确回答「有没有」，而不是返回一个全空的假对象。
+ */
+export type TeamStatus = {
+  root: string;
+  project_root: string;
+  name: string;
+  remote: string | null;
+  initialized: boolean;
+  goals: number;
+  issues: number;
+};
+
+export type TeamInitOutcome = {
+  root: string;
+  project_root: string;
+  steps: string[];
+  commit: string | null;
+  identity: { name: string; email: string };
+  remote: string | null;
+  sync_source: boolean;
+  warnings: string[];
+};
+
+export type TeamCounts = {
+  total: number;
+  todo: number;
+  doing: number;
+  blocked: number;
+  done: number;
+  dropped: number;
+};
+
+export type TeamTask = {
+  id: string;
+  title: string;
+  /** `todo` | `doing` | `blocked` | `done` | `dropped` */
+  status: string;
+  status_label: string;
+  priority: string;
+  assignee: string | null;
+  parent_id: string | null;
+  depends_on: string[];
+  children: string[];
+  /** 还没完成的前置任务。 */
+  waiting_on: string[];
+  /** 0~100。有子任务时按子任务算。 */
+  progress: number;
+  /** 前置全完成、状态是待办 —— 可以直接开工。 */
+  ready: boolean;
+  blocked_reason: string;
+  estimate_hours: number | null;
+  due_at: number | null;
+};
+
+export type TeamGoal = {
+  id: string;
+  title: string;
+  description: string;
+  /** `active` | `paused` | `done` | `archived` */
+  status: string;
+  status_label: string;
+  priority: string;
+  owner: string | null;
+  due_at: number | null;
+  percent: number;
+  counts: TeamCounts;
+  /** 根任务 id，按顺序。 */
+  roots: string[];
+  tasks: TeamTask[];
+};
+
+export type TeamBoardColumn = {
+  id: string;
+  name: string;
+  order: number;
+  wip_limit: number | null;
+};
+
+export type TeamCard = {
+  id: string;
+  board_id: string;
+  column_id: string;
+  group_id: string | null;
+  text: string;
+  task_id: string | null;
+  votes: number;
+  order: number;
+  created_at: number;
+  created_by: string;
+  updated_at: number | null;
+  updated_by: string | null;
+};
+
+export type TeamBoard = {
+  id: string;
+  title: string;
+  description: string;
+  goal_id: string | null;
+  columns: TeamBoardColumn[];
+  cards: TeamCard[];
+};
+
+export type TeamEvent = {
+  sha: string;
+  /** `claim` | `release` | `comment` | `sync` | `note` */
+  kind: string;
+  target: string | null;
+  goal_id: string | null;
+  body: string;
+  subject: string;
+  author: { name: string; email: string } | null;
+  at: number;
+};
+
+export type TeamOverview = {
+  root: string;
+  name: string;
+  remote: string | null;
+  identity: string | null;
+  goals: TeamGoal[];
+  boards: TeamBoard[];
+  events: TeamEvent[];
+  /** 读不出来的文件。给人看的诊断信息。 */
+  warnings: string[];
+};
+
+export type TeamTodo = {
+  id: string;
+  title: string;
+  status: string;
+  status_label: string;
+  priority: string;
+  goal_id: string;
+  goal_title: string;
+  blocked_reason: string;
+  /** 还差几个前置。 */
+  waiting_on: number;
+  ready: boolean;
+};
+
+/** 这个工作目录的团队目录状态。`null` = 没初始化过。 */
+export function teamStatus(cwd: string): Promise<TeamStatus | null> {
+  return invoke<TeamStatus | null>("team_status", { cwd });
+}
+
+/** 初始化团队目录。会 `git init`（必要时）并提交一次。 */
+export function teamInitialize(
+  projectRoot: string,
+  name?: string | null,
+): Promise<TeamInitOutcome> {
+  return invoke<TeamInitOutcome>("team_initialize", { projectRoot, name: name ?? null });
+}
+
+/** 全景：目标 + 任务树 + 看板 + 最近事件。界面一次拉完。 */
+export function teamOverview(cwd: string): Promise<TeamOverview> {
+  return invoke<TeamOverview>("team_overview", { cwd });
+}
+
+/** 我名下未完成的任务。消息框下方的待办条用它。 */
+export function teamMyTasks(cwd: string): Promise<TeamTodo[]> {
+  return invoke<TeamTodo[]>("team_my_tasks", { cwd });
+}
+
+/**
+ * 把团队数据的改动提交成一条 git 提交。返回提交短 SHA；没有改动时是 `null`。
+ *
+ * 由界面在**轮到结束**时调用 —— 一轮里模型可能改了好多处，那是同一件事。
+ */
+export function teamCommit(cwd: string, message: string): Promise<string | null> {
+  return invoke<string | null>("team_commit", { cwd, message });
+}
+
+/** 立刻同步一次（拉远端、只做快进）。观察源也会定时跑。 */
+export function teamSync(cwd: string): Promise<string> {
+  return invoke<string>("team_sync", { cwd });
+}

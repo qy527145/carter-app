@@ -378,6 +378,13 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
         push(Arc::new(AssistantRecallTool::new(store.clone())), &mut tools);
     }
 
+    // 团队目录（目标 / 任务 / 看板）。在快照之后：子 agent 拿的是主对话工具表的
+    // 快照，让它们顺手改团队账本等于「派出去的人各自改同一本账」——
+    // 而它们本来就该把结果交回来由主对话记。侧边聊天同样不该挂（见 `team::tool::attach`）。
+    if settings.tool_enabled("team") {
+        push(crate::team::tool::attach(&cwd), &mut tools);
+    }
+
     // 跨会话消息。在快照之后：子 agent 看不到主对话，替它对外说话只会说半截情况。
     if let Some(shell) = peers {
         for kind in [peer::Kind::List, peer::Kind::Send, peer::Kind::Read] {

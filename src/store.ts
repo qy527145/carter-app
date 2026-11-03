@@ -205,7 +205,7 @@ type Store = Conv & {
    */
   configNonce: number;
   /** 主区显示哪个视图。默认对话。 */
-  view: "chat" | "settings" | "assistant";
+  view: "chat" | "settings" | "assistant" | "team";
   /**
    * 会话列表被改过几次（新建 / 改名 / fork / 删除）。
    *
@@ -255,7 +255,7 @@ type Store = Conv & {
   openInspector: (turn?: number | null) => void;
   closeInspector: () => void;
   setInspectorTurn: (turn: number | null) => void;
-  setView: (v: "chat" | "settings" | "assistant") => void;
+  setView: (v: "chat" | "settings" | "assistant" | "team") => void;
   /** 常驻助理的状态（面板与侧栏角标共用一份，`assistant_changed` 时重拉）。 */
   assistant: AssistantView | null;
   setAssistant: (a: AssistantView) => void;

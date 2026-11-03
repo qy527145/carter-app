@@ -16,6 +16,7 @@ import {
   Search,
   Settings as SettingsIcon,
   Sun,
+  Target,
   Trash,
 } from "lucide-react";
 
@@ -244,6 +245,26 @@ function AssistantEntry() {
   );
 }
 
+/**
+ * 团队页入口。与「助理」并列，而不是塞进设置 ——
+ * 这里是每天要看的地方（我该做什么、现在卡在哪），不是偶尔改一次配置的地方。
+ */
+function TeamEntry() {
+  const setView = useStore((s) => s.setView);
+  const view = useStore((s) => s.view);
+  return (
+    <button
+      onClick={() => setView("team")}
+      className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition-colors ${
+        view === "team" ? "bg-ink/10 font-medium text-ink" : "text-dim hover:bg-ink/5"
+      }`}
+    >
+      <Target size={14} className={view === "team" ? "text-tone-violet" : ""} />
+      目标与任务
+    </button>
+  );
+}
+
 export function Sidebar() {
   const sessions = useStore((s) => s.sessions);
   const sessionId = useStore((s) => s.sessionId);
@@ -328,8 +349,9 @@ export function Sidebar() {
             <Plus size={14} />
             新对话
           </Button>
-          <div className="mt-1.5">
+          <div className="mt-1.5 space-y-1">
             <AssistantEntry />
+            <TeamEntry />
           </div>
         </div>
 

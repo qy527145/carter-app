@@ -2022,6 +2022,12 @@ impl Runner {
                 self.ctx.handle.busy.store(false, Ordering::SeqCst);
                 // 这一轮读过信、发信方要回执的，现在送（历史快照此时已经是这一轮的结尾）。
                 crate::peers::on_idle(&self.ctx.shell, &self.ctx.handle);
+                // 这一轮动过团队数据（`.carter/`）就收成一条提交。放在 idle 而不是
+                // 每次工具调用：一轮里建三个任务改两个状态是**一件事**，应该是一条
+                // 提交。侧边聊天不碰团队数据（它没挂 `team` 工具），提交是空转。
+                if self.ctx.include_task {
+                    crate::team::git::commit_turn_if_team(&self.ctx.cwd, self.thread.user_turns);
+                }
             }
             _ => {}
         }

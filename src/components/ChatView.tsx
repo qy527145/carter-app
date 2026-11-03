@@ -54,6 +54,7 @@ import { FilePreviewModal } from "./FilePreview";
 import { MarkdownImage, MarkdownLink, MarkdownPre, transformMarkdownUrl } from "./Media";
 import { AskForm } from "./AskForm";
 import { Composer, MessageImages } from "./Composer";
+import { TeamTodoDock } from "./TeamTodoDock";
 import { GoalBar } from "./GoalBar";
 import { MemorySuggestBar } from "./MemorySuggestBar";
 import { ModePill } from "./ModePill";
@@ -1658,6 +1659,10 @@ export function ChatView() {
       <MessageList />
       <MainChangesPanel />
       <TodoPanel />
+      {/* 团队待办：贴着输入框，点一条就把它交给这条对话。
+          放在 `TodoPanel` 之后 —— 那一块是「这一轮模型自己列的清单」，
+          这一块是「团队账本里归我的活」，前者更临时，后者更持久。 */}
+      <TeamTodoDock />
       <AskForm />
       {/* 目标条贴着输入框：它和「我要它干什么」是一件事，读起来是一句话。 */}
       <GoalBar />

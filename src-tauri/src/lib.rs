@@ -1751,6 +1751,13 @@ pub fn run() {
             set_fast_model,
             get_compaction,
             set_compaction,
+            // 团队目录
+            team_status,
+            team_initialize,
+            team_overview,
+            team_my_tasks,
+            team_commit,
+            team_sync,
             // 定时任务
             list_schedules,
             save_schedule,
@@ -1826,4 +1833,308 @@ pub fn run() {
             }
             let _ = (app, event);
         });
+}
+
+// ---------------------------------------------------------------------------
+// 团队目录（目标 / 任务 / 看板）
+// ---------------------------------------------------------------------------
+
+/// 这个目录（或它上面某一层）已经初始化过团队目录了吗。
+#[tauri::command]
+fn team_status(cwd: String) -> Option<TeamStatus> {
+    let store = carter_app_core::team::Store::discover(Path::new(&cwd))?;
+    let meta = store.meta().ok()?;
+    let goals = store.goals();
+    Some(TeamStatus {
+        root: store.root().to_string_lossy().to_string(),
+        project_root: store.project_root().to_string_lossy().to_string(),
+        name: meta.name,
+        remote: meta.remote,
+        initialized: true,
+        goals: goals.items.len(),
+        issues: goals.issues.len(),
+    })
+}
+
+#[derive(Serialize)]
+struct TeamStatus {
+    root: String,
+    project_root: String,
+    name: String,
+    remote: Option<String>,
+    initialized: bool,
+    goals: usize,
+    issues: usize,
+}
+
+/// 初始化团队目录。建骨架 + 首次提交 + 自动建同步观察源。
+///
+/// 观察源建在这里而不是 `team::init` 里：那个模块刻意不依赖 `AppShell`（它要能在
+/// 没有 webview 的情况下测），而建源需要整个外壳。
+#[tauri::command]
+fn team_initialize(
+    shell: State<'_, Arc<AppShell>>,
+    project_root: String,
+    name: Option<String>,
+) -> Result<carter_app_core::InitOutcome, String> {
+    let mut outcome = carter_app_core::team::initialize(Path::new(&project_root), name.as_deref())?;
+    match carter_app_core::team::init::create_sync_source(
+        shell.inner(),
+        Path::new(&project_root),
+        &outcome.project_root
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or("项目"),
+    ) {
+        Ok(created) => {
+            outcome.sync_source = created;
+            if !created {
+                outcome
+                    .warnings
+                    .push("没有远端，暂不自动同步。配好 origin 之后再点一次初始化即可补上。".into());
+            }
+        }
+        Err(e) => outcome.warnings.push(format!("同步观察源没建成：{e}")),
+    }
+    Ok(outcome)
+}
+
+/// 目标全景：目标 + 任务树 + 进度 + 看板。界面一次拉完。
+#[tauri::command]
+fn team_overview(cwd: String) -> Result<TeamOverview, String> {
+    let store = carter_app_core::team::Store::discover(Path::new(&cwd))
+        .ok_or("这个项目还没有初始化团队目录")?;
+
+    let mut warnings = Vec::new();
+    let goals_loaded = store.goals();
+    for (path, why) in &goals_loaded.issues {
+        warnings.push(format!("{path}：{why}"));
+    }
+
+    let mut goals = Vec::new();
+    for goal in goals_loaded.items {
+        let view = store.goal_view(&goal.id);
+        let tasks = match &view {
+            Ok(v) => v
+                .tasks
+                .iter()
+                .map(|t| TaskRow {
+                    id: t.task.id.clone(),
+                    title: t.task.title.clone(),
+                    status: t.task.status.as_str().to_string(),
+                    status_label: t.task.status.label().to_string(),
+                    priority: t.task.priority.as_str().to_string(),
+                    assignee: t.task.assignee.clone(),
+                    parent_id: t.task.parent_id.clone(),
+                    depends_on: t.task.depends_on.clone(),
+                    children: t.children.clone(),
+                    waiting_on: t.waiting_on.clone(),
+                    progress: t.progress,
+                    ready: t.ready,
+                    blocked_reason: t.task.blocked_reason.clone(),
+                    estimate_hours: t.task.estimate_hours,
+                    due_at: t.task.due_at,
+                })
+                .collect(),
+            Err(e) => {
+                warnings.push(format!("{}：{e}", goal.id));
+                Vec::new()
+            }
+        };
+        goals.push(GoalRow {
+            id: goal.id.clone(),
+            title: goal.title.clone(),
+            description: goal.description.clone(),
+            status: goal.status.as_str().to_string(),
+            status_label: goal.status.label().to_string(),
+            priority: goal.priority.as_str().to_string(),
+            owner: goal.owner.clone(),
+            due_at: goal.due_at,
+            percent: view.as_ref().map(|v| v.counts.percent()).unwrap_or(0),
+            counts: view.as_ref().map(|v| v.counts).unwrap_or_default(),
+            roots: view.as_ref().map(|v| v.roots.clone()).unwrap_or_default(),
+            tasks,
+        });
+    }
+
+    let boards_loaded = store.boards();
+    for (path, why) in &boards_loaded.issues {
+        warnings.push(format!("{path}：{why}"));
+    }
+    let mut boards = Vec::new();
+    for board in boards_loaded.items {
+        let cards = store.cards(&board.id);
+        for (path, why) in &cards.issues {
+            warnings.push(format!("{path}：{why}"));
+        }
+        boards.push(BoardRow {
+            id: board.id.clone(),
+            title: board.title.clone(),
+            description: board.description.clone(),
+            goal_id: board.goal_id.clone(),
+            columns: board.columns.clone(),
+            cards: cards.items,
+        });
+    }
+
+    let meta = store.meta().ok();
+    let identity = carter_app_core::team::git::local_identity(store.project_root()).ok();
+
+    Ok(TeamOverview {
+        root: store.root().to_string_lossy().to_string(),
+        name: meta.as_ref().map(|m| m.name.clone()).unwrap_or_default(),
+        remote: meta.and_then(|m| m.remote),
+        identity: identity.map(|i| i.as_key()),
+        goals,
+        boards,
+        events: carter_app_core::team::git::events(store.project_root(), 40),
+        warnings,
+    })
+}
+
+#[derive(Serialize)]
+struct TeamOverview {
+    root: String,
+    name: String,
+    remote: Option<String>,
+    identity: Option<String>,
+    goals: Vec<GoalRow>,
+    boards: Vec<BoardRow>,
+    events: Vec<carter_app_core::team::git::Event>,
+    warnings: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct GoalRow {
+    id: String,
+    title: String,
+    description: String,
+    status: String,
+    status_label: String,
+    priority: String,
+    owner: Option<String>,
+    due_at: Option<u64>,
+    percent: u32,
+    counts: carter_app_core::team::Counts,
+    roots: Vec<String>,
+    tasks: Vec<TaskRow>,
+}
+
+#[derive(Serialize)]
+struct TaskRow {
+    id: String,
+    title: String,
+    status: String,
+    status_label: String,
+    priority: String,
+    assignee: Option<String>,
+    parent_id: Option<String>,
+    depends_on: Vec<String>,
+    children: Vec<String>,
+    waiting_on: Vec<String>,
+    progress: u32,
+    ready: bool,
+    blocked_reason: String,
+    estimate_hours: Option<f64>,
+    due_at: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct BoardRow {
+    id: String,
+    title: String,
+    description: String,
+    goal_id: Option<String>,
+    columns: Vec<carter_app_core::team::BoardColumn>,
+    cards: Vec<carter_app_core::team::Card>,
+}
+
+/// 我名下的未完成任务。消息框下方的待办条用它。
+///
+/// 单独一条命令而不是让前端从 `team_overview` 里筛：待办条要跟着**每轮结束**刷新
+/// （模型可能刚改过状态），而全景包含所有目标的任务，两边的刷新频率不一样。
+#[tauri::command]
+fn team_my_tasks(cwd: String) -> Vec<TeamTodo> {
+    let Some(store) = carter_app_core::team::Store::discover(Path::new(&cwd)) else {
+        return Vec::new();
+    };
+    let Ok(me) = carter_app_core::team::git::local_identity(store.project_root()) else {
+        return Vec::new();
+    };
+    let key = me.as_key();
+    let mut out = Vec::new();
+    for goal in store.goals().items {
+        if !goal.status.is_live() {
+            continue;
+        }
+        let Ok(view) = store.goal_view(&goal.id) else {
+            continue;
+        };
+        for t in view.tasks {
+            if t.task.assignee.as_deref() != Some(key.as_str()) || !t.task.status.is_open() {
+                continue;
+            }
+            out.push(TeamTodo {
+                id: t.task.id.clone(),
+                title: t.task.title.clone(),
+                status: t.task.status.as_str().to_string(),
+                status_label: t.task.status.label().to_string(),
+                priority: t.task.priority.as_str().to_string(),
+                goal_id: goal.id.clone(),
+                goal_title: goal.title.clone(),
+                blocked_reason: t.task.blocked_reason.clone(),
+                waiting_on: t.waiting_on.len() as u32,
+                ready: t.ready,
+            });
+        }
+    }
+    // 能开工的排前面，然后按优先级。
+    out.sort_by(|a, b| {
+        b.ready
+            .cmp(&a.ready)
+            .then_with(|| a.priority.cmp(&b.priority))
+            .then_with(|| a.title.cmp(&b.title))
+    });
+    out
+}
+
+#[derive(Serialize)]
+struct TeamTodo {
+    id: String,
+    title: String,
+    status: String,
+    status_label: String,
+    priority: String,
+    goal_id: String,
+    goal_title: String,
+    blocked_reason: String,
+    waiting_on: u32,
+    ready: bool,
+}
+
+/// 把团队数据提交成一条 git 提交。
+///
+/// 单独一条命令而不是每次改都提交：一轮对话里模型可能建三个任务、改两个状态，
+/// 那是**一件事**，应该是一条提交。界面在轮末调用它。
+#[tauri::command]
+fn team_commit(cwd: String, message: String) -> Result<Option<String>, String> {
+    let store = carter_app_core::team::Store::discover(Path::new(&cwd))
+        .ok_or("这个项目还没有初始化团队目录")?;
+    let root = store.project_root();
+    let rel = store
+        .root()
+        .strip_prefix(root)
+        .map_err(|_| "团队目录不在仓库里".to_string())?
+        .to_string_lossy()
+        .replace('\\', "/");
+    carter_app_core::team::git::stage_team(root, &rel)?;
+    carter_app_core::team::git::commit_team(root, &rel, message.trim())
+}
+
+/// 立刻同步一次（拉远端、快进）。观察源也会定时跑，这里是手动入口。
+#[tauri::command]
+fn team_sync(cwd: String) -> Result<String, String> {
+    let store = carter_app_core::team::Store::discover(Path::new(&cwd))
+        .ok_or("这个项目还没有初始化团队目录")?;
+    carter_app_core::team::git::sync(store.project_root())
 }

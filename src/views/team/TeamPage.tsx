@@ -1,0 +1,754 @@
+// 团队协作页：目标 → 任务图 → 看板 → 动态。
+//
+// ## 三个视图的选择理由
+//
+// * **任务图**（默认）—— 目标是「一件事怎么拆开、谁等谁」，这本质上是一张 DAG。
+//   用横向泳道（层 = 依赖深度）而不是纵树：依赖是「从左往右推进」的，横向读起来
+//   与「进度条」是同一个方向。父子的缩进画在节点标题上，不参与泳道计算 ——
+//   父子是「拆解」，依赖是「先后」，两套约束不该抢同一个轴。
+// * **看板** —— 回顾与自由讨论。列是「结论的形状」，与任务状态无关。
+// * **动态** —— 空提交那条通道的原始记录：谁认领了、谁说了什么。它是唯一一处
+//   能看到「为什么这么改」的地方，所以单独给一屏，而不是塞在侧栏角落里。
+//
+// ## 为什么不用图形库
+//
+// 节点位置全是确定的（泳道 + 序号），连线是正交折线，用 SVG 画几十条路径比引一个
+// 布局引擎更可控，也不会为了「力导向好看」把顺序抖动掉 —— 团队图每次打开都长得
+// 不一样，人就记不住东西在哪。
+
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  ArrowRight,
+  CircleAlert,
+  GitBranch,
+  GitMerge,
+  Kanban,
+  LayoutGrid,
+  ListChecks,
+  LoaderCircle,
+  Plus,
+  RefreshCw,
+  Sparkles,
+  Target,
+  Users,
+} from "lucide-react";
+
+import {
+  teamInitialize,
+  teamOverview,
+  teamSync,
+  type TeamBoard,
+  type TeamGoal,
+  type TeamOverview,
+  type TeamTask,
+} from "../../lib/api";
+import { toastError, toastOk } from "../../lib/toast";
+import { useStore } from "../../store";
+import {
+  avatarHue,
+  displayName,
+  layerize,
+  priorityTone,
+  since,
+  statusTone,
+} from "../../lib/teamUi";
+
+type Tab = "graph" | "board" | "log";
+
+export function TeamPage() {
+  const cwd = useStore((s) => s.cwd);
+  const setView = useStore((s) => s.setView);
+  const [data, setData] = useState<TeamOverview | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [tab, setTab] = useState<Tab>("graph");
+  const [picked, setPicked] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    if (!cwd) return;
+    try {
+      setData(await teamOverview(cwd));
+      setError(null);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [cwd]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  // 「初始化」只在真的没有团队目录时出现 —— 那时后端会拒绝 overview。
+  const needsInit =
+    error !== null && (error.includes("还没有初始化") || error.includes("初始化过"));
+
+  async function doInit() {
+    if (!cwd) return;
+    setBusy(true);
+    try {
+      const out = await teamInitialize(cwd, null);
+      const detail = [
+        ...out.steps,
+        out.commit ? `提交 ${out.commit}` : null,
+        out.sync_source ? "已建同步观察源" : null,
+        ...out.warnings,
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      toastOk(`团队目录已就绪：${detail}`);
+      await load();
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function doSync() {
+    setBusy(true);
+    try {
+      toastOk(await teamSync(cwd));
+      await load();
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const activeGoal = useMemo(() => {
+    if (!data) return null;
+    return data.goals.find((g) => g.id === picked) ?? data.goals[0] ?? null;
+  }, [data, picked]);
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <header className="flex shrink-0 items-center gap-3 border-b border-edge px-5 py-2.5">
+        <div className="flex size-6 items-center justify-center rounded-md bg-ink text-[var(--accent-contrast)]">
+          <Target size={13} />
+        </div>
+        <div className="min-w-0">
+          <div className="truncate text-sm font-semibold tracking-tight">
+            {data?.name || "团队"}
+          </div>
+          <div className="mono truncate text-[10px] text-dim">
+            {data?.root || cwd || "—"}
+          </div>
+        </div>
+
+        <div className="ml-2 flex items-center gap-1 rounded-lg bg-card p-0.5">
+          <TabButton active={tab === "graph"} onClick={() => setTab("graph")} icon={<GitBranch size={12} />}>
+            任务图
+          </TabButton>
+          <TabButton active={tab === "board"} onClick={() => setTab("board")} icon={<Kanban size={12} />}>
+            看板
+          </TabButton>
+          <TabButton active={tab === "log"} onClick={() => setTab("log")} icon={<ListChecks size={12} />}>
+            动态
+          </TabButton>
+        </div>
+
+        <div className="ml-auto flex items-center gap-1.5">
+          {data?.remote && (
+            <span className="mono hidden max-w-[16rem] truncate text-[10px] text-dim xl:block">
+              {data.remote}
+            </span>
+          )}
+          {data?.identity && (
+            <span
+              title={data.identity}
+              className="flex items-center gap-1 rounded-full bg-card px-2 py-1 text-[10px] text-dim"
+            >
+              <Avatar identity={data.identity} size={14} />
+              {displayName(data.identity)}
+            </span>
+          )}
+          <IconAction onClick={() => void load()} title="重新读取">
+            <RefreshCw size={13} className={busy ? "animate-spin" : ""} />
+          </IconAction>
+          <IconAction onClick={() => void doSync()} title="同步远端（只做快进）">
+            <GitMerge size={13} />
+          </IconAction>
+          <button
+            onClick={() => setView("chat")}
+            className="rounded-md px-2 py-1 text-xs text-dim transition-colors hover:bg-ink/5 hover:text-ink"
+          >
+            回到对话
+          </button>
+        </div>
+      </header>
+
+      {needsInit ? (
+        <InitPanel onInit={doInit} busy={busy} cwd={cwd} />
+      ) : error ? (
+        <div className="p-6 text-sm text-danger">{error}</div>
+      ) : !data ? (
+        <div className="flex flex-1 items-center justify-center text-sm text-dim">
+          <LoaderCircle size={14} className="mr-2 animate-spin" />
+          正在读取团队目录…
+        </div>
+      ) : (
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          {data.warnings.length > 0 && (
+            <div className="mx-5 mt-4 rounded-lg bg-warn-bg px-3 py-2 text-[11px] text-ink">
+              <div className="mb-0.5 flex items-center gap-1.5 font-medium">
+                <CircleAlert size={12} />
+                有 {data.warnings.length} 个文件读不出来
+              </div>
+              {data.warnings.map((w) => (
+                <div key={w} className="mono truncate text-dim">
+                  {w}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {tab === "graph" && (
+            <GraphTab data={data} goal={activeGoal} onPick={setPicked} />
+          )}
+          {tab === "board" && <BoardTab boards={data.boards} />}
+          {tab === "log" && <LogTab data={data} />}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 初始化
+// ---------------------------------------------------------------------------
+
+function InitPanel({
+  onInit,
+  busy,
+  cwd,
+}: {
+  onInit: () => void;
+  busy: boolean;
+  cwd: string;
+}) {
+  return (
+    <div className="flex flex-1 items-center justify-center p-8">
+      <div className="w-full max-w-lg rounded-2xl bg-card p-6 shadow-soft">
+        <div className="mb-1 flex items-center gap-2 text-sm font-semibold">
+          <Sparkles size={15} className="text-tone-violet" />
+          这个项目还没有团队目录
+        </div>
+        <p className="mb-4 text-xs leading-relaxed text-dim">
+          初始化会在项目里建一个 <span className="mono">.carter/</span> 目录，
+          用来记团队的目标、任务与回顾看板。它会：
+        </p>
+        <ul className="mb-5 space-y-1.5 text-xs text-dim">
+          {[
+            "确认项目在 git 管理下（没有就 git init）",
+            "建好目标 / 任务 / 看板的目录结构与内置技能",
+            "把这一份结构提交进 git，团队其他人 clone 下来就有",
+            "有远端时自动建一个同步观察源，由卡特助理定时拉取",
+          ].map((t) => (
+            <li key={t} className="flex gap-2">
+              <ArrowRight size={12} className="mt-0.5 shrink-0 text-dim" />
+              {t}
+            </li>
+          ))}
+        </ul>
+        <div className="mono mb-4 truncate rounded-md bg-bubble px-2 py-1.5 text-[10px] text-dim">
+          {cwd}
+        </div>
+        <button
+          onClick={onInit}
+          disabled={busy}
+          className="flex w-full items-center justify-center gap-1.5 rounded-lg bg-ink py-2 text-sm font-medium text-[var(--accent-contrast)] transition-opacity hover:opacity-90 disabled:opacity-50"
+        >
+          {busy ? <LoaderCircle size={14} className="animate-spin" /> : <Plus size={14} />}
+          初始化团队目录
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 任务图
+// ---------------------------------------------------------------------------
+
+function GraphTab({
+  data,
+  goal,
+  onPick,
+}: {
+  data: TeamOverview;
+  goal: TeamGoal | null;
+  onPick: (id: string) => void;
+}) {
+  if (data.goals.length === 0) {
+    return (
+      <div className="flex flex-1 flex-col items-center justify-center gap-2 py-24 text-sm text-dim">
+        <Target size={20} />
+        还没有目标
+        <div className="text-xs">在对话里说「把这件事拆成第一阶段」，让卡特助理建一个。</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex min-h-0 gap-0">
+      {/* 目标列 */}
+      <div className="w-[15rem] shrink-0 border-r border-edge p-3">
+        <div className="mb-2 px-1 text-[10px] font-medium uppercase tracking-wider text-dim">
+          目标 · {data.goals.length}
+        </div>
+        <div className="space-y-1.5">
+          {data.goals.map((g) => (
+            <GoalCard
+              key={g.id}
+              goal={g}
+              active={goal?.id === g.id}
+              onClick={() => onPick(g.id)}
+            />
+          ))}
+        </div>
+      </div>
+
+      {/* 图 */}
+      <div className="min-w-0 flex-1 p-5">
+        {goal ? <GoalGraph goal={goal} /> : null}
+      </div>
+    </div>
+  );
+}
+
+function GoalCard({
+  goal,
+  active,
+  onClick,
+}: {
+  goal: TeamGoal;
+  active: boolean;
+  onClick: () => void;
+}) {
+  const tone = statusTone(goal.status);
+  return (
+    <button
+      onClick={onClick}
+      className={`w-full rounded-xl p-2.5 text-left transition-colors ${
+        active ? "bg-card shadow-soft" : "hover:bg-ink/[0.04]"
+      }`}
+    >
+      <div className="mb-1 flex items-center gap-1.5">
+        <span
+          className="size-1.5 shrink-0 rounded-full"
+          style={{ background: tone.fg }}
+        />
+        <span className="truncate text-xs font-medium">{goal.title}</span>
+      </div>
+      <div className="mb-1.5 flex items-center gap-1.5 text-[10px] text-dim">
+        <span style={{ color: priorityTone(goal.priority).fg }}>{goal.priority}</span>
+        <span>·</span>
+        <span>{tone.label}</span>
+        <span>·</span>
+        <span className="tabular-nums">
+          {goal.counts.done}/{goal.counts.total - goal.counts.dropped}
+        </span>
+      </div>
+      <Progress value={goal.percent} tone={tone.fg} />
+    </button>
+  );
+}
+
+function GoalGraph({ goal }: { goal: TeamGoal }) {
+  const layers = useMemo(() => layerize(goal.tasks), [goal.tasks]);
+
+  // 泳道 = 依赖深度。同一层内按 `order`（后端已经排好）—— 保持稳定，不抖动。
+  const lanes = useMemo(() => {
+    const max = Math.max(0, ...[...layers.values()]);
+    const out: TeamTask[][] = Array.from({ length: max + 1 }, () => []);
+    for (const t of goal.tasks) {
+      out[layers.get(t.id) ?? 0].push(t);
+    }
+    return out;
+  }, [goal.tasks, layers]);
+
+  const byId = useMemo(() => new Map(goal.tasks.map((t) => [t.id, t])), [goal.tasks]);
+
+  return (
+    <div className="min-w-0">
+      <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
+        <div className="min-w-0">
+          <h2 className="truncate text-base font-semibold tracking-tight">{goal.title}</h2>
+          {goal.description && (
+            <p className="mt-0.5 max-w-2xl text-xs leading-relaxed text-dim">
+              {goal.description}
+            </p>
+          )}
+        </div>
+        <div className="flex items-center gap-2 text-[11px] text-dim">
+          <Ring value={goal.percent} />
+          <span className="tabular-nums">
+            {goal.counts.done}/{goal.counts.total - goal.counts.dropped} 完成
+          </span>
+          {goal.counts.blocked > 0 && (
+            <span style={{ color: "var(--tone-orange)" }}>
+              {goal.counts.blocked} 受阻
+            </span>
+          )}
+          {goal.counts.doing > 0 && (
+            <span style={{ color: "var(--tone-blue)" }}>{goal.counts.doing} 进行中</span>
+          )}
+        </div>
+      </div>
+
+      {goal.tasks.length === 0 ? (
+        <div className="rounded-xl bg-card p-6 text-center text-xs text-dim">
+          这个目标还没有任务。在对话里让它拆一下。
+        </div>
+      ) : (
+        <div className="relative flex gap-4 overflow-x-auto pb-2">
+          {lanes.map((lane, i) => (
+            <div key={i} className="flex w-[16.5rem] shrink-0 flex-col gap-2">
+              <div className="mb-0.5 px-1 text-[10px] uppercase tracking-wider text-dim">
+                {i === 0 ? "起点" : `第 ${i} 层`}
+              </div>
+              {lane.map((t) => (
+                <TaskNode key={t.id} task={t} byId={byId} />
+              ))}
+              {lane.length === 0 && (
+                <div className="rounded-lg border border-dashed border-edge px-2 py-6 text-center text-[10px] text-dim">
+                  空
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* 依赖关系单独列一块：图上画箭头在横向溢出时会被裁掉，而「谁在等谁」
+          是这块最重要的信息，不能只在悬浮里给。 */}
+      {goal.tasks.some((t) => t.depends_on.length > 0) && (
+        <div className="mt-4 rounded-xl bg-card p-3">
+          <div className="mb-1.5 text-[10px] uppercase tracking-wider text-dim">依赖</div>
+          <div className="space-y-1">
+            {goal.tasks
+              .filter((t) => t.depends_on.length > 0)
+              .map((t) => (
+                <div key={t.id} className="flex flex-wrap items-center gap-1 text-[11px]">
+                  {t.depends_on.map((d) => (
+                    <span key={d} className="flex items-center gap-1">
+                      <span className="rounded bg-bubble px-1.5 py-0.5 text-dim">
+                        {byId.get(d)?.title ?? d}
+                      </span>
+                      <ArrowRight size={10} className="text-dim" />
+                    </span>
+                  ))}
+                  <span className={t.waiting_on.length > 0 ? "text-ink" : "text-dim"}>
+                    {t.title}
+                  </span>
+                  {t.waiting_on.length > 0 && (
+                    <span className="text-[10px] text-dim">（还差 {t.waiting_on.length} 个）</span>
+                  )}
+                </div>
+              ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TaskNode({
+  task,
+  byId,
+}: {
+  task: TeamTask;
+  byId: Map<string, TeamTask>;
+}) {
+  const tone = statusTone(task.status);
+  const parent = task.parent_id ? byId.get(task.parent_id) : null;
+
+  return (
+    <div
+      className="group relative rounded-xl bg-card p-2.5 shadow-soft transition-shadow hover:shadow-lift"
+      style={{
+        // 能开工的左边挂一条彩色竖线 —— 一眼能扫出「现在能做哪几件」。
+        boxShadow: task.ready
+          ? "inset 2px 0 0 0 var(--tone-green), var(--shadow-soft)"
+          : undefined,
+      }}
+    >
+      <div className="mb-1 flex items-center gap-1.5">
+        <span
+          className="rounded px-1.5 py-[1px] text-[10px] font-medium"
+          style={{ background: tone.bg, color: tone.fg }}
+        >
+          {task.status_label}
+        </span>
+        <span className="text-[10px]" style={{ color: priorityTone(task.priority).fg }}>
+          {task.priority}
+        </span>
+        {task.ready && (
+          <span className="text-[10px] text-tone-green">可开工</span>
+        )}
+        <span className="ml-auto">
+          {task.assignee && <Avatar identity={task.assignee} size={16} />}
+        </span>
+      </div>
+
+      <div className="text-xs font-medium leading-snug">{task.title}</div>
+
+      {parent && (
+        <div className="mt-0.5 truncate text-[10px] text-dim">
+          ↳ 在「{parent.title}」下
+        </div>
+      )}
+
+      {task.blocked_reason && (
+        <div className="mt-1 rounded bg-tone-orange-soft px-1.5 py-1 text-[10px] text-tone-orange">
+          {task.blocked_reason}
+        </div>
+      )}
+
+      {task.children.length > 0 && (
+        <div className="mt-1.5">
+          <div className="mb-1 flex items-center justify-between text-[10px] text-dim">
+            <span>子任务 {task.children.length}</span>
+            <span className="tabular-nums">{task.progress}%</span>
+          </div>
+          <Progress value={task.progress} tone={tone.fg} />
+        </div>
+      )}
+
+      <div className="mt-1.5 flex items-center gap-1.5 text-[10px] text-dim">
+        <span className="mono truncate">{task.id}</span>
+        {task.estimate_hours ? <span>· {task.estimate_hours}h</span> : null}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 看板
+// ---------------------------------------------------------------------------
+
+function BoardTab({ boards }: { boards: TeamBoard[] }) {
+  if (boards.length === 0) {
+    return (
+      <div className="flex flex-1 flex-col items-center justify-center gap-2 py-24 text-sm text-dim">
+        <LayoutGrid size={20} />
+        还没有看板
+        <div className="text-xs">让它建一块「十月回顾」，或者在任何一张卡上开始聊。</div>
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-6 p-5">
+      {boards.map((b) => (
+        <div key={b.id}>
+          <div className="mb-2 flex items-baseline gap-2">
+            <h3 className="text-sm font-semibold tracking-tight">{b.title}</h3>
+            <span className="mono text-[10px] text-dim">{b.id}</span>
+            {b.goal_id && (
+              <span className="text-[10px] text-dim">· 关联 {b.goal_id}</span>
+            )}
+          </div>
+          <div className="flex gap-3 overflow-x-auto pb-2">
+            {[...b.columns]
+              .sort((x, y) => x.order - y.order)
+              .map((col) => {
+                const cards = b.cards.filter((c) => c.column_id === col.id);
+                const over = col.wip_limit != null && cards.length > col.wip_limit;
+                return (
+                  <div key={col.id} className="w-[16rem] shrink-0 rounded-xl bg-card p-2">
+                    <div className="mb-1.5 flex items-center gap-1.5 px-1">
+                      <span className="text-[11px] font-medium">{col.name}</span>
+                      <span className="text-[10px] text-dim tabular-nums">{cards.length}</span>
+                      {col.wip_limit != null && (
+                        <span
+                          className="text-[10px] tabular-nums"
+                          style={{ color: over ? "var(--danger)" : "var(--text-dim)" }}
+                        >
+                          / {col.wip_limit}
+                        </span>
+                      )}
+                    </div>
+                    <div className="space-y-1.5">
+                      {cards.map((c) => (
+                        <div
+                          key={c.id}
+                          className="rounded-lg bg-elevated p-2 text-[11px] leading-snug shadow-soft"
+                        >
+                          <div>{c.text}</div>
+                          <div className="mt-1.5 flex items-center gap-1.5 text-[10px] text-dim">
+                            <Avatar identity={c.created_by} size={13} />
+                            <span>{displayName(c.created_by)}</span>
+                            {c.votes !== 0 && <span>· {c.votes} 票</span>}
+                            {c.task_id && <span className="mono">· {c.task_id}</span>}
+                          </div>
+                        </div>
+                      ))}
+                      {cards.length === 0 && (
+                        <div className="rounded-lg border border-dashed border-edge py-4 text-center text-[10px] text-dim">
+                          空
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 动态
+// ---------------------------------------------------------------------------
+
+const KIND_LABEL: Record<string, string> = {
+  claim: "认领",
+  release: "释放",
+  comment: "评论",
+  sync: "同步",
+  note: "备注",
+};
+
+function LogTab({ data }: { data: TeamOverview }) {
+  if (data.events.length === 0) {
+    return (
+      <div className="flex flex-1 flex-col items-center justify-center gap-2 py-24 text-sm text-dim">
+        <Users size={20} />
+        还没有团队动态
+        <div className="text-xs">
+          认领任务、留一条评论，都会在这里留下一条带作者与时间的记录。
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="mx-auto max-w-3xl space-y-1 p-5">
+      {data.events.map((e) => (
+        <div key={e.sha} className="flex gap-2.5 rounded-lg px-2 py-1.5 hover:bg-card">
+          <Avatar identity={e.author ? `${e.author.name} <${e.author.email}>` : null} size={20} />
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-baseline gap-1.5 text-[11px]">
+              <span className="font-medium">{displayName(e.author?.name)}</span>
+              <span className="text-dim">{KIND_LABEL[e.kind] ?? e.kind}</span>
+              {e.target && <span className="mono text-[10px] text-dim">{e.target}</span>}
+              <span className="ml-auto text-[10px] text-dim">{since(e.at)}</span>
+            </div>
+            {e.body && (
+              <div className="mt-0.5 whitespace-pre-wrap text-[11px] leading-relaxed text-ink/90">
+                {e.body}
+              </div>
+            )}
+          </div>
+          <span className="mono shrink-0 self-start text-[9px] text-dim">{e.sha}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 小件
+// ---------------------------------------------------------------------------
+
+function TabButton({
+  active,
+  onClick,
+  icon,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  icon: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] transition-colors ${
+        active ? "bg-elevated font-medium text-ink shadow-soft" : "text-dim hover:text-ink"
+      }`}
+    >
+      {icon}
+      {children}
+    </button>
+  );
+}
+
+function IconAction({
+  onClick,
+  title,
+  children,
+}: {
+  onClick: () => void;
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      title={title}
+      className="rounded-md p-1.5 text-dim transition-colors hover:bg-ink/5 hover:text-ink"
+    >
+      {children}
+    </button>
+  );
+}
+
+function Avatar({ identity, size = 18 }: { identity: string | null; size?: number }) {
+  const name = displayName(identity);
+  if (!name) return null;
+  const hue = avatarHue(identity);
+  return (
+    <span
+      title={identity ?? ""}
+      className="inline-flex shrink-0 items-center justify-center rounded-full font-medium"
+      style={{
+        width: size,
+        height: size,
+        fontSize: size * 0.5,
+        // 低饱和 + 固定明度：头像是身份提示，不该抢主体的注意力。
+        background: `hsl(${hue} 45% 48% / 0.18)`,
+        color: `hsl(${hue} 60% 38%)`,
+      }}
+    >
+      {[...name][0]?.toUpperCase() ?? "?"}
+    </span>
+  );
+}
+
+function Progress({ value, tone }: { value: number; tone: string }) {
+  return (
+    <span className="block h-1 overflow-hidden rounded-full bg-ink/[0.07]">
+      <span
+        className="block h-full rounded-full transition-[width] duration-500"
+        style={{ width: `${Math.max(0, Math.min(100, value))}%`, background: tone }}
+      />
+    </span>
+  );
+}
+
+/** 进度环。SVG 圆环比条形更适合放在标题右边一小块地方。 */
+function Ring({ value }: { value: number }) {
+  const r = 9;
+  const c = 2 * Math.PI * r;
+  const v = Math.max(0, Math.min(100, value));
+  return (
+    <svg width="24" height="24" viewBox="0 0 24 24" className="shrink-0 -rotate-90">
+      <circle cx="12" cy="12" r={r} fill="none" stroke="var(--border-strong)" strokeWidth="2.5" />
+      <circle
+        cx="12"
+        cy="12"
+        r={r}
+        fill="none"
+        stroke="var(--tone-green)"
+        strokeWidth="2.5"
+        strokeLinecap="round"
+        strokeDasharray={`${(v / 100) * c} ${c}`}
+        className="transition-[stroke-dasharray] duration-500"
+      />
+    </svg>
+  );
+}
