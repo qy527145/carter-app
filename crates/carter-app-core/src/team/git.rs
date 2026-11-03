@@ -1,33 +1,14 @@
-//! git 通道：空提交当消息总线，加上同步。
+//! git 通道：远端、快进同步、轮末提交。
 //!
-//! ## 为什么用空提交
+//! 团队数据分两类，各走一条通道：
 //!
-//! 团队协作里有两类事实，它们的**合并语义**完全不同：
+//! * **状态**（目标、任务、成员、看板）—— `.carter/` 下的文件，跟着代码分支走，
+//!   由这里的 [`commit_turn`] 在每轮对话结束时收成一条提交，[`sync`] 快进同步。
+//! * **事件**（评论、@、广播、指派、认领）—— 不在代码分支上，走独立的
+//!   `refs/carter/events`，见 [`super::events`] 与 `docs/team-protocol.md`。
 //!
-//! * **状态**（任务现在是什么状态、归谁）—— 这一类需要「最后写的赢」，而且必须
-//!   有一个能串行化的裁决者。让两个人同时对同一个任务点「认领」，光靠改文件
-//!   不可能判定谁赢：两个人都写到自己的磁盘上，谁也看不见谁，直到 flush 那一刻。
-//!   改成空提交之后，`git push` 是那个裁决者 —— 别人先进去了你就被拒，重试时
-//!   能看到「已经被人占了」。这是 git 唯一真正原子化的地方。
-//! * **事件**（评论、握手、认领记录）—— 这一类**永不冲突**：追加就是追加。
-//!   塞进文件里反而会让每次评论都变成一处潜在的 merge 冲突点。
-//!
-//! 所以：状态落文件、事件走空提交。两套通道各管各的，职责不重叠。
-//!
-//! ## 提交信息格式
-//!
-//! 一行机器可读的抬头，加一个 trailer：
-//!
-//! ```text
-//! carter/claim t-xyz 张三
-//!
-//! Carter-Team: kind=claim id=t-xyz goal=g-abc at=1790000000000
-//! ```
-//!
-//! 抬头给人看（`git log --oneline` 里一眼能读），trailer 给程序解析。
-//! 用 trailer 而不是往抬头里塞更多字段：抬头一长，`git log` 就折行，人反而看不清。
-//! trailer 还有个好处 —— `git log --grep` 与 `git log -z --format` 都能直接取到
-//! 作者与时间，等于免费得到了「谁、什么时候」。
+//! v0 曾经把事件也打成当前分支上的空提交。那些旧事件仍然能被读出来（`events::read`
+//! 会顺带扫当前分支），但不再往分支上写。
 //!
 //! ## 与观察源的关系
 //!
@@ -39,64 +20,7 @@
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use serde::{Deserialize, Serialize};
-
 use super::model::Identity;
-
-/// 空提交能承载的事件种类。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EventKind {
-    /// 认领一个任务。
-    Claim,
-    /// 释放认领。
-    Release,
-    /// 一条评论。`body` 里是正文。
-    Comment,
-    /// 一次同步握手（观察源跑通时打一条）。
-    Sync,
-    /// 进度汇报：做了一点、卡住了。正文里是说明。
-    Note,
-}
-
-impl EventKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            EventKind::Claim => "claim",
-            EventKind::Release => "release",
-            EventKind::Comment => "comment",
-            EventKind::Sync => "sync",
-            EventKind::Note => "note",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<Self> {
-        Some(match s {
-            "claim" => EventKind::Claim,
-            "release" => EventKind::Release,
-            "comment" => EventKind::Comment,
-            "sync" => EventKind::Sync,
-            "note" => EventKind::Note,
-            _ => return None,
-        })
-    }
-}
-
-/// 从提交历史里解出来的一条事件。
-#[derive(Debug, Clone, Serialize)]
-pub struct Event {
-    /// 提交的短 SHA。
-    pub sha: String,
-    pub kind: EventKind,
-    /// 事件的对象（任务 / 卡片 id）。`sync` 这类没有对象。
-    pub target: Option<String>,
-    pub goal_id: Option<String>,
-    pub body: String,
-    /// 提交信息抬头那一行，界面上当标题用。
-    pub subject: String,
-    pub author: Option<Identity>,
-    pub at: u64,
-}
 
 // ---------------------------------------------------------------------------
 // 命令执行
@@ -169,158 +93,6 @@ pub fn local_identity(dir: &Path) -> Result<Identity, String> {
         name: name.trim().to_string(),
         email: email.trim().to_string(),
     })
-}
-
-// ---------------------------------------------------------------------------
-// 历史
-// ---------------------------------------------------------------------------
-
-/// 读最近 `limit` 条空提交（`.carter/` 相关的事件）。
-///
-/// 只认带 trailer 的提交：仓库里正常的工作提交不该混进事件流。用 `--grep` 在
-/// 提交正文里找 `Carter-Team:`，比 `--allow-empty` 过滤更准 —— 后者会把所有空提交
-/// 都捞出来，包括人在别处用空提交触发的 CI。
-pub fn events(root: &Path, limit: usize) -> Vec<Event> {
-    if !git_available() {
-        return Vec::new();
-    }
-    // 字段之间用 \x1f 分隔、提交之间用 \x1e —— 正文里可能有换行，用普通分隔符会串行。
-    let format = "--format=%h%x1f%H%x1f%an%x1f%ae%x1f%ct%x1f%s%x1f%b%x1e";
-    let count = format!("-n{limit}");
-    let Ok(raw) = git(
-        root,
-        &["log", count.as_str(), "--grep=Carter-Team:", "--fixed-strings", format],
-    ) else {
-        return Vec::new();
-    };
-    parse_events(&raw)
-}
-
-fn parse_events(raw: &str) -> Vec<Event> {
-    let mut out = Vec::new();
-    for chunk in raw.split('\u{1e}') {
-        let chunk = chunk.trim_start_matches('\n');
-        if chunk.trim().is_empty() {
-            continue;
-        }
-        let mut parts = chunk.split('\u{1f}');
-        let sha = parts.next().unwrap_or("").trim().to_string();
-        let _full = parts.next();
-        let an = parts.next().unwrap_or("").trim();
-        let ae = parts.next().unwrap_or("").trim();
-        let ct = parts.next().unwrap_or("").trim();
-        let subject = parts.next().unwrap_or("").trim().to_string();
-        let body = parts.next().unwrap_or("").to_string();
-
-        let Some(trailer) = body
-            .lines()
-            .find(|l| l.trim_start().starts_with("Carter-Team:"))
-            .map(|l| l.trim_start().trim_start_matches("Carter-Team:").trim())
-        else {
-            continue;
-        };
-        let mut kind = None;
-        let mut target = None;
-        let mut goal_id = None;
-        for field in trailer.split_whitespace() {
-            let Some((k, v)) = field.split_once('=') else {
-                continue;
-            };
-            match k {
-                "kind" => kind = EventKind::parse(v),
-                "id" => target = Some(v.to_string()),
-                "goal" => goal_id = Some(v.to_string()),
-                _ => {}
-            }
-        }
-        let Some(kind) = kind else { continue };
-
-        // 正文去掉 trailer 那一行与抬头，剩下的才是评论正文。
-        let text = body
-            .lines()
-            .filter(|l| !l.trim_start().starts_with("Carter-Team:"))
-            .collect::<Vec<_>>()
-            .join("\n")
-            .trim()
-            .to_string();
-
-        out.push(Event {
-            sha,
-            kind,
-            target,
-            goal_id,
-            body: text,
-            subject,
-            author: if ae.is_empty() {
-                None
-            } else {
-                Identity::parse(&format!("{an} <{ae}>"))
-            },
-            at: ct.parse::<u64>().unwrap_or(0).saturating_mul(1000),
-        });
-    }
-    out
-}
-
-// ---------------------------------------------------------------------------
-// 写：空提交
-// ---------------------------------------------------------------------------
-
-/// 打一条空提交。**不 push** —— 推送由 [`push`] 单独决定，认领那条路径要
-/// 「push 失败 = 认领失败」的语义，而评论可以攒着一起推。
-///
-/// `team_rel` 是团队目录相对仓库根的路径。提交**只限定在它上面**：不加 pathspec 的
-/// `git commit --allow-empty` 会把用户自己暂存、还没打算提交的无关文件一并卷进这条
-/// 「评论」里 —— 用户毫无察觉，事后在 `git log` 里看到一条叫 carter/comment 的提交
-/// 改了他的业务代码。带上 `-- <团队目录>` 之后，团队目录没改动时是纯空提交，
-/// 有改动（认领顺带写了 assignee）时只提交团队目录，其余暂存原样留着。
-pub fn commit_event(
-    root: &Path,
-    team_rel: &str,
-    kind: EventKind,
-    target: Option<&str>,
-    goal_id: Option<&str>,
-    subject: &str,
-    body: &str,
-) -> Result<String, String> {
-    let mut trailer = format!("Carter-Team: kind={}", kind.as_str());
-    if let Some(t) = target {
-        trailer.push_str(&format!(" id={t}"));
-    }
-    if let Some(g) = goal_id {
-        trailer.push_str(&format!(" goal={g}"));
-    }
-    let subject = subject.trim();
-    let subject = if subject.is_empty() {
-        format!("carter/{}", kind.as_str())
-    } else {
-        subject.to_string()
-    };
-    let message = if body.trim().is_empty() {
-        format!("{subject}\n\n{trailer}\n")
-    } else {
-        format!("{subject}\n\n{}\n\n{trailer}\n", body.trim())
-    };
-
-    git(root, &["commit", "--allow-empty", "-m", &message, "--", team_rel])?;
-    // 取刚打的那条的短 SHA（HEAD 就是它）。
-    Ok(git(root, &["rev-parse", "--short", "HEAD"]).unwrap_or_default())
-}
-
-/// 撤掉刚打的那条提交，但**保留工作区**（`--soft`）。
-///
-/// 用在「提交成功了、push 却被拒」的场合：本地必须先退回去，否则磁盘上写着
-/// 「我认领了」、远端写着「别人认领了」，两个人各自看自己那份都是对的。
-pub fn undo_last_commit(root: &Path) -> Result<(), String> {
-    git(root, &["reset", "--soft", "HEAD~1"]).map(|_| ())
-}
-
-/// 把某个路径的改动从暂存区撤下来（`git restore --staged`）。
-///
-/// 与 [`undo_last_commit`] 一起用：退了提交之后，暂存区里还留着刚写进去的那份，
-/// 得再把它撤掉，索引才真正回到提交之前。
-pub fn unstage(root: &Path, pathspec: &str) -> Result<(), String> {
-    git(root, &["restore", "--staged", "--", pathspec]).map(|_| ())
 }
 
 /// 提交 `.carter/` 里攒下的改动，并给出一条能读的提交信息。
@@ -520,6 +292,8 @@ pub fn publish(root: &Path) -> Result<String, String> {
     };
     let branch = current_branch(root)?;
     git(root, &["push", "-u", &remote, &branch])?;
+    // 事件链在分支之外，`push <branch>` 不会带上它。
+    let _ = super::events::push(root);
     Ok(format!("已推送 {branch} → {remote}"))
 }
 
@@ -527,7 +301,13 @@ pub fn publish(root: &Path) -> Result<String, String> {
 // 同步
 // ---------------------------------------------------------------------------
 
-/// 同步一次：`fetch` + 快进合并。
+/// 同步一次：先收发消息，再 `fetch` + 快进合并分支。
+///
+/// ## 为什么消息先做、而且不受工作区影响
+///
+/// 消息（事件链）不碰工作区，拉取与推送任何时候都安全。分支同步要求工作区干净 ——
+/// 而用户写代码的时候工作区几乎总是脏的。两者绑在一起的话，「写代码期间收不到
+/// 任何 @」，那这套消息就没法用了。
 ///
 /// ## 为什么只做快进
 ///
@@ -543,6 +323,30 @@ pub fn sync(root: &Path) -> Result<String, String> {
     let Some(remote) = remote_name(root) else {
         return Err("还没有配远端".into());
     };
+    let messages = sync_events(root);
+    let branch = sync_branch(root, &remote);
+    match branch {
+        Ok(b) => Ok(format!("{messages}；{b}")),
+        // 分支没同步成，但消息照样收发了 —— 说清楚，免得用户以为什么都没发生。
+        Err(e) => Err(format!("{messages}；分支没同步：{e}")),
+    }
+}
+
+/// 收发消息，返回一句给人看的话。失败只说原因，不中断分支同步。
+fn sync_events(root: &Path) -> String {
+    let got = match super::events::fetch(root) {
+        Ok(0) => "没有新消息".to_string(),
+        Ok(n) => format!("收到 {n} 条新消息"),
+        Err(e) => format!("拉取消息失败（{e}）"),
+    };
+    match super::events::push(root) {
+        Ok(_) => got,
+        Err(e) => format!("{got}，推送消息失败（{e}）"),
+    }
+}
+
+fn sync_branch(root: &Path, remote: &str) -> Result<String, String> {
+    let remote = remote.to_string();
     let branch = current_branch(root)?;
 
     // 有未提交的改动就不同步。`.carter/` 自己刚写完还没提交的那份也算。
@@ -613,27 +417,6 @@ pub fn head(root: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn trailers_are_parsed_back_out() {
-        // `%b` 是抬头之后的那一段，不含抬头本身 —— 夹具要照这个形状写。
-        let raw = "abc123\u{1f}abc123full\u{1f}张三\u{1f}z@example.com\u{1f}1790000000\u{1f}carter/claim t-1 张三\u{1f}开始做这个\n\nCarter-Team: kind=claim id=t-1 goal=g-9\u{1e}";
-        let evs = parse_events(raw);
-        assert_eq!(evs.len(), 1);
-        let e = &evs[0];
-        assert_eq!(e.kind, EventKind::Claim);
-        assert_eq!(e.target.as_deref(), Some("t-1"));
-        assert_eq!(e.goal_id.as_deref(), Some("g-9"));
-        assert_eq!(e.author.as_ref().unwrap().name, "张三");
-        assert_eq!(e.at, 1_790_000_000_000);
-        assert_eq!(e.body, "开始做这个", "trailer 与抬头都不进正文");
-    }
-
-    #[test]
-    fn commits_without_a_trailer_are_ignored() {
-        let raw = "abc\u{1f}abc\u{1f}a\u{1f}a@x\u{1f}1\u{1f}普通提交\u{1f}正文\u{1e}";
-        assert!(parse_events(raw).is_empty());
-    }
 
     #[test]
     fn a_turn_of_team_edits_becomes_one_commit() {

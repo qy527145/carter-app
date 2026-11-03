@@ -121,10 +121,13 @@ pub fn retire_script(project_root: &Path) -> Result<Option<String>, String> {
 ///
 /// carter-team / goal / task 的 v1 教 agent 调 `.carter/bin/carter-team` 脚本；v2 起
 /// 只教 `team` 工具，脚本已经不装了，旧说明书必须换掉。
+///
+/// carter-team / task 的 v3：消息改走独立的事件链、有了成员名单。v2 说「事件落空提交」
+/// 「认领把负责人设成你的 git 身份」，照着做出来的东西与 v3 的数据对不上。
 const SKILL_VERSIONS: &[(&str, u32, &str)] = &[
     (
         "carter-team",
-        2,
+        3,
         "---\nname: carter-team\ndescription: 项目里有 .carter/ 团队目录时，先读这一篇",
     ),
     (
@@ -134,7 +137,7 @@ const SKILL_VERSIONS: &[(&str, u32, &str)] = &[
     ),
     (
         "carter-task",
-        2,
+        3,
         "---\nname: carter-task\ndescription: 需要拆解任务、更新任务状态、认领任务",
     ),
     (
@@ -169,9 +172,9 @@ fn skill_action(existing: Option<&str>, current: u32, v1_head: &str) -> ScriptAc
 
 const CARTER_TEAM: &str = r#"---
 name: carter-team
-description: 项目里有 .carter/ 团队目录时，先读这一篇：目标 / 任务 / 看板怎么组织，所有读写都通过 team 工具完成（不要手改文件），以及认领、评论、同步、校验的规矩。只要这次任务涉及「现在有什么目标 / 我手上有什么任务 / 把这件活记下来 / 更新进展」，就读它。
+description: 项目里有 .carter/ 团队目录时，先读这一篇：目标 / 任务 / 看板怎么组织，所有读写都通过 team 工具完成（不要手改文件），以及成员、指派、认领、@ / 广播、同步、校验的规矩。只要这次任务涉及「现在有什么目标 / 我手上有什么任务 / 把这件活记下来 / 更新进展」，就读它。
 ---
-<!-- carter-skill-version: 2 -->
+<!-- carter-skill-version: 3 -->
 
 # 团队目录：`.carter/`
 
@@ -194,8 +197,14 @@ description: 项目里有 .carter/ 团队目录时，先读这一篇：目标 / 
 | 我名下还没做完的 | `{ "action": "my_tasks" }` |
 | 新建 / 修改目标 | `goal_new` / `goal_update` —— 见 `carter-goal` |
 | 新建 / 修改任务、推进状态 | `task_new` / `task_update` / `task_status` —— 见 `carter-task` |
+| 团队里有谁 | `{ "action": "members" }` |
+| 指派 / 转交任务 | `{ "action": "assign", "task_id": "…", "assignee": "成员 id 或昵称" }` |
 | 认领 / 释放任务 | `task_claim` / `task_release` |
-| 留一条评论 | `{ "action": "comment", "task_id" 或 "goal_id": "…", "text": "…" }` |
+| 对任务 / 目标留评论 | `{ "action": "comment", "task_id" 或 "goal_id": "…", "text": "…" }` |
+| @ 某人 | `{ "action": "mention", "to": ["昵称或 id"], "text": "…" }`（可带 `task_id`） |
+| 请人评审 / 拍板 | `{ "action": "request", "to": […], "text": "…", "due_at": 毫秒 }` |
+| 全员广播 | `{ "action": "broadcast", "text": "…" }` |
+| 跟我有关的消息 | `{ "action": "inbox" }` |
 | 最近的团队动态 | `{ "action": "events", "limit": 30 }` |
 | 看板 | `board_list` / `board_new` / `board_update` —— 见 `carter-board` |
 | 全库校验 | `{ "action": "check" }` |
@@ -214,12 +223,35 @@ description: 项目里有 .carter/ 团队目录时，先读这一篇：目标 / 
 
 1. **id 由工具生成。** 新建后工具回灌的文本里有单独一行 `id = …`，后续操作用它。
    不要自己编 id —— 编出来的会和别人撞，一撞就是静默覆盖别人的任务。
-2. **状态落文件，事件落空提交。** `task_status` 改的是任务文件；`comment` /
-   `task_claim` / `task_release` 各打一条空提交。不要用改描述的方式「发消息」。
+2. **状态落文件，消息落事件链。** `task_status` / `assign` 改的是任务文件；
+   `comment` / `mention` / `broadcast` / `assign` 的通知 / 认领记录写在独立的事件链
+   （`refs/carter/events`）上，不在代码分支里，写完立刻推送。不要用改描述的方式「发消息」。
 3. **认领要推送成功才算数。** 有远端时 `task_claim` 会立刻推送；被拒说明别人先占了，
    工具会撤回你本地的改动并告诉你 —— 这时**不要重试覆盖**，先 `sync` 再看，
    或者换一个任务、问用户。
 4. **依赖不能成环。** 写入前工具会验，验不过就换一种拆法。
+
+## 成员与指派
+
+团队成员在 `.carter/members/` 里，一人一个文件，有稳定的 id（`m-…`）。**引用人一律
+用成员 id 或昵称**，工具会替你解析；重名时会让你改写 id。还没加入的人（新同事）
+可以先写 `名字 <邮箱>`，他加入之后按邮箱就能对上。
+
+* **拆任务时就考虑派给谁。** 拆完一个目标后先 `members` 看有谁，按「谁最近改过相关
+  代码 / 谁负责这一块」给出建议，**列给用户确认后**再用 `assign` 写进去。拿不准的
+  留空，放进任务池等人认领 —— 指派错人比不指派更糟。
+* 指派与转交会自动给对方发一条通知（`assign` / `handoff`），不用再单独 @。
+* 派给别人的任务照样能「开工」：能不能开工只看状态与前置，不看归谁。
+
+## 什么时候发消息
+
+你发的每一条消息都标着「经卡特」，对方能看出不是用户亲手写的。所以：
+
+* 用户让你说的，照说。
+* 完成、受阻、改了方案时，在那个任务上留一条 `comment` 说清**为什么** —— 这是以后
+  回头看「这件事为什么这么做」的唯一记录。
+* 不要为了「汇报我在干活」发消息，不要把测试数据发成评论，不要替用户做承诺。
+* 要对方做事、需要回应的用 `request`（可以带期限），只是告知的用 `mention`。
 
 ## 写错了怎么办
 
@@ -253,10 +285,12 @@ description: 项目里有 .carter/ 团队目录时，先读这一篇：目标 / 
   team.json                         项目元信息
   goals/<goal-id>/goal.json         一个目标
   goals/<goal-id>/tasks/<id>.json   一个任务（一任务一个文件）
+  members/<member-id>.json          一个成员（一人一个文件）
   boards/<board-id>.html            一块看板（一整页 HTML）
   skills/                           技能（就是这一篇）
 ```
 
+消息不在这些文件里，在 git 的 `refs/carter/events` 上（协议见仓库里的说明）。
 知道文件在哪有助于理解 `check` 的报错，但改动请一律走工具。
 "#;
 
@@ -318,7 +352,7 @@ const CARTER_TASK: &str = r#"---
 name: carter-task
 description: 需要拆解任务、更新任务状态、认领任务、或者回答「我现在该做什么」时读它。任务是 .carter 里的基本执行单位，带父子关系与依赖关系；所有操作通过 team 工具的 task_new / task_update / task_status / task_claim / task_release 完成。
 ---
-<!-- carter-skill-version: 2 -->
+<!-- carter-skill-version: 3 -->
 
 # 任务
 
@@ -344,6 +378,7 @@ description: 需要拆解任务、更新任务状态、认领任务、或者回�
   "parent_id": "t-…",
   "depends_on": ["t-…", "t-…"],
   "priority": "P1",
+  "assignee": "小张",
   "estimate_hours": 4,
   "deliverable": "一句话说清交什么",
   "acceptance": ["cargo test 通过", "golden fixture 往返一致"]
@@ -379,16 +414,20 @@ description: 需要拆解任务、更新任务状态、认领任务、或者回�
 `estimate_hours`、`deliverable`、`acceptance`。没给的字段保持原样；
 `depends_on` / `acceptance` 给了就是**整列替换**；`parent_id` 传空串变回根任务。
 
-## 认领
+## 指派与认领
 
 ```json
+{ "action": "assign", "task_id": "t-…", "assignee": "小张", "text": "接口文档在 docs/api.md" }
 { "action": "task_claim", "task_id": "t-…" }
 { "action": "task_release", "task_id": "t-…" }
 ```
 
-认领会把负责人设成你（当前 git 身份），打一条空提交，有远端时立刻推送。
-**推送被拒 = 别人已经占了**：工具会撤回本地改动并说明，这时换个任务，不要覆盖。
-已经被别人认领的任务工具也会直接拒绝。
+* **指派**（`assign`）：把任务交给某个人，对方会收到通知。原来有人负责、换成别人的
+  就是「转交」。`task_new` / `task_update` 里直接写 `assignee` 也会通知。
+* **认领**（`task_claim`）：用户自己说「这件我来」。负责人设成用户在团队里的成员 id，
+  在事件链上记一条，有远端时立刻推送；**推送失败、或者链上有人先认领了，都算认领
+  没成**，工具会撤回本地改动并说是谁 —— 这时换个任务，不要覆盖。
+* 已经归别人的任务，`task_claim` 会直接拒绝；真要换人，问过用户之后用 `assign`。
 
 ## 拆到多细
 

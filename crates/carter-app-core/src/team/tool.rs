@@ -24,8 +24,9 @@
 //!
 //! * 所有写操作都**落盘并 `git add`**，但**不 commit** —— 提交由外层统一做
 //!   （见 `session.rs` 的轮末钩子），否则一轮里改十个任务就是十条提交。
-//! * `claim` / `release` / `comment` 例外：它们是事件，各自成一条空提交。
-//!   `claim` 还要 push —— push 成功才算认领成功。
+//! * 事件（`comment` / `mention` / `broadcast` / `assign` / `claim` …）例外：它们走
+//!   独立的事件 ref（`refs/carter/events`，见 `events.rs`），写完立刻推送，不等轮末。
+//!   `claim` 还要求推送成功 —— 推送成功才算认领成功。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -34,18 +35,34 @@ use serde_json::{Value, json};
 
 use carter::tools::{Tool, ToolResult};
 
-use super::git::{self, EventKind};
+use super::events::{self, Draft, EventKind};
+use super::git;
+use super::members::{self, Roster};
 use super::model::*;
 use super::store::Store;
 
 pub struct TeamTool {
     /// 会话的工作目录。团队目录从它往上找 —— 与技能扫描同一套规则。
     cwd: PathBuf,
+    /// 写事件时的 `via`。模型调用是 `carter`（界面上标「经卡特」）；界面上人自己点的
+    /// 是 `None`。两条入口走同一份逻辑，只差这一个标记 —— 分两份写，迟早会出现
+    /// 「界面上指派会发通知、让卡特指派却不发」这种不一致。
+    via: Option<&'static str>,
 }
 
 impl TeamTool {
     pub fn new(cwd: PathBuf) -> Self {
-        Self { cwd }
+        Self { cwd, via: Some("carter") }
+    }
+
+    /// 界面上人自己操作用的。事件不带 `via`。
+    pub fn for_person(cwd: PathBuf) -> Self {
+        Self { cwd, via: None }
+    }
+
+    /// 给界面用的入口：参数与工具调用完全一样。
+    pub fn act(&self, args: &Value) -> Result<String, String> {
+        self.run(args)
     }
 
     fn store(&self) -> Result<Store, String> {
@@ -59,6 +76,101 @@ impl TeamTool {
     fn me(&self) -> Result<Identity, String> {
         let store = self.store()?;
         git::local_identity(store.project_root())
+    }
+
+    /// 本机在名单里的成员 id。还没加入时用 git 身份串顶上 —— 不阻止模型干活，
+    /// 但写出去的引用是旧格式，等用户在界面上加入之后再写的就是 id 了。
+    fn me_ref(&self, roster: &Roster) -> Result<String, String> {
+        let me = self.me()?;
+        Ok(roster
+            .me(&me)
+            .map(|m| m.id.clone())
+            .unwrap_or_else(|| me.as_key()))
+    }
+
+    /// 把一个「人」的写法解析成成员 id。认不出就报错，并把名单列给模型 ——
+    /// 让它自己挑一个对的，而不是写一个谁都匹配不上的名字进任务文件。
+    fn person(&self, roster: &Roster, raw: &str) -> Result<String, String> {
+        if let Some(m) = roster.resolve(raw) {
+            return Ok(m.id.clone());
+        }
+        // 还没加入的人（新同事、名单为空）可以用 `名字 <邮箱>`：读的地方都认，
+        // 他加入之后按邮箱就能对上。
+        if let Some(i) = Identity::parse(raw).filter(|i| !i.email.is_empty()) {
+            return Ok(i.as_key());
+        }
+        let names = roster
+            .members
+            .iter()
+            .map(|m| format!("{}（{}）", m.name, m.id))
+            .collect::<Vec<_>>()
+            .join("、");
+        Err(if names.is_empty() {
+            format!("认不出「{raw}」是谁。团队里还没有人加入，写成 `名字 <邮箱>` 的形式。")
+        } else {
+            format!(
+                "认不出「{raw}」是谁（重名时也认不出）。团队成员有：{names}。\
+                 写成员 id，或者还没加入的人写 `名字 <邮箱>`。"
+            )
+        })
+    }
+
+    /// 写一条事件并尽量推送。推送失败只提示，不算失败 —— 事件已经在本地链上，
+    /// 下一次推送会带上它。（认领例外，见 `task_claim`。）
+    fn emit(&self, store: &Store, mut d: Draft) -> Result<String, String> {
+        let roster = members::load_all(&store);
+        if d.from.is_none() {
+            d.from = member_only(self.me_ref(&roster)?);
+        }
+        // 收件人同理：还没加入的人没有 id，`to=` 里写不了他。消息照样记下，
+        // 他加入之后能在动态里看到，只是不会被单独提醒 —— 回灌里说清楚。
+        let before = d.to.len();
+        d.to.retain(|t| t == events::EVERYONE || members::valid_member_id(t));
+        let dropped = before - d.to.len();
+        // 模型调的工具一律标成「经卡特」：人发的和 agent 代发的要能一眼分开。
+        if d.via.is_none() {
+            d.via = self.via.map(str::to_string);
+        }
+        let root = store.project_root();
+        let (sha, eid) = events::append(root, &d)?;
+        let pushed = match events::push(root) {
+            Ok(true) => "已推送".to_string(),
+            Ok(false) => "还没有远端，只记在本地".to_string(),
+            Err(e) => format!("推送失败（下次会再推）：{e}"),
+        };
+        let note = if dropped > 0 {
+            format!(" · {dropped} 个收件人还没加入团队，收不到提醒")
+        } else {
+            String::new()
+        };
+        Ok(format!("{sha} · {eid} · {pushed}{note}"))
+    }
+
+    /// 指派 / 转交之后给新负责人发一条事件，返回附在回灌末尾的一句话。
+    ///
+    /// 失败不影响指派本身（任务文件已经写好了）：只是对方要等同步之后才在「我的」里
+    /// 看到，不会收到提醒。把原因说出来，模型可以转告用户。
+    fn notify(&self, store: &Store, task: &Task, to: &str, kind: &str, note: &str) -> String {
+        let d = Draft {
+            kind: kind.into(),
+            target: Some(task.id.clone()),
+            goal_id: Some(task.goal_id.clone()),
+            to: vec![to.to_string()],
+            body: note.to_string(),
+            ..Default::default()
+        };
+        match self.emit(store, d) {
+            Ok(out) => format!(" 已通知对方（{out}）。"),
+            Err(e) => format!(" 但没能发出通知：{e}"),
+        }
+    }
+
+    /// 新建 / 更新任务时顺手带上的指派通知。指派给自己不发 —— 自己不用提醒自己。
+    fn notify_assign(&self, store: &Store, roster: &Roster, task: &Task, to: &str) -> String {
+        match self.me_ref(roster) {
+            Ok(me) if roster.same(&me, to) => String::new(),
+            _ => self.notify(store, task, to, EventKind::ASSIGN, ""),
+        }
     }
 
     /// 写完之后把 `.carter/` 放进暂存区，但不提交。
@@ -92,6 +204,51 @@ fn team_rel(repo_root: &std::path::Path, team_root: &std::path::Path) -> Result<
         .join("/"))
 }
 
+/// 只有成员 id 才能进 trailer（`名字 <邮箱>` 里有空格）。还没加入的人不写 `from`，
+/// 读的人按提交作者的邮箱去认（协议 3.4）。
+fn member_only(r: String) -> Option<String> {
+    members::valid_member_id(&r).then_some(r)
+}
+
+/// 这个任务上，排在**我最近那条认领之前**、最近的一条认领是不是别人的。是的话返回那人的名字。
+///
+/// 用来裁决「两个人同时认领」：推送之后链上的顺序就是全团队公认的顺序，排在我前面、
+/// 中间又没有被释放的那条认领赢。排在我**后面**的认领是输家，与我无关。
+///
+/// 我还没认领过（认领前的预检）时，就看链上最近的一条：是别人的认领就说明已经被占了。
+/// 顺序取链上的（[`events::chain`]），不按提交时间 —— 各人的本机时钟不可信。
+fn claimed_by_other(root: &std::path::Path, task_id: &str, me: &str, roster: &Roster) -> Option<String> {
+    let evs: Vec<_> = events::chain(root, 500)
+        .into_iter()
+        .filter(|e| e.target.as_deref() == Some(task_id))
+        .collect();
+    // 发出者：有成员 id 用 id；还没人加入时（没有 `from`）退回提交作者的 `名字 <邮箱>`，
+    // 与 `me_ref` 在同样情况下给出的写法对得上。
+    let from_of = |e: &events::Event| {
+        super::inbox::sender(e, roster)
+            .or_else(|| e.author.as_ref().map(|a| a.as_key()))
+            .unwrap_or_default()
+    };
+    let is_mine = |e: &events::Event| {
+        let f = from_of(e);
+        f == me || roster.same(&f, me)
+    };
+    let start = evs
+        .iter()
+        .position(|e| e.kind.is(EventKind::CLAIM) && is_mine(e))
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    for e in &evs[start..] {
+        if e.kind.is(EventKind::RELEASE) {
+            return None;
+        }
+        if e.kind.is(EventKind::CLAIM) {
+            return if is_mine(e) { None } else { Some(roster.display(&from_of(e))) };
+        }
+    }
+    None
+}
+
 #[async_trait::async_trait]
 impl Tool for TeamTool {
     fn name(&self) -> &str {
@@ -102,7 +259,7 @@ impl Tool for TeamTool {
         "读写本项目的团队目录（`.carter/`）：目标、任务、看板。\n\
          \n\
          什么时候该用：用户问「有什么目标 / 我手上有什么任务 / 下一步做什么」，\
-         或者要你把这件活记下来、更新进展、认领任务、留一条评论。\n\
+         或者要你把这件活记下来、更新进展、认领 / 指派任务、留评论、@ 某人、发广播。\n\
          \n\
          什么时候不该用：项目没有 `.carter/`（先让用户初始化）；只是聊天。\n\
          \n\
@@ -110,6 +267,9 @@ impl Tool for TeamTool {
          * id 一律由工具生成，不要自己编。\n\
          * 状态推进用 `task_status`，不要靠改文件。\n\
          * `claim` 会 push，被拒说明别人先占了 —— 换个任务，不要覆盖。\n\
+         * 指派之前先 `members` 看有谁；拿不准派给谁就列出建议，让用户确认。\n\
+         * 消息（comment / mention / broadcast / request）都会标成「经卡特」，\
+           只在用户要你说、或者完成 / 受阻 / 改方案需要留个记录时才发。\n\
          * 依赖不能成环；工具会验，验不过就换种拆法。"
     }
 
@@ -123,7 +283,9 @@ impl Tool for TeamTool {
                         "overview", "my_tasks",
                         "goal_new", "goal_update",
                         "task_new", "task_update", "task_status", "task_claim", "task_release",
-                        "comment", "events", "check", "sync",
+                        "assign", "members",
+                        "comment", "mention", "broadcast", "request", "note", "inbox", "events",
+                        "check", "sync",
                         "board_list", "board_new", "board_update"
                     ],
                     "description": "要做什么。先看 action 的分组：读用 overview / my_tasks / events；目标用 goal_*；任务用 task_*；看板用 board_*。"
@@ -147,7 +309,13 @@ impl Tool for TeamTool {
                     "type": "array", "items": { "type": "string" },
                     "description": "前置任务 id 列表（要等它们先完成）。与 parent_id 是两件事，别混。"
                 },
-                "assignee": { "type": "string", "description": "负责人，写成 `名字 <邮箱>`，与 git 提交身份一致。task_* 里是任务负责人，goal_update 里是目标负责人；传空串表示清掉。" },
+                "assignee": { "type": "string", "description": "负责人：成员 id（m- 开头）或昵称，先用 members 看有谁。还没加入的人写 `名字 <邮箱>`。task_* 里是任务负责人，goal_update 里是目标负责人；传空串表示清掉。" },
+                "to": {
+                    "type": "array", "items": { "type": "string" },
+                    "description": "收件人：成员 id 或昵称。mention / request 必填；comment 可选（顺带 @ 人）。broadcast 不用填（发给全员）。"
+                },
+                "due_at": { "type": "integer", "description": "期限（毫秒时间戳）。request 用。" },
+                "reply_to": { "type": "string", "description": "回复哪条事件（事件的 eid，e- 开头）。" },
                 "estimate_hours": { "type": "number", "description": "估时（小时）。" },
                 "deliverable": { "type": "string", "description": "交付物：一句话说清交什么。" },
                 "acceptance": {
@@ -155,7 +323,7 @@ impl Tool for TeamTool {
                     "description": "验收标准，每条都要可验证（「cargo test 通过」而不是「质量好」）。"
                 },
                 "blocked_reason": { "type": "string", "description": "受阻原因。status = blocked 时填。" },
-                "text": { "type": "string", "description": "评论正文（comment 必填）。" },
+                "text": { "type": "string", "description": "消息正文（comment / mention / broadcast / request / note 必填）；assign 时是附言。卡片正文也用它（若有卡片）。" },
                 "limit": { "type": "integer", "description": "events 取多少条，默认 30。" }
             },
             "required": ["action"]
@@ -244,13 +412,15 @@ impl TeamTool {
             "my_tasks" => {
                 let store = self.store()?;
                 let me = self.me()?;
+                let roster = members::load_all(&store);
+                let me_key = roster.me(&me).map(|m| m.id.clone()).unwrap_or_else(|| me.as_key());
                 let mut out = Vec::new();
                 for goal in store.goals().items {
                     if !goal.status.is_live() {
                         continue;
                     }
                     for t in store.tasks(&goal.id).items {
-                        if t.assignee.as_deref() == Some(me.as_key().as_str()) && t.status.is_open() {
+                        if t.assignee.as_deref().is_some_and(|a| roster.same(a, &me_key)) && t.status.is_open() {
                             out.push(format!(
                                 "- [{}] {}  ({})  目标：{}",
                                 t.status.label(),
@@ -316,12 +486,12 @@ impl TeamTool {
                         "状态只能是 active / paused / done / archived，收到 `{s}`"
                     ))?;
                 }
-                // 负责人：与任务的 assignee 同一个写法，空串 = 清掉。
+                // 负责人：与任务的 assignee 同一个写法（成员 id / 昵称 / `名字 <邮箱>`），空串 = 清掉。
                 if let Some(o) = args.get("assignee").and_then(Value::as_str) {
                     goal.owner = if o.trim().is_empty() {
                         None
                     } else {
-                        Some(o.trim().to_string())
+                        Some(self.person(&members::load_all(&store), o)?)
                     };
                 }
                 goal.touch(&me);
@@ -365,8 +535,9 @@ impl TeamTool {
                         .filter(|s| !s.is_empty())
                         .collect();
                 }
-                if let Some(a) = args.get("assignee").and_then(Value::as_str) {
-                    task.assignee = Identity::parse(a).map(|i| i.as_key());
+                let roster = members::load_all(&store);
+                if let Some(a) = args.get("assignee").and_then(Value::as_str).filter(|a| !a.trim().is_empty()) {
+                    task.assignee = Some(self.person(&roster, a)?);
                 }
                 if let Some(h) = args.get("estimate_hours").and_then(Value::as_f64) {
                     task.estimate_hours = Some(h);
@@ -408,6 +579,9 @@ impl TeamTool {
                         task.depends_on.join("、")
                     ));
                 }
+                if let Some(a) = task.assignee.clone() {
+                    msg.push_str(self.notify_assign(&store, &roster, &task, &a).trim_start());
+                }
                 Ok(msg.trim_end().to_string())
             }
 
@@ -424,11 +598,13 @@ impl TeamTool {
                 if let Some(p) = args.get("priority").and_then(Value::as_str) {
                     task.priority = Priority::parse(p).ok_or(format!("认不出优先级 `{p}`"))?;
                 }
+                let roster = members::load_all(&store);
+                let before = task.assignee.clone();
                 if let Some(a) = args.get("assignee").and_then(Value::as_str) {
                     task.assignee = if a.trim().is_empty() {
                         None
                     } else {
-                        Identity::parse(a).map(|i| i.as_key())
+                        Some(self.person(&roster, a)?)
                     };
                 }
                 if let Some(h) = args.get("estimate_hours").and_then(Value::as_f64) {
@@ -471,7 +647,13 @@ impl TeamTool {
                 self.check_task(&store, &task)?;
                 store.save_task(&task)?;
                 self.stage(&store);
-                Ok(format!("任务「{}」已更新。", task.title))
+                let mut msg = format!("任务「{}」已更新。", task.title);
+                if task.assignee != before {
+                    if let Some(a) = task.assignee.clone() {
+                        msg.push_str(&self.notify_assign(&store, &roster, &task, &a));
+                    }
+                }
+                Ok(msg)
             }
 
             "task_status" => {
@@ -512,6 +694,8 @@ impl TeamTool {
             "task_claim" | "task_release" => {
                 let store = self.store()?;
                 let me = self.me()?;
+                let roster = members::load_all(&store);
+                let me_ref = self.me_ref(&roster)?;
                 let (_, mut task) = self.locate_task(&store, args)?;
                 let claiming = action == "task_claim";
                 let root = store.project_root();
@@ -520,56 +704,69 @@ impl TeamTool {
                 // 而后果是两个人同时在改同一件事。
                 if claiming {
                     if let Some(a) = task.assignee.as_deref() {
-                        if a != me.as_key() && !a.trim().is_empty() {
+                        if !a.trim().is_empty() && !roster.same(a, &me_ref) {
                             return Err(format!(
-                                "「{}」已经被 {} 认领了。换个任务，或者先问一句。",
-                                task.title, a
+                                "「{}」已经被 {} 认领了。换个任务，或者先问一句（mention）。",
+                                task.title,
+                                roster.display(a)
                             ));
                         }
                     }
                 }
+                if !git::in_repo(root) {
+                    return Err("这个目录不是 git 仓库，认领无处可记".into());
+                }
 
-                // 记下原样：push 被拒时要原路退回去。
+                // 认领的裁决者是**事件链**的推送：两个人同时认领，链上排在前面的那条赢。
+                // 先拉一次，有人刚抢先一步的话直接说，不必再写一条注定作废的认领。
+                if claiming && git::has_remote(root) {
+                    let _ = events::fetch(root);
+                    if let Some(who) = claimed_by_other(root, &task.id, &me_ref, &roster) {
+                        return Err(format!(
+                            "「{}」已经被 {who} 认领了（远端事件里有）。换个任务，或者先问一句。",
+                            task.title
+                        ));
+                    }
+                }
+
                 let original = task.clone();
-                task.assignee = if claiming { Some(me.as_key()) } else { None };
+                task.assignee = if claiming { Some(me_ref.clone()) } else { None };
                 task.touch(&me);
                 store.save_task(&task)?;
+                self.stage(&store);
 
-                let kind = if claiming { EventKind::Claim } else { EventKind::Release };
-                let subject = format!(
-                    "carter/{} {} {}",
-                    kind.as_str(),
-                    task.id,
-                    me.short()
-                );
-                if git::in_repo(root) {
-                    let rel = team_rel(root, store.root())?;
-                    let _ = git::stage_team(root, &rel);
-                    git::commit_event(
-                        root,
-                        &rel,
-                        kind,
-                        Some(&task.id),
-                        Some(&task.goal_id),
-                        &subject,
-                        "",
-                    )?;
-                    // push 成功才算认领成功 —— 这是整条通道里唯一原子化的地方。
-                    if git::has_remote(root) {
-                        if let Err(e) = git::push(root) {
-                            // **本地也要退回去。** 只把错误报给模型是不够的：文件里
-                            // 已经写上了自己的名字，而远端是别人的 —— 两人各自看自己
-                            // 那份都是对的，这种不一致没有任何地方会报出来。
-                            let _ = git::undo_last_commit(root);
-                            let _ = store.save_task(&original);
-                            let _ = git::unstage(root, &rel);
-                            return Err(format!(
-                                "认领没有生效：push 被拒（{e}）。\
-                                 本地改动已撤回。多半是别人先占了同一个任务，\
-                                 先 team sync 再看一遍现状，或者换一个任务。"
-                            ));
-                        }
+                let kind = if claiming { EventKind::CLAIM } else { EventKind::RELEASE };
+                events::append(
+                    root,
+                    &Draft {
+                        kind: kind.into(),
+                        target: Some(task.id.clone()),
+                        goal_id: Some(task.goal_id.clone()),
+                        from: member_only(me_ref.clone()),
+                        via: self.via.map(str::to_string),
+                        ..Default::default()
+                    },
+                )?;
+
+                if claiming && git::has_remote(root) {
+                    // 推送成功、而且链上排在我前面的没有别人的认领，才算认领成功。
+                    let lost = match events::push(root) {
+                        Ok(_) => claimed_by_other(root, &task.id, &me_ref, &roster)
+                            .map(|who| format!("{who} 先认领了")),
+                        Err(e) => Some(format!("推送失败（{e}）")),
+                    };
+                    if let Some(why) = lost {
+                        // **本地也要退回去。** 文件里写着自己、远端却是别人，两人各自看
+                        // 自己那份都是对的，这种不一致没有任何地方会报出来。
+                        let _ = store.save_task(&original);
+                        self.stage(&store);
+                        return Err(format!(
+                            "认领没有生效：{why}「{}」。本地改动已撤回，换一个任务吧。",
+                            task.title
+                        ));
                     }
+                } else {
+                    let _ = events::push(root);
                 }
                 Ok(if claiming {
                     format!("已认领「{}」。做完记得 task_status 改成 done。", task.title)
@@ -578,66 +775,199 @@ impl TeamTool {
                 })
             }
 
-            "comment" => {
+            "assign" => {
                 let store = self.store()?;
                 let me = self.me()?;
-                let body = text.ok_or("comment 需要 text")?.trim();
+                let roster = members::load_all(&store);
+                let (_, mut task) = self.locate_task(&store, args)?;
+                let who = args
+                    .get("assignee")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.trim().is_empty())
+                    .ok_or("assign 需要 assignee（成员 id 或昵称）")?;
+                let to = self.person(&roster, who)?;
+                let previous = task.assignee.clone();
+                task.assignee = Some(to.clone());
+                task.touch(&me);
+                self.check_task(&store, &task)?;
+                store.save_task(&task)?;
+                self.stage(&store);
+                // 从别人手里转过来的是「转交」，空着派出去的是「指派」—— 收件人那边看到的话不一样。
+                let handoff = previous
+                    .as_deref()
+                    .is_some_and(|p| !p.trim().is_empty() && !roster.same(p, &to));
+                let kind = if handoff { EventKind::HANDOFF } else { EventKind::ASSIGN };
+                let tail = self.notify(&store, &task, &to, kind, text.unwrap_or("").trim());
+                Ok(format!(
+                    "「{}」已{}给 {}。{tail}",
+                    task.title,
+                    if handoff { "转交" } else { "指派" },
+                    roster.display(&to)
+                ))
+            }
+
+            "comment" | "mention" | "broadcast" | "request" | "note" => {
+                let store = self.store()?;
+                let roster = members::load_all(&store);
+                let body = text.ok_or(format!("{action} 需要 text"))?.trim();
                 if body.is_empty() {
                     return Err("text 不能为空".into());
                 }
-                let root = store.project_root();
-                let target = goal_id
-                    .map(str::to_string)
-                    .or_else(|| task_id.map(str::to_string))
-                    .ok_or("comment 需要 goal_id 或 task_id")?;
-                let (goal, subject) = if let Some(gid) = goal_id {
+                // 对象：任务优先（任务 id 能推出目标），其次目标。
+                let (target, goal) = if let Some(tid) = task_id.filter(|t| !t.trim().is_empty()) {
+                    let (gid, t) = self.locate_task(&store, &json!({ "task_id": tid }))?;
+                    (Some(t.id), Some(gid))
+                } else if let Some(gid) = goal_id.filter(|g| !g.trim().is_empty()) {
                     let g = store.goal(gid)?;
-                    (g.id.clone(), format!("carter/comment {} {}", g.id, me.short()))
+                    (Some(g.id.clone()), Some(g.id))
                 } else {
-                    let (gid, t) = self.locate_task(&store, args)?;
-                    (gid, format!("carter/comment {} {}", t.id, me.short()))
+                    (None, None)
                 };
-                if !git::in_repo(root) {
-                    return Err("这个目录不是 git 仓库，评论无处可写".into());
+                if action == "comment" && target.is_none() {
+                    return Err("comment 需要 task_id 或 goal_id；要对全员说话用 broadcast".into());
                 }
-                git::commit_event(
-                    root,
-                    &team_rel(root, store.root())?,
-                    EventKind::Comment,
-                    Some(&target),
-                    Some(&goal),
-                    &subject,
-                    body,
+                let mut to: Vec<String> = Vec::new();
+                if action == "broadcast" {
+                    to.push(events::EVERYONE.into());
+                } else if let Some(list) = args.get("to").and_then(Value::as_array) {
+                    for v in list.iter().filter_map(Value::as_str) {
+                        to.push(self.person(&roster, v)?);
+                    }
+                }
+                if matches!(action.as_str(), "mention" | "request") && to.is_empty() {
+                    return Err(format!("{action} 需要 to（收件人的成员 id 或昵称列表）"));
+                }
+                let out = self.emit(
+                    &store,
+                    Draft {
+                        kind: action.clone(),
+                        target,
+                        goal_id: goal,
+                        to: to.clone(),
+                        due: args.get("due_at").and_then(Value::as_u64),
+                        reply_to: args
+                            .get("reply_to")
+                            .and_then(Value::as_str)
+                            .filter(|s| !s.trim().is_empty())
+                            .map(str::to_string),
+                        body: body.to_string(),
+                        ..Default::default()
+                    },
                 )?;
-                Ok("评论已记录（走空提交，永不冲突）。".into())
+                let who = to
+                    .iter()
+                    .map(|t| if t == events::EVERYONE { "全员".to_string() } else { roster.display(t) })
+                    .collect::<Vec<_>>()
+                    .join("、");
+                Ok(if who.is_empty() {
+                    format!("已记录（{out}）。")
+                } else {
+                    format!("已发给 {who}（{out}）。")
+                })
+            }
+
+            "members" => {
+                let store = self.store()?;
+                let roster = members::load_all(&store);
+                let me_id = self
+                    .me()
+                    .ok()
+                    .and_then(|m| roster.me(&m).map(|x| x.id.clone()));
+                let mut out: Vec<String> = roster
+                    .members
+                    .iter()
+                    .map(|m| {
+                        let mark = if Some(&m.id) == me_id.as_ref() { "（我）" } else { "" };
+                        let role = if m.role.trim().is_empty() {
+                            String::new()
+                        } else {
+                            format!(" · {}", m.role)
+                        };
+                        format!("- {}{mark}  {}{role}", m.name, m.id)
+                    })
+                    .collect();
+                if out.is_empty() {
+                    out.push("还没有人加入这个团队。".into());
+                }
+                if me_id.is_none() {
+                    out.push("\n本机还不在名单里：让用户在团队页里点一下「加入团队」。".into());
+                }
+                let pending = members::git_candidates(store.project_root(), &roster);
+                if !pending.is_empty() {
+                    out.push(format!(
+                        "\n提交过代码、但还没加入的人（要指派给他们就写 `名字 <邮箱>`）：{}",
+                        pending
+                            .iter()
+                            .take(10)
+                            .map(|i| i.as_key())
+                            .collect::<Vec<_>>()
+                            .join("、")
+                    ));
+                }
+                Ok(out.join("\n"))
+            }
+
+            "inbox" => {
+                let store = self.store()?;
+                let me = self.me()?;
+                let _ = events::fetch(store.project_root());
+                let roster = members::load_all(&store);
+                let titles = super::inbox::task_titles(&store);
+                let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(20) as usize;
+                let items = super::inbox::read(&store, &me, limit);
+                if items.is_empty() {
+                    return Ok("没有跟你有关的消息。".into());
+                }
+                Ok(items
+                    .iter()
+                    .map(|i| format!("- {}", super::inbox::line(i, &roster, &titles)))
+                    .collect::<Vec<_>>()
+                    .join("\n"))
             }
 
             "events" => {
                 let store = self.store()?;
+                let root = store.project_root();
+                let _ = events::fetch(root);
+                let roster = members::load_all(&store);
                 let limit = args
                     .get("limit")
                     .and_then(Value::as_u64)
                     .unwrap_or(30) as usize;
-                let evs = git::events(store.project_root(), limit);
+                let evs = events::read(root, limit);
                 if evs.is_empty() {
                     return Ok("还没有任何团队事件。".into());
                 }
                 let mut out = Vec::new();
                 for e in evs {
-                    let who = e.author.as_ref().map(|a| a.short().to_string()).unwrap_or_default();
+                    let who = super::inbox::sender(&e, &roster)
+                        .map(|id| roster.display(&id))
+                        .or_else(|| e.author.as_ref().map(|a| a.short().to_string()))
+                        .unwrap_or_default();
                     let target = e.target.as_deref().unwrap_or("-");
-                    if e.body.trim().is_empty() {
-                        out.push(format!("- {} {} {} ({})", e.sha, e.kind.as_str(), target, who));
+                    let to = if e.to.is_empty() {
+                        String::new()
                     } else {
-                        out.push(format!(
-                            "- {} {} {} ({})：{}",
-                            e.sha,
-                            e.kind.as_str(),
-                            target,
-                            who,
-                            e.body.replace('\n', " ")
-                        ));
-                    }
+                        format!(
+                            " → {}",
+                            e.to.iter()
+                                .map(|t| if t == events::EVERYONE { "全员".into() } else { roster.display(t) })
+                                .collect::<Vec<_>>()
+                                .join("、")
+                        )
+                    };
+                    let body = if e.body.trim().is_empty() {
+                        String::new()
+                    } else {
+                        format!("：{}", e.body.replace('\n', " "))
+                    };
+                    out.push(format!(
+                        "- {} {} {} ({who}){to}{body}  #{}",
+                        e.sha,
+                        e.kind.label(),
+                        target,
+                        e.eid
+                    ));
                 }
                 Ok(out.join("\n"))
             }
@@ -710,8 +1040,8 @@ impl TeamTool {
 
             other => Err(format!(
                 "不认识的 action `{other}`。可用的：overview / my_tasks / goal_new / goal_update / \
-                 task_new / task_update / task_status / task_claim / task_release / comment / events / \
-                 check / sync / board_list / board_new / board_update"
+                 task_new / task_update / task_status / task_claim / task_release / assign / members / \
+                 comment / mention / broadcast / request / note / inbox / events / check / sync / board_*"
             )),
         }
     }
@@ -788,6 +1118,7 @@ impl TeamTool {
     /// 输出是**给模型读的**，比 JSON 省掉大量 token，也比 JSON 好判断「下一步该做什么」。
     fn overview(&self, store: &Store) -> String {
         let goals = store.goals();
+        let roster = members::load_all(&store);
         let mut out = Vec::new();
         if goals.items.is_empty() {
             let mut s = "还没有任何目标。用 goal_new 建一个，再用 task_new 往下拆。".to_string();
@@ -826,6 +1157,7 @@ impl TeamTool {
                         id: &str,
                         depth: usize,
                         by_id: &std::collections::HashMap<&str, &TaskView>,
+                        roster: &Roster,
                         out: &mut Vec<String>,
                     ) {
                         let Some(tv) = by_id.get(id) else { return };
@@ -833,8 +1165,7 @@ impl TeamTool {
                         let who = t
                             .assignee
                             .as_deref()
-                            .and_then(|a| a.split('<').next())
-                            .map(|n| format!(" @{}", n.trim()))
+                            .map(|a| format!(" @{}", roster.display(a)))
                             .unwrap_or_default();
                         let waiting = if tv.waiting_on.is_empty() {
                             String::new()
@@ -858,11 +1189,11 @@ impl TeamTool {
                             reason
                         ));
                         for c in &tv.children {
-                            walk(c, depth + 1, by_id, out);
+                            walk(c, depth + 1, by_id, roster, out);
                         }
                     }
                     for root in &v.roots {
-                        walk(root, 0, &by_id, &mut out);
+                        walk(root, 0, &by_id, &roster, &mut out);
                     }
                 }
             }
@@ -999,9 +1330,9 @@ mod tests {
         assert_eq!(task.assignee.as_deref(), Some("测试 <t@example.com>"));
 
         // 事件流里应该有一条 claim。
-        let evs = git::events(&dir, 10);
+        let evs = events::read(&dir, 10);
         assert!(
-            evs.iter().any(|e| e.kind == EventKind::Claim && e.target.as_deref() == Some(&tid)),
+            evs.iter().any(|e| e.kind.is(EventKind::CLAIM) && e.target.as_deref() == Some(&tid)),
             "{evs:?}"
         );
 
@@ -1039,8 +1370,8 @@ mod tests {
         let gid = id_of(&out);
 
         call(&t, json!({"action": "comment", "goal_id": gid, "text": "第一阶段先不做界面"}));
-        let evs = git::events(&dir, 5);
-        let c = evs.iter().find(|e| e.kind == EventKind::Comment).expect("要有一条评论");
+        let evs = events::read(&dir, 5);
+        let c = evs.iter().find(|e| e.kind.is(EventKind::COMMENT)).expect("要有一条评论");
         assert_eq!(c.body, "第一阶段先不做界面");
         assert_eq!(c.author.as_ref().unwrap().email, "t@example.com");
     }
@@ -1242,59 +1573,157 @@ mod e2e {
         assert!(overview.contains("写数据层"), "{overview}");
         assert!(overview.contains(&tid));
         // 事件流也同步过来了，而且带着作者与正文。
-        let evs = git::events(&w.bob, 20);
+        let evs = events::read(&w.bob, 20);
         let c = evs
             .iter()
-            .find(|e| e.kind == EventKind::Comment)
+            .find(|e| e.kind.is(EventKind::COMMENT))
             .unwrap_or_else(|| panic!("李四没看到张三的评论：{evs:?}"));
         assert_eq!(c.body, "数据层先落地");
         assert_eq!(c.author.as_ref().unwrap().name, "张三");
         let _ = std::fs::remove_dir_all(&w.base);
     }
 
+    /// 有人先认领了：后来的那个在写之前拉一次事件就能看到，直接拒绝，本地什么都不改。
     #[test]
-    fn a_rejected_claim_is_rolled_back_locally() {
+    fn a_claim_already_on_the_remote_is_refused_up_front() {
         let w = world("race");
+        let (gid, tid) = shared_task(&w, "抢我");
+
+        // 张三先认领 —— 认领事件立刻推到远端。
+        TeamTool::new(w.alice.clone())
+            .run(&json!({"action": "task_claim", "task_id": tid}))
+            .unwrap();
+
+        let bob = TeamTool::new(w.bob.clone());
+        let err = bob
+            .run(&json!({"action": "task_claim", "task_id": tid}))
+            .unwrap_err();
+        assert!(err.contains("张三"), "要说出是谁先认领的：{err}");
+
+        let store_b = Store::discover(&w.bob).unwrap();
+        assert!(
+            store_b.task(&gid, &tid).unwrap().assignee.is_none(),
+            "被拒之后本地不能留下「我认领了」"
+        );
+        assert!(
+            git::status_porcelain(store_b.project_root()).trim().is_empty(),
+            "工作区应该干净：{}",
+            git::status_porcelain(store_b.project_root())
+        );
+        let _ = std::fs::remove_dir_all(&w.base);
+    }
+
+    /// 真正的并发：两边都在对方推送之前写下了自己的认领。事件链会把两条接成一条，
+    /// 排在前面的赢；输的那一方本地退回原样。
+    #[test]
+    fn simultaneous_claims_have_exactly_one_winner() {
+        let w = world("tie");
+        let (gid, tid) = shared_task(&w, "抢我");
+        let store_a = Store::discover(&w.alice).unwrap();
+        let store_b = Store::discover(&w.bob).unwrap();
+
+        // 张三的认领先上了远端链。
+        let alice = TeamTool::new(w.alice.clone());
+        alice.run(&json!({"action": "task_claim", "task_id": tid})).unwrap();
+
+        // 李四在拉到之前就写下了自己的认领（模拟两边同时点）。
+        events::append(
+            &w.bob,
+            &Draft {
+                kind: EventKind::CLAIM.into(),
+                target: Some(tid.clone()),
+                goal_id: Some(gid.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // 推送时被拒、自动接到张三后面 —— 链上张三在前。
+        events::push(&w.bob).unwrap();
+        let me_b = git::local_identity(&w.bob).unwrap().as_key();
+        let roster = members::load_all(&store_b);
+        assert_eq!(
+            claimed_by_other(&w.bob, &tid, &me_b, &roster).as_deref(),
+            Some("张三"),
+            "链上排在前面的那条认领赢"
+        );
+        let me_a = git::local_identity(&w.alice).unwrap().as_key();
+        events::fetch(&w.alice).unwrap();
+        assert!(
+            claimed_by_other(&w.alice, &tid, &me_a, &members::load_all(&store_a)).is_none(),
+            "赢的那一方不该被判输"
+        );
+        let _ = std::fs::remove_dir_all(&w.base);
+    }
+
+    /// @ 与指派跨机器送达：张三发，李四拉一次就能在收件箱里看到。
+    #[test]
+    fn mentions_and_assignments_reach_the_other_member() {
+        let w = world("inbox");
+        let (_, tid) = shared_task(&w, "接口联调");
+        // 两个人都加入团队，名单随状态提交同步。
+        let zs = members::join(
+            &w.alice.join(".carter"),
+            &git::local_identity(&w.alice).unwrap(),
+            members::Join::New { name: "张三".into() },
+        )
+        .unwrap()
+        .0;
+        let ls = members::join(
+            &w.alice.join(".carter"),
+            &Identity::parse("李四 <li@example.com>").unwrap(),
+            members::Join::New { name: "李四".into() },
+        )
+        .unwrap()
+        .0;
+        let root_a = Store::discover(&w.alice).unwrap();
+        git::stage_team(root_a.project_root(), ".carter").unwrap();
+        git::commit_team(root_a.project_root(), ".carter", "chore: 成员").unwrap();
+        git::push(root_a.project_root()).unwrap();
+        git::sync(&w.bob).unwrap();
+
+        let alice = TeamTool::new(w.alice.clone());
+        alice
+            .run(&json!({"action": "mention", "to": ["李四"], "task_id": tid, "text": "接口定好了"}))
+            .unwrap();
+        let out = alice
+            .run(&json!({"action": "assign", "task_id": tid, "assignee": "李四"}))
+            .unwrap();
+        assert!(out.contains("指派给 李四"), "{out}");
+        // 任务文件里存的是成员 id，不是名字。
+        let t = root_a.task(&shared_goal(&w), &tid).unwrap();
+        assert_eq!(t.assignee.as_deref(), Some(ls.id.as_str()));
+
+        // 李四这边：只拉事件、不合并分支，就能收到。
+        let bob = TeamTool::new(w.bob.clone());
+        let inbox = bob.run(&json!({"action": "inbox"})).unwrap();
+        assert!(inbox.contains("[@我] 张三（经卡特） 提到"), "{inbox}");
+        assert!(inbox.contains("[派给我]"), "{inbox}");
+        assert!(inbox.contains("接口联调"), "消息里要带任务标题：{inbox}");
+        // 张三自己发的不进自己的收件箱。
+        let own = alice.run(&json!({"action": "inbox"})).unwrap();
+        assert!(!own.contains("接口定好了"), "{own}");
+        let _ = zs;
+        let _ = std::fs::remove_dir_all(&w.base);
+    }
+
+    /// 张三建一个目标 + 任务，提交并推上去，李四同步下来。返回 `(goal_id, task_id)`。
+    fn shared_task(w: &World, title: &str) -> (String, String) {
         let alice = TeamTool::new(w.alice.clone());
         let gid = id_of(&alice.run(&json!({"action": "goal_new", "title": "g"})).unwrap());
         let tid = id_of(
-            &alice.run(&json!({"action": "task_new", "goal_id": gid, "title": "抢我"})).unwrap(),
+            &alice
+                .run(&json!({"action": "task_new", "goal_id": gid, "title": title}))
+                .unwrap(),
         );
         let store_a = Store::discover(&w.alice).unwrap();
         git::stage_team(store_a.project_root(), ".carter").unwrap();
         git::commit_team(store_a.project_root(), ".carter", "feat: 建任务").unwrap();
         git::push(store_a.project_root()).unwrap();
         git::sync(&w.bob).unwrap();
+        (gid, tid)
+    }
 
-        // 张三先认领并推上去。
-        alice.run(&json!({"action": "task_claim", "task_id": tid})).unwrap();
-
-        // 李四还拿着旧的远端视图去抢 —— 结果本地的推送被远端拒绝。
-        let bob = TeamTool::new(w.bob.clone());
-        let err = bob
-            .run(&json!({"action": "task_claim", "task_id": tid}))
-            .unwrap_err();
-        assert!(err.contains("push 被拒"), "{err}");
-
-        // 关键：本地不能留下「我认领了」的假象。
-        let store_b = Store::discover(&w.bob).unwrap();
-        let task = store_b.task(&gid, &tid).unwrap();
-        assert!(
-            task.assignee.is_none(),
-            "推送被拒之后本地必须退回原样，实际是 {:?}",
-            task.assignee
-        );
-        // 工作区要干净：不能留一条未推送的认领提交或一堆暂存改动。
-        assert!(
-            git::status_porcelain(store_b.project_root()).trim().is_empty(),
-            "工作区应该干净：{}",
-            git::status_porcelain(store_b.project_root())
-        );
-
-        // 同步之后本地应该看到张三的认领。
-        git::sync(store_b.project_root()).unwrap();
-        let task = store_b.task(&gid, &tid).unwrap();
-        assert_eq!(task.assignee.as_deref(), Some("张三 <zhang@example.com>"));
-        let _ = std::fs::remove_dir_all(&w.base);
+    fn shared_goal(w: &World) -> String {
+        Store::discover(&w.alice).unwrap().goals().items[0].id.clone()
     }
 }

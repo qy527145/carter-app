@@ -95,10 +95,24 @@ fn clip(line: &str) -> String {
     s
 }
 
+/// 内置命令的前缀。以它开头的「命令」不交给 shell，由应用自己执行。
+///
+/// 团队消息的送达（`carter:team-inbox`）就是这样一条：它要读 git 的事件链、对照成员
+/// 名单，用 shell 拼的话得依赖 `jq`，而 Windows 上通常没有 —— 那正是上一版
+/// `carter-team` 脚本在 Windows 上起不来的原因。做成内置命令，三平台行为一致，
+/// 输出照样是「一行一件事」，观察源其余的机制（基线、去重、评估）一点不用改。
+pub const BUILTIN_PREFIX: &str = "carter:";
+
+/// 团队收件箱：拉取事件、筛出跟本机有关的，每条一行。
+pub const TEAM_INBOX: &str = "carter:team-inbox";
+
 /// 跑一次来源的命令，返回标准输出。非零退出码算失败，错误里带上 stderr 的末尾。
 pub async fn run_command(command: &str, cwd: &Path) -> Result<String, String> {
     if !cwd.is_dir() {
         return Err(format!("工作目录 {} 不存在", cwd.display()));
+    }
+    if let Some(rest) = command.trim().strip_prefix(BUILTIN_PREFIX) {
+        return run_builtin(rest.trim(), cwd).await;
     }
     let shell = platform::detect_shell();
     let mut cmd = tokio::process::Command::new(&shell.program);
@@ -136,6 +150,19 @@ pub async fn run_command(command: &str, cwd: &Path) -> Result<String, String> {
         });
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+async fn run_builtin(name: &str, cwd: &Path) -> Result<String, String> {
+    match name {
+        "team-inbox" => {
+            let cwd = cwd.to_path_buf();
+            // git 是阻塞调用；放进阻塞线程池，别卡住轮询它的那个运行时。
+            tokio::task::spawn_blocking(move || crate::team::inbox::observe(&cwd, 50))
+                .await
+                .map_err(|e| format!("团队收件箱没跑完：{e}"))?
+        }
+        other => Err(format!("不认识的内置命令 `{BUILTIN_PREFIX}{other}`")),
+    }
 }
 
 /// 轮询一次：跑命令、比对、把结果记进 `state`。返回新事件。

@@ -279,7 +279,42 @@ pub fn create_sync_source(
     source.enabled = true;
 
     crate::assistant::runtime::save_source(shell, source)?;
+    create_inbox_source(shell, project_root, team_label)?;
     Ok(true)
+}
+
+/// 建（或补齐）团队消息的观察源：定时拉事件链、筛出跟本机有关的（@我 / 广播 /
+/// 派给我 / 我的任务上的评论），每条一行交给卡特助理。
+///
+/// 与同步源分开：同步每 10 分钟拉一次分支就够了；消息要快一些，而且它**不碰工作区**，
+/// 写代码期间照样能收 —— 绑在同步源上的话，工作区一脏就什么都收不到。
+///
+/// 命令是内置的 `carter:team-inbox`（见 `assistant::source`），不走 shell：要对照成员
+/// 名单、读 git 事件链，用 shell 拼得依赖 `jq`，Windows 上没有。
+pub fn create_inbox_source(
+    shell: &std::sync::Arc<crate::shell::AppShell>,
+    project_root: &Path,
+    team_label: &str,
+) -> Result<(), String> {
+    let name = format!("{team_label} · 团队消息");
+    let existing = shell
+        .assistant
+        .snapshot()
+        .sources
+        .into_iter()
+        .find(|s| s.name == name);
+    let mut source = existing.unwrap_or_else(|| crate::assistant::Source {
+        id: String::new(),
+        name: name.clone(),
+        command: String::new(),
+        cwd: String::new(),
+        every_minutes: 3,
+        enabled: true,
+        state: Default::default(),
+    });
+    source.command = crate::assistant::source::TEAM_INBOX.to_string();
+    source.cwd = project_root.to_string_lossy().into_owned();
+    crate::assistant::runtime::save_source(shell, source)
 }
 
 #[cfg(test)]

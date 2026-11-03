@@ -389,9 +389,11 @@ impl Store {
                 .cloned()
                 .collect();
 
-            let ready = matches!(t.status, TaskStatus::Todo)
-                && waiting_on.is_empty()
-                && (t.assignee.is_none() || t.assignee.as_deref() == Some(goal.owner.as_deref().unwrap_or("")));
+            // 「能开工」只看两件事：还是待办、前置都完成了。**与归谁无关** —— 上一版要求
+            // 「没人负责、或者负责人恰好是目标 owner」，于是一旦把任务派给张三，它在
+            // 任何人（包括张三自己）的视图里都不再显示「可开工」。谁该做由 assignee
+            // 回答，能不能做由这里回答，两件事不该搅在一起。
+            let ready = matches!(t.status, TaskStatus::Todo) && waiting_on.is_empty();
 
             views.push(TaskView {
                 task: (*t).clone(),
@@ -591,6 +593,25 @@ mod tests {
         let s = Store::open(root);
         s.save_meta(&TeamMeta::new("demo", &me())).unwrap();
         s
+    }
+
+    /// 派给别人的任务照样「能开工」。上一版在这里要求负责人为空或是目标 owner，
+    /// 结果预先指派的任务在谁的视图里都开不了工。
+    #[test]
+    fn an_assigned_task_is_still_ready() {
+        let s = seed(&tmp("ready-assigned"));
+        let goal = Goal::new("g", &me());
+        s.save_goal(&goal).unwrap();
+        let mut a = Task::new(&goal.id, "前置", &me());
+        a.status = TaskStatus::Done;
+        let mut b = Task::new(&goal.id, "派给张三", &me());
+        b.assignee = Some("m-zhangsan".into());
+        b.depends_on = vec![a.id.clone()];
+        s.save_task(&a).unwrap();
+        s.save_task(&b).unwrap();
+        let v = s.goal_view(&goal.id).unwrap();
+        let tb = v.tasks.iter().find(|t| t.task.id == b.id).unwrap();
+        assert!(tb.ready, "前置完成、状态待办，就该能开工，不管归谁");
     }
 
     #[test]
