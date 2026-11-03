@@ -1585,7 +1585,7 @@ impl Runner {
                 &tools,
                 &mut sink,
                 &cancel,
-            );
+            ));
             tokio::pin!(turn);
 
             loop {
