@@ -131,6 +131,15 @@ impl TeamTool {
         if d.via.is_none() {
             d.via = self.via.map(str::to_string);
         }
+        // 抬头里带上对象的标题。任务文件跟着分支走，收件人还没同步那个分支时只有
+        // 事件、没有任务文件 —— 只写 id 的话他看到的是「指派 t-mw0j411z」，看不懂。
+        if d.subject.trim().is_empty() {
+            if let Some(t) = d.target.as_deref() {
+                if let Some(title) = super::inbox::task_titles(store).get(t) {
+                    d.subject = format!("carter/{} {t} 「{title}」", d.kind);
+                }
+            }
+        }
         let root = store.project_root();
         let (sha, eid) = events::append(root, &d)?;
         let pushed = match events::push(root) {

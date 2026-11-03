@@ -135,7 +135,7 @@ pub fn line(item: &InboxItem, roster: &Roster, titles: &HashMap<String, String>)
     let target = e
         .target
         .as_deref()
-        .map(|t| match titles.get(t) {
+        .map(|t| match titles.get(t).cloned().or_else(|| subject_title(&e.subject)) {
             Some(title) => format!(" 「{title}」({t})"),
             None => format!(" {t}"),
         })
@@ -151,6 +151,13 @@ pub fn line(item: &InboxItem, roster: &Roster, titles: &HashMap<String, String>)
         e.kind.label(),
         e.eid
     )
+}
+
+/// 从抬头 `carter/assign t-… 「标题」` 里取出标题。收件人还没同步到任务文件时用它。
+pub fn subject_title(subject: &str) -> Option<String> {
+    let start = subject.find('「')? + '「'.len_utf8();
+    let end = subject.rfind('」')?;
+    (end > start).then(|| subject[start..end].to_string())
 }
 
 pub fn reason_label(reason: &str) -> &'static str {

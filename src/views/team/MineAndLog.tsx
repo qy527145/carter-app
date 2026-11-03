@@ -66,6 +66,12 @@ export function useInbox(cwd: string, nonce: number, fetch: boolean) {
   return items;
 }
 
+/** 抬头 `carter/assign t-… 「标题」` 里的标题（与后端 `inbox::subject_title` 一致）。 */
+function subjectTitle(subject: string): string | null {
+  const m = /「(.+)」/.exec(subject);
+  return m ? m[1] : null;
+}
+
 const REASON: Record<TeamInboxItem["reason"], string> = {
   mention: "@我",
   broadcast: "广播",
@@ -415,7 +421,12 @@ function EventRow({
               「{target.task?.title ?? target.goal.title}」
             </button>
           )}
-          {!target && e.target && <span className="mono text-[10px] text-dim">{e.target}</span>}
+          {/* 任务文件跟着分支走：对方那个分支还没同步过来时这里找不到任务，退回抬头里带的标题。 */}
+          {!target && e.target && (
+            <span title={e.target} className="max-w-[16rem] truncate text-ink/80">
+              {subjectTitle(e.subject) ? `「${subjectTitle(e.subject)}」` : <span className="mono text-[10px] text-dim">{e.target}</span>}
+            </span>
+          )}
           {reason && (
             <span className={`rounded px-1 text-[9px] ${fresh ? "bg-tone-orange-soft text-tone-orange" : "bg-bubble text-dim"}`}>
               {reason}
