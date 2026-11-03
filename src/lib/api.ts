@@ -413,7 +413,15 @@ export type CreatedSession = {
    * 会话文件里存的是展开后的正文，回填进去等于把整份文件内容摊在输入框里。
    */
   prompts?: TurnPrompt[];
+  /** 接上的是一条正在跑的会话：显示成「生成中」，后续增量照常从事件来。 */
+  running?: boolean;
+  /** 正在跑的那一轮已经产出的正文与工具调用。 */
+  live?: LiveView[];
 };
+
+export type LiveView =
+  | { kind: "text"; text: string }
+  | { kind: "tool"; call_id: string; name: string; args: string; result: string | null };
 
 /** 侧边聊天（`/btw`）：继承主会话上下文、不落盘、关掉即丢。 */
 export type CreatedSide = {
@@ -476,6 +484,11 @@ export function createSession(args: {
  * 打开（或续接）常驻的助理对话：固定 id，盘上有历史就接着聊，没有就新建。
  * 返回值与 `createSession` 一样，直接交给 `beginSession`。
  */
+/** 界面换走了这条会话：空闲就关，正在跑就让它跑完再关。 */
+export function detachSession(sessionId: string): Promise<void> {
+  return invoke<void>("detach_session", { sessionId });
+}
+
 export function openAssistantChat(model?: string | null): Promise<CreatedSession> {
   return invoke<CreatedSession>("open_assistant_chat", { model: model ?? null });
 }

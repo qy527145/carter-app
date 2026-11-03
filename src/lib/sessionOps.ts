@@ -126,13 +126,15 @@ export const ASSISTANT_CHAT_ID = "assistant";
 let cwdBeforeChat = "";
 
 /**
- * 换走时关掉旧会话 —— 助理对话除外：它要一直在后台，汇报才有地方送。
- * 会话可能已经自己结束了，关不掉不算错。
+ * 换走旧会话。助理对话不动：它要一直在后台，汇报才有地方送。
+ *
+ * 别的会话交给后端 `detach`：空闲就关，正在跑一轮就让它跑完再关 —— 切过去看一眼
+ * 别的对话，不该把这边正在跑的命令杀掉。会话可能已经自己结束了，失败不算错。
  */
 async function closeUnlessChat(id: string | null): Promise<void> {
   if (!id || id === ASSISTANT_CHAT_ID) return;
   try {
-    await api.closeSession(id);
+    await api.detachSession(id);
   } catch {
     /* 已经自己结束了 */
   }

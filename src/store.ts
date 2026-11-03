@@ -33,6 +33,7 @@ import type {
   BlockView,
   CreatedSession,
   CreatedSide,
+  LiveView,
   ContextView,
   GoalView,
   MessageView,
@@ -636,6 +637,31 @@ export function historyToTurns(
   return turns;
 }
 
+/**
+ * 接上一条正在跑的会话时，把进行中那一轮已经产出的东西接在历史后面。
+ *
+ * 历史快照只在轮次边界刷新，正在跑的这一轮在里面只有用户那句话；没有这一步，
+ * 接上之后要等下一个增量才会冒出一段没头没尾的回答，前面跑过的命令也看不见。
+ * 工具卡片用的 `callId` 与事件里的是同一个号，后续的 `tool_finished` 能对上。
+ */
+function withLive(turns: Turn[], live: LiveView[]): Turn[] {
+  if (live.length === 0) return turns;
+  // 最后一段正文可能还在写：不收束，后续增量才会接在同一段里。
+  const items: Item[] = live.map((x, i) =>
+    x.kind === "text"
+      ? { kind: "text", text: x.text, closed: i < live.length - 1 }
+      : {
+          kind: "tool",
+          callId: x.call_id,
+          name: x.name,
+          args: parseArgs(x.args),
+          result: x.result === null ? undefined : { ok: true, content: x.result, elapsedMs: 0 },
+        },
+  );
+  const last = turns[turns.length - 1];
+  return [...turns, { role: "assistant", turn: last?.turn, items }];
+}
+
 // ---------------------------------------------------------------------------
 // store
 // ---------------------------------------------------------------------------
@@ -764,7 +790,9 @@ export const useStore = create<Store>((set) => ({
       // 留着它们会让界面显示一批永远不会开始跑的「排队中」。
       queued: [],
       goal: c.goal,
-      turns: historyToTurns(c.history, c.prompts),
+      turns: withLive(historyToTurns(c.history, c.prompts), c.live ?? []),
+      // 接上的是正在跑的会话：错过的 `turn_started` 补不回来，按后端说的来。
+      streaming: c.running ?? false,
       changed: changedRecord(c.changes),
       changesSince: c.changes_since ?? 0,
       // 这里**不**补当前会话那一行：续接的会话本来就在列表里；新开的会话在发出第一句

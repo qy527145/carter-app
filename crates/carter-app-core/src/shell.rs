@@ -16,7 +16,7 @@ use carter::config::Config;
 use carter::provider::WireMessage;
 use carter::registry::ModelInfo;
 
-use crate::protocol::{AppEvent, Command};
+use crate::protocol::{AppEvent, Command, SessionEvent};
 
 /// 模型通过 `ask_user_question` 提的问题，等前端作答。
 ///
@@ -91,6 +91,9 @@ pub struct SessionHandle {
     /// 界面接上一条在后台跑的会话时要知道该不该显示「生成中」—— 事件不回放，
     /// 错过的那条 `turn_started` 补不回来。
     pub busy: std::sync::atomic::AtomicBool,
+    /// 界面此刻是不是连着它。换走时置 `false`，重新接上时置 `true` ——
+    /// [`AppShell::detach_session`] 跑完一轮后据此决定还关不关。
+    pub attached: std::sync::atomic::AtomicBool,
     /// 只有 crate 内能构造 —— 命令通道的持有者是会话运行器，不该由外部塞进来。
     pub(crate) cmd_tx: mpsc::UnboundedSender<Command>,
 }
@@ -115,6 +118,7 @@ impl SessionHandle {
             close: CancelToken::new(),
             done: CancelToken::new(),
             busy: std::sync::atomic::AtomicBool::new(false),
+            attached: std::sync::atomic::AtomicBool::new(false),
             cmd_tx,
         })
     }
@@ -296,17 +300,67 @@ impl AppShell {
         let ids: Vec<String> = handles.iter().map(|h| h.id.clone()).collect();
         // 并行等：主会话与侧边聊天各 5 秒串起来就是 10 秒，界面会明显卡一下。
         // 总时限仍是 5 秒。
-        let _ = tokio::time::timeout(
+        let waited = tokio::time::timeout(
             std::time::Duration::from_secs(5),
             futures::future::join_all(handles.iter().map(|h| h.done.cancelled())),
         )
         .await;
+        if waited.is_err() {
+            tracing::warn!(session = id, "关闭会话：5 秒内没有退出，重开会被拒绝直到它退出");
+        }
         // 超时**不**清标记：旧 runner 还攥着会话文件，这时按 id 重开就是两个写者 ——
         // 历史交错，`tool_result` 与它的 `tool_use` 被隔开，之后每次请求都 400。
         // 标记由 runner 退出时自己摘（`mark_closed`），这期间 `start_session` 会拒绝，
         // 界面上是一句「还在收尾，请稍后再打开」。
         let _ = ids;
         true
+    }
+
+    /// 界面换走了这条会话：空闲就关掉；正在跑一轮就让它跑完，跑完自己关。
+    ///
+    /// 换会话本来是「关掉旧的」—— 关会话要先让工具停下，用户只是切过去看一眼别的
+    /// 对话，正在跑的 bash 却被杀了。这一轮跑完之后才关，用户切回来时它还在（接上，
+    /// 见 `session::attach_session`）。
+    ///
+    /// 助理在跑的工单会话不归界面管，由助理自己收（`runtime::on_idle`）。
+    pub async fn detach_session(self: &Arc<Self>, id: &str) {
+        use std::sync::atomic::Ordering::SeqCst;
+        let Some(handle) = self.session(id) else { return };
+        handle.attached.store(false, SeqCst);
+        if self.assistant.is_worker(id) {
+            return;
+        }
+        // 先订阅再看 busy：反过来的话，看完到订阅之间来的那条 Idle 会漏掉。
+        let mut rx = self.subscribe();
+        if !handle.busy.load(SeqCst) {
+            self.close_session(id).await;
+            return;
+        }
+        let shell = self.clone();
+        let id = id.to_string();
+        tokio::spawn(async move {
+            loop {
+                let check = match rx.recv().await {
+                    Ok(AppEvent::Session { session_id, event: SessionEvent::Idle }) => session_id == id,
+                    Ok(_) => false,
+                    // 积压时 Idle 可能被挤掉了：照样核对一次。
+                    Err(broadcast::error::RecvError::Lagged(_)) => true,
+                    Err(broadcast::error::RecvError::Closed) => return,
+                };
+                if handle.done.is_cancelled() {
+                    return;
+                }
+                if !check || handle.busy.load(SeqCst) {
+                    continue;
+                }
+                // 跑完了。界面又接上了它、或它已经被换成新任务，就不归这里管。
+                let same = shell.session(&id).is_some_and(|h| Arc::ptr_eq(&h, &handle));
+                if same && !handle.attached.load(SeqCst) {
+                    shell.close_session(&id).await;
+                }
+                return;
+            }
+        });
     }
 
     /// 这条会话是不是正在关闭（已经发了信号，任务还没退出）。
@@ -338,6 +392,7 @@ impl AppShell {
             out.extend(self.close_tree(&child));
         }
         if let Some((_, handle)) = self.sessions.remove(id) {
+            tracing::info!(session = id, busy = handle.busy.load(std::sync::atomic::Ordering::SeqCst), "关闭会话");
             handle.close.set();
             handle.cancel.set();
             handle.asks.clear();
@@ -448,6 +503,77 @@ mod tests {
         );
         shell.sessions.insert(id.to_string(), h.clone());
         h
+    }
+
+    /// 换走一条正在跑的会话：不关、不打断；这一轮跑完才关。
+    #[tokio::test]
+    async fn detaching_a_busy_session_waits_for_its_turn_to_end() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let shell = shell();
+        let h = add(&shell, "b1", None);
+        h.busy.store(true, SeqCst);
+        shell.detach_session("b1").await;
+        assert!(!h.cancel.is_cancelled(), "正在跑的那一轮不能被打断");
+        assert!(shell.session("b1").is_some());
+
+        // 这一轮跑完。没有真的 runner，`done` 自己置位，免得关会话等满 5 秒。
+        h.busy.store(false, SeqCst);
+        let done = h.clone();
+        tokio::spawn(async move {
+            done.close.cancelled().await;
+            done.done.set();
+        });
+        shell.emit(AppEvent::Session { session_id: "b1".into(), event: SessionEvent::Idle });
+        for _ in 0..50 {
+            if shell.session("b1").is_none() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(shell.session("b1").is_none(), "跑完之后要关掉");
+    }
+
+    /// 换走之后又切回来：这一轮跑完时它正被看着，不能关。
+    #[tokio::test]
+    async fn a_session_reattached_before_its_turn_ends_stays_open() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let shell = shell();
+        let h = add(&shell, "b2", None);
+        h.busy.store(true, SeqCst);
+        shell.detach_session("b2").await;
+        h.attached.store(true, SeqCst);
+        h.busy.store(false, SeqCst);
+        shell.emit(AppEvent::Session { session_id: "b2".into(), event: SessionEvent::Idle });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(shell.session("b2").is_some());
+        assert!(!h.close.is_cancelled());
+    }
+
+    /// 空闲的会话换走就关，和以前一样。
+    #[tokio::test]
+    async fn detaching_an_idle_session_closes_it() {
+        let shell = shell();
+        let h = add(&shell, "b3", None);
+        let done = h.clone();
+        tokio::spawn(async move {
+            done.close.cancelled().await;
+            done.done.set();
+        });
+        shell.detach_session("b3").await;
+        assert!(shell.session("b3").is_none());
+        assert!(h.close.is_cancelled());
+    }
+
+    /// 关会话等超时之后，旧任务还没退出时这条会话不能被重开 —— 否则两个 runner 写同一个文件。
+    /// 真等满 5 秒（没有 test-util 不能暂停时钟）。
+    #[tokio::test]
+    async fn a_session_that_outlives_the_close_timeout_stays_marked_closing() {
+        let shell = shell();
+        let _h = add(&shell, "slow", None);
+        shell.close_session("slow").await;
+        assert!(shell.is_closing("slow"), "旧 runner 还没退出，标记要留着");
+        shell.mark_closed("slow");
+        assert!(!shell.is_closing("slow"));
     }
 
     /// 关闭必须是**显式通知**，不能只从注册表里拿掉。

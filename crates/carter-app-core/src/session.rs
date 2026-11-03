@@ -87,6 +87,11 @@ pub struct StartedSession {
     /// 界面拿它回填「编辑」框 —— 会话文件里存的是展开后的正文，回填进去等于把
     /// 整份文件内容摊在输入框里。同上：只存在应用私有目录，随历史一起带回。
     pub prompts: Vec<crate::prompts::TurnPrompt>,
+    /// 接上的会话此刻正在跑一轮（见 [`attach_session`]）。新开的总是 `false`。
+    pub running: bool,
+    /// 正在跑的那一轮已经产出的东西（正文、工具调用）。界面接上时据此把这一轮画出来，
+    /// 之后的增量照常从事件流来。不在跑时为空。
+    pub live: Vec<crate::shell::LiveItem>,
 }
 
 /// 接上一条正在后台跑的会话（不关掉重开），返回界面要的那份状态。
@@ -95,12 +100,16 @@ pub struct StartedSession {
 /// 接上则什么都不动 —— 历史取自句柄上的快照，进行中那一轮另外带回（见 `live`）。
 pub fn attach_session(shell: &AppShell, id: &str) -> Option<StartedSession> {
     let handle = shell.session(id)?;
+    handle.attached.store(true, Ordering::SeqCst);
+    tracing::info!(session = id, busy = handle.busy.load(Ordering::SeqCst), "接上正在后台的会话");
     Some(StartedSession {
         history: crate::view::to_views(&handle.history.load()),
         goal: goal::load(id).as_ref().map(goal::view),
         changes: crate::changes::load(id),
         changes_since: crate::changes::since(id),
         prompts: crate::prompts::load(id),
+        running: handle.busy.load(Ordering::SeqCst),
+        live: handle.live.snapshot(),
         handle,
     })
 }
@@ -123,6 +132,7 @@ pub fn start_session(shell: Arc<AppShell>, opts: SessionOptions) -> carter::Resu
     // 宁可让用户看到一句「还在收尾」，也不要把会话文件写坏。
     if let Some(id) = opts.resume_id.as_deref().or(opts.new_id.as_deref()) {
         if shell.session(id).is_some() || shell.is_closing(id) {
+            tracing::warn!(session = id, "拒绝重开：会话还在跑或还在收尾");
             return Err(carter::CarterError::Config(format!(
                 "会话 {id} 还在收尾（上一轮的命令没有响应中断），请稍后再打开。"
             )));
@@ -163,9 +173,12 @@ pub fn start_session(shell: Arc<AppShell>, opts: SessionOptions) -> carter::Resu
         Some(id) => find_by_id(id),
         // 「最近一条」不能选中助理对话：它从应用启动起就在后台跑着，再开一个 runner
         // 就是同一个会话文件两个写者。它有自己的入口，不参与这个选择。
-        None if opts.resume_latest => session::list(&opts.cwd, false)
-            .into_iter()
-            .find(|e| e.meta.id != crate::assistant::CHAT_SESSION_ID),
+        // 还在跑的（助理的工单、定时任务）也跳过，理由相同。
+        None if opts.resume_latest => session::list(&opts.cwd, false).into_iter().find(|e| {
+            e.meta.id != crate::assistant::CHAT_SESSION_ID
+                && shell.session(&e.meta.id).is_none()
+                && !shell.is_closing(&e.meta.id)
+        }),
         None => None,
     };
     let (mut thread, meta, resumed) = match existing {
@@ -295,6 +308,8 @@ pub fn start_session(shell: Arc<AppShell>, opts: SessionOptions) -> carter::Resu
         changes,
         changes_since,
         prompts,
+        running: false,
+        live: Vec::new(),
     })
 }
 
@@ -940,7 +955,7 @@ impl Runner {
         //
         // 助理的汇报不展开：里面有外部事件的文字，写一个 `@~/.ssh/id_rsa` 不该把文件读进来。
         // 后台命令的完成通知同理：里面是命令输出。
-        let expansion = if raw.starts_with(crate::assistant::REPORT_MARK)
+        let expansion = if crate::assistant::is_injected(&raw)
             || raw.starts_with(crate::tools::background::DONE_MARK)
         {
             Ok((raw.clone(), None))

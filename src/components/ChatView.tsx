@@ -1046,19 +1046,27 @@ function UserTurn({
   );
 }
 
-/** 与后端 `assistant::REPORT_MARK` 逐字对应。 */
+/** 与后端 `assistant::REPORT_MARK` / `EVENT_MARK` 逐字对应。 */
 const REPORT_MARK = "【助理汇报】";
+const EVENT_MARK = "【新事件】";
 
-/** 一条汇报：第一行是「状态 · 工单」，后面是正文。靠左，是助理在说话。 */
-function ReportTurn({ text }: { text: string }) {
-  const rest = text.slice(REPORT_MARK.length);
+/**
+ * 助理送进来的一条消息：汇报（进助理对话）或观察源的新事件（进工单会话）。
+ * 第一行是标题，后面是正文。靠左 —— 不是用户在说话。
+ */
+function ReportTurn({ mark, text }: { mark: string; text: string }) {
+  const rest = text.slice(mark.length);
   const cut = rest.indexOf("\n");
   const title = cut < 0 ? rest : rest.slice(0, cut);
   const body = cut < 0 ? "" : rest.slice(cut + 1).trim();
   return (
     <div className="rounded-xl border border-edge bg-card px-3.5 py-2.5">
       <div className="flex items-center gap-1.5 text-xs font-medium text-tone-blue">
-        <Megaphone size={12} className="shrink-0" />
+        {mark === EVENT_MARK ? (
+          <Radar size={12} className="shrink-0" />
+        ) : (
+          <Megaphone size={12} className="shrink-0" />
+        )}
         <span className="truncate">{title}</span>
       </div>
       {body && <div className="mt-1 whitespace-pre-wrap break-words text-sm text-ink">{body}</div>}
@@ -1122,7 +1130,8 @@ function TurnView({
 }) {
   if (turn.role === "user") {
     // 助理自己送进来的汇报：不是用户说的话，不画成用户气泡，也不给重试 / 分叉。
-    if (turn.text.startsWith(REPORT_MARK)) return <ReportTurn text={turn.text} />;
+    if (turn.text.startsWith(REPORT_MARK)) return <ReportTurn mark={REPORT_MARK} text={turn.text} />;
+    if (turn.text.startsWith(EVENT_MARK)) return <ReportTurn mark={EVENT_MARK} text={turn.text} />;
     if (turn.text.startsWith(DONE_MARK)) return <BackgroundDoneTurn text={turn.text} />;
     return <UserTurn turn={turn} onRetry={onRetry} retryAsks={retryAsks} onFork={onFork} />;
   }

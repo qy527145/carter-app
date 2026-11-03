@@ -844,6 +844,15 @@ pub const CHAT_SESSION_ID: &str = "assistant";
 /// 主动汇报送进对话时加在前面的标记。模型靠它认出「这不是用户说的话」。
 pub const REPORT_MARK: &str = "【助理汇报】";
 
+/// 观察源的新事件送进工单会话时加在前面的标记。界面靠它画成事件卡而不是用户气泡；
+/// 里面是外部文字，会话也不按用户输入展开它（`@文件`、`/命令`）。
+pub const EVENT_MARK: &str = "【新事件】";
+
+/// 这段输入是助理送进来的（汇报或事件），不是用户打的字。
+pub fn is_injected(text: &str) -> bool {
+    text.starts_with(REPORT_MARK) || text.starts_with(EVENT_MARK)
+}
+
 /// 助理对话这一轮的系统提示追加段：现状 + 该怎么做。
 ///
 /// 每轮现算（与原型 `runtime/policy` 每轮重新生成同一个理由）：用户在别处删了来源、

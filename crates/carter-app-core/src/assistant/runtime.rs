@@ -191,7 +191,11 @@ pub async fn assess(shell: &Arc<AppShell>, source: &Source, events: Vec<String>)
             d.verdict = Verdict::Attach;
             d.reason = reason;
             d.ticket_id = Some(ticket_id.clone());
-            let mut text = format!("（来源「{}」有了与这张工单相关的新事件）\n", source.name);
+            let mut text = format!(
+                "{}来源「{}」 · 与这张工单相关\n",
+                super::EVENT_MARK,
+                source.name
+            );
             for e in &events {
                 text.push_str(&format!("- {e}\n"));
             }
@@ -744,7 +748,9 @@ async fn on_idle(shell: &Arc<AppShell>, session_id: &str) {
                 .is_some_and(|h| Arc::ptr_eq(&h, &handle));
             // 等它真的退出再往下走：紧接着的 `launch_queued` 可能就要按 id 续接同一条会话，
             // 旧任务还攥着会话文件的话会出现两个写者（见 `AppShell::close_session`）。
-            if close && same {
+            // 用户正看着它（界面接上了这个句柄）就别关，等用户换走时由界面收
+            // （`AppShell::detach_session`）。
+            if close && same && !handle.attached.load(std::sync::atomic::Ordering::SeqCst) {
                 shell.close_session(session_id).await;
             }
         }

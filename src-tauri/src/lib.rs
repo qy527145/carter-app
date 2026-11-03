@@ -27,6 +27,34 @@ const CARTER_EVENT: &str = "carter://event";
 
 /// 桌面应用没有「当前工作目录」这个概念 —— 进程的 cwd 取决于从哪启动的，
 /// 用户不会预期会话记在 `/` 或 `C:\Windows\System32` 下。默认落在家目录。
+/// 日志写进 `~/.carter-app/app.log`。
+///
+/// 桌面应用没有终端，不装订阅者的话 `tracing::warn!` 全都丢掉 —— 出了「会话被打断」
+/// 「工单失败」这类问题，事后无据可查。只记 info 及以上，`CARTER_LOG` 可以改；
+/// 每次启动超过 5 MB 就截掉重来，不做轮转。
+fn init_logging() {
+    use tracing_subscriber::EnvFilter;
+    let path = carter_app_core::paths::app_home().join("app.log");
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let too_big = std::fs::metadata(&path).is_ok_and(|m| m.len() > 5 * 1024 * 1024);
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(!too_big)
+        .write(true)
+        .truncate(too_big)
+        .open(&path);
+    let Ok(file) = file else { return };
+    let filter = EnvFilter::try_from_env("CARTER_LOG")
+        .unwrap_or_else(|_| EnvFilter::new("info,carter_app_core=info,carter=warn"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_ansi(false)
+        .with_writer(std::sync::Mutex::new(file))
+        .try_init();
+}
+
 fn default_cwd() -> PathBuf {
     std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))
@@ -127,6 +155,47 @@ struct CreatedSession {
     changes_since: u32,
     /// 历史里每一轮用户打的原文（展开之前）。界面拿它回填「编辑」框。
     prompts: Vec<carter_app_core::prompts::TurnPrompt>,
+    /// 接上的是一条正在跑的会话：界面要显示成「生成中」。
+    running: bool,
+    /// 正在跑的那一轮已经产出的正文与工具调用，界面先把它们画出来。
+    live: Vec<LiveView>,
+}
+
+/// 进行中那一轮的一条记录（`LiveItem` 的界面形态）。
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum LiveView {
+    Text { text: String },
+    Tool { call_id: String, name: String, args: String, result: Option<String> },
+}
+
+impl CreatedSession {
+    fn from_started(started: carter_app_core::StartedSession) -> Self {
+        use carter_app_core::shell::LiveItem;
+        let handle = &started.handle;
+        Self {
+            session_id: handle.id.clone(),
+            model: handle.model.load().api_name.clone(),
+            model_ref: handle.model.load().key.clone(),
+            cwd: handle.cwd.to_string_lossy().to_string(),
+            history: started.history,
+            goal: started.goal,
+            changes: started.changes,
+            changes_since: started.changes_since,
+            prompts: started.prompts,
+            running: started.running,
+            live: started
+                .live
+                .into_iter()
+                .map(|x| match x {
+                    LiveItem::Text(text) => LiveView::Text { text },
+                    LiveItem::Tool { call_id, name, args, result } => {
+                        LiveView::Tool { call_id, name, args, result }
+                    }
+                })
+                .collect(),
+        }
+    }
 }
 
 /// 新建或续接一个会话，并把已有历史一并带回。
@@ -142,16 +211,16 @@ async fn create_session(
     resume: bool,
     resume_id: Option<String>,
 ) -> Result<CreatedSession, String> {
-    // 按 id 打开一条**还挂在后台**的会话：先把它关掉再重开。
+    // 按 id 打开一条**还在后台跑**的会话：接上它，不关掉重开。
     //
-    // 前端同一时刻只连着一条主会话，换会话时总是先关掉旧的 —— 所以按 id 打开时
-    // 它若还在注册表里，必然是界面已经不认识的孤儿：页面重载过（前端状态清空、
-    // 后端任务还活着）、快速连点了两条会话（两次「关旧开新」交错，有一条被盖掉），
-    // 或是定时任务在后台开的那条。不先关掉，`start_session` 会以「同一会话不能有
-    // 两个 runner」拒绝，而且之后每次都拒 —— 这条会话就再也点不开了。
-    // `close_session` 会等任务真的放掉会话文件才返回，所以重开不会出现双写者。
-    if let Some(id) = resume_id.as_deref() {
-        shell.close_session(id).await;
+    // 这类会话是助理的工单、定时任务开的那条，或者页面重载前界面连着的那条。
+    // 关掉重开会打断它正在跑的命令（关会话必须先让工具停下才能放掉会话文件），
+    // 而用户点开它只是想看一眼 —— 接上就够了，正在跑的那一轮照常往下走。
+    if let Some(started) = resume_id
+        .as_deref()
+        .and_then(|id| carter_app_core::session::attach_session(&shell, id))
+    {
+        return Ok(CreatedSession::from_started(started));
     }
     let opts = SessionOptions {
         cwd: cwd.map(PathBuf::from).unwrap_or_else(default_cwd),
@@ -162,18 +231,8 @@ async fn create_session(
     };
     let started = carter_app_core::start_session(shell.inner().clone(), opts)
         .map_err(|e| e.to_string())?;
-    let handle = &started.handle;
-    Ok(CreatedSession {
-        session_id: handle.id.clone(),
-        model: handle.model.load().api_name.clone(),
-        model_ref: handle.model.load().key.clone(),
-        cwd: handle.cwd.to_string_lossy().to_string(),
-        history: started.history,
-        goal: started.goal,
-        changes: started.changes,
-        changes_since: started.changes_since,
-        prompts: started.prompts,
-    })
+    started.handle.attached.store(true, std::sync::atomic::Ordering::SeqCst);
+    Ok(CreatedSession::from_started(started))
 }
 
 /// 显示常驻的助理对话：它在后台跑着就接上那一个，不关掉重开 —— 那会打断它正在说的话。
@@ -183,18 +242,7 @@ async fn open_assistant_chat(
     model: Option<String>,
 ) -> Result<CreatedSession, String> {
     let started = carter_app_core::assistant::chat::open(shell.inner(), model)?;
-    let handle = &started.handle;
-    Ok(CreatedSession {
-        session_id: handle.id.clone(),
-        model: handle.model.load().api_name.clone(),
-        model_ref: handle.model.load().key.clone(),
-        cwd: handle.cwd.to_string_lossy().to_string(),
-        history: started.history,
-        goal: started.goal,
-        changes: started.changes,
-        changes_since: started.changes_since,
-        prompts: started.prompts,
-    })
+    Ok(CreatedSession::from_started(started))
 }
 
 #[derive(Serialize)]
@@ -251,6 +299,13 @@ fn send_command(
 #[tauri::command]
 async fn close_session(shell: State<'_, Arc<AppShell>>, session_id: String) -> Result<(), String> {
     shell.close_session(&session_id).await;
+    Ok(())
+}
+
+/// 界面换走了这条会话。正在跑就让它跑完再关，见 `AppShell::detach_session`。
+#[tauri::command]
+async fn detach_session(shell: State<'_, Arc<AppShell>>, session_id: String) -> Result<(), String> {
+    shell.inner().detach_session(&session_id).await;
     Ok(())
 }
 
@@ -1546,6 +1601,7 @@ pub fn run() {
         // 助理只在工单要人处理时出声，走的就是系统通知。
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
+            init_logging();
             // 配置在启动时读一次。之后每次界面写回都会热重载（`apply_config`）。
             let config = carter::config::Config::load()?;
             let shell = AppShell::new(config);
@@ -1615,6 +1671,7 @@ pub fn run() {
             set_app_settings,
             // 会话
             create_session,
+            detach_session,
             open_assistant_chat,
             create_side_session,
             send_command,
