@@ -510,6 +510,49 @@ mod tests {
         assert!(r.same(&m.id, "张三 <Z@x>"));
     }
 
+    fn sh(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git").current_dir(dir).args(args).output().unwrap();
+        assert!(out.status.success(), "git {args:?}：{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// 加入：只提交成员目录（用户暂存的别的东西原样留着），并广播一条 `join`。
+    /// 在另一个分支上加入的人，回到 main 也认得出来。
+    #[test]
+    fn joining_commits_only_the_roster_and_is_visible_across_branches() {
+        let dir = tmp();
+        sh(&dir, &["init", "-q", "-b", "main"]);
+        sh(&dir, &["config", "user.name", "zs"]);
+        sh(&dir, &["config", "user.email", "z@x"]);
+        crate::team::init::initialize(&dir, Some("t")).unwrap();
+        let store = crate::team::store::Store::discover(&dir).unwrap();
+
+        // 用户自己暂存了一个无关文件，加入团队不能把它卷进去。
+        std::fs::write(dir.join("wip.txt"), "x").unwrap();
+        sh(&dir, &["add", "wip.txt"]);
+
+        sh(&dir, &["checkout", "-q", "-b", "feature"]);
+        let (m, created) = join_and_announce(&store, Join::New { name: "张三".into() }, None).unwrap();
+        assert!(created);
+        assert_eq!(sh(&dir, &["diff", "--cached", "--name-only"]), "wip.txt", "用户暂存的原样留着");
+        let last = sh(&dir, &["log", "-1", "--name-only", "--format=%s"]);
+        assert!(last.contains("张三 加入团队") && last.contains("members/"), "{last}");
+        assert!(!last.contains("wip.txt"), "{last}");
+
+        let evs = crate::team::events::read(&dir, 10);
+        let j = evs.iter().find(|e| e.kind.is("join")).expect("要广播一条 join");
+        assert_eq!(j.from.as_deref(), Some(m.id.as_str()));
+        assert!(j.addressed_to("m-anyone"), "join 发给全员");
+
+        // 回到 main：工作区里没有这个成员文件，但名单里要有他。
+        sh(&dir, &["stash", "-q"]);
+        sh(&dir, &["checkout", "-q", "main"]);
+        assert!(load(store.root()).members.is_empty(), "main 的工作区里确实没有");
+        let all = load_all(&store);
+        assert_eq!(all.by_id(&m.id).map(|x| x.name.as_str()), Some("张三"), "别的分支上加入的也要认得");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn duplicate_names_are_not_guessed() {
         let root = tmp();

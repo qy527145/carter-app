@@ -375,6 +375,8 @@ export type AppSettings = {
    * 内置目录规则与 `.gitignore` 不在这里，它们始终生效。
    */
   changes_ignore: string[];
+  /** 全局昵称：加入新团队时预填的称呼。空 = 用 git 的 `user.name`。 */
+  nickname: string;
 };
 
 export type AppInfo = {
@@ -1858,16 +1860,59 @@ export type TeamBoard = {
   goal_id: string | null;
 };
 
+/**
+ * 一条团队事件（协议见 `docs/team-protocol.md`）。
+ *
+ * `kind` 是开放的字符串：新版客户端写的、本版不认识的种类也要能显示出来，
+ * 不能吞掉 —— 发的人以为对方看到了。
+ */
 export type TeamEvent = {
+  /** 提交的短 SHA。只用来显示；引用请用 `eid`。 */
   sha: string;
-  /** `claim` | `release` | `comment` | `sync` | `note` */
+  /** 协议版本。0 = 旧版打在代码分支上的事件。 */
+  v: number;
+  /** `comment` | `mention` | `broadcast` | `request` | `assign` | `handoff` | `claim` | `release` | `join` | `note` | `sync` | … */
   kind: string;
+  /** 稳定的事件 id（`e-…`）。旧事件用 SHA 顶上。 */
+  eid: string;
   target: string | null;
   goal_id: string | null;
+  /** 发出者的成员 id。旧事件没有，按作者邮箱去名单里认。 */
+  from: string | null;
+  /** 收件人成员 id，`*` = 全员。 */
+  to: string[];
+  /** `"carter"` = 由 agent 代发。 */
+  via: string | null;
+  reply_to: string | null;
+  due: number | null;
   body: string;
   subject: string;
   author: { name: string; email: string } | null;
   at: number;
+  legacy: boolean;
+};
+
+/** 收件箱里的一条：事件 + 为什么在这里。 */
+export type TeamInboxItem = TeamEvent & {
+  reason: "mention" | "broadcast" | "assigned" | "my_task";
+};
+
+export type TeamMember = {
+  id: string;
+  name: string;
+  emails: string[];
+  role: string;
+  joined_at: number;
+};
+
+export type TeamPeople = {
+  members: TeamMember[];
+  /** 本机的成员 id。`null` = 还没加入这个团队。 */
+  me: string | null;
+  /** 本机的 git 身份（`名字 <邮箱>`）。没配 git 时为空，那时没法加入。 */
+  identity: string | null;
+  /** 提交过代码、还没加入的人（`名字 <邮箱>`）。 */
+  pending: string[];
 };
 
 export type TeamOverview = {
@@ -1946,4 +1991,50 @@ export function teamSync(cwd: string): Promise<string> {
  */
 export function teamSetRemote(cwd: string, url: string): Promise<string> {
   return invoke<string>("team_set_remote", { cwd, url });
+}
+
+/** 团队里有谁、本机是谁。 */
+export function teamPeople(cwd: string): Promise<TeamPeople> {
+  return invoke<TeamPeople>("team_people", { cwd });
+}
+
+/**
+ * 加入团队。给 `memberId` = 「我是这个人，这是我的另一台机器」（把本机邮箱挂到他名下）；
+ * 否则用 `name` 新建一个成员。已经在名单里时什么都不做。
+ */
+export function teamJoin(
+  cwd: string,
+  join: { name: string } | { memberId: string },
+): Promise<TeamMember> {
+  return invoke<TeamMember>("team_join", {
+    cwd,
+    name: "name" in join ? join.name : null,
+    memberId: "memberId" in join ? join.memberId : null,
+  });
+}
+
+export function teamRenameMe(cwd: string, name: string): Promise<TeamMember> {
+  return invoke<TeamMember>("team_rename_me", { cwd, name });
+}
+
+/**
+ * 团队操作：指派、认领、评论、@、广播……参数与 `team` 工具一致（`action` + 各自的字段），
+ * 后端走同一份实现，只是不带「经卡特」的标记。返回给人看的一句结果。
+ */
+export type TeamAction =
+  | { action: "assign"; task_id: string; assignee: string; text?: string }
+  | { action: "task_claim" | "task_release"; task_id: string }
+  | { action: "task_update"; task_id: string; assignee: string }
+  | { action: "comment"; task_id?: string; goal_id?: string; text: string; to?: string[] }
+  | { action: "mention"; to: string[]; text: string; task_id?: string; goal_id?: string }
+  | { action: "request"; to: string[]; text: string; task_id?: string; due_at?: number }
+  | { action: "broadcast"; text: string; goal_id?: string };
+
+export function teamAct(cwd: string, args: TeamAction): Promise<string> {
+  return invoke<string>("team_act", { cwd, args });
+}
+
+/** 跟本机有关的消息，新的在前。`fetch` = 先拉一次远端。 */
+export function teamInbox(cwd: string, fetch = false): Promise<TeamInboxItem[]> {
+  return invoke<TeamInboxItem[]>("team_inbox", { cwd, fetch });
 }

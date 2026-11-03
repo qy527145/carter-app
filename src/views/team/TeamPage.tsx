@@ -1,8 +1,10 @@
-// 团队协作页：目标 → 任务图 → 看板 → 动态。
+// 团队协作页：我的 → 任务图 → 看板 → 动态。
 //
-// ## 三个视图的选择理由
+// ## 四个视图的选择理由
 //
-// * **任务图**（默认）—— 目标是「一件事怎么拆开、谁等谁」，这本质上是一张 DAG。
+// * **我的**（默认）—— 开发成员打开这一页的第一个问题是「我现在该做什么、谁在找我」，
+//   不是「整个项目长什么样」。详见 `MineAndLog.tsx`。
+// * **任务图** —— 目标是「一件事怎么拆开、谁等谁」，这本质上是一张 DAG。
 //   用横向泳道（层 = 依赖深度）而不是纵树：依赖是「从左往右推进」的，横向读起来
 //   与「进度条」是同一个方向。父子的缩进画在节点标题上，不参与泳道计算 ——
 //   父子是「拆解」，依赖是「先后」，两套约束不该抢同一个轴。
@@ -33,13 +35,13 @@ import {
   Link2,
   ListChecks,
   LoaderCircle,
+  UserRound,
   MessageSquare,
   Plus,
   RefreshCw,
   Send,
   Sparkles,
   Target,
-  Users,
 } from "lucide-react";
 
 import {
@@ -60,16 +62,13 @@ import { ASSISTANT_CHAT_ID, openProjectChat } from "../../lib/sessionOps";
 import { toastError, toastOk } from "../../lib/toast";
 import { useStore } from "../../store";
 import { BoardFrame } from "./BoardFrame";
-import {
-  avatarHue,
-  displayName,
-  layerize,
-  priorityTone,
-  since,
-  statusTone,
-} from "../../lib/teamUi";
+import { LogTab, MineTab, markSeen, readSeen, useInbox } from "./MineAndLog";
+import { PeopleProvider, usePeople } from "./people";
+import { IdentityChip, JoinDialog, PersonAvatar } from "./peopleUi";
+import { TaskDrawer } from "./TaskDrawer";
+import { layerize, personName, priorityTone, statusTone } from "../../lib/teamUi";
 
-type Tab = "graph" | "board" | "log";
+type Tab = "mine" | "graph" | "board" | "log";
 
 /**
  * 能挑的项目：有过对话的目录（按最近用过排）+ 当前正在看的那个。
@@ -106,12 +105,33 @@ async function pickDirectory(): Promise<string | null> {
 
 export function TeamPage() {
   const cwd = useStore((s) => s.teamCwd);
+  // 名单随全景一起刷新：别人的加入是随 git 同步过来的，重读全景时名单也该重读。
+  const [nonce, setNonce] = useState(0);
+  const bump = useCallback(() => setNonce((n) => n + 1), []);
+  return (
+    <PeopleProvider cwd={cwd} nonce={nonce}>
+      <TeamPageBody onReloaded={bump} />
+    </PeopleProvider>
+  );
+}
+
+function TeamPageBody({ onReloaded }: { onReloaded: () => void }) {
+  const cwd = useStore((s) => s.teamCwd);
   const setTeamCwd = useStore((s) => s.setTeamCwd);
+  const { people } = usePeople();
   const [data, setData] = useState<TeamOverview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [tab, setTab] = useState<Tab>("graph");
+  const [tab, setTab] = useState<Tab>("mine");
+  /** 抽屉里打开的任务（存 id，数据刷新后跟着最新那份走）。 */
+  const [opened, setOpened] = useState<{ goal: string; task: string } | null>(null);
+  const [joining, setJoining] = useState(false);
+  /** 收件箱跟着全景刷新；`fetchInbox` 只在第一次与手动刷新时拉远端，别的时候读本地。 */
+  const [inboxNonce, setInboxNonce] = useState(0);
+  const [fetchInbox, setFetchInbox] = useState(true);
+  const inbox = useInbox(cwd, inboxNonce, fetchInbox);
+  const [seen, setSeen] = useState(() => readSeen(cwd));
   const [picked, setPicked] = useState<string | null>(null);
   /** 正在编辑远端地址。`null` = 没打开。 */
   const [remoteDraft, setRemoteDraft] = useState<string | null>(null);
@@ -127,6 +147,8 @@ export function TeamPage() {
       if (mine !== seq.current) return;
       setData(next);
       setError(null);
+      onReloaded();
+      setInboxNonce((n) => n + 1);
     } catch (e) {
       if (mine !== seq.current) return;
       setData(null);
@@ -134,7 +156,7 @@ export function TeamPage() {
     } finally {
       if (mine === seq.current) setLoading(false);
     }
-  }, [cwd]);
+  }, [cwd, onReloaded]);
 
   // 换项目：先清掉旧的，别让上一个项目的目标在新标题下闪一帧。
   useEffect(() => {
@@ -142,8 +164,39 @@ export function TeamPage() {
     setError(null);
     setPicked(null);
     setRemoteDraft(null);
+    setOpened(null);
+    setFetchInbox(true);
+    setSeen(readSeen(cwd));
     void load();
-  }, [load]);
+  }, [load, cwd]);
+
+  // 第一次在这个团队里、git 身份也配好了、还不在名单里：问一次要不要加入。
+  // 只问一次（按项目记在本机），点了「以后再说」就不再自动弹 —— 右上角一直有入口。
+  useEffect(() => {
+    if (!people || people.me || !people.identity || !data) return;
+    const key = `carter.team.joinAsked:${cwd}`;
+    try {
+      if (localStorage.getItem(key)) return;
+      localStorage.setItem(key, "1");
+    } catch {
+      return;
+    }
+    setJoining(true);
+  }, [people, data, cwd]);
+
+  // 看过「我的」或「动态」就算读过：把已读游标推到最新一条。
+  useEffect(() => {
+    if ((tab !== "mine" && tab !== "log") || inbox.length === 0) return;
+    const latest = Math.max(...inbox.map((i) => i.at));
+    // 延迟一下再标：刚打开时那几条「新」要让人看见高亮。
+    const t = setTimeout(() => {
+      markSeen(cwd, latest);
+      setSeen(latest);
+    }, 4000);
+    return () => clearTimeout(t);
+  }, [tab, inbox, cwd]);
+
+  const unread = inbox.filter((i) => i.at > seen).length;
 
   // 团队数据在磁盘上，别处（对话里的模型、git pull）随时会改。回到窗口时对一次。
   useEffect(() => {
@@ -182,6 +235,8 @@ export function TeamPage() {
     setBusy(true);
     try {
       toastOk(await teamSync(cwd));
+      // 同步本身已经拉过事件，收件箱读本地即可。
+      setFetchInbox(false);
       await load();
     } catch (e) {
       toastError(e);
@@ -209,6 +264,16 @@ export function TeamPage() {
     return data.goals.find((g) => g.id === picked) ?? data.goals[0] ?? null;
   }, [data, picked]);
 
+  const openTask = useCallback((goal: TeamGoal, task: TeamTask) => {
+    setOpened({ goal: goal.id, task: task.id });
+  }, []);
+  const drawer = useMemo(() => {
+    if (!opened || !data) return null;
+    const goal = data.goals.find((g) => g.id === opened.goal);
+    const task = goal?.tasks.find((t) => t.id === opened.task);
+    return goal && task ? { goal, task } : null;
+  }, [opened, data]);
+
   /** 去这个项目的对话里，把一段话摆进输入框。 */
   const askCarter = useCallback(
     (draft?: string) => {
@@ -224,6 +289,10 @@ export function TeamPage() {
 
         {data && (
           <div className="flex items-center gap-1 rounded-lg bg-card p-0.5">
+            <TabButton active={tab === "mine"} onClick={() => setTab("mine")} icon={<UserRound size={12} />}>
+              我的
+              {unread > 0 && <Dot n={unread} />}
+            </TabButton>
             <TabButton active={tab === "graph"} onClick={() => setTab("graph")} icon={<GitBranch size={12} />}>
               任务图
             </TabButton>
@@ -257,18 +326,16 @@ export function TeamPage() {
                 配远端
               </button>
             ))}
-          {data?.identity && (
-            <span
-              title={`以 ${data.identity} 的身份认领与提交`}
-              className="hidden items-center gap-1 rounded-full bg-card px-2 py-1 text-[10px] text-dim lg:flex"
-            >
-              <Avatar identity={data.identity} size={14} />
-              {displayName(data.identity)}
-            </span>
-          )}
+          {data && <IdentityChip cwd={cwd} onJoin={() => setJoining(true)} />}
           {data && (
             <>
-              <IconAction onClick={() => void load()} title="重新读取">
+              <IconAction
+                onClick={() => {
+                  setFetchInbox(true);
+                  void load();
+                }}
+                title="重新读取（顺带拉一次新消息）"
+              >
                 <RefreshCw size={13} className={loading ? "animate-spin" : ""} />
               </IconAction>
               <IconAction
@@ -359,15 +426,42 @@ export function TeamPage() {
             </div>
           )}
 
+          {tab === "mine" && (
+            <MineTab data={data} inbox={inbox} seen={seen} onOpenTask={openTask} onJoin={() => setJoining(true)} />
+          )}
           {tab === "graph" && (
-            <GraphTab data={data} goal={activeGoal} onPick={setPicked} onAsk={askCarter} />
+            <GraphTab data={data} goal={activeGoal} onPick={setPicked} onAsk={askCarter} onOpenTask={openTask} />
           )}
           {tab === "board" && (
             <BoardTab cwd={cwd} boards={data.boards} version={data} onAsk={askCarter} />
           )}
-          {tab === "log" && <LogTab data={data} />}
+          {tab === "log" && (
+            <LogTab
+              cwd={cwd}
+              data={data}
+              inbox={inbox}
+              seen={seen}
+              onChanged={() => void load()}
+              onOpenTask={openTask}
+              onNeedJoin={() => setJoining(true)}
+            />
+          )}
         </div>
       )}
+
+      {drawer && data && (
+        <TaskDrawer
+          cwd={cwd}
+          task={drawer.task}
+          goal={drawer.goal}
+          events={data.events}
+          onClose={() => setOpened(null)}
+          onChanged={() => void load()}
+          onAsk={askCarter}
+          onNeedJoin={() => setJoining(true)}
+        />
+      )}
+      {joining && <JoinDialog cwd={cwd} onClose={() => setJoining(false)} />}
     </div>
   );
 }
@@ -616,11 +710,13 @@ function GraphTab({
   goal,
   onPick,
   onAsk,
+  onOpenTask,
 }: {
   data: TeamOverview;
   goal: TeamGoal | null;
   onPick: (id: string) => void;
   onAsk: (draft?: string) => void;
+  onOpenTask: (goal: TeamGoal, task: TeamTask) => void;
 }) {
   if (data.goals.length === 0) {
     return (
@@ -655,7 +751,7 @@ function GraphTab({
 
       {/* 图 */}
       <div className="min-w-0 flex-1 p-5">
-        {goal ? <GoalGraph goal={goal} onAsk={onAsk} /> : null}
+        {goal ? <GoalGraph goal={goal} onAsk={onAsk} onOpenTask={onOpenTask} /> : null}
       </div>
     </div>
   );
@@ -699,7 +795,24 @@ function GoalCard({
   );
 }
 
-function GoalGraph({ goal, onAsk }: { goal: TeamGoal; onAsk: (draft?: string) => void }) {
+function GoalGraph({
+  goal,
+  onAsk,
+  onOpenTask,
+}: {
+  goal: TeamGoal;
+  onAsk: (draft?: string) => void;
+  onOpenTask: (goal: TeamGoal, task: TeamTask) => void;
+}) {
+  const { people } = usePeople();
+  // 按人筛：只看某个人的任务（其余的淡出而不是藏起来 —— 依赖关系还要看得见）。
+  // `null` = 全部，`""` = 没人负责的。
+  const [who, setWho] = useState<string | null>(null);
+  const assignees = useMemo(() => {
+    const seen = new Map<string, number>();
+    for (const t of goal.tasks) if (t.assignee) seen.set(t.assignee, (seen.get(t.assignee) ?? 0) + 1);
+    return [...seen];
+  }, [goal.tasks]);
   const layers = useMemo(() => layerize(goal.tasks), [goal.tasks]);
 
   // 泳道 = 依赖深度。同一层内按 `order`（后端已经排好）—— 保持稳定，不抖动。
@@ -754,6 +867,25 @@ function GoalGraph({ goal, onAsk }: { goal: TeamGoal; onAsk: (draft?: string) =>
         </div>
       </div>
 
+      {assignees.length > 0 && (
+        <div className="mb-3 flex flex-wrap items-center gap-1 text-[11px]">
+          <span className="mr-1 text-[10px] text-dim">按人看</span>
+          <FilterChip active={who === null} onClick={() => setWho(null)}>
+            全部
+          </FilterChip>
+          {assignees.map(([a, n]) => (
+            <FilterChip key={a} active={who === a} onClick={() => setWho(who === a ? null : a)}>
+              <PersonAvatar person={a} size={13} />
+              {people?.me === a ? "我" : personName(people, a)}
+              <span className="tabular-nums opacity-60">{n}</span>
+            </FilterChip>
+          ))}
+          <FilterChip active={who === ""} onClick={() => setWho(who === "" ? null : "")}>
+            没人负责
+          </FilterChip>
+        </div>
+      )}
+
       {goal.tasks.length === 0 ? (
         <div className="rounded-xl bg-card p-6 text-center text-xs text-dim">
           这个目标还没有任务。点右上角「让卡特拆解」，它会在这个项目的对话里拆好。
@@ -766,7 +898,15 @@ function GoalGraph({ goal, onAsk }: { goal: TeamGoal; onAsk: (draft?: string) =>
                 {i === 0 ? "起点" : `第 ${i} 层`}
               </div>
               {lane.map((t) => (
-                <TaskNode key={t.id} task={t} byId={byId} goal={goal} onAsk={onAsk} />
+                <TaskNode
+                  key={t.id}
+                  task={t}
+                  byId={byId}
+                  goal={goal}
+                  onAsk={onAsk}
+                  onOpen={() => onOpenTask(goal, t)}
+                  dim={who !== null && (who === "" ? !!t.assignee : t.assignee !== who)}
+                />
               ))}
               {lane.length === 0 && (
                 <div className="rounded-lg border border-dashed border-edge px-2 py-6 text-center text-[10px] text-dim">
@@ -816,19 +956,33 @@ function TaskNode({
   byId,
   goal,
   onAsk,
+  onOpen,
+  dim,
 }: {
   task: TeamTask;
   byId: Map<string, TeamTask>;
   goal: TeamGoal;
   onAsk: (draft?: string) => void;
+  onOpen: () => void;
+  dim: boolean;
 }) {
+  const { people } = usePeople();
   const closed = task.status === "done" || task.status === "dropped";
   const tone = statusTone(task.status);
   const parent = task.parent_id ? byId.get(task.parent_id) : null;
 
   return (
     <div
-      className="group relative rounded-xl bg-card p-2.5 shadow-soft transition-shadow hover:shadow-lift"
+      role="button"
+      tabIndex={0}
+      onClick={onOpen}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") onOpen();
+      }}
+      title="打开任务：看要求、指派、讨论"
+      className={`group relative cursor-pointer rounded-xl bg-card p-2.5 shadow-soft transition-[box-shadow,opacity] hover:shadow-lift ${
+        dim ? "opacity-35" : ""
+      }`}
       style={{
         // 能开工的左边挂一条彩色竖线 —— 一眼能扫出「现在能做哪几件」。
         boxShadow: task.ready
@@ -849,8 +1003,15 @@ function TaskNode({
         {task.ready && (
           <span className="text-[10px] text-tone-green">可开工</span>
         )}
-        <span className="ml-auto">
-          {task.assignee && <Avatar identity={task.assignee} size={16} />}
+        <span className="ml-auto flex items-center gap-1">
+          {task.assignee ? (
+            <span className="flex items-center gap-1 text-[10px] text-dim">
+              {personName(people, task.assignee)}
+              <PersonAvatar person={task.assignee} size={16} />
+            </span>
+          ) : (
+            !closed && <span className="text-[10px] text-dim opacity-0 group-hover:opacity-100">待指派</span>
+          )}
         </span>
       </div>
 
@@ -884,7 +1045,8 @@ function TaskNode({
         {/* 悬停才露出来：每张卡常驻一个按钮，整屏就是一片按钮。 */}
         {!closed && (
           <button
-            onClick={() =>
+            onClick={(e) => {
+              e.stopPropagation();
               onAsk(
                 `接着做这个任务：\n\n` +
                   `- 任务：${task.title}\n` +
@@ -893,8 +1055,8 @@ function TaskNode({
                   `- 当前状态：${task.status_label}\n` +
                   (task.blocked_reason ? `- 受阻原因：${task.blocked_reason}\n` : "") +
                   `\n先看一眼任务的具体要求（acceptance 里写了验收标准），再动手。`,
-              )
-            }
+              );
+            }}
             title="去这个项目的对话里，把任务摆进输入框"
             className="ml-auto hidden shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-dim transition-colors hover:bg-ink/5 hover:text-ink group-hover:flex"
           >
@@ -1013,51 +1175,6 @@ function BoardTab({
 // 动态
 // ---------------------------------------------------------------------------
 
-const KIND_LABEL: Record<string, string> = {
-  claim: "认领",
-  release: "释放",
-  comment: "评论",
-  sync: "同步",
-  note: "备注",
-};
-
-function LogTab({ data }: { data: TeamOverview }) {
-  if (data.events.length === 0) {
-    return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-2 py-24 text-sm text-dim">
-        <Users size={20} />
-        还没有团队动态
-        <div className="text-xs">
-          认领任务、留一条评论，都会在这里留下一条带作者与时间的记录。
-        </div>
-      </div>
-    );
-  }
-  return (
-    <div className="mx-auto max-w-3xl space-y-1 p-5">
-      {data.events.map((e) => (
-        <div key={e.sha} className="flex gap-2.5 rounded-lg px-2 py-1.5 hover:bg-card">
-          <Avatar identity={e.author ? `${e.author.name} <${e.author.email}>` : null} size={20} />
-          <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-baseline gap-1.5 text-[11px]">
-              <span className="font-medium">{displayName(e.author?.name)}</span>
-              <span className="text-dim">{KIND_LABEL[e.kind] ?? e.kind}</span>
-              {e.target && <span className="mono text-[10px] text-dim">{e.target}</span>}
-              <span className="ml-auto text-[10px] text-dim">{since(e.at)}</span>
-            </div>
-            {e.body && (
-              <div className="mt-0.5 whitespace-pre-wrap text-[11px] leading-relaxed text-ink/90">
-                {e.body}
-              </div>
-            )}
-          </div>
-          <span className="mono shrink-0 self-start text-[9px] text-dim">{e.sha}</span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 // ---------------------------------------------------------------------------
 // 小件
 // ---------------------------------------------------------------------------
@@ -1142,25 +1259,33 @@ function IconAction({
   );
 }
 
-function Avatar({ identity, size = 18 }: { identity: string | null; size?: number }) {
-  const name = displayName(identity);
-  if (!name) return null;
-  const hue = avatarHue(identity);
+/** 未读数的小红点。 */
+function Dot({ n }: { n: number }) {
   return (
-    <span
-      title={identity ?? ""}
-      className="inline-flex shrink-0 items-center justify-center rounded-full font-medium"
-      style={{
-        width: size,
-        height: size,
-        fontSize: size * 0.5,
-        // 低饱和 + 固定明度：头像是身份提示，不该抢主体的注意力。
-        background: `hsl(${hue} 45% 48% / 0.18)`,
-        color: `hsl(${hue} 60% 38%)`,
-      }}
-    >
-      {[...name][0]?.toUpperCase() ?? "?"}
+    <span className="min-w-4 rounded-full bg-tone-orange px-1 text-center text-[9px] font-medium leading-4 text-white">
+      {n > 99 ? "99+" : n}
     </span>
+  );
+}
+
+function FilterChip({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`flex items-center gap-1 rounded-full px-2 py-0.5 transition-colors ${
+        active ? "bg-ink text-[var(--accent-contrast)]" : "bg-card text-dim hover:text-ink"
+      }`}
+    >
+      {children}
+    </button>
   );
 }
 

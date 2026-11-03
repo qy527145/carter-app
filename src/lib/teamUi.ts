@@ -4,7 +4,7 @@
 // 待办条、任务详情抽屉）说的是同一套话。状态色散落三处时，最容易出现「同一件事
 // 在列表里是橙色、在抽屉里是蓝色」—— 那不叫设计，那叫没设计。
 
-import type { TeamTask } from "./api";
+import type { TeamEvent, TeamMember, TeamPeople, TeamTask } from "./api";
 
 /** 任务 / 目标状态 → 语义色。用 body 上的 CSS 变量，两套主题各自成立。 */
 export function statusTone(status: string): {
@@ -124,4 +124,93 @@ export function layerize(tasks: TeamTask[]): Map<string, number> {
 
   for (const t of tasks) depth(t.id, new Set());
   return memo;
+}
+
+// ---------------------------------------------------------------------------
+// 成员
+// ---------------------------------------------------------------------------
+
+
+/**
+ * 把一个「人」的引用解析成成员。任务里的 `assignee` 可能是成员 id（v1）、也可能是
+ * `名字 <邮箱>`（v0 留下的），两种都认 —— 与后端 `Roster::resolve` 同一套规则。
+ */
+export function findMember(people: TeamPeople | null, raw: string | null | undefined): TeamMember | null {
+  if (!people || !raw) return null;
+  const r = raw.trim();
+  if (r.startsWith("m-")) return people.members.find((m) => m.id === r) ?? null;
+  const email = /<([^>]+)>/.exec(r)?.[1] ?? (r.includes("@") ? r : null);
+  if (email) {
+    const e = email.trim().toLowerCase();
+    return people.members.find((m) => m.emails.some((x) => x.toLowerCase() === e)) ?? null;
+  }
+  return null;
+}
+
+/** 给人看的名字：成员的昵称，认不出就从 `名字 <邮箱>` 里取名字。 */
+export function personName(people: TeamPeople | null, raw: string | null | undefined): string {
+  if (!raw) return "";
+  return findMember(people, raw)?.name ?? displayName(raw);
+}
+
+/** 头像配色用的稳定键：成员用 id，认不出的用原串。同一个人换了邮箱颜色不变。 */
+export function personKey(people: TeamPeople | null, raw: string | null | undefined): string {
+  return findMember(people, raw)?.id ?? raw ?? "";
+}
+
+/** 这个引用是不是本机这个人。 */
+export function isMe(people: TeamPeople | null, raw: string | null | undefined): boolean {
+  if (!people?.me || !raw) return false;
+  return findMember(people, raw)?.id === people.me || raw === people.me;
+}
+
+/** 事件是谁发的：v1 看 `from`，v0 按作者邮箱认。返回成员 id 或 `名字 <邮箱>`。 */
+export function eventSender(e: TeamEvent): string | null {
+  if (e.from) return e.from;
+  return e.author ? `${e.author.name} <${e.author.email}>` : null;
+}
+
+/** 事件种类 → 动词。不认识的原样给出去（协议：不认识的种类也要显示）。 */
+export function eventVerb(kind: string): string {
+  return (
+    {
+      comment: "评论",
+      mention: "提到",
+      broadcast: "广播",
+      request: "请求",
+      assign: "指派",
+      handoff: "转交",
+      claim: "认领",
+      release: "释放",
+      join: "加入了团队",
+      note: "更新进展",
+      sync: "同步",
+    } as Record<string, string>
+  )[kind] ?? kind;
+}
+
+/**
+ * 正文里的 `@昵称` → 成员 id。发消息时用：协议规定收件人只看 `to=`，不从正文里猜，
+ * 所以这一步在发送前做，用户看到的是 `@小张`，发出去的是 id。
+ *
+ * 昵称里可能有空格以外的任何字符，按名单里的名字**从长到短**去匹配，避免「小张」
+ * 把「小张三」截成两半。重名的不解析（不知道是哪个）。
+ */
+export function mentionsIn(text: string, people: TeamPeople | null): string[] {
+  if (!people) return [];
+  const counts = new Map<string, number>();
+  for (const m of people.members) counts.set(m.name, (counts.get(m.name) ?? 0) + 1);
+  const named = people.members
+    .filter((m) => counts.get(m.name) === 1)
+    .sort((a, b) => b.name.length - a.name.length);
+  const out = new Set<string>();
+  let rest = text;
+  for (const m of named) {
+    const tag = `@${m.name}`;
+    if (rest.includes(tag)) {
+      out.add(m.id);
+      rest = rest.split(tag).join(" ");
+    }
+  }
+  return [...out];
 }

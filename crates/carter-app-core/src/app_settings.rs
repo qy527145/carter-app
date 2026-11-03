@@ -58,6 +58,12 @@ pub struct AppSettings {
     /// 不含 `/` 的按任意层级的名字匹配（`*.log`、`__generated__`）。后向
     /// 兼容：旧文件没有这个字段时就是空列表。
     pub changes_ignore: Vec<String>,
+    /// 全局昵称：第一次加入某个团队时预填的称呼（每个团队里仍可各自改）。
+    ///
+    /// 空 = 还没设过，加入时退回 git 的 `user.name`。存在应用设置而不是 git 配置里：
+    /// git 的 `user.name` 进的是每一条提交，很多人那里写的是拼音或工号，不一定是
+    /// 想在团队里被叫的名字。
+    pub nickname: String,
 }
 
 impl Default for AppSettings {
@@ -70,6 +76,7 @@ impl Default for AppSettings {
             skill_roots: Vec::new(),
             ignored_skills: Vec::new(),
             changes_ignore: Vec::new(),
+            nickname: String::new(),
         }
     }
 }
@@ -219,6 +226,7 @@ mod tests {
             skill_roots: vec!["C:\\scans\\claude".into()],
             ignored_skills: vec!["pdf".into()],
             changes_ignore: vec!["*.snap".into()],
+            nickname: "徐侨".into(),
         };
         s.save_to(&path).unwrap();
 
@@ -230,6 +238,7 @@ mod tests {
         assert_eq!(back.skill_roots, vec!["C:\\scans\\claude".to_string()]);
         assert!(back.skill_ignored("pdf"));
         assert_eq!(back.changes_ignore, vec!["*.snap".to_string()]);
+        assert_eq!(back.nickname, "徐侨");
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
