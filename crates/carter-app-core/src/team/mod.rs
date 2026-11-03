@@ -10,7 +10,11 @@
 //!
 //! * [`model`] —— 纯数据：目标、任务、看板、id、排序插值。没有 IO。
 //! * [`store`] —— `.carter/` 的读写：一实体一文件、原子写、派生视图。
-//! * [`git`] —— git 通道：空提交事件、快进同步、认领的裁决。
+//! * [`git`] —— git 通道：快进同步、远端、轮末提交。
+//! * [`events`] —— 事件通道：评论 / @ / 广播 / 指派，存在独立的 `refs/carter/events` 上
+//!   （协议见 `docs/team-protocol.md`）。
+//! * [`members`] —— 成员名单：`members/<id>.json`，一人一文件，git 邮箱只用来认人。
+//! * [`inbox`] —— 从事件流里挑出「跟我有关」的那些，界面与观察员共用。
 //! * [`init`] —— 初始化：`git init` + 建骨架 + 首次提交 + 自动建同步观察源。
 //! * [`skills`] —— 内置技能与 `carter-team` 薄壳命令。
 //! * [`validate`] —— 语义校验：坏文件在哪、该怎么改。写路径与 `team` 工具都走它。
@@ -29,8 +33,11 @@
 //! 写进任务的 `description` 或一条评论 —— 一段文字比一张关联表更能表达清楚，
 //! 而关联表一旦漏填就再也补不回来。
 
+pub mod events;
 pub mod git;
+pub mod inbox;
 pub mod init;
+pub mod members;
 pub mod model;
 pub mod skills;
 pub mod store;
