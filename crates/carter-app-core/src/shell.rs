@@ -86,6 +86,11 @@ pub struct SessionHandle {
     /// `Recorder` 放掉 —— 否则两个 runner 会往同一个会话文件里追加，历史从此错位
     /// （见 `AppShell::close_session`）。
     pub done: CancelToken,
+    /// 这一刻是不是正在跑一轮（`turn_started` 到 `idle` 之间）。
+    ///
+    /// 界面接上一条在后台跑的会话时要知道该不该显示「生成中」—— 事件不回放，
+    /// 错过的那条 `turn_started` 补不回来。
+    pub busy: std::sync::atomic::AtomicBool,
     /// 只有 crate 内能构造 —— 命令通道的持有者是会话运行器，不该由外部塞进来。
     pub(crate) cmd_tx: mpsc::UnboundedSender<Command>,
 }
@@ -109,6 +114,7 @@ impl SessionHandle {
             cancel: CancelToken::new(),
             close: CancelToken::new(),
             done: CancelToken::new(),
+            busy: std::sync::atomic::AtomicBool::new(false),
             cmd_tx,
         })
     }
@@ -295,13 +301,11 @@ impl AppShell {
             futures::future::join_all(handles.iter().map(|h| h.done.cancelled())),
         )
         .await;
-        // 超时也照样清掉标记：一直卡着它只会让这条会话永远打不开。
-        // 真出现这种情况，`start_session` 那边还有一道「同一 id 不能有两个 runner」
-        // 的兜底。
-        let mut closing = self.closing.lock().unwrap();
-        for id in ids {
-            closing.remove(&id);
-        }
+        // 超时**不**清标记：旧 runner 还攥着会话文件，这时按 id 重开就是两个写者 ——
+        // 历史交错，`tool_result` 与它的 `tool_use` 被隔开，之后每次请求都 400。
+        // 标记由 runner 退出时自己摘（`mark_closed`），这期间 `start_session` 会拒绝，
+        // 界面上是一句「还在收尾，请稍后再打开」。
+        let _ = ids;
         true
     }
 

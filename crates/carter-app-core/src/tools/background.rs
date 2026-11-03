@@ -8,6 +8,16 @@
 //! 让模型显式地写 `run_in_background: true`（起服务、跑长构建、`tail -f`），
 //! 拿到 `shell_id` 之后由它决定什么时候回来看。
 //!
+//! ## 结束时主动通知，而不是让模型轮询
+//!
+//! 光有 `shell_id` 还不够：模型不知道命令什么时候结束，只能 `bash_output` 一遍遍去问
+//! —— 这一轮照样卡着，和前台跑没有区别。所以命令**自己**结束时，这里往会话发一条
+//! 完成通知（见 [`BackgroundShells::subscribe`]）：会话空闲时它立刻起一轮，正在跑时
+//! 等这一轮结束再起。模型启动后台命令之后就可以结束这一轮，用户照常聊别的。
+//!
+//! 不通知的两种情况：被 `kill_shell` / 关会话收掉的（那是有人主动结束的，没什么
+//! 好报）；模型已经用 `bash_output` 亲眼看到它结束了的（再报一遍是重复）。
+//!
 //! ## 输出怎么拿回来
 //!
 //! 后台进程的 stdout/stderr 直接重定向到日志文件，`bash_output` 每次从**上次读到的
@@ -37,8 +47,24 @@ use crate::platform::Shell;
 /// 单次读回的上限。与 bash 的结果上限一致：够模型看清，又不至于把上下文撑爆。
 const MAX_READ: usize = 30_000;
 
-/// `bash_output` 最多等多久。再长就等于把「后台」又变回前台了。
-const MAX_WAIT_MS: u64 = 60_000;
+/// 完成通知里最多带多少输出（末尾）。完整的仍在日志里，模型要看可以 `bash_output`。
+const NOTICE_TAIL: usize = 4_000;
+
+/// 完成通知送进会话时加在前面的标记。界面靠它画成通知卡片而不是用户气泡，
+/// 模型靠它认出「这不是用户说的话」。与前端 `ChatView.tsx` 里那份逐字对应。
+pub const DONE_MARK: &str = "【后台命令】";
+
+/// 起完后台命令之后告诉模型的那句话：重点是「别轮询，结束了会通知你」。
+pub(crate) fn follow_up(id: &str) -> String {
+    format!(
+        "命令结束时会自动通知你（以一条 `{DONE_MARK}` 开头的消息），不要用 bash_output 反复轮询。\
+         接下来没有别的事要做的话，告诉用户命令在后台跑着、结束一轮即可；\
+         中途想看输出用 bash_output(shell_id=\"{id}\")，要提前结束用 kill_shell(shell_id=\"{id}\")。"
+    )
+}
+
+/// 完成通知的发送端，由会话任务订阅。见 [`BackgroundShells::subscribe`]。
+type Notifier = Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<String>>>>;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ShellStatus {
@@ -64,12 +90,30 @@ impl ShellStatus {
 }
 
 struct ShellState {
+    command: String,
     log: PathBuf,
     /// 下次 `bash_output` 从哪个字节开始读。
     offset: u64,
     status: ShellStatus,
     /// 进程组 id（Unix 上就是子进程 pid，因为 setsid 之后它自成一个组）。
     pid: Option<u32>,
+    /// 模型已经知道它结束了（`bash_output` 读到过结束状态，或完成通知已经送过）。
+    told: bool,
+}
+
+/// 命令自己结束：记下退出码并通知会话。被 kill 过的不要被「进程确实退出了」覆盖成
+/// Exited —— 界面上「我杀掉了它」和「它自己跑完了」是两件事，也不必通知。
+fn on_exit(state: &Mutex<ShellState>, id: &str, code: i32, notify: &Notifier) {
+    {
+        let mut s = state.lock().unwrap();
+        if !s.status.is_running() {
+            return;
+        }
+        s.status = ShellStatus::Exited(code);
+    }
+    if let Some(tx) = notify.lock().unwrap().as_ref() {
+        let _ = tx.send(id.to_string());
+    }
 }
 
 /// 接管过来的一条命令（前台转后台）。见 [`BackgroundShells::adopt`]。
@@ -79,12 +123,13 @@ pub(crate) struct AdoptedShell {
     /// 继续往日志里追加输出用的句柄（读取任务持有它）。
     pub file: std::fs::File,
     state: Arc<Mutex<ShellState>>,
+    notify: Notifier,
 }
 
 impl AdoptedShell {
     /// 进程退出了，把状态写回后台表。
     pub fn mark_exited(&self, code: i32) {
-        self.state.lock().unwrap().status = ShellStatus::Exited(code);
+        on_exit(&self.state, &self.id, code, &self.notify);
     }
 }
 
@@ -92,6 +137,7 @@ impl AdoptedShell {
 pub struct BackgroundShells {
     shells: Mutex<HashMap<String, Arc<Mutex<ShellState>>>>,
     seq: AtomicU64,
+    notify: Notifier,
     /// 日志根目录。生产是 `~/.carter-app/shells`；测试给一个自己的临时目录 ——
     /// 测试之间共享 `CARTER_APP_HOME` 会互相删掉对方的文件（那是进程级环境变量）。
     root: PathBuf,
@@ -106,8 +152,17 @@ impl BackgroundShells {
         Arc::new(Self {
             shells: Mutex::new(HashMap::new()),
             seq: AtomicU64::new(0),
+            notify: Arc::default(),
             root,
         })
+    }
+
+    /// 订阅完成通知：命令自己结束时收到它的 `shell_id`。一个会话订阅一次，
+    /// 再订阅会顶掉前一个。收到之后用 [`BackgroundShells::completion`] 取通知正文。
+    pub fn subscribe(&self) -> tokio::sync::mpsc::UnboundedReceiver<String> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        *self.notify.lock().unwrap() = Some(tx);
+        rx
     }
 
     fn log_path(&self, session_id: &str, id: &str) -> PathBuf {
@@ -158,23 +213,21 @@ impl BackgroundShells {
         let pid = child.id();
 
         let state = Arc::new(Mutex::new(ShellState {
+            command: command.to_string(),
             log: log.clone(),
             offset: 0,
             status: ShellStatus::Running,
             pid,
+            told: false,
         }));
         let watcher = state.clone();
+        let (watch_id, notify) = (id.clone(), self.notify.clone());
         tokio::spawn(async move {
             let code = match child.wait().await {
                 Ok(st) => st.code().unwrap_or(-1),
                 Err(_) => -1,
             };
-            let mut s = watcher.lock().unwrap();
-            // 被 kill 过的不要被「进程确实退出了」覆盖成 Exited —— 界面上
-            // 「我杀掉了它」和「它自己跑完了」是两件事。
-            if s.status.is_running() {
-                s.status = ShellStatus::Exited(code);
-            }
+            on_exit(&watcher, &watch_id, code, &notify);
         });
 
         self.shells.lock().unwrap().insert(id.clone(), state);
@@ -210,10 +263,12 @@ impl BackgroundShells {
         let _ = writeln!(file, "（这条命令先在前台跑，已转到后台）\n$ {command}");
 
         let state = Arc::new(Mutex::new(ShellState {
+            command: command.to_string(),
             log: log.clone(),
             offset: 0,
             status: ShellStatus::Running,
             pid,
+            told: false,
         }));
         self.shells
             .lock()
@@ -224,6 +279,7 @@ impl BackgroundShells {
             log,
             file,
             state,
+            notify: self.notify.clone(),
         })
     }
 
@@ -252,7 +308,54 @@ impl BackgroundShells {
         };
         let text = String::from_utf8_lossy(&buf[..boundary]).to_string();
         s.offset += boundary as u64;
+        // 模型亲眼看到它结束了 —— 不必再发完成通知。
+        if !s.status.is_running() {
+            s.told = true;
+        }
         Ok((text, s.status.clone()))
+    }
+
+    /// 一条命令的完成通知正文。`None` = 不用通知（模型已经知道了、被 kill 的、
+    /// 还在跑的、或者不认识这个 id）。
+    ///
+    /// 带上**还没读过**的输出的末尾，读指针推到日志末尾 —— 之后 `bash_output`
+    /// 不会把这段再给一遍。
+    pub fn completion(&self, id: &str) -> Option<String> {
+        let state = self.shells.lock().unwrap().get(id).cloned()?;
+        let mut s = state.lock().unwrap();
+        let ShellStatus::Exited(code) = s.status else {
+            return None;
+        };
+        if std::mem::replace(&mut s.told, true) {
+            return None;
+        }
+        let mut buf = Vec::new();
+        if let Ok(mut f) = std::fs::File::open(&s.log) {
+            let _ = f.seek(SeekFrom::Start(s.offset));
+            let _ = f.read_to_end(&mut buf);
+        }
+        s.offset += buf.len() as u64;
+        let all = String::from_utf8_lossy(&buf);
+        let all = all.trim_end();
+        let tail = if all.len() > NOTICE_TAIL {
+            let mut cut = all.len() - NOTICE_TAIL;
+            while !all.is_char_boundary(cut) {
+                cut += 1;
+            }
+            format!("（前面还有 {} 字节，完整输出见日志）\n…{}", cut, &all[cut..])
+        } else if all.is_empty() {
+            "（没有新输出）".to_string()
+        } else {
+            all.to_string()
+        };
+        Some(format!(
+            "{DONE_MARK}{id} · 已结束（退出码 {code}）\n\
+             这是系统通知，不是用户说的话：你之前在后台启动的命令跑完了。\
+             据此接着做原来的事，或者把结果告诉用户。\n\
+             $ {}\n日志：{}\n--- 未读输出 ---\n{tail}",
+            s.command,
+            s.log.display()
+        ))
     }
 
     pub fn status(&self, id: &str) -> Option<ShellStatus> {
@@ -355,9 +458,9 @@ impl Tool for BashOutputTool {
     }
 
     fn description(&self) -> &str {
-        "读取 `bash` 以 `run_in_background: true` 启动的命令的输出。\
-         每次只返回**上次之后的新内容**。命令还在跑时可以带 `wait_ms` 等一会儿\
-         再取（最多 60 秒），适合等构建/测试结束。"
+        "读取后台命令（`run_in_background: true` 或被转到后台的命令）的输出，\
+         每次只返回**上次之后的新内容**，立刻返回、不等待。\
+         不要用它反复轮询等命令结束 —— 命令结束时会自动通知你。"
     }
 
     fn parameters(&self) -> Value {
@@ -367,10 +470,6 @@ impl Tool for BashOutputTool {
                 "shell_id": {
                     "type": "string",
                     "description": "后台命令的 id（`bash` 返回的 shell_id）"
-                },
-                "wait_ms": {
-                    "type": "integer",
-                    "description": "没有新输出时最多等多久（毫秒，缺省 0 = 立刻返回）"
                 }
             },
             "required": ["shell_id"]
@@ -381,36 +480,19 @@ impl Tool for BashOutputTool {
         let Some(id) = args.get("shell_id").and_then(Value::as_str) else {
             return ToolResult::err("缺少 shell_id");
         };
-        let wait = args
-            .get("wait_ms")
-            .and_then(Value::as_u64)
-            .unwrap_or(0)
-            .min(MAX_WAIT_MS);
-        let deadline = tokio::time::Instant::now() + Duration::from_millis(wait);
-
-        loop {
-            let (text, status) = match self.shells.read(id) {
-                Ok(v) => v,
-                Err(e) => return ToolResult::err(e),
-            };
-            let done = !status.is_running();
-            if !text.is_empty() || done || tokio::time::Instant::now() >= deadline {
-                let body = if text.is_empty() {
-                    if done {
-                        "（没有新输出）".to_string()
-                    } else {
-                        "（还没有新输出，命令仍在运行）".to_string()
-                    }
-                } else {
-                    text
-                };
-                return ToolResult::ok(format!(
-                    "shell_id={id}\nstatus={}\n--- 新输出 ---\n{body}",
-                    status.as_str()
-                ));
-            }
-            tokio::time::sleep(Duration::from_millis(150)).await;
-        }
+        let (text, status) = match self.shells.read(id) {
+            Ok(v) => v,
+            Err(e) => return ToolResult::err(e),
+        };
+        let body = match (text.is_empty(), status.is_running()) {
+            (false, _) => text,
+            (true, true) => "（还没有新输出，命令仍在运行；结束时会自动通知你）".to_string(),
+            (true, false) => "（没有新输出）".to_string(),
+        };
+        ToolResult::ok(format!(
+            "shell_id={id}\nstatus={}\n--- 新输出 ---\n{body}",
+            status.as_str()
+        ))
     }
 }
 
@@ -527,6 +609,50 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(shells.running_count(), 0);
         assert!(shells.read(&id).is_ok(), "日志仍然读得到");
+    }
+
+    /// 命令自己结束 → 会话收到通知，正文带命令与未读输出；只报一次。
+    #[tokio::test]
+    async fn a_finished_command_notifies_once_with_its_output() {
+        let shells = shells();
+        let mut rx = shells.subscribe();
+        let (id, _) = shells
+            .spawn("echo done-out; exit 3", &std::env::temp_dir(), &sh(), "test-session")
+            .unwrap();
+        let got = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("结束时要通知")
+            .unwrap();
+        assert_eq!(got, id);
+        let text = shells.completion(&id).expect("第一次要有正文");
+        assert!(text.starts_with(DONE_MARK), "{text}");
+        assert!(text.contains("退出码 3"), "{text}");
+        assert!(text.contains("done-out"), "{text}");
+        assert!(shells.completion(&id).is_none(), "不该报第二遍");
+        // 通知里给过的输出，bash_output 不再重复。
+        let (rest, _) = shells.read(&id).unwrap();
+        assert!(!rest.contains("done-out"), "{rest:?}");
+    }
+
+    /// 模型已经用 bash_output 看到它结束了 → 不再通知；被 kill 的也不通知。
+    #[tokio::test]
+    async fn no_notice_when_already_seen_or_killed() {
+        let shells = shells();
+        let mut rx = shells.subscribe();
+        let (seen, _) = shells
+            .spawn("echo x", &std::env::temp_dir(), &sh(), "test-session")
+            .unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
+        let _ = shells.read(&seen).unwrap();
+        assert!(shells.completion(&seen).is_none());
+
+        let (killed, _) = shells
+            .spawn("sleep 30", &std::env::temp_dir(), &sh(), "test-session")
+            .unwrap();
+        shells.kill(&killed).unwrap();
+        let none = tokio::time::timeout(Duration::from_millis(500), rx.recv()).await;
+        assert!(none.is_err(), "被 kill 的不该通知：{none:?}");
+        assert!(shells.completion(&killed).is_none());
     }
 
     #[tokio::test]

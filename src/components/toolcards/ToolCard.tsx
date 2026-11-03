@@ -293,7 +293,7 @@ function BashCard({ item }: { item: ToolItem }) {
             </button>
             <button
               onClick={() => act("background")}
-              title="命令继续跑，工具立刻返回 shell_id；之后模型用 bash_output 读输出"
+              title="命令继续跑，工具立刻返回 shell_id；命令结束时会自动通知模型"
               className="inline-flex items-center gap-1 rounded bg-bubble px-1.5 py-0.5 text-[11px] text-dim transition-colors hover:text-tone-blue"
             >
               <ArrowDownToLine size={10} />

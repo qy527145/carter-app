@@ -89,6 +89,22 @@ pub struct StartedSession {
     pub prompts: Vec<crate::prompts::TurnPrompt>,
 }
 
+/// 接上一条正在后台跑的会话（不关掉重开），返回界面要的那份状态。
+///
+/// 关掉重开会打断它正在跑的命令：`close_session` 要先让工具停下才能放掉会话文件。
+/// 接上则什么都不动 —— 历史取自句柄上的快照，进行中那一轮另外带回（见 `live`）。
+pub fn attach_session(shell: &AppShell, id: &str) -> Option<StartedSession> {
+    let handle = shell.session(id)?;
+    Some(StartedSession {
+        history: crate::view::to_views(&handle.history.load()),
+        goal: goal::load(id).as_ref().map(goal::view),
+        changes: crate::changes::load(id),
+        changes_since: crate::changes::since(id),
+        prompts: crate::prompts::load(id),
+        handle,
+    })
+}
+
 /// 新建 / 续接一个会话。返回的句柄立即可以投递命令。
 ///
 /// **必须在 tokio runtime 上下文里调用** —— 它要 spawn 会话任务。同步的 Tauri 命令
@@ -105,7 +121,7 @@ pub fn start_session(shell: Arc<AppShell>, opts: SessionOptions) -> carter::Resu
     // 正常路径上走不到这里：`close_session` 会等旧任务退出之后才返回，而前端是
     // 「先关再开」。这条是兜底 —— 某个不响应取消的工具（MCP）把旧任务多拖了几秒时，
     // 宁可让用户看到一句「还在收尾」，也不要把会话文件写坏。
-    if let Some(id) = opts.resume_id.as_deref() {
+    if let Some(id) = opts.resume_id.as_deref().or(opts.new_id.as_deref()) {
         if shell.session(id).is_some() || shell.is_closing(id) {
             return Err(carter::CarterError::Config(format!(
                 "会话 {id} 还在收尾（上一轮的命令没有响应中断），请稍后再打开。"
@@ -680,6 +696,11 @@ impl Runner {
             ));
         }
 
+        // 后台命令自己结束时的通知。只在**空闲**时取：正在跑的那一轮里它就留在通道里，
+        // 等这一轮（以及排在前面的用户消息）跑完再起新的一轮 —— 与 Claude Code 一样，
+        // 模型起完后台命令就可以收工，结束了再被叫回来，而不是守着它轮询。
+        let mut done_rx = self.ctx.shells.subscribe();
+
         loop {
             let cmd = match self.queued.pop_front() {
                 Some(c) => c,
@@ -689,6 +710,13 @@ impl Runner {
                             Some(c) => c,
                             // 命令通道关了（句柄全 drop）→ 会话结束。
                             None => break,
+                        },
+                        Some(id) = done_rx.recv() => {
+                            // `None` = 模型这期间已经用 bash_output 看到它结束了，不必再报。
+                            match self.ctx.shells.completion(&id) {
+                                Some(text) => Command::SendPrompt { text, id: None, interject: false },
+                                None => continue,
+                            }
                         },
                         // 显式关闭。光靠上面那条 `None` 是不够的 —— 会话任务自己攥着一个
                         // `Arc<SessionHandle>`，它持有发送端，所以 `recv()` 永远不会返回
@@ -715,7 +743,13 @@ impl Runner {
         drop(self.tool_tx.take());
         drop(self.ask_tx.take());
         let _ = forwarder.await;
-        self.ctx.shell.sessions.remove(&session_id);
+        // 只摘**自己**那一条。按 id 摘的话，`close_session` 等超时之后已经开起来的
+        // 接班 runner 会被一起摘掉 —— 注册表里看不到它，别人又按 id 开出第三个，
+        // 同一个会话文件就有了多个写者。
+        self.ctx
+            .shell
+            .sessions
+            .remove_if(&session_id, |_, h| Arc::ptr_eq(h, &self.ctx.handle));
         self.ctx.shell.mark_closed(&session_id);
         // **最后**一句：告诉 `close_session` 那个等待方「文件与 Thread 都放掉了」。
         // 放在 remove 之后，保证它醒来时注册表里已经没有这条会话。
@@ -905,7 +939,10 @@ impl Runner {
         // `media::inline_user_attachments`），两边行为对得上。
         //
         // 助理的汇报不展开：里面有外部事件的文字，写一个 `@~/.ssh/id_rsa` 不该把文件读进来。
-        let expansion = if raw.starts_with(crate::assistant::REPORT_MARK) {
+        // 后台命令的完成通知同理：里面是命令输出。
+        let expansion = if raw.starts_with(crate::assistant::REPORT_MARK)
+            || raw.starts_with(crate::tools::background::DONE_MARK)
+        {
             Ok((raw.clone(), None))
         } else {
             expand_input(&self.ctx.cwd, &raw)
@@ -1334,7 +1371,13 @@ impl Runner {
                     },
                     // 关会话（关掉侧边抽屉、换会话）要立刻断流，而不是等这一轮
                     // 自然跑完 —— 「关掉即丢」的前提就是这个。
-                    _ = self.ctx.handle.close.cancelled() => {
+                    //
+                    // **只响应一次**（`!closed`）。`close` 置位之后 `cancelled()` 每次都立即
+                    // 就绪，不加这道闸的话 select 每圈都选中它：一个 worker 线程被忙转占满，
+                    // 而 carter 收到第一次取消就 `reset()` 了，这里又一遍遍重新置位 ——
+                    // 正在跑的 bash 看不稳这个信号，一直跑到 120 秒超时，runner 迟迟不退出，
+                    // 5 秒后接班的 runner 就和它同写一个会话文件。
+                    _ = self.ctx.handle.close.cancelled(), if !closed => {
                         closed = true;
                         cancel.set();
                     }
@@ -1664,6 +1707,11 @@ impl Runner {
     }
 
     fn emit(&self, event: SessionEvent) {
+        match event {
+            SessionEvent::TurnStarted { .. } => self.ctx.handle.busy.store(true, Ordering::SeqCst),
+            SessionEvent::Idle => self.ctx.handle.busy.store(false, Ordering::SeqCst),
+            _ => {}
+        }
         emit(&self.ctx.shell, &self.ctx.handle.id, event);
     }
 
@@ -2249,5 +2297,52 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&mine).unwrap();
+    }
+}
+
+/// 关会话时正在跑的 bash 要被立刻收掉，runner 要在几秒内真的退出。
+/// `CARTER_HOME=<tmp> CARTER_APP_HOME=<tmp> cargo test -p carter-app-core live_close -- --ignored --nocapture`
+#[cfg(test)]
+mod live_close {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn live_close_kills_a_running_bash_promptly() {
+        assert!(std::env::var_os("CARTER_HOME").is_some());
+        let shell = AppShell::new(carter::config::Config::load().unwrap());
+        let dir = std::env::temp_dir().join(format!("carter-live-close-{}", crate::protocol::now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut rx = shell.subscribe();
+        let started = start_session(
+            shell.clone(),
+            SessionOptions { cwd: dir.clone(), model: None, resume_latest: false, resume_id: None, new_id: None },
+        )
+        .unwrap();
+        let id = started.handle.id.clone();
+        started.handle.send(Command::SendPrompt {
+            text: "用 bash 工具执行 `sleep 40 && echo done`，前台执行，不要后台。".into(),
+            id: None,
+            interject: false,
+        });
+        loop {
+            match tokio::time::timeout(Duration::from_secs(60), rx.recv()).await.unwrap().unwrap() {
+                AppEvent::Session { event: SessionEvent::ToolStarted { name, .. }, .. } if name == "bash" => break,
+                _ => {}
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let t = Instant::now();
+        shell.close_session(&id).await;
+        let waited = t.elapsed();
+        println!("close_session 返回用了 {waited:?}，done={}", started.handle.done.is_cancelled());
+        let t = Instant::now();
+        while !started.handle.done.is_cancelled() && t.elapsed() < Duration::from_secs(60) {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        println!("runner 真正退出又过了 {:?}", t.elapsed());
+        assert!(started.handle.done.is_cancelled());
+        assert!(waited < Duration::from_secs(5), "关会话要在 5 秒内收掉正在跑的 bash");
     }
 }

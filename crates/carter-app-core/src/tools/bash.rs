@@ -205,7 +205,8 @@ impl Tool for PlatformBash {
                 "run_in_background": {
                     "type": "boolean",
                     "description": "后台执行，立刻返回 shell_id。适合起服务、跑长构建、tail -f 这类\
-                                    不想卡住整轮对话的命令。之后用 bash_output 读输出、kill_shell 结束。"
+                                    不想卡住整轮对话的命令。命令结束时会自动通知你，不用轮询；\
+                                    中途想看输出用 bash_output，要提前结束用 kill_shell。"
                 }
             },
             "required": ["command"]
@@ -252,9 +253,9 @@ impl Tool for PlatformBash {
                     "命令已在后台启动。\n\
                      shell_id={id}\n\
                      日志：{}\n\
-                     用 bash_output(shell_id=\"{id}\") 读取输出（可以带 wait_ms 等一会儿），\
-                     用 kill_shell(shell_id=\"{id}\") 结束它。",
-                    log.display()
+                     {}",
+                    log.display(),
+                    super::background::follow_up(&id)
                 )),
                 Err(e) => ToolResult::err(e),
             };
@@ -489,9 +490,9 @@ impl PlatformBash {
                     "命令已转到后台继续运行。\n\
                      shell_id={id}\n\
                      日志：{}\n\
-                     用 bash_output(shell_id=\"{id}\") 读取输出（可以带 wait_ms 等一会儿），\
-                     用 kill_shell(shell_id=\"{id}\") 结束它。",
-                    log.display()
+                     {}",
+                    log.display(),
+                    super::background::follow_up(&id)
                 ))
             }
             Err(e) => ToolResult::err(e),

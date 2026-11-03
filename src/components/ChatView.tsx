@@ -29,6 +29,7 @@ import {
   RotateCcw,
   ScanSearch,
   Target,
+  Terminal,
   TriangleAlert,
   Wrench,
   X,
@@ -1065,6 +1066,39 @@ function ReportTurn({ text }: { text: string }) {
   );
 }
 
+/** 与后端 `tools::background::DONE_MARK` 逐字对应。 */
+const DONE_MARK = "【后台命令】";
+
+/**
+ * 后台命令结束时系统送进来的通知：第一行是「shell_id · 已结束（退出码 N）」，
+ * 后面是给模型看的说明与输出。不是用户说的话，画成一张可展开的卡片。
+ */
+function BackgroundDoneTurn({ text }: { text: string }) {
+  const rest = text.slice(DONE_MARK.length);
+  const cut = rest.indexOf("\n");
+  const title = cut < 0 ? rest : rest.slice(0, cut);
+  const body = cut < 0 ? "" : rest.slice(cut + 1).trim();
+  const failed = !/退出码 0）/.test(title);
+  return (
+    <details className="group rounded-xl border border-edge bg-card px-3.5 py-2.5">
+      <summary
+        className={`flex cursor-pointer list-none items-center gap-1.5 text-xs font-medium ${
+          failed ? "text-danger" : "text-ok"
+        }`}
+      >
+        <Terminal size={12} className="shrink-0" />
+        <span className="truncate">后台命令 {title}</span>
+        <ChevronRight size={12} className="shrink-0 transition-transform group-open:rotate-90" />
+      </summary>
+      {body && (
+        <pre className="mt-1.5 max-h-80 overflow-auto whitespace-pre-wrap break-words font-mono text-xs text-dim">
+          {body}
+        </pre>
+      )}
+    </details>
+  );
+}
+
 function TurnView({
   turn,
   isLast,
@@ -1089,6 +1123,7 @@ function TurnView({
   if (turn.role === "user") {
     // 助理自己送进来的汇报：不是用户说的话，不画成用户气泡，也不给重试 / 分叉。
     if (turn.text.startsWith(REPORT_MARK)) return <ReportTurn text={turn.text} />;
+    if (turn.text.startsWith(DONE_MARK)) return <BackgroundDoneTurn text={turn.text} />;
     return <UserTurn turn={turn} onRetry={onRetry} retryAsks={retryAsks} onFork={onFork} />;
   }
   return (

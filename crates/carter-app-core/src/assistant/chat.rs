@@ -49,16 +49,8 @@ pub fn ensure(shell: &Arc<AppShell>) -> Result<(), String> {
 /// 接上时历史取自句柄上的快照（每轮开始与结束时刷新）—— 不能关掉重开去读盘，
 /// 那会打断它正在说的话、丢掉排着队的汇报。
 pub fn open(shell: &Arc<AppShell>, model: Option<String>) -> Result<StartedSession, String> {
-    if let Some(handle) = shell.session(CHAT_SESSION_ID) {
-        let id = handle.id.clone();
-        return Ok(StartedSession {
-            history: crate::view::to_views(&handle.history.load()),
-            goal: crate::goal::load(&id).as_ref().map(crate::goal::view),
-            changes: crate::changes::load(&id),
-            changes_since: crate::changes::since(&id),
-            prompts: crate::prompts::load(&id),
-            handle,
-        });
+    if let Some(started) = crate::session::attach_session(shell, CHAT_SESSION_ID) {
+        return Ok(started);
     }
     start_session(shell.clone(), options(model)).map_err(|e| e.to_string())
 }
