@@ -432,27 +432,88 @@ pub fn commit_team(root: &Path, team_rel: &str, message: &str) -> Result<Option<
 /// `push`，失败再试 `push -u origin <branch>`：前者是常态，后者是首次。
 /// 实时问 git「远端是什么」，而不是读 `team.json` 里那份。
 ///
-/// `team.json` 的 `remote` 是**初始化那一刻**的快照。之后用户 `git remote add
-/// origin ...` 不会回填它 —— 于是界面上会显示「没有远端」，而 git 那边明明配好了。
-/// 以 git 为准：那份配置才是 `fetch` / `push` 真正看的东西。
+/// `team.json` 的 `remote` 是**初始化那一刻**的快照。之后用户配了远端不会回填它 ——
+/// 于是界面上会显示「没有远端」，而 git 那边明明配好了。以 git 为准：那份配置才是
+/// `fetch` / `push` 真正看的东西。
+///
+/// **不假定远端叫 `origin`。** 上一版硬编码 `remote get-url origin`，远端叫
+/// `upstream`、`team`、或者干脆是别的名字时，就会被判成「没有远端」——
+/// 而 git 明明能用。团队仓库是用户自己的仓库，叫什么名字都合法。
+///
+/// 优先级：`origin` → 当前分支的上游 → 第一个远端。
+pub fn remote_name(root: &Path) -> Option<String> {
+    if git(root, &["remote", "get-url", "origin"]).is_ok() {
+        return Some("origin".into());
+    }
+    // 当前分支已经跟踪的那个远端（`remotes/upstream/main` 取 `upstream`）。
+    if let Ok(up) = git(
+        root,
+        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+    ) {
+        if let Some((name, _)) = up.trim().split_once('/') {
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
+    git(root, &["remote"])
+        .ok()?
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(str::to_string)
+}
+
+/// 远端地址。给界面显示用。
 pub fn remote_url(root: &Path) -> Option<String> {
-    git(root, &["remote", "get-url", "origin"])
+    let name = remote_name(root)?;
+    git(root, &["remote", "get-url", &name])
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
 }
 
 pub fn push(root: &Path) -> Result<String, String> {
-    if !has_remote(root) {
-        return Err("没有配置远端（origin），只在本地记录".into());
+    let Some(remote) = remote_name(root) else {
+        return Err("还没有配远端，只在本地记录".into());
+    };
+    if git(root, &["push"]).is_ok() {
+        return Ok(String::new());
     }
-    match git(root, &["push"]) {
-        Ok(out) => Ok(out),
-        Err(_) => {
-            let branch = current_branch(root)?;
-            git(root, &["push", "-u", "origin", &branch])
-        }
+    let branch = current_branch(root)?;
+    git(root, &["push", "-u", &remote, &branch])
+}
+
+/// 配（或改）远端。界面上那一个输入框走这里；不要求用户去终端。
+///
+/// 已经有一个远端叫 `origin` 时改它的地址，否则新建（`origin` 这个默认名优先，
+/// 被占用就用 `origin` 之外的名字反而没必要 —— 直接覆盖更符合「我要改成这个」）。
+pub fn set_remote(root: &Path, url: &str) -> Result<String, String> {
+    let url = url.trim();
+    if url.is_empty() {
+        return Err("远端地址不能为空".into());
     }
+    let name = remote_name(root).unwrap_or_else(|| "origin".into());
+    if git(root, &["remote", "get-url", &name]).is_ok() {
+        git(root, &["remote", "set-url", &name, url])?;
+        Ok(format!("远端 {name} 已改为 {url}"))
+    } else {
+        git(root, &["remote", "add", &name, url])?;
+        Ok(format!("已添加远端 {name} → {url}"))
+    }
+}
+
+/// 把当前分支推上去并建立跟踪。
+///
+/// 首次推送之后，`fetch` / `merge` 才有东西可比 —— 所以「配好远端」之后下一步
+/// 就该是它。没有远端时报错，而不是默默什么都不做。
+pub fn publish(root: &Path) -> Result<String, String> {
+    let Some(remote) = remote_name(root) else {
+        return Err("还没有配远端".into());
+    };
+    let branch = current_branch(root)?;
+    git(root, &["push", "-u", &remote, &branch])?;
+    Ok(format!("已推送 {branch} → {remote}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -472,9 +533,9 @@ pub fn push(root: &Path) -> Result<String, String> {
 ///
 /// 工作区脏的时候快进可能把用户的改动弄丢。这里直接拒绝，理由同上。
 pub fn sync(root: &Path) -> Result<String, String> {
-    if !has_remote(root) {
-        return Err("没有配置远端，跳过".into());
-    }
+    let Some(remote) = remote_name(root) else {
+        return Err("还没有配远端".into());
+    };
     let branch = current_branch(root)?;
 
     // 有未提交的改动就不同步。`.carter/` 自己刚写完还没提交的那份也算。
@@ -486,8 +547,8 @@ pub fn sync(root: &Path) -> Result<String, String> {
         ));
     }
 
-    git(root, &["fetch", "--prune", "origin"])?;
-    let upstream = format!("origin/{branch}");
+    git(root, &["fetch", "--prune", &remote])?;
+    let upstream = format!("{remote}/{branch}");
     if !git_ok(root, &["rev-parse", "--verify", &upstream]) {
         // 远端还没有这个分支：首次 push 由调用方决定，这里不算失败。
         return Ok("远端还没有这个分支，无需同步".into());
@@ -623,6 +684,93 @@ mod tests {
         std::fs::write(dir.join("sub").join(".git"), "gitdir: ../x\n").unwrap();
         assert!(in_repo(&dir.join("sub")));
         assert!(in_repo(&dir.join("sub").join("deeper")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod remote_tests {
+    use super::*;
+
+    fn repo(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("carter-remote-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec!["config", "user.name", "t"],
+            vec!["config", "user.email", "t@example.com"],
+        ] {
+            std::process::Command::new("git")
+                .current_dir(&dir)
+                .args(&args)
+                .output()
+                .unwrap();
+        }
+        std::fs::write(dir.join("a"), "x").unwrap();
+        std::process::Command::new("git")
+            .current_dir(&dir)
+            .args(["add", "-A"])
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .current_dir(&dir)
+            .args(["commit", "-qm", "init"])
+            .output()
+            .unwrap();
+        dir
+    }
+
+    /// 这正是用户报的那次：远端不叫 origin，旧实现直接判成「没有远端」。
+    #[test]
+    fn a_remote_not_named_origin_is_still_found() {
+        let dir = repo("named");
+        assert!(remote_name(&dir).is_none());
+        git(&dir, &["remote", "add", "upstream", "https://example.com/r.git"]).unwrap();
+
+        assert_eq!(remote_name(&dir).as_deref(), Some("upstream"));
+        assert_eq!(
+            remote_url(&dir).as_deref(),
+            Some("https://example.com/r.git"),
+            "地址也要拿得到，界面要显示它"
+        );
+        assert!(has_remote(&dir), "不能因为名字不叫 origin 就说没有远端");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// origin 存在时优先用它 —— 这是约定俗成的名字，也多半是用户真正想推的那个。
+    #[test]
+    fn origin_wins_when_present() {
+        let dir = repo("prefer");
+        git(&dir, &["remote", "add", "upstream", "https://example.com/up.git"]).unwrap();
+        git(&dir, &["remote", "add", "origin", "https://example.com/origin.git"]).unwrap();
+        assert_eq!(remote_name(&dir).as_deref(), Some("origin"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn set_remote_adds_then_updates() {
+        let dir = repo("set");
+        let msg = set_remote(&dir, "https://example.com/a.git").unwrap();
+        assert!(msg.contains("添加"), "{msg}");
+        assert_eq!(remote_url(&dir).as_deref(), Some("https://example.com/a.git"));
+
+        // 再配一次是改地址，不是加出第二个远端。
+        let msg = set_remote(&dir, "https://example.com/b.git").unwrap();
+        assert!(msg.contains("已改为"), "{msg}");
+        assert_eq!(remote_url(&dir).as_deref(), Some("https://example.com/b.git"));
+        assert_eq!(
+            git(&dir, &["remote"]).unwrap().lines().count(),
+            1,
+            "不能多出第二个远端"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_empty_url_is_rejected() {
+        let dir = repo("empty");
+        assert!(set_remote(&dir, "   ").is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

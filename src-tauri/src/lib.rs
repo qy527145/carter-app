@@ -1758,6 +1758,7 @@ pub fn run() {
             team_my_tasks,
             team_commit,
             team_sync,
+            team_set_remote,
             // 定时任务
             list_schedules,
             save_schedule,
@@ -2143,7 +2144,22 @@ fn team_sync(cwd: String) -> Result<String, String> {
     // 「没有远端」不是错误，是一个还没配好的状态。用红色报错去说这件事，
     // 会让人觉得同步坏了；实际是团队仓库本来就只在本地。
     if !carter_app_core::team::git::has_remote(root) {
-        return Ok("还没有配远端，团队仓库目前只在本地。配好后（git remote add origin …）再点一次即可。".into());
+        return Ok("还没有配远端，团队仓库目前只在本地。点右上角「配远端」填一个仓库地址即可。".into());
     }
     carter_app_core::team::git::sync(root)
+}
+
+/// 配远端。界面上那一个输入框走这里 —— 不该让用户为了同步去开终端。
+#[tauri::command]
+fn team_set_remote(cwd: String, url: String) -> Result<String, String> {
+    let store = carter_app_core::team::Store::discover(Path::new(&cwd))
+        .ok_or("这个项目还没有初始化团队目录")?;
+    let msg = carter_app_core::team::git::set_remote(store.project_root(), &url)?;
+    // 配完顺手推一次：不推的话 `fetch` / `merge` 没东西可比，同步仍然是空转，
+    // 用户会以为「配了没用」。
+    let pushed = carter_app_core::team::git::publish(store.project_root());
+    Ok(match pushed {
+        Ok(p) => format!("{msg}；{p}"),
+        Err(e) => format!("{msg}；但首次推送没成功：{e}"),
+    })
 }

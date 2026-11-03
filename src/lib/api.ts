@@ -1955,3 +1955,13 @@ export function teamCommit(cwd: string, message: string): Promise<string | null>
 export function teamSync(cwd: string): Promise<string> {
   return invoke<string>("team_sync", { cwd });
 }
+
+/**
+ * 配（或改）远端，并顺手把当前分支推上去。
+ *
+ * 远端不必叫 `origin` —— 后端会自动找已有的那个。界面上给一个输入框就够了，
+ * 不该让人为了同步去开终端。
+ */
+export function teamSetRemote(cwd: string, url: string): Promise<string> {
+  return invoke<string>("team_set_remote", { cwd, url });
+}

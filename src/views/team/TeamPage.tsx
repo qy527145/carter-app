@@ -24,6 +24,7 @@ import {
   GitMerge,
   Kanban,
   LayoutGrid,
+  Link2,
   ListChecks,
   LoaderCircle,
   Plus,
@@ -36,6 +37,7 @@ import {
 import {
   teamInitialize,
   teamOverview,
+  teamSetRemote,
   teamSync,
   type TeamBoard,
   type TeamGoal,
@@ -62,6 +64,8 @@ export function TeamPage() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [tab, setTab] = useState<Tab>("graph");
+  /** 正在编辑远端地址。`null` = 没打开。 */
+  const [remoteDraft, setRemoteDraft] = useState<string | null>(null);
   const [picked, setPicked] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -116,6 +120,20 @@ export function TeamPage() {
     }
   }
 
+  async function doSetRemote() {
+    if (!cwd || remoteDraft === null) return;
+    setBusy(true);
+    try {
+      toastOk(await teamSetRemote(cwd, remoteDraft));
+      setRemoteDraft(null);
+      await load();
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const activeGoal = useMemo(() => {
     if (!data) return null;
     return data.goals.find((g) => g.id === picked) ?? data.goals[0] ?? null;
@@ -149,10 +167,23 @@ export function TeamPage() {
         </div>
 
         <div className="ml-auto flex items-center gap-1.5">
-          {data?.remote && (
-            <span className="mono hidden max-w-[16rem] truncate text-[10px] text-dim xl:block">
+          {data?.remote ? (
+            <button
+              onClick={() => setRemoteDraft(data.remote ?? "")}
+              title={`${data.remote}\n点击修改`}
+              className="mono hidden max-w-[16rem] truncate text-[10px] text-dim transition-colors hover:text-ink xl:block"
+            >
               {data.remote}
-            </span>
+            </button>
+          ) : (
+            <button
+              onClick={() => setRemoteDraft("")}
+              title="团队数据目前只在本地。填一个仓库地址，别人就能同步到了。"
+              className="flex items-center gap-1 rounded-full bg-tone-orange-soft px-2 py-1 text-[10px] text-tone-orange transition-opacity hover:opacity-80"
+            >
+              <Link2 size={11} />
+              配远端
+            </button>
           )}
           {data?.identity && (
             <span
@@ -189,6 +220,46 @@ export function TeamPage() {
         </div>
       ) : (
         <div className="min-h-0 flex-1 overflow-y-auto">
+          {remoteDraft !== null && (
+            <div className="mx-5 mt-4 rounded-xl bg-card p-3 shadow-soft">
+              <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium">
+                <Link2 size={12} />
+                团队同步的远端仓库
+              </div>
+              <p className="mb-2 text-[11px] leading-relaxed text-dim">
+                所有人指向同一个 git 仓库，目标与任务才能互相同步。
+                远端不必叫 <span className="mono">origin</span>，已有的任何一个都会被用上；
+                配好之后会立刻把当前分支推上去。
+              </p>
+              <div className="flex gap-1.5">
+                <input
+                  autoFocus
+                  value={remoteDraft}
+                  onChange={(e) => setRemoteDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") void doSetRemote();
+                    if (e.key === "Escape") setRemoteDraft(null);
+                  }}
+                  placeholder="git@github.com:acme/team.git"
+                  className="mono min-w-0 flex-1 rounded-md bg-bubble px-2 py-1.5 text-[11px] outline-none"
+                />
+                <button
+                  onClick={() => void doSetRemote()}
+                  disabled={busy || remoteDraft.trim() === ""}
+                  className="shrink-0 rounded-md bg-ink px-3 py-1.5 text-[11px] font-medium text-[var(--accent-contrast)] transition-opacity hover:opacity-90 disabled:opacity-40"
+                >
+                  保存并推送
+                </button>
+                <button
+                  onClick={() => setRemoteDraft(null)}
+                  className="shrink-0 rounded-md px-2 py-1.5 text-[11px] text-dim transition-colors hover:bg-ink/5 hover:text-ink"
+                >
+                  取消
+                </button>
+              </div>
+            </div>
+          )}
+
           {data.warnings.length > 0 && (
             <div className="mx-5 mt-4 rounded-lg bg-warn-bg px-3 py-2 text-[11px] text-ink">
               <div className="mb-0.5 flex items-center gap-1.5 font-medium">

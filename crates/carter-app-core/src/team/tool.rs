@@ -120,7 +120,7 @@ impl Tool for TeamTool {
                         "overview", "my_tasks",
                         "goal_new", "goal_update",
                         "task_new", "task_update", "task_status", "task_claim", "task_release",
-                        "comment", "events", "check",
+                        "comment", "events", "check", "sync",
                         "board_new", "card_new", "card_move"
                     ],
                     "description": "要做什么。先看 action 的分组：读用 overview / my_tasks / events；目标用 goal_*；任务用 task_*；看板用 board_* / card_*。"
@@ -192,6 +192,21 @@ impl TeamTool {
             "check" => {
                 let store = self.store()?;
                 Ok(super::validate::check_store(&store).render())
+            }
+
+            "sync" => {
+                // 同步做成一个工具动作，而不是只留着 `carter-team sync` 脚本：
+                // 那个脚本是 POSIX sh + jq，Windows 上跑不起来。工具这条路
+                // 三平台都一样，模型在任何系统上都能真的把远端拉下来。
+                let store = self.store()?;
+                let root = store.project_root();
+                if !git::has_remote(root) {
+                    return Ok(
+                        "还没有配远端，团队数据目前只在本地。让用户在界面上点「配远端」填一个仓库地址。"
+                            .into(),
+                    );
+                }
+                git::sync(root)
             }
 
             "my_tasks" => {
@@ -697,7 +712,7 @@ impl TeamTool {
             other => Err(format!(
                 "不认识的 action `{other}`。可用的：overview / my_tasks / goal_new / goal_update / \
                  task_new / task_update / task_status / task_claim / task_release / comment / events / \
-                 board_new / card_new / card_move"
+                 check / sync / board_new / card_new / card_move"
             )),
         }
     }

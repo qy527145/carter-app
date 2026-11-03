@@ -183,6 +183,27 @@ fn create_skeleton(
         steps.push("写入 .gitignore（忽略 .cache/）".into());
     }
 
+    // .gitattributes：**把脚本钉成 LF。**
+    //
+    // Windows 上 `core.autocrlf=true`（Git for Windows 的默认值）检出时会把文本文件
+    // 转成 CRLF。对 `.sh` 来说这是致命的：shebang 变成 `#!/bin/sh\r`，内核找不到
+    // 解释器，连 Git Bash 都报 "bad interpreter: No such file or directory"。
+    // 这个错误出现在**别人**的机器上、而不是提交它的人那里，所以最容易拖很久。
+    //
+    // 只钉脚本与技能，不碰数据：JSON 用 CRLF 也能解析，钉了反而制造无谓的 diff。
+    let attrs = root.join(".gitattributes");
+    if !attrs.is_file() {
+        std::fs::write(
+            &attrs,
+            "# 脚本必须是 LF：CRLF 会让 shebang 变成 `#!/bin/sh\\r`，直接跑不起来。\n\
+             # 这个问题只在 Windows 检出的那份上出现，所以必须写在仓库里。\n\
+             bin/* text eol=lf\n\
+             *.sh text eol=lf\n",
+        )
+        .map_err(|e| format!("写 {} 失败：{e}", attrs.display()))?;
+        steps.push("写入 .gitattributes（脚本固定 LF）".into());
+    }
+
     // 技能：只补缺。用户改过的 SKILL.md 不会被覆盖。
     let skills_dir = root.join("skills");
     if !skills_dir.is_dir() {
@@ -221,9 +242,18 @@ fn relative_to(repo_root: &Path, target: &Path) -> Result<String, String> {
 
 /// 自动建（或补齐）同步观察源。
 ///
-/// 观察源跑的是 `carter-team sync`，一条**带副作用**的命令：它会把远端的东西
-/// 拉下来、并打一条握手提交。之所以能这么干，是因为观察源在启动时只建立基线、
-/// 之后有上限与失败退避，不会因为一次网络抖动把整条命令重跑几十遍。
+/// ## 为什么不再调 `carter-team` 脚本
+///
+/// 上一版这条源跑的是 `.carter/bin/carter-team sync`。那是 `#!/bin/sh` + `jq`，
+/// 在 Linux / macOS 上没问题，**在 Windows 上根本起不来**：没有 `sh`、也没有
+/// `jq`，而且 git 检出时 `core.autocrlf` 会把脚本转成 CRLF，shebang 变成
+/// `#!/bin/sh\r` —— 连 Git Bash 都会报 "bad interpreter"。
+///
+/// 同步本身只是「拉一下」，一条 `git pull --ff-only` 就够了，而 git 是三平台
+/// 都有的。把这条通道从脚本上摘下来，Windows 用户的自动同步才真正成立。
+///
+/// 推送不在这里做：本地改动由轮末提交时顺带推（见 `git::commit_turn_if_team`）。
+/// 分开的理由是观察源每 10 分钟跑一次，而推送应该跟着「真的改了东西」走。
 ///
 /// 幂等：已经有同名的源就更新命令与目录，不重复添加。
 pub fn create_sync_source(
@@ -235,11 +265,9 @@ pub fn create_sync_source(
         // 没有远端时建一个只会一直报错的源，比不建更糟。
         return Ok(false);
     }
-    let script = skills::sync_script_path(project_root);
-    if !script.is_file() {
-        return Err("同步脚本没写出来".into());
-    }
-    let command = format!("\"{}\" sync", script.display());
+    // `--ff-only`：只在能干净快进时才动。后台自动跑的东西不该产出冲突。
+    // 命令里不写路径 —— 观察源自带 cwd，而拼路径要处理三平台的引号规则。
+    let command = "git pull --ff-only".to_string();
     let name = format!("{team_label} · 团队同步");
 
     let existing = shell

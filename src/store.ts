@@ -207,6 +207,15 @@ type Store = Conv & {
   /** 主区显示哪个视图。默认对话。 */
   view: "chat" | "settings" | "assistant" | "team";
   /**
+   * 「目标与任务」页正在看的项目目录。空 = 还没选。
+   *
+   * 刻意**不**直接用 `cwd`：那是当前对话的目录，切到助理对话（住在家目录）时它就
+   * 成了 `~`，团队页跟着变成「家目录的团队」。这里只在打开**项目**对话时跟过去，
+   * 用户也可以在团队页里自己换，两边互不牵连。
+   */
+  teamCwd: string;
+  setTeamCwd: (cwd: string) => void;
+  /**
    * 会话列表被改过几次（新建 / 改名 / fork / 删除）。
    *
    * 侧栏与「会话」设置页各有一份列表（都跨项目，设置页另有全文搜索），改完一边
@@ -804,6 +813,26 @@ function timesRecord(list: TurnTime[] | undefined): Record<number, TurnTime> {
   return out;
 }
 
+/** 团队页上次看的项目。重启后接着看同一个，不必先绕去开一条那个项目的对话。 */
+const TEAM_CWD_KEY = "carter.team.project";
+
+function readTeamCwd(): string {
+  try {
+    return localStorage.getItem(TEAM_CWD_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function rememberTeamCwd(cwd: string): string {
+  try {
+    localStorage.setItem(TEAM_CWD_KEY, cwd);
+  } catch {
+    // 存不进去只是下次启动要重选一次项目。
+  }
+  return cwd;
+}
+
 export const useStore = create<Store>((set) => ({
   sessionId: null,
   model: "",
@@ -820,6 +849,7 @@ export const useStore = create<Store>((set) => ({
   settings: null,
   configNonce: 0,
   view: "chat",
+  teamCwd: readTeamCwd(),
   assistant: null,
   queued: [],
   sessionsNonce: 0,
@@ -843,7 +873,12 @@ export const useStore = create<Store>((set) => ({
     })),
 
   beginSession: (c) =>
-    set(() => ({
+    set((s) => ({
+      // 团队页跟着「项目」对话走：助理对话（固定 id `assistant`）与家目录下的对话都
+      // 不算项目，跟过去只会把团队页带到 `~`。
+      ...(c.session_id !== "assistant" && c.cwd && c.cwd !== s.appInfo?.default_cwd
+        ? { teamCwd: rememberTeamCwd(c.cwd) }
+        : {}),
       sessionId: c.session_id,
       model: c.model,
       modelRef: c.model_ref ?? c.model,
@@ -896,6 +931,7 @@ export const useStore = create<Store>((set) => ({
   closeInspector: () => set({ inspectorOpen: false }),
   setInspectorTurn: (turn) => set({ inspectorTurn: turn }),
   setView: (view) => set({ view }),
+  setTeamCwd: (teamCwd) => set({ teamCwd: rememberTeamCwd(teamCwd) }),
   setAssistant: (assistant) => set({ assistant }),
   setComposerDraft: (composerDraft) => set({ composerDraft }),
 
