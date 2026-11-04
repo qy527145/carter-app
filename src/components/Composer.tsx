@@ -405,12 +405,19 @@ export function Composer() {
   }, []);
 
   const connected = sessionId !== null;
+  // 会话正在开（「交给卡特」先落地、后连会话的那一段）：还不能发，但输入框要能用 ——
+  // 刚落地的卡片就摆在这里，禁用会把它压暗一半，看起来像没落地、点了个寂寞。
+  const opening = useStore((s) => s.opening);
   const disabled = !connected || pendingAsk !== null;
+  const typingBlocked = pendingAsk !== null || (!connected && !opening);
 
   // 提问上的「分叉」把那句话交到这里：新会话打开后摆进输入框，等用户改完再发。
+  //
+  // 会话还在开（`opening`）时也要收：「交给卡特」的卡片要先落地、后连会话，等它就位
+  // 再摆的话，卡片会在半空停住不动。
   const composerDraft = useStore((s) => s.composerDraft);
   useEffect(() => {
-    if (composerDraft === null || !connected) return;
+    if (composerDraft === null || !(connected || opening)) return;
     useStore.getState().setComposerDraft(null);
     const { contexts: ctxs, rest } = parseContexts(composerDraft);
     const split = splitCommand(rest, commandsRef.current);
@@ -421,7 +428,7 @@ export function Composer() {
     setFileQuery(null);
     setLandTick((n) => n + 1);
     focusEnd(taRef.current, body.length);
-  }, [composerDraft, connected]);
+  }, [composerDraft, connected, opening]);
 
   // 命令列表按 cwd 取一次。自定义命令来自磁盘，cwd 变了要重取。
   useEffect(() => {
@@ -771,22 +778,24 @@ export function Composer() {
               onChange={(e) => onTextChange(e.target.value, e.target.selectionStart)}
               onPaste={onPaste}
               onKeyDown={onKeyDown}
-              disabled={disabled}
+              disabled={typingBlocked}
               style={{ textIndent: indent }}
               placeholder={
-                !connected
-                  ? "会话未就绪 —— 点「新对话」开始"
-                  : pendingAsk
-                    ? "请先回答上面的问题"
-                    : command
-                      ? commandRow?.argument_hint || "接着写，Enter 执行"
-                      : contexts.length > 0
-                        ? "想补充点什么？也可以直接按 Enter 交给卡特"
-                        : busy
-                          ? "可以接着说：Enter 排队，⌘/Ctrl+Enter 插队"
-                          : sessionId === ops.ASSISTANT_CHAT_ID
-                            ? "告诉助理要盯什么、什么事可以替你做，或回答它的问题"
-                            : "输入消息   / 命令   @ 引用文件/目录   可直接粘贴图片"
+                opening
+                  ? "正在开一条新对话…"
+                  : !connected
+                    ? "会话未就绪 —— 点「新对话」开始"
+                    : pendingAsk
+                      ? "请先回答上面的问题"
+                      : command
+                        ? commandRow?.argument_hint || "接着写，Enter 执行"
+                        : contexts.length > 0
+                          ? "想补充点什么？也可以直接按 Enter 交给卡特"
+                          : busy
+                            ? "可以接着说：Enter 排队，⌘/Ctrl+Enter 插队"
+                            : sessionId === ops.ASSISTANT_CHAT_ID
+                              ? "告诉助理要盯什么、什么事可以替你做，或回答它的问题"
+                              : "输入消息   / 命令   @ 引用文件/目录   可直接粘贴图片"
               }
               className="block max-h-48 min-h-14 w-full resize-none bg-transparent px-4 pb-1 pt-3.5 text-[15px] leading-relaxed text-ink outline-none placeholder:text-dim disabled:opacity-50"
             />

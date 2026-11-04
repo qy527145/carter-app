@@ -237,6 +237,14 @@ type Store = Conv & {
    */
   composerDraft: string | null;
   /**
+   * 会话正在新建 / 切换，还没接上。
+   *
+   * 「交给卡特」现在先切到对话页、把卡片摆进输入框，再等后端把会话开出来 ——
+   * 飞入的卡片要立刻有落点，不能悬在半空等后端。这段空窗里输入框既不是「未就绪」
+   * （用户在等的是自己要的那条会话），也不是「能发」：单独标一下，占位文案才说得对。
+   */
+  opening: boolean;
+  /**
    * 输入框里正摆着的上下文卡片。
    *
    * 它由输入框**自己**读，而不是「塞一个值进去、再被取走」：待办条上的勾选状态
@@ -256,8 +264,9 @@ type Store = Conv & {
    * 列表里还没有这一行（新会话的第一句）时补一行出来 —— 新对话从这一刻起才算存在。
    */
   touchSession: (id: string) => void;
-  beginSession: (c: CreatedSession) => void;
+  beginSession: (c: CreatedSession, opts?: { keepComposer?: boolean }) => void;
   resetSession: () => void;
+  setOpening: (opening: boolean) => void;
   addUserTurn: (text: string) => void;
   applyEvent: (e: SessionEvent) => void;
   /** 记下一条已发出、等后端开始处理的消息。 */
@@ -866,6 +875,7 @@ export const useStore = create<Store>((set) => ({
   queued: [],
   sessionsNonce: 0,
   composerDraft: null,
+  opening: false,
   composerContexts: [],
 
   // 应用信息里带着设置，一起落地 —— 分开拉会让主题在首帧闪一下。
@@ -885,7 +895,7 @@ export const useStore = create<Store>((set) => ({
       ),
     })),
 
-  beginSession: (c) =>
+  beginSession: (c, opts) =>
     set((s) => ({
       // 团队页跟着「项目」对话走：助理对话（固定 id `assistant`）与家目录下的对话都
       // 不算项目，跟过去只会把团队页带到 `~`。
@@ -897,12 +907,16 @@ export const useStore = create<Store>((set) => ({
       modelRef: c.model_ref ?? c.model,
       cwd: c.cwd,
       ...emptyConversation,
+      opening: false,
       // 换/重建会话时排队清空：那些消息属于原来那条会话任务，
       // 留着它们会让界面显示一批永远不会开始跑的「排队中」。
       queued: [],
       // 输入框里的上下文卡片同样要清：它们指向**上一个**项目 / 团队目录里的任务，
       // 带到新对话里就是一句「接着做 t-abc」，而新会话根本不知道那是谁。
-      composerContexts: [],
+      //
+      // `keepComposer` 是给「交给卡特」留的：卡片已经先落进输入框了（见
+      // `startProjectChat`），会话后到，这时再清一次就把刚落地的卡片抹掉了。
+      ...(opts?.keepComposer ? {} : { composerContexts: [] }),
       goal: c.goal,
       turns: withLive(historyToTurns(c.history, c.prompts), c.live ?? []),
       // 接上的是正在跑的会话：错过的 `turn_started` 补不回来，按后端说的来。
@@ -932,8 +946,10 @@ export const useStore = create<Store>((set) => ({
       side: null,
       inspectorOpen: false,
       inspectorTurn: null,
+      opening: false,
     }),
 
+  setOpening: (opening) => set({ opening }),
   // 用户消息在本地先落一条：事件流里没有「用户发言」事件，唯一的来源就是提交动作。
   addUserTurn: (text) => set((s) => ({ turns: [...s.turns, { role: "user", text }] })),
 

@@ -72,16 +72,31 @@ export function refreshAssistant(): Promise<void> {
  *
  * 会话任务的存活跟着句柄走：不先关掉旧的，它会继续占着后台任务，
  * 而且旧的 `Recorder` 还攥着文件。
+ *
+ * `draft` 给了就**先**切过去、把话摆进输入框，再等会话开出来。团队页那张飞入的
+ * 卡片落点就是输入框：等后端把会话建好（debug 下关旧会话与开新会话加起来大半秒）
+ * 再摆，卡片就悬在半空不动，看起来就是「点下去卡一下」。
  */
-async function replaceSession(args: {
-  resume: boolean;
-  resumeId?: string | null;
-  cwd?: string | null;
-}) {
+async function replaceSession(
+  args: {
+    resume: boolean;
+    resumeId?: string | null;
+    cwd?: string | null;
+  },
+  opts?: { draft?: string },
+) {
   const store = useStore.getState();
   const prev = store.sessionId;
   store.resetSession();
-  await closeUnlessChat(prev);
+  const draft = opts?.draft;
+  if (draft !== undefined) {
+    store.setOpening(true);
+    store.setComposerDraft(draft);
+  }
+  const early = draft !== undefined;
+  // 关旧会话与新开并行：两条是不同 id、不同文件，互不影响。串着等，落在输入框上
+  // 的卡片后面就会空等一次「关」—— debug 构建里那是三四百毫秒。
+  const closing = closeUnlessChat(prev);
   try {
     const created = await api.createSession(args);
     // 按 id 打开时，后端找不到该 id 不会报错，而是**静默新建** —— 返回值会是
@@ -89,12 +104,23 @@ async function replaceSession(args: {
     if (args.resumeId && created.session_id !== args.resumeId) {
       useStore.getState().setNotice("该会话已不存在，已新建会话");
     }
-    useStore.getState().beginSession(created);
+    // 卡片已经摆进去了，新会话到的时候别再清一遍 —— 那会把刚落地的卡片抹掉。
+    useStore.getState().beginSession(created, { keepComposer: early });
     // 侧栏列表不用等：它要把全部会话文件读一遍，而调用方（交给卡特的飞入卡片、分叉
     // 的草稿）都在等这里返回才往下走 —— 等着它，卡片就悬在半空停一下。
     void refreshSessions();
   } catch (e) {
     toastError(e);
+    // 没开成：话不留到下一条会话里，飞着的卡片立刻收掉。
+    if (early) {
+      const s = useStore.getState();
+      s.setOpening(false);
+      s.setComposerContexts([]);
+      landFlight(null);
+    }
+  } finally {
+    // 换走这件事要在返回前做完：调用方拿到返回值就当旧会话已经收了。
+    await closing;
   }
 }
 
@@ -312,10 +338,8 @@ export async function startProjectChat(cwd: string, draft: string): Promise<void
     store.setComposerDraft(draft);
     return;
   }
-  await replaceSession({ resume: false, cwd });
-  // 没开成（错误已经报过）：话不留到下一条会话里，飞着的卡片也立刻收掉。
-  if (useStore.getState().sessionId) useStore.getState().setComposerDraft(draft);
-  else landFlight(null);
+  // 草稿交给 `replaceSession` 先摆进去：卡片落在输入框上不该等后端。
+  await replaceSession({ resume: false, cwd }, { draft });
 }
 
 /**
