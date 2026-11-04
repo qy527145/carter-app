@@ -36,6 +36,9 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+// 只有 Unix 的 `kill_process_tree` 与测试用到；Windows 构建里它不存在，
+// 无条件导入会变成 unused import，而 `-D warnings` 会把它当错误。
+#[cfg(any(unix, test))]
 use std::time::Duration;
 
 use serde_json::{Value, json};

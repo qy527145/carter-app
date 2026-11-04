@@ -231,13 +231,20 @@ fn relative(roots: &[PathBuf], path: &Path) -> Option<PathBuf> {
 /// * Windows 的 `canonicalize` 会加 `\\?\` 前缀，而事件不带 —— 两种都试。
 fn root_variants(root: &Path) -> Vec<PathBuf> {
     let mut out = vec![root.to_path_buf()];
-    if let Ok(c) = root.canonicalize()
-        && !out.contains(&c)
+    // canonical 形式留到后面还要用（Windows 的 `\\?\` 变体是从它推出来的），
+    // 所以先存成 `Option` 而不是在一次 `if let` 里就地消费掉。
+    let canonical = root.canonicalize().ok();
+    if let Some(c) = &canonical
+        && !out.contains(c)
     {
         out.push(c.clone());
     }
     #[cfg(windows)]
-    if let Some(s) = c.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+    if let Some(s) = canonical
+        .as_deref()
+        .and_then(|c| c.to_str())
+        .and_then(|s| s.strip_prefix(r"\\?\"))
+    {
         let v = PathBuf::from(s);
         if !out.contains(&v) {
             out.push(v);

@@ -924,6 +924,9 @@ mod tests {
     }
 
     /// 一个独立的临时工作目录，带一个子目录 `sub`。
+    ///
+    /// 只有 Unix 的 `cd` 相关测试用它，Windows 测试构建里不加这个 `cfg` 就是死代码。
+    #[cfg(unix)]
     fn workdir(tag: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("carter-cwd-test-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(d.join("sub")).unwrap();
