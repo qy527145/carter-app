@@ -1945,9 +1945,12 @@ fn team_initialize(
     ) {
         Ok(created) => {
             outcome.sync_source = created;
-            if !created {
+            if outcome.remote.is_none() {
+                // 源已经建好了，但它连不上任何远端。等用户配好地址，`team_set_remote`
+                // 会再补齐一次，不需要重跑初始化。
                 outcome.warnings.push(
-                    "没有远端，暂不自动同步。配好 origin 之后再点一次初始化即可补上。".into(),
+                    "还没有远端，同步暂时空转。点右上角「配远端」填一个仓库地址，后台就会开始自动同步。"
+                        .into(),
                 );
             }
         }
@@ -2405,15 +2408,41 @@ async fn team_inbox(
 
 /// 配远端。界面上那一个输入框走这里 —— 不该让用户为了同步去开终端。
 #[tauri::command]
-fn team_set_remote(cwd: String, url: String) -> Result<String, String> {
+fn team_set_remote(
+    shell: State<'_, Arc<AppShell>>,
+    cwd: String,
+    url: String,
+) -> Result<String, String> {
     let store = carter_app_core::team::Store::discover(Path::new(&cwd))
         .ok_or("这个项目还没有初始化团队目录")?;
     let msg = carter_app_core::team::git::set_remote(store.project_root(), &url)?;
     // 配完顺手推一次：不推的话 `fetch` / `merge` 没东西可比，同步仍然是空转，
     // 用户会以为「配了没用」。
     let pushed = carter_app_core::team::git::publish(store.project_root());
+    // 初始化时还没远端的话，同步源要么没建、要么一直空转。这里补齐，免得用户
+    // 还得回去再点一次「初始化」。
+    let synced = carter_app_core::team::init::create_sync_source(
+        shell.inner(),
+        store.project_root(),
+        &store
+            .meta()
+            .map(|m| m.name)
+            .ok()
+            .filter(|n| !n.trim().is_empty())
+            .unwrap_or_else(|| {
+                store
+                    .project_root()
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "项目".into())
+            }),
+    );
+    let tail = match synced {
+        Ok(_) => String::new(),
+        Err(e) => format!("；后台同步源没建成：{e}"),
+    };
     Ok(match pushed {
-        Ok(p) => format!("{msg}；{p}"),
+        Ok(p) => format!("{msg}；{p}{tail}"),
         Err(e) => format!("{msg}；但首次推送没成功：{e}"),
     })
 }

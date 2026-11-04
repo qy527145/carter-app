@@ -231,11 +231,15 @@ fn relative_to(repo_root: &Path, target: &Path) -> Result<String, String> {
 /// `jq`，而且 git 检出时 `core.autocrlf` 会把脚本转成 CRLF，shebang 变成
 /// `#!/bin/sh\r` —— 连 Git Bash 都会报 "bad interpreter"。
 ///
-/// 同步本身只是「拉一下」，一条 `git pull --ff-only` 就够了，而 git 是三平台
-/// 都有的。把这条通道从脚本上摘下来，Windows 用户的自动同步才真正成立。
+/// ## 为什么是内置命令而不是 `git pull --ff-only`
 ///
-/// 推送不在这里做：本地改动由轮末提交时顺带推（见 `git::commit_turn_if_team`）。
-/// 分开的理由是观察源每 10 分钟跑一次，而推送应该跟着「真的改了东西」走。
+/// 一条 `git pull` 只能拉不能推。团队数据在本地提交之后，远端永远是旧的，直到有人
+/// 手动点同步 —— 而「后台静默自动同步」正是这个源该干的事。现在它跑内置的
+/// `carter:team-sync`：拉消息、推消息、推分支、能快进就快进（见 `git::sync`）。
+/// 推送只在远端没动时进行，所以它不会把人推进一次人工合并；工作区脏时也不快进，
+/// 写的代码不会被吃掉。失败不报错，安静地等下一轮。
+///
+/// 五分钟一次：消息有自己的源（更快），这里管的是分支状态。
 ///
 /// 幂等：已经有同名的源就更新命令与目录，不重复添加。
 pub fn create_sync_source(
@@ -243,13 +247,9 @@ pub fn create_sync_source(
     project_root: &Path,
     team_label: &str,
 ) -> Result<bool, String> {
-    if !git::has_remote(project_root) {
-        // 没有远端时建一个只会一直报错的源，比不建更糟。
-        return Ok(false);
-    }
-    // `--ff-only`：只在能干净快进时才动。后台自动跑的东西不该产出冲突。
-    // 命令里不写路径 —— 观察源自带 cwd，而拼路径要处理三平台的引号规则。
-    let command = "git pull --ff-only".to_string();
+    // 没有远端时也建：远端可能是之后才配上的（`team_set_remote` 会再调一次这里），
+    // 而且这条源在没远端时也只是安静地什么都不做，比缺一条源好。
+    let command = crate::assistant::source::TEAM_SYNC.to_string();
     let name = format!("{team_label} · 团队同步");
 
     let existing = shell
@@ -264,13 +264,13 @@ pub fn create_sync_source(
         name: name.clone(),
         command: String::new(),
         cwd: String::new(),
-        every_minutes: 10,
+        every_minutes: 5,
         enabled: true,
         state: Default::default(),
     });
     source.command = command;
     source.cwd = project_root.to_string_lossy().into_owned();
-    source.every_minutes = 10;
+    source.every_minutes = 5;
     source.enabled = true;
 
     crate::assistant::runtime::save_source(shell, source)?;
@@ -281,7 +281,7 @@ pub fn create_sync_source(
 /// 建（或补齐）团队消息的观察源：定时拉事件链、筛出跟本机有关的（@我 / 广播 /
 /// 派给我 / 我的任务上的评论），每条一行交给卡特助理。
 ///
-/// 与同步源分开：同步每 10 分钟拉一次分支就够了；消息要快一些，而且它**不碰工作区**，
+/// 与同步源分开：同步管分支状态；消息要快一些（一分钟一次），而且它**不碰工作区**，
 /// 写代码期间照样能收 —— 绑在同步源上的话，工作区一脏就什么都收不到。
 ///
 /// 命令是内置的 `carter:team-inbox`（见 `assistant::source`），不走 shell：要对照成员
@@ -303,12 +303,15 @@ pub fn create_inbox_source(
         name: name.clone(),
         command: String::new(),
         cwd: String::new(),
-        every_minutes: 3,
+        every_minutes: 1,
         enabled: true,
         state: Default::default(),
     });
     source.command = crate::assistant::source::TEAM_INBOX.to_string();
     source.cwd = project_root.to_string_lossy().into_owned();
+    // 已经有这条源的老用户也要吃到新节奏（3 分钟 → 1 分钟），否则「静默自动同步」
+    // 只对新装的机器成立。用户自己关掉了它的话，`enabled` 保持关闭。
+    source.every_minutes = 1;
     crate::assistant::runtime::save_source(shell, source)
 }
 

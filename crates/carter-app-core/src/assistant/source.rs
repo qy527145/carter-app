@@ -108,6 +108,9 @@ pub const BUILTIN_PREFIX: &str = "carter:";
 /// 团队收件箱：拉取事件、筛出跟本机有关的，每条一行。
 pub const TEAM_INBOX: &str = "carter:team-inbox";
 
+/// 团队同步：拉消息、推消息、推分支、能快进就快进。后台静默跑的。
+pub const TEAM_SYNC: &str = "carter:team-sync";
+
 /// 跑一次来源的命令，返回标准输出。非零退出码算失败，错误里带上 stderr 的末尾。
 pub async fn run_command(command: &str, cwd: &Path) -> Result<String, String> {
     if !cwd.is_dir() {
@@ -162,6 +165,14 @@ async fn run_builtin(name: &str, cwd: &Path) -> Result<String, String> {
             tokio::task::spawn_blocking(move || crate::team::inbox::observe(&cwd, 50))
                 .await
                 .map_err(|e| format!("团队收件箱没跑完：{e}"))?
+        }
+        // 同步失败（离线、分叉）不是「来源坏了」，所以这里永不返回 Err：那会让界面
+        // 给这条源标红。原因作为一行输出说出去，用户需要时看得见。
+        "team-sync" => {
+            let cwd = cwd.to_path_buf();
+            tokio::task::spawn_blocking(move || Ok(crate::team::git::background_sync(&cwd)))
+                .await
+                .map_err(|e| format!("团队同步没跑完：{e}"))?
         }
         other => Err(format!("不认识的内置命令 `{BUILTIN_PREFIX}{other}`")),
     }
