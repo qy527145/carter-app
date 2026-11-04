@@ -29,6 +29,7 @@ import { eventSender, eventVerb, personName, priorityTone, since, statusTone } f
 import { toastError } from "../../lib/toast";
 import { usePeople } from "./people";
 import { PersonAvatar } from "./peopleUi";
+import { HandoffButton } from "./HandoffButton";
 import { Composer, Mentions, ViaCarter } from "./TaskDrawer";
 
 /** 已读到哪条：存本机。已读回执要是也打成事件，消息流会被淹没（协议第 4 节）。 */
@@ -88,12 +89,15 @@ export function MineTab({
   inbox,
   seen,
   onOpenTask,
+  onHandoff,
   onJoin,
 }: {
   data: TeamOverview;
   inbox: TeamInboxItem[];
   seen: number;
   onOpenTask: (goal: TeamGoal, task: TeamTask) => void;
+  /** 直接把这件事交给卡特（不打开抽屉）。 */
+  onHandoff: (goal: TeamGoal, task: TeamTask) => void;
   onJoin: () => void;
 }) {
   const { people } = usePeople();
@@ -165,12 +169,25 @@ export function MineTab({
           empty="手上没有能开工的任务。"
           items={ready}
           onOpen={onOpenTask}
+          onHandoff={onHandoff}
         />
         {waiting.length > 0 && (
-          <Group icon={<ListChecks size={12} />} title="等前置完成" items={waiting} onOpen={onOpenTask} />
+          <Group
+            icon={<ListChecks size={12} />}
+            title="等前置完成"
+            items={waiting}
+            onOpen={onOpenTask}
+            onHandoff={onHandoff}
+          />
         )}
         {blocked.length > 0 && (
-          <Group icon={<CircleAlert size={12} />} title="受阻" items={blocked} onOpen={onOpenTask} />
+          <Group
+            icon={<CircleAlert size={12} />}
+            title="受阻"
+            items={blocked}
+            onOpen={onOpenTask}
+            onHandoff={onHandoff}
+          />
         )}
         {mine.length === 0 && pool.length > 0 && (
           <Group
@@ -178,6 +195,7 @@ export function MineTab({
             title="没人负责、可以直接领的"
             items={pool}
             onOpen={onOpenTask}
+            onHandoff={onHandoff}
           />
         )}
       </div>
@@ -210,12 +228,14 @@ function Group({
   items,
   empty,
   onOpen,
+  onHandoff,
 }: {
   icon: React.ReactNode;
   title: string;
   items: { goal: TeamGoal; task: TeamTask }[];
   empty?: string;
   onOpen: (goal: TeamGoal, task: TeamTask) => void;
+  onHandoff: (goal: TeamGoal, task: TeamTask) => void;
 }) {
   return (
     <section>
@@ -230,11 +250,19 @@ function Group({
           {items.map(({ goal, task }) => {
             const tone = statusTone(task.status);
             return (
-              <button
+              // 这里原来是一个整行 `<button>`：一整行都是「打开任务」。但这一页
+              // 最常做的事其实是「把这件事交给卡特」，而行里塞不进第二个按钮。
+              // 换成「透明覆盖按钮 + 上面压交办按钮」，两个动作各占各的。
+              <div
                 key={task.id}
-                onClick={() => onOpen(goal, task)}
-                className="flex w-full items-center gap-2 rounded-xl bg-card px-3 py-2 text-left shadow-soft transition-shadow hover:shadow-lift"
+                className="group relative flex w-full items-center gap-2 rounded-xl bg-card px-3 py-2 text-left shadow-soft transition-shadow hover:shadow-lift"
               >
+                <button
+                  type="button"
+                  onClick={() => onOpen(goal, task)}
+                  aria-label={`打开任务：${task.title}`}
+                  className="absolute inset-0 z-0 cursor-pointer rounded-xl outline-none focus-visible:ring-2 focus-visible:ring-edge-strong"
+                />
                 <span
                   className="size-1.5 shrink-0 rounded-full"
                   style={{ background: task.ready ? "var(--tone-green)" : tone.fg }}
@@ -256,7 +284,11 @@ function Group({
                 >
                   {task.ready ? "可开工" : task.status_label}
                 </span>
-              </button>
+                <HandoffButton
+                  className="-my-1 -mr-2"
+                  onClick={() => onHandoff(goal, task)}
+                />
+              </div>
             );
           })}
         </div>

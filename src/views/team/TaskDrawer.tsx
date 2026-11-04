@@ -10,7 +10,7 @@
 // 协议规定收件人只看 `to=`，不从正文里猜（昵称会改、会重名）。所以这里在发送时把
 // 正文里的 `@昵称` 解析成成员 id 填进 `to`。用户看到的是 `@小张`，发出去的是 id。
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AtSign, Send, Sparkles, UserRound, X } from "lucide-react";
 
 import {
@@ -30,6 +30,7 @@ import {
 } from "../../lib/teamUi";
 import { toastError, toastOk } from "../../lib/toast";
 import { usePeople } from "./people";
+import { HandoffButton } from "./HandoffButton";
 import { PersonAvatar, PersonPicker } from "./peopleUi";
 
 export function TaskDrawer({
@@ -59,14 +60,33 @@ export function TaskDrawer({
   const tone = statusTone(task.status);
   const closed = task.status === "done" || task.status === "dropped";
 
+  // ⌘/Ctrl+Enter 直接交给卡特。
+  //
+  // 抽屉里最常做的两件事是「说一句」和「交给卡特」。前者有输入框、回车即发；
+  // 后者原来要点底部那块通栏按钮，鼠标得一路移到左下角。给它一个键，看完任务
+  // 直接敲出去 —— 而右下角的讨论框里 ⌘↵ 仍然归它自己（发送），两者不抢。
+  const handoff = useCallback(() => {
+    onAsk(taskHandoff(goal, task));
+  }, [onAsk, goal, task]);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       // 正在输入时 Escape 先交给输入框（清 @ 补全），不关抽屉。
       if (e.key === "Escape" && !(e.target instanceof HTMLTextAreaElement)) onClose();
+      if (
+        e.key === "Enter" &&
+        (e.metaKey || e.ctrlKey) &&
+        !closed &&
+        // 焦点在讨论框里时那是「发送这句话」，不能在这里截走。
+        !(e.target instanceof HTMLTextAreaElement)
+      ) {
+        e.preventDefault();
+        handoff();
+      }
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [onClose, handoff, closed]);
 
   const thread = useMemo(
     () => events.filter((e) => e.target === task.id).slice().reverse(),
@@ -173,16 +193,14 @@ export function TaskDrawer({
             <section className="mb-4 text-[11px] text-dim">还在等 {task.waiting_on.length} 个前置任务完成。</section>
           )}
 
+          {/* 抽屉里最主要的动作。原来是一块灰底灰字的通栏 —— 看上去像禁用态。 */}
           {!closed && (
-            <button
-              onClick={() =>
-                onAsk(taskHandoff(goal, task))
-              }
-              className="mb-4 flex w-full items-center justify-center gap-1.5 rounded-lg bg-ink/5 py-1.5 text-xs text-dim transition-colors hover:bg-ink/10 hover:text-ink"
-            >
-              <Sparkles size={12} />
-              交给卡特去做
-            </button>
+            <HandoffButton
+              variant="full"
+              shortcut="⌘↵"
+              className="mb-4"
+              onClick={handoff}
+            />
           )}
 
           <section>

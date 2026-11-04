@@ -39,7 +39,6 @@ import {
   MessageSquare,
   Plus,
   RefreshCw,
-  Send,
   Sparkles,
   Target,
 } from "lucide-react";
@@ -68,6 +67,7 @@ import { LogTab, MineTab, markSeen, readSeen, useInbox } from "./MineAndLog";
 import { PeopleProvider, usePeople } from "./people";
 import { IdentityChip, JoinDialog, PersonAvatar } from "./peopleUi";
 import { BoardView, GRAPH_VIEWS, ListView, TimelineView, useGraphView } from "./GraphViews";
+import { HandoffButton } from "./HandoffButton";
 import { TaskDrawer } from "./TaskDrawer";
 import {
   layerize,
@@ -452,7 +452,14 @@ function TeamPageBody({ onReloaded }: { onReloaded: () => void }) {
           )}
 
           {tab === "mine" && (
-            <MineTab data={data} inbox={inbox} seen={seen} onOpenTask={openTask} onJoin={() => setJoining(true)} />
+            <MineTab
+              data={data}
+              inbox={inbox}
+              seen={seen}
+              onOpenTask={openTask}
+              onHandoff={(g, t) => askCarter(taskHandoff(g, t))}
+              onJoin={() => setJoining(true)}
+            />
           )}
           {tab === "graph" && (
             <GraphTab
@@ -1083,14 +1090,10 @@ function TaskNode({
 
   return (
     <div
-      role="button"
-      tabIndex={0}
-      onClick={onOpen}
-      onKeyDown={(e) => {
-        if (e.key === "Enter") onOpen();
-      }}
-      title="打开任务：看要求、指派、讨论"
-      className={`group relative cursor-pointer rounded-xl bg-card p-2.5 shadow-soft transition-[box-shadow,opacity] hover:shadow-lift ${
+      // 卡片整块可点靠一层铺满的透明按钮，而不是给外层挂 role="button" ——
+      // 外面再套 role="button"、里面再放一个 `<button>`，是嵌套交互元素，
+      // 读屏会念成两个按钮，Tab 也会在同一个位置上停两次。
+      className={`group relative rounded-xl bg-card p-2.5 shadow-soft transition-[box-shadow,opacity] hover:shadow-lift ${
         dim ? "opacity-35" : ""
       }`}
       style={{
@@ -1100,7 +1103,17 @@ function TaskNode({
           : undefined,
       }}
     >
-      <div className="mb-1 flex items-center gap-1.5">
+      {/* 整块可点的那一层。`z-0` 铺满卡片；上面的交办按钮抬到 `z-10` 才接得到
+          自己那一小块。按 Enter 打开靠的是它的焦点，不是外层 div 的。 */}
+      <button
+        type="button"
+        onClick={onOpen}
+        aria-label={`打开任务：${task.title}`}
+        title="打开任务：看要求、指派、讨论"
+        className="absolute inset-0 z-0 cursor-pointer rounded-xl outline-none focus-visible:ring-2 focus-visible:ring-edge-strong"
+      />
+
+      <div className="pointer-events-none relative z-[1] mb-1 flex items-center gap-1.5">
         <span
           className="rounded px-1.5 py-[1px] text-[10px] font-medium"
           style={{ background: tone.bg, color: tone.fg }}
@@ -1125,7 +1138,7 @@ function TaskNode({
         </span>
       </div>
 
-      <div className="text-xs font-medium leading-snug">{task.title}</div>
+      <div className="relative z-[1] text-xs font-medium leading-snug">{task.title}</div>
 
       {parent && (
         <div className="mt-0.5 truncate text-[10px] text-dim">
@@ -1149,22 +1162,16 @@ function TaskNode({
         </div>
       )}
 
-      <div className="mt-1.5 flex items-center gap-1.5 text-[10px] text-dim">
+      <div className="relative z-[1] mt-1.5 flex items-center gap-1.5 text-[10px] text-dim">
         <span className="mono truncate">{task.id}</span>
         {task.estimate_hours ? <span>· {task.estimate_hours}h</span> : null}
-        {/* 悬停才露出来：每张卡常驻一个按钮，整屏就是一片按钮。 */}
+        {/* 常驻在卡片右下角：它是这张卡上最主要的动作，悬停才出现等于不存在。
+            形状与另外三种视图一致，见 HandoffButton.tsx。 */}
         {!closed && (
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              onAsk(taskHandoff(goal, task));
-            }}
-            title="在这个项目里开一条新对话，把任务摆进输入框"
-            className="ml-auto hidden shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-dim transition-colors hover:bg-ink/5 hover:text-ink group-hover:flex"
-          >
-            <Send size={10} />
-            交给卡特
-          </button>
+          <HandoffButton
+            className="ml-auto -mr-1 -my-1"
+            onClick={() => onAsk(taskHandoff(goal, task))}
+          />
         )}
       </div>
     </div>

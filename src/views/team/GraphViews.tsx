@@ -32,12 +32,12 @@ import {
   Check,
   Columns3,
   LayoutList,
-  Plus,
 } from "lucide-react";
 
 import { teamAct, type TeamGoal, type TeamTask } from "../../lib/api";
 import { personName, priorityTone, statusTone, taskHandoff } from "../../lib/teamUi";
 import { toastError } from "../../lib/toast";
+import { HandoffButton } from "./HandoffButton";
 import { usePeople } from "./people";
 
 export type GraphView = "lanes" | "board" | "list" | "timeline";
@@ -277,37 +277,39 @@ function BoardCard({
 }) {
   const { people } = usePeople();
   return (
+    // 与图层节点同样的结构：卡片本身不是按钮，「打开」由一层铺满的透明按钮承担，
+    // 「交给卡特」压在它上面。外层挂 role="button" 再嵌 `<button>` 是嵌套交互元素，
+    // 读屏会念两遍，←/→ 也说不清该归谁。
     <div
-      role="button"
-      tabIndex={0}
       draggable={!busy}
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
-      onClick={onOpen}
-      onKeyDown={(e) => {
-        if (e.key === "Enter") {
-          e.preventDefault();
-          onOpen();
-        }
-        // ←/→ 换列：拖拽之外的备用通道，键盘用户也改得动状态。
-        if (e.key === "ArrowLeft") {
-          e.preventDefault();
-          onMove(-1);
-        }
-        if (e.key === "ArrowRight") {
-          e.preventDefault();
-          onMove(1);
-        }
-      }}
-      title="拖到别的列可以改状态；聚焦后按 ←/→ 也行"
-      className={`group cursor-grab rounded-lg bg-elevated p-2 shadow-soft outline-none transition-[opacity,box-shadow] hover:shadow-lift active:cursor-grabbing ${
+      title="拖到别的列可以改状态"
+      className={`group relative cursor-grab rounded-lg bg-elevated p-2 shadow-soft transition-[opacity,box-shadow] hover:shadow-lift active:cursor-grabbing ${
         dragging ? "opacity-40" : ""
       } ${busy ? "animate-pulse" : ""}`}
       style={{
         boxShadow: task.ready ? "inset 2px 0 0 0 var(--tone-green), var(--shadow-soft)" : undefined,
       }}
     >
-      <div className="flex items-center gap-1.5">
+      <button
+        type="button"
+        onClick={onOpen}
+        aria-label={`打开任务：${task.title}`}
+        className="absolute inset-0 z-0 cursor-pointer rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-edge-strong"
+        onKeyDown={(e) => {
+          // ←/→ 换列：拖拽之外的备用通道，键盘用户也改得动状态。
+          if (e.key === "ArrowLeft") {
+            e.preventDefault();
+            onMove(-1);
+          }
+          if (e.key === "ArrowRight") {
+            e.preventDefault();
+            onMove(1);
+          }
+        }}
+      />
+      <div className="pointer-events-none relative z-[1] flex items-center gap-1.5">
         <span className="text-[10px]" style={{ color: priorityTone(task.priority).fg }}>
           {task.priority}
         </span>
@@ -316,25 +318,18 @@ function BoardCard({
           {task.assignee ? personName(people, task.assignee) : "待指派"}
         </span>
       </div>
-      <div className="mt-1 line-clamp-2 text-xs font-medium leading-snug">{task.title}</div>
+      <div className="pointer-events-none relative z-[1] mt-1 line-clamp-2 text-xs font-medium leading-snug">
+        {task.title}
+      </div>
       {task.blocked_reason && columnOf(task) === "blocked" && (
-        <div className="mt-1 line-clamp-2 rounded bg-tone-orange-soft px-1.5 py-1 text-[10px] text-tone-orange">
+        <div className="pointer-events-none relative z-[1] mt-1 line-clamp-2 rounded bg-tone-orange-soft px-1.5 py-1 text-[10px] text-tone-orange">
           {task.blocked_reason}
         </div>
       )}
-      <div className="mt-1.5 flex items-center gap-1.5 text-[10px] text-dim">
+      <div className="relative z-[1] mt-1.5 flex items-center gap-1.5 text-[10px] text-dim">
         <span className="mono truncate">{task.id}</span>
         {task.estimate_hours ? <span>· {task.estimate_hours}h</span> : null}
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            onAsk();
-          }}
-          title="开一条新对话，把任务摆进输入框"
-          className="ml-auto hidden shrink-0 items-center gap-0.5 rounded px-1 py-0.5 transition-colors hover:bg-ink/5 hover:text-ink group-hover:flex"
-        >
-          <Plus size={10} /> 卡特
-        </button>
+        <HandoffButton className="-mr-1 -my-0.5 ml-auto" onClick={onAsk} />
       </div>
     </div>
   );
@@ -461,19 +456,23 @@ function ListRow({
 
   return (
     <div
-      role="button"
-      tabIndex={0}
-      onClick={onOpen}
-      onKeyDown={(e) => {
-        if (e.key === "Enter") onOpen();
-      }}
-      className={`group flex w-full items-center gap-2.5 px-3 py-2 text-left outline-none transition-colors hover:bg-ink/[0.03] ${
+      className={`group relative flex w-full items-center gap-2.5 px-3 py-2 text-left transition-colors hover:bg-ink/[0.03] ${
         last ? "" : "border-b border-edge/60"
       }`}
     >
+      {/* 打开任务的透明层。清单一行里有两个真按钮（完成圈、交给卡特），
+          它们都压在它上面，所以不用在外层挂 role="button"。 */}
+      <button
+        type="button"
+        onClick={onOpen}
+        aria-label={`打开任务：${task.title}`}
+        className="absolute inset-0 z-0 cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-edge-strong"
+      />
       <button
         onClick={toggleDone}
         disabled={done}
+        // 勾选按钮要在透明层之上，否则点它是「打开任务」。
+        style={{ position: "relative", zIndex: 1 }}
         title={closed ? "重新打开" : "标记完成"}
         aria-label={closed ? "重新打开" : "标记完成"}
         className={`flex size-4 shrink-0 items-center justify-center rounded-full transition-colors ${
@@ -485,38 +484,42 @@ function ListRow({
         {closed && <Check size={10} strokeWidth={3} />}
       </button>
 
-      <span className="shrink-0 text-[10px]" style={{ color: priorityTone(task.priority).fg }}>
+      {/* 文字层不接指针：它们压在透明层上面，接了就轮到它们吃掉点击，
+          点标题会变成什么都不发生。真正要接指针的只有下面那两个按钮。 */}
+      <span
+        className="pointer-events-none relative z-[1] shrink-0 text-[10px]"
+        style={{ color: priorityTone(task.priority).fg }}
+      >
         {task.priority}
       </span>
 
-      <span className={`min-w-0 flex-1 truncate text-xs ${closed ? "text-dim line-through" : "text-ink"}`}>
+      <span
+        className={`pointer-events-none relative z-[1] min-w-0 flex-1 truncate text-xs ${
+          closed ? "text-dim line-through" : "text-ink"
+        }`}
+      >
         {task.title}
       </span>
 
       {task.children.length > 0 && (
-        <span className="shrink-0 text-[10px] tabular-nums text-dim">
+        <span className="pointer-events-none relative z-[1] shrink-0 text-[10px] tabular-nums text-dim">
           {task.progress}%
         </span>
       )}
       {task.waiting_on.length > 0 && (
-        <span className="shrink-0 text-[10px] text-dim">等 {task.waiting_on.length} 个</span>
+        <span className="pointer-events-none relative z-[1] shrink-0 text-[10px] text-dim">
+          等 {task.waiting_on.length} 个
+        </span>
       )}
       {task.due_at && (
-        <span className="shrink-0 text-[10px] text-dim">{shortDate(task.due_at)}</span>
+        <span className="pointer-events-none relative z-[1] shrink-0 text-[10px] text-dim">
+          {shortDate(task.due_at)}
+        </span>
       )}
-      <span className="w-14 shrink-0 truncate text-right text-[10px] text-dim">
+      <span className="pointer-events-none relative z-[1] w-14 shrink-0 truncate text-right text-[10px] text-dim">
         {task.assignee ? personName(people, task.assignee) : "—"}
       </span>
-      <button
-        onClick={(e) => {
-          e.stopPropagation();
-          onAsk();
-        }}
-        title="开一条新对话，把任务摆进输入框"
-        className="hidden shrink-0 rounded p-1 text-dim transition-colors hover:bg-ink/5 hover:text-ink group-hover:block"
-      >
-        <Plus size={11} />
-      </button>
+      <HandoffButton className="-my-1 -mr-1" onClick={onAsk} />
     </div>
   );
 }
@@ -620,15 +623,16 @@ export function TimelineView({
               return (
                 <div
                   key={t.id}
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => onOpen(t)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") onOpen(t);
-                  }}
-                  className="group grid cursor-pointer grid-cols-[15rem_1fr] items-center gap-2 rounded-md py-0.5 outline-none transition-colors hover:bg-ink/[0.03] focus-visible:bg-ink/[0.04]"
+                  className="group relative grid grid-cols-[15rem_1fr] items-center gap-2 rounded-md py-0.5 transition-colors hover:bg-ink/[0.03]"
                 >
-                  <div className="flex min-w-0 items-center gap-1.5 pl-1">
+                  {/* 同样的三段式：透明层管「打开」，交办按钮压在它上面。 */}
+                  <button
+                    type="button"
+                    onClick={() => onOpen(t)}
+                    aria-label={`打开任务：${t.title}`}
+                    className="absolute inset-0 z-0 cursor-pointer rounded-md outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-edge-strong"
+                  />
+                  <div className="pointer-events-none relative z-[1] flex min-w-0 items-center gap-1.5 pl-1">
                     <span
                       className="size-1.5 shrink-0 rounded-full"
                       style={{ background: tone.fg }}
@@ -637,18 +641,12 @@ export function TimelineView({
                       {t.priority}
                     </span>
                     <span className="min-w-0 flex-1 truncate text-[11px]">{t.title}</span>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onAsk(taskHandoff(goal, t));
-                      }}
-                      title="交给卡特"
-                      className="hidden shrink-0 rounded p-0.5 text-dim hover:block hover:bg-ink/5 hover:text-ink group-hover:block"
-                    >
-                      <Plus size={10} />
-                    </button>
+                    <HandoffButton
+                      className="pointer-events-auto -my-1"
+                      onClick={() => onAsk(taskHandoff(goal, t))}
+                    />
                   </div>
-                  <div className="relative h-5 min-w-0">
+                  <div className="pointer-events-none relative z-[1] h-5 min-w-0">
                     {/* 从今天到截止日的一段。逾期的那一段用橙色，不靠文字说明。 */}
                     <div
                       className="absolute top-1/2 h-1 -translate-y-1/2 rounded-full transition-opacity group-hover:opacity-80"
