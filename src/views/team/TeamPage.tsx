@@ -309,7 +309,7 @@ function TeamPageBody({ onReloaded }: { onReloaded: () => void }) {
         lastPressed.current = (e.target as Element).closest("button");
       }}
     >
-      <header className="flex shrink-0 items-center gap-3 border-b border-edge px-5 py-2.5">
+      <header className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-edge px-5 py-2.5">
         <ProjectSwitcher current={cwd} teamName={data?.name} onPick={setTeamCwd} />
 
         {data && (
@@ -775,13 +775,13 @@ function GraphTab({
   }
 
   return (
-    <div className="flex min-h-0 gap-0">
+    <div className="flex min-h-0 flex-col lg:flex-row">
       {/* 目标列 */}
-      <div className="w-[15rem] shrink-0 border-r border-edge p-3">
+      <div className="w-full shrink-0 border-b border-edge p-3 lg:w-[15rem] lg:border-b-0 lg:border-r">
         <div className="mb-2 px-1 text-[10px] font-medium uppercase tracking-wider text-dim">
           目标 · {data.goals.length}
         </div>
-        <div className="space-y-1.5">
+        <div className="flex gap-1.5 overflow-x-auto lg:block lg:space-y-1.5 lg:overflow-visible">
           {data.goals.map((g) => (
             <GoalCard
               key={g.id}
@@ -822,7 +822,7 @@ function GoalCard({
   return (
     <button
       onClick={onClick}
-      className={`w-full rounded-xl p-2.5 text-left transition-colors ${
+      className={`w-[14rem] shrink-0 rounded-xl p-2.5 text-left lg:w-full transition-colors ${
         active ? "bg-card shadow-soft" : "hover:bg-ink/[0.04]"
       }`}
     >
@@ -1232,8 +1232,8 @@ function BoardTab({
     );
   }
   return (
-    <div className="flex min-h-full gap-4 p-5">
-      <div className="w-[12rem] shrink-0 space-y-0.5">
+    <div className="flex min-h-full flex-col gap-4 p-5 lg:flex-row">
+      <div className="w-full shrink-0 space-y-0.5 lg:w-[12rem]">
         {[...boards].reverse().map((b) => (
           <button
             key={b.id}

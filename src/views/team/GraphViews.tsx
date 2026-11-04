@@ -177,7 +177,7 @@ export function BoardView({
   }
 
   return (
-    <div className="flex gap-3 overflow-x-auto pb-3">
+    <div className="grid grid-cols-[repeat(auto-fit,minmax(13rem,1fr))] gap-3 pb-3">
       {COLUMNS.map((col) => {
         const tone = statusTone(col.status);
         const items = byColumn[col.status];
@@ -209,7 +209,7 @@ export function BoardView({
               const id = e.dataTransfer.getData("text/plain") || drag;
               if (id) void drop(id, col.status);
             }}
-            className={`flex w-[17rem] shrink-0 flex-col rounded-xl p-2 transition-colors duration-150 ${
+            className={`flex min-w-0 flex-col rounded-xl p-2 transition-colors duration-150 ${
               active ? "bg-card ring-1 ring-edge-strong/50" : "bg-card/50"
             }`}
           >
@@ -599,12 +599,16 @@ export function TimelineView({
   return (
     <div>
       {dated.length > 0 ? (
-        <div className="rounded-xl bg-card p-3">
+        <div
+          className="rounded-xl bg-card p-3"
+          // 标签栏宽度随容器收缩（8rem ~ 15rem）；刻度、行、今天的竖线都读这一个变量，保持同一坐标系。
+          style={{ "--lbl": "clamp(8rem, 30%, 15rem)" } as React.CSSProperties}
+        >
           {/* 刻度与条形必须落在同一个坐标系里：两处都用 `grid-cols-[15rem_1fr]` 加同一条
               gap，左边那一栏的任务名才会与右边的条对齐。早先用 `ml-[15rem]` 对齐刻度，
               漏掉了 flex 的 gap，刻度和条会整体差出几像素 —— 这种偏差在密集的轴上看
               得出来，而且会随着窗口宽度变。 */}
-          <div className="grid grid-cols-[15rem_1fr] gap-2">
+          <div className="grid grid-cols-[var(--lbl)_1fr] gap-2">
             <div />
             <div className="relative h-4 border-b border-edge/70">
               {ticks.map((t) => (
@@ -628,7 +632,7 @@ export function TimelineView({
             <div
               className="pointer-events-none absolute bottom-0 top-0 z-10 w-px bg-tone-blue/50"
               style={{
-                left: `calc(15rem + 0.5rem + (100% - 15.5rem) * ${((now - min) / span).toFixed(6)})`,
+                left: `calc(var(--lbl) + 0.5rem + (100% - var(--lbl) - 0.5rem) *${((now - min) / span).toFixed(6)})`,
               }}
             />
             {dated.map((t) => {
@@ -637,7 +641,7 @@ export function TimelineView({
               return (
                 <div
                   key={t.id}
-                  className="group relative grid grid-cols-[15rem_1fr] items-center gap-2 rounded-md py-0.5 transition-colors hover:bg-ink/[0.03]"
+                  className="group relative grid grid-cols-[var(--lbl)_1fr] items-center gap-2 rounded-md py-0.5 transition-colors hover:bg-ink/[0.03]"
                 >
                   {/* 同样的三段式：透明层管「打开」，交办按钮压在它上面。 */}
                   <button
