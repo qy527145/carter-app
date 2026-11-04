@@ -12,7 +12,7 @@
 // 不是 hash。所以图片存在 `attachments` 里、显示成缩略图，发送时才拼到文本末尾。
 // 历史消息里那些 token 由 `MessageImages` 渲染回图片。
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   CircleHelp,
@@ -47,11 +47,14 @@ import {
   type CommandRow,
   type ModelRow,
 } from "../lib/api";
+import { landFlight } from "../lib/flight";
+import { contextSummary, formatContext, parseContext, type PromptContext } from "../lib/promptContext";
 import { toastError } from "../lib/toast";
 import { fmtTokens, shortenPath } from "../lib/format";
 import { displayName, modelTitle, useModelCatalog } from "../lib/modelLabel";
 import * as ops from "../lib/sessionOps";
 import { useStore, type QueuedPrompt } from "../store";
+import { ContextChip } from "./ContextChip";
 import { Glyph } from "./toolcards/ToolCard";
 
 // ---------------------------------------------------------------------------
@@ -337,6 +340,10 @@ function tokenStartAt(text: string, caret: number): number {
 
 export function Composer() {
   const [text, setText] = useState("");
+  // 选定的斜杠命令（不带 `/`）。它是一枚整体的标签，不在 `text` 里：
+  // 否则退格一下就成了残缺的命令名，还会把菜单重新弹出来。
+  const [command, setCommand] = useState<string | null>(null);
+  const [context, setContext] = useState<PromptContext | null>(null);
   const [attachments, setAttachments] = useState<string[]>([]);
   const [pasting, setPasting] = useState(false);
 
@@ -344,6 +351,8 @@ export function Composer() {
   const [files, setFiles] = useState<string[]>([]);
   const [fileQuery, setFileQuery] = useState<string | null>(null);
   const [active, setActive] = useState(0);
+  const commandsRef = useRef<CommandRow[]>([]);
+  commandsRef.current = commands;
 
   const streaming = useStore((s) => s.streaming);
   const sessionId = useStore((s) => s.sessionId);
@@ -358,12 +367,27 @@ export function Composer() {
   const enqueuePrompt = useStore((s) => s.enqueuePrompt);
 
   const taRef = useRef<HTMLTextAreaElement>(null);
+  const contextRef = useRef<HTMLDivElement>(null);
+  const commandRef = useRef<HTMLSpanElement>(null);
+  // 命令标签浮在第一行开头，文字靠首行缩进让位：折行后仍顶格，看上去就是行内元素。
+  const [indent, setIndent] = useState(0);
+  const [landTick, setLandTick] = useState(0);
+
+  useLayoutEffect(() => {
+    setIndent(command && commandRef.current ? commandRef.current.offsetWidth + 6 : 0);
+  }, [command]);
+
+  // 在这一帧上屏之前接住飞来的卡片（见 lib/flight）。
+  useLayoutEffect(() => {
+    if (landTick === 0) return;
+    landFlight(contextRef.current?.querySelector("[data-context-chip]") ?? taRef.current);
+  }, [landTick]);
 
   // 内容变了就把框撑到合适高度。挂在这里而不是 `onChange` 里，是因为文本还会从
   // 别的路径进来（分叉的草稿、菜单插入的 `@目录/`、清空），逐处调用总会漏一处。
   useEffect(() => {
     growComposer(taRef.current);
-  }, [text]);
+  }, [text, indent]);
 
   // 窗口变窄 → 同样一段话多折几行。不重量的话框会停在旧高度上、内容被切掉一截。
   useEffect(() => {
@@ -380,9 +404,15 @@ export function Composer() {
   useEffect(() => {
     if (composerDraft === null || !connected) return;
     useStore.getState().setComposerDraft(null);
-    setText(composerDraft);
+    const { context: ctx, rest } = parseContext(composerDraft);
+    const split = splitCommand(rest, commandsRef.current);
+    setContext(ctx);
+    setCommand(split?.name ?? null);
+    const body = split ? split.rest : rest;
+    setText(body);
     setFileQuery(null);
-    focusEnd(taRef.current, composerDraft.length);
+    setLandTick((n) => n + 1);
+    focusEnd(taRef.current, body.length);
   }, [composerDraft, connected]);
 
   // 命令列表按 cwd 取一次。自定义命令来自磁盘，cwd 变了要重取。
@@ -416,7 +446,7 @@ export function Composer() {
   // -------------------------------------------------------------------------
 
   const slashItems: MenuItem[] = useMemo(() => {
-    if (!text.startsWith("/") || text.includes(" ")) return [];
+    if (command || !text.startsWith("/") || text.includes(" ")) return [];
     const q = text.slice(1).toLowerCase();
     return commands
       .filter((c) => c.name.toLowerCase().includes(q))
@@ -433,7 +463,7 @@ export function Composer() {
           badge: c.kind === "builtin" ? undefined : "自定义",
         };
       });
-  }, [text, commands]);
+  }, [text, commands, command]);
 
   const fileItems: MenuItem[] = useMemo(() => {
     if (fileQuery === null) return [];
@@ -459,6 +489,15 @@ export function Composer() {
 
   /** 文本变化时顺便重新判断光标前是不是 `@`。 */
   const onTextChange = (next: string, caret: number) => {
+    // 手打或粘贴的 `/goal ` 也变成标签，与从菜单选的一个样子。
+    const split = command ? null : splitCommand(next, commands);
+    if (split) {
+      setCommand(split.name);
+      setText(split.rest);
+      setFileQuery(null);
+      focusEnd(taRef.current, Math.max(0, caret - (next.length - split.rest.length)));
+      return;
+    }
     setText(next);
     setFileQuery(fileQueryAt(next, caret));
   };
@@ -506,14 +545,20 @@ export function Composer() {
           return;
         }
         if (result === "needs-args") {
-          // 点击菜单里的 `/goal` 与手打一样：把命令名摆好等用户补目标正文。
-          setText(`/${name} `);
+          // 点击菜单里的 `/goal` 与手打一样：把命令摆好等用户补目标正文。
+          setCommand(name);
+          setText("");
           setFileQuery(null);
-          focusEnd(taRef.current, name.length + 2);
+          focusEnd(taRef.current, 0);
           return;
         }
-        // 自定义命令：把 `/名字 ` 留在输入框里让用户补参数，
+        // 自定义命令：摆成标签让用户补参数，
         // 真正的展开在发送时由后端做（见 core 的 expand_input）。
+        setCommand(name);
+        setText("");
+        setFileQuery(null);
+        focusEnd(taRef.current, 0);
+        return;
       }
       insert(item.insert);
     },
@@ -563,7 +608,8 @@ export function Composer() {
    * 带着 `prompt_id` 回来的时候（见 store 的 `applyEvent`）。
    */
   const send = (interject = false) => {
-    const t = text.trim();
+    const typed = text.trim();
+    const t = command ? `/${command} ${typed}`.trim() : typed;
     // 打在输入框里的内置命令：**本地执行**，不进对话文本、也不发给模型。
     //
     // 之前只有从菜单里**点**才会执行内置命令，手打 `/help` 再回车是把字面量
@@ -580,15 +626,18 @@ export function Composer() {
       if (result === "needs-args") {
         // 命令想让你把话说完（`/goal` 后面接目标正文）。把命令名摆好、光标放末尾，
         // 而不是把用户已经打的那几个字发出去。
-        setText(`/${cmd.name} `);
+        setCommand(cmd.name);
+        setText("");
         setFileQuery(null);
-        focusEnd(taRef.current, cmd.name.length + 2);
+        focusEnd(taRef.current, 0);
         return;
       }
     }
-    if ((!t && attachments.length === 0) || !sessionId || disabled) return;
+    if ((!t && !context && attachments.length === 0) || !sessionId || disabled) return;
     // 图片引用拼在文本末尾：carter 在消息文本里认 `[img:...]` 这个形态。
-    const payload = [t, ...attachments].filter(Boolean).join("\n");
+    // 上下文排在用户的话后面：`/命令` 必须打头，后端才认得出来。
+    const block = context ? formatContext(context) : "";
+    const payload = [t, block, ...attachments].filter(Boolean).join("\n");
     const id = nextPromptId();
     // 挂进「排队中」：模型写这一轮时用户还能接着说，后端的队列保证顺序。
     // 后端闲着、前面也没有别的消息时不用等，标成直发（见 `QueuedPrompt.direct`）。
@@ -596,13 +645,17 @@ export function Composer() {
     const direct = !s.streaming && !s.compacting && s.queued.length === 0;
     enqueuePrompt({ id, text: payload, direct });
     setText("");
+    setCommand(null);
+    setContext(null);
     setAttachments([]);
     setFileQuery(null);
     ops.send(sessionId, payload, { id, interject }).catch((e) => setNotice(String(e)));
   };
 
+  // 不动上下文卡片：中途跑一条 `/compact`，不该把摆好的任务一起扔掉。
   const clearInput = () => {
     setText("");
+    setCommand(null);
     setAttachments([]);
     setFileQuery(null);
   };
@@ -638,6 +691,17 @@ export function Composer() {
         return;
       }
     }
+    // 光标在最前面时退格删掉整枚命令标签，与删除一个字符是同一个手势。
+    if (
+      command &&
+      (e.key === "Backspace" || (e.key === "Escape" && !text)) &&
+      e.currentTarget.selectionStart === 0 &&
+      e.currentTarget.selectionEnd === 0
+    ) {
+      e.preventDefault();
+      setCommand(null);
+      return;
+    }
     // Enter 发送，Shift+Enter 换行。生成中按 Cmd/Ctrl+Enter = 插队：
     // 中断这一轮，先处理这条。
     if (e.key === "Enter" && !e.shiftKey) {
@@ -646,7 +710,9 @@ export function Composer() {
     }
   };
 
-  const canSend = (text.trim() !== "" || attachments.length > 0) && !disabled;
+  const canSend =
+    (text.trim() !== "" || command !== null || context !== null || attachments.length > 0) && !disabled;
+  const commandRow = command ? commands.find((c) => c.name === command) : undefined;
 
   return (
     <div className="shrink-0 px-4 pb-4 pt-1">
@@ -669,6 +735,31 @@ export function Composer() {
 
           <QueueStrip queued={queued} sessionId={sessionId} />
 
+          {context && (
+            <div ref={contextRef} className="px-3.5 pt-3">
+              <ContextChip
+                context={context}
+                onRemove={() => {
+                  setContext(null);
+                  taRef.current?.focus();
+                }}
+              />
+            </div>
+          )}
+
+          <div className="relative">
+          {command && (
+            <CommandTag
+              ref={commandRef}
+              name={command}
+              builtin={commandRow?.kind === "builtin"}
+              title={commandRow?.description}
+              onRemove={() => {
+                setCommand(null);
+                taRef.current?.focus();
+              }}
+            />
+          )}
           <textarea
             ref={taRef}
             rows={1}
@@ -677,19 +768,25 @@ export function Composer() {
             onPaste={onPaste}
             onKeyDown={onKeyDown}
             disabled={disabled}
+            style={{ textIndent: indent }}
             placeholder={
               !connected
                 ? "会话未就绪 —— 点「新对话」开始"
                 : pendingAsk
                   ? "请先回答上面的问题"
+                  : command
+                    ? commandRow?.argument_hint || "接着写，Enter 执行"
+                  : context
+                    ? "想补充点什么？也可以直接按 Enter 交给卡特"
                   : busy
                     ? "可以接着说：Enter 排队，⌘/Ctrl+Enter 插队"
                     : sessionId === ops.ASSISTANT_CHAT_ID
                       ? "告诉助理要盯什么、什么事可以替你做，或回答它的问题"
                       : "输入消息   / 命令   @ 引用文件/目录   可直接粘贴图片"
             }
-            className="max-h-48 min-h-14 w-full resize-none bg-transparent px-4 pb-1 pt-3.5 text-[15px] leading-relaxed text-ink outline-none placeholder:text-dim disabled:opacity-50"
+            className="block max-h-48 min-h-14 w-full resize-none bg-transparent px-4 pb-1 pt-3.5 text-[15px] leading-relaxed text-ink outline-none placeholder:text-dim disabled:opacity-50"
           />
+          </div>
 
           {/* 输入框下的一行：模型、工作目录、发送。 */}
           <div className="flex items-center gap-2 px-2.5 pb-2">
@@ -766,8 +863,8 @@ function QueueStrip({
             key={q.id}
             className="group flex items-center gap-2 rounded px-1 py-0.5 hover:bg-ink/5"
           >
-            <span className="min-w-0 flex-1 truncate text-xs text-dim" title={q.text}>
-              {q.text.split("\n")[0]}
+            <span className="min-w-0 flex-1 truncate text-xs text-dim" title={contextSummary(q.text)}>
+              {contextSummary(q.text)}
             </span>
             <button
               onClick={() => sessionId && ops.promote(sessionId, q.id)}
@@ -788,6 +885,61 @@ function QueueStrip({
         ))}
       </ul>
     </div>
+  );
+}
+
+/**
+ * 把开头的 `/已知命令 ` 拆出来。必须已经打了空白才算选定 ——
+ * 还在打命令名时要留给菜单，`/usr/bin` 这种路径也不在名单里，不会被误伤。
+ */
+function splitCommand(text: string, commands: CommandRow[]): { name: string; rest: string } | null {
+  const m = /^\/(\S+)\s+([\s\S]*)$/.exec(text);
+  if (!m || !commands.some((c) => c.name === m[1])) return null;
+  return { name: m[1], rest: m[2] };
+}
+
+const TAG_TONE: Record<Tone, string> = {
+  blue: "bg-tone-blue-soft text-tone-blue",
+  green: "bg-tone-green-soft text-tone-green",
+  orange: "bg-tone-orange-soft text-tone-orange",
+  violet: "bg-tone-violet-soft text-tone-violet",
+  pink: "bg-tone-pink-soft text-tone-pink",
+};
+
+/** 输入框第一行开头那枚命令标签。悬停时图标换成叉，点一下移除。 */
+function CommandTag({
+  ref,
+  name,
+  builtin,
+  title,
+  onRemove,
+}: {
+  ref: React.Ref<HTMLSpanElement>;
+  name: string;
+  builtin: boolean;
+  title?: string;
+  onRemove: () => void;
+}) {
+  const look = builtin ? COMMAND_ICONS[name] : undefined;
+  const Icon = look?.icon ?? (builtin ? Zap : Sparkles);
+  const tone = look?.tone ?? (builtin ? "green" : "pink");
+  return (
+    <span
+      ref={ref}
+      title={title}
+      className={`carter-pop group/tag absolute left-4 top-3.5 z-10 inline-flex h-6 items-center gap-1 rounded-md pl-1.5 pr-2 text-[13px] font-medium ${TAG_TONE[tone]}`}
+    >
+      <button
+        type="button"
+        onClick={onRemove}
+        aria-label={`移除命令 ${name}`}
+        className="relative flex size-3.5 items-center justify-center"
+      >
+        <Icon size={13} className="group-hover/tag:opacity-0" />
+        <X size={13} className="absolute opacity-0 group-hover/tag:opacity-100" />
+      </button>
+      {name}
+    </span>
   );
 }
 

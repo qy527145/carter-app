@@ -59,6 +59,8 @@ import { FilePreviewModal } from "./FilePreview";
 import { MarkdownImage, MarkdownLink, MarkdownPre, transformMarkdownUrl } from "./Media";
 import { AskForm } from "./AskForm";
 import { Composer, MessageImages } from "./Composer";
+import { ContextChip } from "./ContextChip";
+import { parseContext, stripContextTags } from "../lib/promptContext";
 import { TeamTodoDock } from "./TeamTodoDock";
 import { TicketReply } from "./TicketReply";
 import { GoalBar } from "./GoalBar";
@@ -1027,6 +1029,7 @@ function UserTurn({
   onFork?: () => void;
 }) {
   const menu = useContextMenu();
+  const { context, rest } = useMemo(() => parseContext(turn.text), [turn.text]);
   // 与回答那边同一套反馈：就地变对勾，2.5 秒后复位。
   const [copied, setCopied] = useState(false);
   const [confirmingRetry, setConfirmingRetry] = useState(false);
@@ -1044,7 +1047,7 @@ function UserTurn({
       {
         label: "复制消息",
         icon: <Copy size={12} />,
-        onSelect: () => void copyText(turn.text),
+        onSelect: () => void copyText(stripContextTags(turn.text)),
       },
     ];
     if (onRetry) {
@@ -1072,7 +1075,12 @@ function UserTurn({
       {/* 粘贴的图片在会话里存的是 `[img:...]` 引用 token，回看时要渲染回图。
           纯文本消息走 MessageImages 的文本分支，行为与直接输出一致。 */}
       <div className="max-w-[75%] break-words rounded-2xl bg-bubble px-3.5 py-2 text-sm leading-relaxed text-ink">
-        <MessageImages text={turn.text} />
+        {context && (
+          <div className={rest ? "mb-1.5" : ""}>
+            <ContextChip context={context} />
+          </div>
+        )}
+        <MessageImages text={rest} />
       </div>
       <div className="mt-1 flex items-center justify-end gap-2">
       <div className={`${ACTION_ROW} justify-end`}>
@@ -1080,7 +1088,7 @@ function UserTurn({
           icon={copied ? <Check size={12} className="carter-pop text-[var(--ok)]" /> : <Copy size={12} />}
           label={copied ? "已复制" : "复制"}
           onClick={async () => {
-            if (await copyText(turn.text, null)) setCopied(true);
+            if (await copyText(stripContextTags(turn.text), null)) setCopied(true);
           }}
         />
         {onRetry && (
@@ -1414,6 +1422,8 @@ export function TurnList({
 // 列表 + 贴底滚动
 // ---------------------------------------------------------------------------
 
+const SETTLE_MS = 1500;
+
 function MessageList() {
   const stored = useStore((s) => s.turns);
   const times = useStore((s) => s.times);
@@ -1435,6 +1445,9 @@ function MessageList() {
   const stick = useRef(true);
   // 离底部够远时浮出「回到最新」—— 翻回去看了一眼，不该靠拖滚动条找回来。
   const [away, setAway] = useState(false);
+  const contentRef = useRef<HTMLDivElement>(null);
+  // 刚进一条会话后的「落定期」：内容还在陆续变高，要一路贴着底部。
+  const settleUntil = useRef(0);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -1445,9 +1458,35 @@ function MessageList() {
   useEffect(() => {
     stick.current = true;
     setAway(false);
+    settleUntil.current = performance.now() + SETTLE_MS;
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
+    if (sessionId && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      contentRef.current?.animate(
+        [
+          { opacity: 0, transform: "translateY(6px)" },
+          { opacity: 1, transform: "none" },
+        ],
+        { duration: 240, easing: "cubic-bezier(0.23, 1, 0.32, 1)" },
+      );
+    }
   }, [sessionId]);
+
+  // 助理对话的往期原话、图片都是后来才长出来的，且画在本期**上面**：只在换会话那一刻
+  // 滚一次，内容一长出来就又停在中间了。只在落定期内跟随 —— 平时用户展开一张工具卡片，
+  // 不该被拽去底部。
+  useEffect(() => {
+    const content = contentRef.current;
+    if (!content) return;
+    const ro = new ResizeObserver(() => {
+      const el = scrollRef.current;
+      if (el && stick.current && performance.now() < settleUntil.current) {
+        el.scrollTop = el.scrollHeight;
+      }
+    });
+    ro.observe(content);
+    return () => ro.disconnect();
+  }, []);
 
   const onScroll = () => {
     const el = scrollRef.current;
@@ -1467,17 +1506,17 @@ function MessageList() {
   return (
     <div className="relative flex min-h-0 flex-1 flex-col">
     <div ref={scrollRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto px-4 py-6 [overflow-anchor:none]">
-      <div className="mx-auto max-w-3xl">
+      <div ref={contentRef} className="mx-auto max-w-3xl">
         {sessionId === ASSISTANT_CHAT_ID && (
           <PastEpisodes
             onGrow={() => {
-              const el = scrollRef.current;
-              if (el && stick.current) el.scrollTop = el.scrollHeight;
+              settleUntil.current = performance.now() + SETTLE_MS;
             }}
           />
         )}
         {turns.length === 0 ? (
-          sessionId === ASSISTANT_CHAT_ID ? (
+          // 换会话的空档不画空状态：否则每次切换都先闪一下欢迎页。
+          sessionId === null ? null : sessionId === ASSISTANT_CHAT_ID ? (
             hasEpisodes ? null : <AssistantEmptyState />
           ) : (
             <EmptyState />

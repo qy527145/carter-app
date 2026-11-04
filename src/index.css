@@ -389,6 +389,18 @@ body {
   animation: carter-enter 200ms var(--ease-out);
 }
 
+/* 换页：只动透明度和一点点位移。动画结束后不留 transform —— 留着的话，
+   页面里 `position: fixed` 的东西会改认它做定位基准。 */
+@keyframes carter-view-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.995);
+  }
+}
+.carter-view {
+  animation: carter-view-in 280ms var(--ease-out);
+}
+
 /* 模态：背板淡入 + 面板从 96% 回到原位。比菜单慢一档 —— 它是「进入一个状态」，
    不是「点开一个列表」。 */
 @keyframes carter-fade-in {
@@ -487,6 +499,7 @@ body {
   .carter-toast,
   .carter-pop,
   .carter-enter,
+  .carter-view,
   .carter-drawer {
     animation: none;
   }

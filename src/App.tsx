@@ -74,18 +74,21 @@ export default function App() {
         {/* min-h-0 同理：不加的话 flex 子项的自动最小高度是内容高度，
             内容一长就把这一列撑开，里面的滚动容器就永远不滚了。 */}
         <main className="flex min-h-0 min-w-0 flex-1 flex-col">
-          {view === "chat" ? (
-            <>
-              <ChatView />
-              <StatusBar />
-            </>
-          ) : view === "assistant" ? (
-            <AssistantPage />
-          ) : view === "team" ? (
-            <TeamPage />
-          ) : (
-            <SettingsPage />
-          )}
+          {/* 换页只在这里动一次：各页不用各写进场，切回来的每一页节奏都一样。 */}
+          <div key={view} className="carter-view flex min-h-0 min-w-0 flex-1 flex-col">
+            {view === "chat" ? (
+              <>
+                <ChatView />
+                <StatusBar />
+              </>
+            ) : view === "assistant" ? (
+              <AssistantPage />
+            ) : view === "team" ? (
+              <TeamPage />
+            ) : (
+              <SettingsPage />
+            )}
+          </div>
         </main>
         <SidePanel />
         <Inspector />

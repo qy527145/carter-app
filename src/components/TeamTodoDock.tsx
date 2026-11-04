@@ -15,6 +15,7 @@ import { useCallback, useEffect, useState } from "react";
 import { ChevronRight, CircleAlert, ListChecks, LoaderCircle } from "lucide-react";
 
 import { teamMyTasks, type TeamTodo } from "../lib/api";
+import { formatContext } from "../lib/promptContext";
 import * as ops from "../lib/sessionOps";
 import { priorityTone } from "../lib/teamUi";
 import { useStore } from "../store";
@@ -124,15 +125,19 @@ function TodoRow({ todo }: { todo: TeamTodo }) {
     try {
       // 注入成对话上下文，而不是「替你点按钮」：真正要做的事仍然由模型读任务、
       // 认领、推进。这里只负责把「做哪件事」说清楚，省掉用户重复描述。
-      const text =
-        `接着做我名下的这个任务：\n\n` +
+      const text = formatContext({
+        kind: "task",
+        title: todo.title,
+        body:
+          `接着做我名下的这个任务：\n\n` +
           `- 任务：${todo.title}\n` +
           `- 任务 id：${todo.id}\n` +
           `- 所属目标：${todo.goal_title}（${todo.goal_id}）\n` +
           `- 当前状态：${todo.status_label}\n` +
-        (todo.blocked_reason ? `- 受阻原因：${todo.blocked_reason}\n` : "") +
-        (todo.waiting_on > 0 ? `- 还有 ${todo.waiting_on} 个前置没完成\n` : "") +
-        `\n先看一眼任务的具体要求（acceptance 里写了验收标准），再动手。`;
+          (todo.blocked_reason ? `- 受阻原因：${todo.blocked_reason}\n` : "") +
+          (todo.waiting_on > 0 ? `- 还有 ${todo.waiting_on} 个前置没完成\n` : "") +
+          `\n先看一眼任务的具体要求（acceptance 里写了验收标准），再动手。`,
+      });
       // 走 `sessionOps.send` 而不是直接 invoke：它带着「会话已结束就重建」的恢复路径，
       // 与输入框走同一条通道 —— 两个入口在会话被打断时表现不一致是最难查的那类 bug。
       //

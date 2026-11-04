@@ -58,7 +58,9 @@ import {
   type TeamTask,
 } from "../../lib/api";
 import { baseName } from "../../lib/format";
-import { ASSISTANT_CHAT_ID, openProjectChat } from "../../lib/sessionOps";
+import { leaveMain, launchFlight } from "../../lib/flight";
+import { contextSummary, formatContext } from "../../lib/promptContext";
+import { ASSISTANT_CHAT_ID, openProjectChat, startProjectChat } from "../../lib/sessionOps";
 import { toastError, toastOk } from "../../lib/toast";
 import { useStore } from "../../store";
 import { BoardFrame } from "./BoardFrame";
@@ -66,7 +68,7 @@ import { LogTab, MineTab, markSeen, readSeen, useInbox } from "./MineAndLog";
 import { PeopleProvider, usePeople } from "./people";
 import { IdentityChip, JoinDialog, PersonAvatar } from "./peopleUi";
 import { TaskDrawer } from "./TaskDrawer";
-import { layerize, personName, priorityTone, statusTone } from "../../lib/teamUi";
+import { layerize, personName, priorityTone, statusTone, taskHandoff } from "../../lib/teamUi";
 
 type Tab = "mine" | "graph" | "board" | "log";
 
@@ -274,16 +276,30 @@ function TeamPageBody({ onReloaded }: { onReloaded: () => void }) {
     return goal && task ? { goal, task } : null;
   }, [opened, data]);
 
-  /** 去这个项目的对话里，把一段话摆进输入框。 */
+  // 最后点下的按钮：卡片从它身上飞出去。这样十来个入口都不用各自往外传位置。
+  const lastPressed = useRef<Element | null>(null);
+
+  /** 带话 → 在这个项目里开新对话并摆进输入框；不带话 → 回到最近那条。 */
   const askCarter = useCallback(
     (draft?: string) => {
-      if (cwd) void openProjectChat(cwd, draft);
+      if (!cwd) return;
+      if (draft === undefined) {
+        leaveMain(() => void openProjectChat(cwd));
+        return;
+      }
+      launchFlight(lastPressed.current, contextSummary(draft));
+      leaveMain(() => void startProjectChat(cwd, draft));
     },
     [cwd],
   );
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div
+      className="flex min-h-0 flex-1 flex-col"
+      onClickCapture={(e) => {
+        lastPressed.current = (e.target as Element).closest("button");
+      }}
+    >
       <header className="flex shrink-0 items-center gap-3 border-b border-edge px-5 py-2.5">
         <ProjectSwitcher current={cwd} teamName={data?.name} onPick={setTeamCwd} />
 
@@ -854,9 +870,14 @@ function GoalGraph({
           <button
             onClick={() =>
               onAsk(
-                goal.tasks.length === 0
-                  ? `把目标「${goal.title}」（${goal.id}）拆成任务，理好依赖。`
-                  : `看一下目标「${goal.title}」（${goal.id}）的进展，接下来该推进哪件？`,
+                formatContext({
+                  kind: "goal",
+                  title: goal.title,
+                  body:
+                    goal.tasks.length === 0
+                      ? `把目标「${goal.title}」（${goal.id}）拆成任务，理好依赖。`
+                      : `看一下目标「${goal.title}」（${goal.id}）的进展，接下来该推进哪件？`,
+                }),
               )
             }
             className="ml-1 flex items-center gap-1 rounded-md bg-ink/5 px-2 py-1 text-[11px] text-dim transition-colors hover:bg-ink/10 hover:text-ink"
@@ -888,7 +909,7 @@ function GoalGraph({
 
       {goal.tasks.length === 0 ? (
         <div className="rounded-xl bg-card p-6 text-center text-xs text-dim">
-          这个目标还没有任务。点右上角「让卡特拆解」，它会在这个项目的对话里拆好。
+          这个目标还没有任务。点右上角「让卡特拆解」，它会开一条新对话拆好。
         </div>
       ) : (
         <div className="relative flex gap-4 overflow-x-auto pb-2">
@@ -1047,17 +1068,9 @@ function TaskNode({
           <button
             onClick={(e) => {
               e.stopPropagation();
-              onAsk(
-                `接着做这个任务：\n\n` +
-                  `- 任务：${task.title}\n` +
-                  `- 任务 id：${task.id}\n` +
-                  `- 所属目标：${goal.title}（${goal.id}）\n` +
-                  `- 当前状态：${task.status_label}\n` +
-                  (task.blocked_reason ? `- 受阻原因：${task.blocked_reason}\n` : "") +
-                  `\n先看一眼任务的具体要求（acceptance 里写了验收标准），再动手。`,
-              );
+              onAsk(taskHandoff(goal, task));
             }}
-            title="去这个项目的对话里，把任务摆进输入框"
+            title="在这个项目里开一条新对话，把任务摆进输入框"
             className="ml-auto hidden shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-dim transition-colors hover:bg-ink/5 hover:text-ink group-hover:flex"
           >
             <Send size={10} />
@@ -1141,7 +1154,13 @@ function BoardTab({
           </button>
         ))}
         <button
-          onClick={() => onAsk(`帮我改一下看板「${active.title}」（${active.id}）：`)}
+          onClick={() => onAsk(
+              formatContext({
+                kind: "board",
+                title: active.title,
+                body: `帮我改一下看板「${active.title}」（${active.id}）。`,
+              }),
+            )}
           className="mt-2 flex w-full items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[11px] text-dim transition-colors hover:bg-ink/[0.04] hover:text-ink"
         >
           <Sparkles size={12} />

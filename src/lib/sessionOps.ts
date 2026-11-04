@@ -4,6 +4,7 @@
 // 直接操作 zustand store 而不是做成 hook：这些是「事件处理函数」而不是渲染逻辑，
 // 不需要订阅。`useStore.getState()` 在任何地方都拿得到同一份状态。
 
+import { landFlight } from "./flight";
 import * as api from "./api";
 import type { GoalCommand } from "./api";
 import { useStore, withCurrent } from "../store";
@@ -294,25 +295,42 @@ export async function startInDirectory(cwd: string): Promise<void> {
 }
 
 /**
- * 去某个项目里对话：接上那个项目**最近的一条**会话，没有就新开一条。
+ * 在某个项目里开一条新对话，把 `draft` 放进输入框（而不是直接发出：从看板上点出来的话，
+ * 用户多半还想补两句）。
  *
- * 团队页「回到对话」「交给卡特」都走这里 —— 从团队页出去，本意是「在这个项目里
- * 接着干」，而不是回到刚才那条（可能是助理、可能是别的项目的）对话。
- * `draft` 放进输入框而不是直接发出：从看板上点出来的话，用户多半还想补两句。
+ * 团队页的「交给卡特」都走这里。一件新活要有自己干净的上下文 —— 接到最近那条上，
+ * 模型会被不相干的历史带偏，标题也对不上，这件事之后还很难在侧栏里找回来。
+ * 当前已经停在这个项目的空对话上就直接用，不多开一条。
  */
-export async function openProjectChat(cwd: string, draft?: string): Promise<void> {
+export async function startProjectChat(cwd: string, draft: string): Promise<void> {
   const store = useStore.getState();
   store.setView("chat");
-  if (store.sessionId !== ASSISTANT_CHAT_ID && store.cwd === cwd && store.sessionId) {
-    if (draft !== undefined) store.setComposerDraft(draft);
+  const idle = !store.streaming && store.queued.length === 0 && store.turns.length === 0;
+  if (store.sessionId && store.sessionId !== ASSISTANT_CHAT_ID && store.cwd === cwd && idle) {
+    store.setComposerDraft(draft);
     return;
   }
+  await replaceSession({ resume: false, cwd });
+  // 没开成（错误已经报过）：话不留到下一条会话里，飞着的卡片也立刻收掉。
+  if (useStore.getState().sessionId) useStore.getState().setComposerDraft(draft);
+  else landFlight(null);
+}
+
+/**
+ * 回到某个项目的对话：接上那个项目**最近的一条**会话，没有就新开一条。
+ *
+ * 团队页「去对话」走这里 —— 本意是「回去接着聊」，而不是回到刚才那条
+ * （可能是助理、可能是别的项目的）对话。
+ */
+export async function openProjectChat(cwd: string): Promise<void> {
+  const store = useStore.getState();
+  store.setView("chat");
+  if (store.sessionId !== ASSISTANT_CHAT_ID && store.cwd === cwd && store.sessionId) return;
   const latest = store.sessions
     .filter((s) => s.cwd === cwd && s.id !== ASSISTANT_CHAT_ID)
     .sort((a, b) => b.updated_at - a.updated_at)[0];
   if (latest) await replaceSession({ resume: false, resumeId: latest.id });
   else await startInDirectory(cwd);
-  if (draft !== undefined) useStore.getState().setComposerDraft(draft);
 }
 
 // ---------------------------------------------------------------------------

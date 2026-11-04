@@ -4,7 +4,24 @@
 // 待办条、任务详情抽屉）说的是同一套话。状态色散落三处时，最容易出现「同一件事
 // 在列表里是橙色、在抽屉里是蓝色」—— 那不叫设计，那叫没设计。
 
-import type { TeamEvent, TeamMember, TeamPeople, TeamTask } from "./api";
+import type { TeamEvent, TeamGoal, TeamMember, TeamPeople, TeamTask } from "./api";
+import { formatContext } from "./promptContext";
+
+/** 「把这个任务交给卡特」带上的上下文。 */
+export function taskHandoff(goal: TeamGoal, task: TeamTask): string {
+  return formatContext({
+    kind: "task",
+    title: task.title,
+    body:
+      `接着做这个任务：\n\n` +
+      `- 任务：${task.title}\n` +
+      `- 任务 id：${task.id}\n` +
+      `- 所属目标：${goal.title}（${goal.id}）\n` +
+      `- 当前状态：${task.status_label}\n` +
+      (task.blocked_reason ? `- 受阻原因：${task.blocked_reason}\n` : "") +
+      `\n先看一眼任务的具体要求（acceptance 里写了验收标准），再动手。`,
+  });
+}
 
 /** 任务 / 目标状态 → 语义色。用 body 上的 CSS 变量，两套主题各自成立。 */
 export function statusTone(status: string): {

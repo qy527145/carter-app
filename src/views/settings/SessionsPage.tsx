@@ -18,6 +18,7 @@ import { openSession } from "../../lib/sessionOps";
 import { useStore } from "../../store";
 import { Button, IconButton } from "../../components/ui/Button";
 import { Input } from "../../components/ui/Input";
+import { stripContextTags } from "../../lib/promptContext";
 import { Badge, Card, Spinner } from "../../components/ui/Panel";
 import { AsyncBody, PageIntro } from "./AsyncBody";
 
@@ -87,7 +88,7 @@ function SearchResults({
             </span>
           </div>
           <div className="text-xs leading-relaxed text-dim">
-            <Marked text={h.snippet} query={query} />
+            <Marked text={stripContextTags(h.snippet)} query={query} />
           </div>
           <div className="mono flex items-center gap-1.5 truncate text-[10px] text-dim/70">
             <span className="truncate" title={modelTitle(h.model, models)}>

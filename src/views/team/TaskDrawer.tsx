@@ -26,7 +26,7 @@ import {
   personName,
   priorityTone,
   since,
-  statusTone,
+  statusTone, taskHandoff,
 } from "../../lib/teamUi";
 import { toastError, toastOk } from "../../lib/toast";
 import { usePeople } from "./people";
@@ -176,15 +176,7 @@ export function TaskDrawer({
           {!closed && (
             <button
               onClick={() =>
-                onAsk(
-                  `接着做这个任务：\n\n` +
-                    `- 任务：${task.title}\n` +
-                    `- 任务 id：${task.id}\n` +
-                    `- 所属目标：${goal.title}（${goal.id}）\n` +
-                    `- 当前状态：${task.status_label}\n` +
-                    (task.blocked_reason ? `- 受阻原因：${task.blocked_reason}\n` : "") +
-                    `\n先看一眼任务的具体要求（acceptance 里写了验收标准），再动手。`,
-                )
+                onAsk(taskHandoff(goal, task))
               }
               className="mb-4 flex w-full items-center justify-center gap-1.5 rounded-lg bg-ink/5 py-1.5 text-xs text-dim transition-colors hover:bg-ink/10 hover:text-ink"
             >
