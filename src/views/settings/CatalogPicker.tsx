@@ -4,15 +4,14 @@
 // 一字不差，而 id 和展示名常常对不上（「DeepSeek V4.1 Flash」的 id 是
 // `deepseek-flash`）。所以有目录的渠道一律让人「选」，手写 meta 只留给中转与自定义模型。
 
-import { useEffect, useState } from "react";
 import { RefreshCw } from "lucide-react";
-
-import { listCatalogModels, refreshModelCatalog, type CatalogEntry } from "../../lib/api";
-import { fmtTokens } from "../../lib/format";
-import { toastError } from "../../lib/toast";
+import { useEffect, useState } from "react";
 import { Button } from "../../components/ui/Button";
 import { Banner } from "../../components/ui/Panel";
 import { Select } from "../../components/ui/Select";
+import { type CatalogEntry, listCatalogModels, refreshModelCatalog } from "../../lib/api";
+import { fmtTokens } from "../../lib/format";
+import { toastError } from "../../lib/toast";
 
 export type Catalog = {
   /** `null` = 这个协议没有对应的 models.dev 服务商，或者还没拉回来。 */

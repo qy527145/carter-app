@@ -252,18 +252,16 @@ pub fn ensure_user_paths() {
     let mut paths: Vec<PathBuf> = std::env::split_paths(&current).collect();
     let mut added = false;
     for d in dirs {
-        if d.is_dir() && !paths.iter().any(|p| *p == d) {
+        if d.is_dir() && !paths.contains(&d) {
             paths.push(d);
             added = true;
         }
     }
-    if added {
-        if let Ok(joined) = std::env::join_paths(&paths) {
-            // SAFETY（语义上）：`set_var` 在多线程下与并发读 PATH 有数据竞争。
-            // 这里只在启动早期、或用户点了「安装」之后的命令层调用，那时没有
-            // 别的线程在读 PATH 做决策；而且这是整个应用唯一写 PATH 的地方。
-            unsafe { std::env::set_var("PATH", joined) };
-        }
+    if added && let Ok(joined) = std::env::join_paths(&paths) {
+        // SAFETY（语义上）：`set_var` 在多线程下与并发读 PATH 有数据竞争。
+        // 这里只在启动早期、或用户点了「安装」之后的命令层调用，那时没有
+        // 别的线程在读 PATH 做决策；而且这是整个应用唯一写 PATH 的地方。
+        unsafe { std::env::set_var("PATH", joined) };
     }
 }
 
@@ -401,7 +399,10 @@ mod tests {
     #[test]
     fn the_description_points_images_to_read_file() {
         let d = bash_tool_description();
-        assert!(d.contains("看图片不要用 bash") && d.contains("read_file"), "{d}");
+        assert!(
+            d.contains("看图片不要用 bash") && d.contains("read_file"),
+            "{d}"
+        );
         if current_os() == Os::Macos {
             assert!(d.contains("sips"), "macOS 上要给出自带的裁图工具：{d}");
         }

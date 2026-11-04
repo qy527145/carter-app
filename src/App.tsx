@@ -7,20 +7,20 @@ import { useEffect } from "react";
 
 import { ChatView } from "./components/ChatView";
 import { Inspector } from "./components/Inspector";
-import { SidePanel } from "./components/SidePanel";
 import { Sidebar } from "./components/Sidebar";
+import { SidePanel } from "./components/SidePanel";
 import { StatusBar } from "./components/StatusBar";
 import { ContextMenuProvider } from "./components/ui/ContextMenu";
 import { ToastContainer } from "./components/ui/Toast";
-import { SettingsPage } from "./views/settings/SettingsPage";
-import { AssistantPage } from "./views/assistant/AssistantPage";
-import { TeamPage } from "./views/team/TeamPage";
 import { appInfo, createSession, listSessions } from "./lib/api";
 import { useAppEvents } from "./lib/events";
 import { refreshAssistant } from "./lib/sessionOps";
 import { applyTheme } from "./lib/theme";
 import { toastError } from "./lib/toast";
 import { useStore } from "./store";
+import { AssistantPage } from "./views/assistant/AssistantPage";
+import { SettingsPage } from "./views/settings/SettingsPage";
+import { TeamPage } from "./views/team/TeamPage";
 
 export default function App() {
   useAppEvents();

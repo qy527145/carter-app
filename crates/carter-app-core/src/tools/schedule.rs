@@ -45,7 +45,9 @@ fn parse_kind(args: &Value) -> Result<ScheduleKind, String> {
         );
     }
     if given > 1 {
-        return Err("`at` / `every_minutes` / `daily_at` 只能给一个 —— 给多个没法判断你要哪个".into());
+        return Err(
+            "`at` / `every_minutes` / `daily_at` 只能给一个 —— 给多个没法判断你要哪个".into(),
+        );
     }
 
     if let Some(at) = at {
@@ -211,9 +213,7 @@ impl ScheduleTool {
         let (name, prompt) = match (name, prompt) {
             (Some(n), Some(p)) => (n, p),
             (None, _) => return ToolResult::err("create 需要 name（短标题）"),
-            (_, None) => {
-                return ToolResult::err("create 需要 prompt（到点时原样发出去的那句话）")
-            }
+            (_, None) => return ToolResult::err("create 需要 prompt（到点时原样发出去的那句话）"),
         };
         let kind = match parse_kind(args) {
             Ok(k) => k,
@@ -264,11 +264,11 @@ impl ScheduleTool {
         };
 
         let mut changed = Vec::new();
-        if let Some(name) = str_arg(args, "name") {
-            if name != s.name {
-                s.name = name;
-                changed.push("name");
-            }
+        if let Some(name) = str_arg(args, "name")
+            && name != s.name
+        {
+            s.name = name;
+            changed.push("name");
         }
         if let Some(prompt) = str_arg(args, "prompt") {
             s.prompt = prompt;
@@ -362,8 +362,10 @@ mod tests {
     async fn create_then_list_shows_the_task() {
         let t = tool("create");
         let r = t
-            .execute(json!({ "action": "create", "name": "早报", "prompt": "看一遍 CI",
-                             "daily_at": "09:00" }))
+            .execute(
+                json!({ "action": "create", "name": "早报", "prompt": "看一遍 CI",
+                             "daily_at": "09:00" }),
+            )
             .await;
         assert!(r.ok, "{}", r.content);
         assert!(r.content.contains("早报"));
@@ -380,14 +382,14 @@ mod tests {
         let none = t
             .execute(json!({ "action": "create", "name": "x", "prompt": "y" }))
             .await;
-        assert!(none.ok == false);
+        assert!(!none.ok);
         assert!(none.content.contains("三选一"), "{}", none.content);
 
         let two = t
             .execute(json!({ "action": "create", "name": "x", "prompt": "y",
                              "daily_at": "09:00", "every_minutes": 30 }))
             .await;
-        assert!(two.ok == false);
+        assert!(!two.ok);
         assert!(two.content.contains("只能给一个"), "{}", two.content);
     }
 
@@ -398,20 +400,24 @@ mod tests {
             .execute(json!({ "action": "create", "name": "x", "prompt": "y",
                              "at": "2020-01-01 09:00" }))
             .await;
-        assert!(r.ok == false);
+        assert!(!r.ok);
         assert!(r.content.contains("过去了"), "{}", r.content);
     }
 
     #[tokio::test]
     async fn update_changes_only_what_was_given() {
         let t = tool("update");
-        t.execute(json!({ "action": "create", "name": "早报", "prompt": "旧正文",
-                           "every_minutes": 60, "model": "ws/sonnet" }))
-            .await;
+        t.execute(
+            json!({ "action": "create", "name": "早报", "prompt": "旧正文",
+                           "every_minutes": 60, "model": "ws/sonnet" }),
+        )
+        .await;
 
         let r = t
-            .execute(json!({ "action": "update", "name": "早报", "prompt": "新正文",
-                             "enabled": false }))
+            .execute(
+                json!({ "action": "update", "name": "早报", "prompt": "新正文",
+                             "enabled": false }),
+            )
             .await;
         assert!(r.ok, "{}", r.content);
 
@@ -429,7 +435,7 @@ mod tests {
                            "every_minutes": 5 }))
             .await;
         let r = t.execute(json!({ "action": "update", "name": "a" })).await;
-        assert!(r.ok == false);
+        assert!(!r.ok);
         assert!(r.content.contains("没有给出"), "{}", r.content);
     }
 
@@ -439,17 +445,21 @@ mod tests {
         t.execute(json!({ "action": "create", "name": "一次性", "prompt": "b",
                            "every_minutes": 5 }))
             .await;
-        let ok = t.execute(json!({ "action": "delete", "name": "一次性" })).await;
+        let ok = t
+            .execute(json!({ "action": "delete", "name": "一次性" }))
+            .await;
         assert!(ok.ok, "{}", ok.content);
-        let again = t.execute(json!({ "action": "delete", "name": "一次性" })).await;
-        assert!(again.ok == false, "删第二次要说找不到");
+        let again = t
+            .execute(json!({ "action": "delete", "name": "一次性" }))
+            .await;
+        assert!(!again.ok, "删第二次要说找不到");
     }
 
     #[tokio::test]
     async fn an_unknown_action_explains_the_options() {
         let t = tool("badaction");
         let r = t.execute(json!({ "action": "run" })).await;
-        assert!(r.ok == false);
+        assert!(!r.ok);
         assert!(r.content.contains("create / list / update / delete"));
     }
 

@@ -73,7 +73,12 @@ fn parse(args: &Value) -> Result<Report, String> {
         return Err("status = needs_user 时必须用 question 问一个具体问题".into());
     }
     let mut options: Vec<String> = Vec::new();
-    for o in args.get("options").and_then(Value::as_array).into_iter().flatten() {
+    for o in args
+        .get("options")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
         let Some(o) = o.as_str().map(str::trim).filter(|o| !o.is_empty()) else {
             continue;
         };
@@ -87,7 +92,12 @@ fn parse(args: &Value) -> Result<Report, String> {
     if options.len() == 1 || options.len() > MAX_OPTIONS {
         return Err(format!("options 给 2 到 {MAX_OPTIONS} 个，或者不给"));
     }
-    Ok(Report { status, summary, question, options })
+    Ok(Report {
+        status,
+        summary,
+        question,
+        options,
+    })
 }
 
 #[async_trait::async_trait]
@@ -134,7 +144,12 @@ impl Tool for AssistantReportTool {
     }
 
     async fn execute(&self, args: Value) -> ToolResult {
-        let Report { status, summary, question, options } = match parse(&args) {
+        let Report {
+            status,
+            summary,
+            question,
+            options,
+        } = match parse(&args) {
             Ok(v) => v,
             Err(e) => return ToolResult::err(format!("assistant_report: {e}")),
         };
@@ -171,7 +186,9 @@ mod tests {
     #[test]
     fn needs_user_requires_a_question() {
         assert!(parse(&json!({"status": "needs_user", "summary": "x"})).is_err());
-        let r = parse(&json!({"status": "needs_user", "summary": "x", "question": "用 A 还是 B？"})).unwrap();
+        let r =
+            parse(&json!({"status": "needs_user", "summary": "x", "question": "用 A 还是 B？"}))
+                .unwrap();
         assert_eq!(r.status, TicketStatus::NeedsUser);
         assert_eq!(r.question.as_deref(), Some("用 A 还是 B？"));
         assert!(r.options.is_empty());
@@ -180,7 +197,9 @@ mod tests {
     #[test]
     fn options_are_two_to_four_and_only_with_needs_user() {
         let ask = |opts: Value| {
-            parse(&json!({"status": "needs_user", "summary": "x", "question": "q", "options": opts}))
+            parse(
+                &json!({"status": "needs_user", "summary": "x", "question": "q", "options": opts}),
+            )
         };
         let r = ask(json!(["用 A", " 用 B ", "用 A", ""])).unwrap();
         assert_eq!(r.options, vec!["用 A", "用 B"], "去空白、去重、丢空的");
@@ -191,24 +210,39 @@ mod tests {
 
     #[test]
     fn a_summary_is_required_and_unknown_statuses_are_refused() {
-        assert!(parse(&json!({"status": "ready"})).err().unwrap().contains("summary"));
-        assert!(parse(&json!({"status": "done", "summary": "x"})).err().unwrap().contains("done"));
+        assert!(
+            parse(&json!({"status": "ready"}))
+                .err()
+                .unwrap()
+                .contains("summary")
+        );
+        assert!(
+            parse(&json!({"status": "done", "summary": "x"}))
+                .err()
+                .unwrap()
+                .contains("done")
+        );
         assert_eq!(
-            parse(&json!({"status": "DROPPED", "summary": "x"})).unwrap().status,
+            parse(&json!({"status": "DROPPED", "summary": "x"}))
+                .unwrap()
+                .status,
             TicketStatus::Dropped
         );
     }
 
     #[tokio::test]
     async fn a_report_moves_the_ticket_and_a_stopped_one_refuses() {
-        let dir = std::env::temp_dir().join(format!("carter-report-{}-{}", std::process::id(), now_ms()));
+        let dir =
+            std::env::temp_dir().join(format!("carter-report-{}-{}", std::process::id(), now_ms()));
         let store = AssistantStore::open(dir.join("assistant.json"));
         let id = store
             .with(|s| s.open_ticket(&crate::assistant::tests::source(), "r", "t", "x", vec![]))
             .unwrap();
         let tool = AssistantReportTool::new(store.clone(), id.clone());
 
-        let r = tool.execute(json!({"status": "ready", "summary": "改好了"})).await;
+        let r = tool
+            .execute(json!({"status": "ready", "summary": "改好了"}))
+            .await;
         assert!(r.ok, "{}", r.content);
         store.read(|s| {
             let t = s.ticket(&id).unwrap();
@@ -216,8 +250,12 @@ mod tests {
             assert_eq!(t.summary.as_deref(), Some("改好了"));
         });
 
-        store.with(|s| s.ticket_mut(&id).unwrap().status = TicketStatus::Stopped).unwrap();
-        let r = tool.execute(json!({"status": "ready", "summary": "x"})).await;
+        store
+            .with(|s| s.ticket_mut(&id).unwrap().status = TicketStatus::Stopped)
+            .unwrap();
+        let r = tool
+            .execute(json!({"status": "ready", "summary": "x"}))
+            .await;
         assert!(!r.ok);
     }
 }

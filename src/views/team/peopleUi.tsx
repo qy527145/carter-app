@@ -3,14 +3,19 @@
 // 这些在任务卡、任务抽屉、动态、指派框里反复出现。集中在一处，头像配色与「不认识时
 // 显示什么」的说法才不会各处不一样。
 
-import { useCallback, useEffect, useRef, useState } from "react";
 import { Check, ChevronDown, LoaderCircle, UserPlus, UserRound } from "lucide-react";
-
-import { setAppSettings, teamJoin, teamRenameMe, type TeamMember, type TeamPeople } from "../../lib/api";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Modal } from "../../components/ui/Panel";
+import {
+  setAppSettings,
+  type TeamMember,
+  type TeamPeople,
+  teamJoin,
+  teamRenameMe,
+} from "../../lib/api";
 import { avatarHue } from "../../lib/teamUi";
 import { toastError, toastOk } from "../../lib/toast";
 import { useStore } from "../../store";
-import { Modal } from "../../components/ui/Panel";
 import { usePeople } from "./people";
 
 /** 成员 / 任意身份的头像。认得出成员就用成员 id 取色，换邮箱颜色也不变。 */
@@ -66,7 +71,13 @@ function shortName(raw: string | null | undefined): string {
 }
 
 /** 名字 + 头像，一行显示。 */
-export function PersonChip({ person, size = 14 }: { person: string | null | undefined; size?: number }) {
+export function PersonChip({
+  person,
+  size = 14,
+}: {
+  person: string | null | undefined;
+  size?: number;
+}) {
   const { people } = usePeople();
   if (!person) return null;
   const name = find(people, person)?.name ?? shortName(person);

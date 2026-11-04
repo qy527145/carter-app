@@ -3,9 +3,9 @@
 // 放进 context 而不是层层传参：任务卡、抽屉、动态、选人框都要「这个 id 是谁」，
 // 而名单只该拉一次、改了（有人加入、改了称呼）一起刷新。
 
-import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
+import { createContext, type ReactNode, useCallback, useContext, useEffect, useState } from "react";
 
-import { teamPeople, type TeamPeople } from "../../lib/api";
+import { type TeamPeople, teamPeople } from "../../lib/api";
 
 type PeopleApi = {
   people: TeamPeople | null;
@@ -14,7 +14,15 @@ type PeopleApi = {
 
 const Ctx = createContext<PeopleApi>({ people: null, reload: async () => {} });
 
-export function PeopleProvider({ cwd, nonce, children }: { cwd: string; nonce: number; children: ReactNode }) {
+export function PeopleProvider({
+  cwd,
+  nonce,
+  children,
+}: {
+  cwd: string;
+  nonce: number;
+  children: ReactNode;
+}) {
   const [people, setPeople] = useState<TeamPeople | null>(null);
   const reload = useCallback(async () => {
     if (!cwd) return;

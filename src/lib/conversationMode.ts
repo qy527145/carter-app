@@ -8,8 +8,8 @@
 // 的是模型说了什么，而不是它敲了哪些命令 —— 那些属于排障时才翻的过程记录。
 // 参考实现里 ChatGPT 的「工作模式 / 聊天模式」切的就是这一层。
 
-import { setAppSettings, type ConversationMode } from "./api";
 import { useStore } from "../store";
+import { type ConversationMode, setAppSettings } from "./api";
 
 export function useConversationMode(): ConversationMode {
   // 设置回来之前先按详细模式渲染：那是最完整的一档，不会把内容藏掉。

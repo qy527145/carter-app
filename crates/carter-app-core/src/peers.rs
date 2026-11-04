@@ -102,7 +102,9 @@ impl Inbox {
         {
             let mut q = self.pending.lock().unwrap();
             if q.len() >= MAX_PENDING {
-                return Err(format!("对方收件箱里已经有 {MAX_PENDING} 封没读的信，先别再发"));
+                return Err(format!(
+                    "对方收件箱里已经有 {MAX_PENDING} 封没读的信，先别再发"
+                ));
             }
             q.push_back(letter);
         }
@@ -173,7 +175,11 @@ fn render(letters: &[Letter], mid_turn: bool) -> String {
     };
     let mut out = String::from(PEER_MARK);
     match letters {
-        [l] if l.receipt => out.push_str(&format!("回执 · {}（{}）", l.from_name, l.reply_to.as_deref().unwrap_or("?"))),
+        [l] if l.receipt => out.push_str(&format!(
+            "回执 · {}（{}）",
+            l.from_name,
+            l.reply_to.as_deref().unwrap_or("?")
+        )),
         [l] => {
             out.push_str(&format!("来自 {}", l.from_name));
             if let Some(t) = &l.from_title {
@@ -181,7 +187,11 @@ fn render(letters: &[Letter], mid_turn: bool) -> String {
             }
             out.push_str(&format!(" · {}", l.id));
         }
-        _ => out.push_str(&format!("{} 封来信（{}）", letters.len(), senders.join("、"))),
+        _ => out.push_str(&format!(
+            "{} 封来信（{}）",
+            letters.len(),
+            senders.join("、")
+        )),
     }
     out.push('\n');
     out.push_str(
@@ -254,7 +264,13 @@ pub fn name_of(id: &str, cwd: &str, len: usize) -> String {
         .unwrap_or_else(|| "session".into());
     let dir: String = dir
         .chars()
-        .map(|c| if c.is_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '-' })
+        .map(|c| {
+            if c.is_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     format!("{dir}-{tag}")
 }
@@ -294,7 +310,9 @@ pub struct Peer {
 ///
 /// 侧边聊天（`/btw`）不列：它挂在父会话上、不落盘，关抽屉就没了。助理对话不列：它不收信。
 pub fn list(shell: &AppShell, me: &str, all: bool) -> Vec<Peer> {
-    let my_cwd = shell.session(me).map(|h| h.cwd.to_string_lossy().to_string());
+    let my_cwd = shell
+        .session(me)
+        .map(|h| h.cwd.to_string_lossy().to_string());
     let disk = carter::session::list(Path::new("."), true);
     let mut rows: Vec<Peer> = Vec::new();
     let mut live: HashSet<String> = HashSet::new();
@@ -310,8 +328,14 @@ pub fn list(shell: &AppShell, me: &str, all: bool) -> Vec<Peer> {
             name: String::new(),
             title: meta.and_then(|d| d.meta.title.clone()),
             cwd: h.cwd.to_string_lossy().to_string(),
-            state: if h.busy.load(Ordering::SeqCst) { PeerState::Busy } else { PeerState::Idle },
-            updated_at: meta.map(|d| mtime(&d.path, d.meta.created_at)).unwrap_or_else(now_ms),
+            state: if h.busy.load(Ordering::SeqCst) {
+                PeerState::Busy
+            } else {
+                PeerState::Idle
+            },
+            updated_at: meta
+                .map(|d| mtime(&d.path, d.meta.created_at))
+                .unwrap_or_else(now_ms),
         });
     }
     let mut dormant: Vec<Peer> = disk
@@ -323,13 +347,17 @@ pub fn list(shell: &AppShell, me: &str, all: bool) -> Vec<Peer> {
             name: String::new(),
             title: d.meta.title.clone(),
             cwd: d.meta.cwd.clone(),
-            state: if shell.is_closing(&d.meta.id) { PeerState::Closing } else { PeerState::Dormant },
+            state: if shell.is_closing(&d.meta.id) {
+                PeerState::Closing
+            } else {
+                PeerState::Dormant
+            },
             updated_at: mtime(&d.path, d.meta.created_at),
         })
         .collect();
-    dormant.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    dormant.sort_by_key(|r| std::cmp::Reverse(r.updated_at));
     dormant.truncate(if all { 40 } else { 10 });
-    rows.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    rows.sort_by_key(|r| std::cmp::Reverse(r.updated_at));
     rows.extend(dormant);
     name_rows(&mut rows);
     rows
@@ -359,7 +387,9 @@ fn mtime(path: &Path, fallback: u64) -> u64 {
 
 /// 按地址找会话。认：名字（4 位或 8 位）、完整 id、标题原文。重名时报出候选，不猜。
 pub fn resolve(shell: &AppShell, me: &str, to: &str) -> Result<Peer, String> {
-    let to = to.trim().trim_matches(|c| c == '"' || c == '「' || c == '」');
+    let to = to
+        .trim()
+        .trim_matches(|c| c == '"' || c == '「' || c == '」');
     if to.is_empty() {
         return Err("缺少收信方".into());
     }
@@ -374,33 +404,36 @@ pub fn resolve(shell: &AppShell, me: &str, to: &str) -> Result<Peer, String> {
     }
     let mut pool = list(shell, me, true);
     // 自己也要能认出来（好给出「不能发给自己」而不是「找不到」）。
-    if !pool.iter().any(|p| p.id == me) {
-        if let Some(h) = shell.session(me) {
-            pool.push(Peer {
-                id: me.to_string(),
-                name: name_of(me, &h.cwd.to_string_lossy(), 4),
-                title: None,
-                cwd: h.cwd.to_string_lossy().to_string(),
-                state: PeerState::Busy,
-                updated_at: now_ms(),
-            });
-        }
+    if !pool.iter().any(|p| p.id == me)
+        && let Some(h) = shell.session(me)
+    {
+        pool.push(Peer {
+            id: me.to_string(),
+            name: name_of(me, &h.cwd.to_string_lossy(), 4),
+            title: None,
+            cwd: h.cwd.to_string_lossy().to_string(),
+            state: PeerState::Busy,
+            updated_at: now_ms(),
+        });
     }
     // 不在最近 40 条里的老会话：按完整 id 仍然找得到。
-    if !pool.iter().any(|p| p.id == to) {
-        if let Some(d) = carter::session::list(Path::new("."), true)
+    if !pool.iter().any(|p| p.id == to)
+        && let Some(d) = carter::session::list(Path::new("."), true)
             .into_iter()
             .find(|d| d.meta.id == to)
-        {
-            pool.push(Peer {
-                name: name_of(&d.meta.id, &d.meta.cwd, 8),
-                id: d.meta.id.clone(),
-                title: d.meta.title.clone(),
-                cwd: d.meta.cwd.clone(),
-                state: if shell.is_closing(&d.meta.id) { PeerState::Closing } else { PeerState::Dormant },
-                updated_at: mtime(&d.path, d.meta.created_at),
-            });
-        }
+    {
+        pool.push(Peer {
+            name: name_of(&d.meta.id, &d.meta.cwd, 8),
+            id: d.meta.id.clone(),
+            title: d.meta.title.clone(),
+            cwd: d.meta.cwd.clone(),
+            state: if shell.is_closing(&d.meta.id) {
+                PeerState::Closing
+            } else {
+                PeerState::Dormant
+            },
+            updated_at: mtime(&d.path, d.meta.created_at),
+        });
     }
     let hits: Vec<Peer> = pool
         .into_iter()
@@ -413,11 +446,16 @@ pub fn resolve(shell: &AppShell, me: &str, to: &str) -> Result<Peer, String> {
         })
         .collect();
     match hits.len() {
-        0 => Err(format!("找不到会话「{to}」。先用 list_sessions 看看有哪些（all=true 列出别的项目的）。")),
+        0 => Err(format!(
+            "找不到会话「{to}」。先用 list_sessions 看看有哪些（all=true 列出别的项目的）。"
+        )),
         1 => Ok(hits.into_iter().next().unwrap()),
         _ => Err(format!(
             "「{to}」对得上好几条会话，换成下面的完整地址再发：{}",
-            hits.iter().map(|p| format!("{}（{}）", name_of(&p.id, &p.cwd, 8), p.id)).collect::<Vec<_>>().join("、")
+            hits.iter()
+                .map(|p| format!("{}（{}）", name_of(&p.id, &p.cwd, 8), p.id))
+                .collect::<Vec<_>>()
+                .join("、")
         )),
     }
 }
@@ -549,7 +587,10 @@ fn to_assistant(shell: &Arc<AppShell>, me: &str, body: &str) -> Result<String, S
     if !crate::assistant::chat::record(shell, text) {
         return Err("助理对话开不起来，这封没有送到".into());
     }
-    Ok("已记进助理对话。它不会因此被叫醒，用户下次开口时会一起看到；不要等回信，手上的事接着做。".into())
+    Ok(
+        "已记进助理对话。它不会因此被叫醒，用户下次开口时会一起看到；不要等回信，手上的事接着做。"
+            .into(),
+    )
 }
 
 /// 助理对话给一张工单写信：按工单编号投进它的执行会话。
@@ -563,17 +604,27 @@ fn to_ticket(shell: &Arc<AppShell>, to: &str, body: &str) -> Result<String, Stri
         .read(|s| s.find_ticket(to).map(|t| (t.id.clone(), t.label())))
         .ok_or_else(|| {
             let live: Vec<String> = shell.assistant.read(|s| {
-                s.tickets.iter().filter(|t| !t.status.ended()).map(|t| t.label()).collect()
+                s.tickets
+                    .iter()
+                    .filter(|t| !t.status.ended())
+                    .map(|t| t.label())
+                    .collect()
             });
             format!(
                 "助理对话只能给工单写信，`to` 填工单编号（如 `#3`）。找不到「{to}」，现在有的：{}",
-                if live.is_empty() { "（没有进行中的工单）".into() } else { live.join("、") }
+                if live.is_empty() {
+                    "（没有进行中的工单）".into()
+                } else {
+                    live.join("、")
+                }
             )
         })?;
     if !deliver(shell, &id, format!("助理转达：{body}"), Wake::Person) {
         return Err(format!("{label} 已经叫停，不再接收消息"));
     }
-    let status = shell.assistant.read(|s| s.ticket(&id).map(|t| t.status.label()));
+    let status = shell
+        .assistant
+        .read(|s| s.ticket(&id).map(|t| t.status.label()));
     let bg = shell.clone();
     tokio::spawn(async move { launch_queued(&bg).await });
     Ok(format!(
@@ -626,7 +677,10 @@ fn reap_when_idle(shell: Arc<AppShell>, handle: Arc<SessionHandle>) {
     tokio::spawn(async move {
         loop {
             let check = match rx.recv().await {
-                Ok(AppEvent::Session { session_id, event: SessionEvent::Idle }) => session_id == handle.id,
+                Ok(AppEvent::Session {
+                    session_id,
+                    event: SessionEvent::Idle,
+                }) => session_id == handle.id,
                 Ok(_) => false,
                 Err(RecvError::Lagged(_)) => true,
                 Err(RecvError::Closed) => return,
@@ -645,7 +699,9 @@ fn reap_when_idle(shell: Arc<AppShell>, handle: Arc<SessionHandle>) {
             if handle.busy.load(Ordering::SeqCst) || !handle.inbox.is_empty() {
                 continue;
             }
-            let same = shell.session(&handle.id).is_some_and(|h| Arc::ptr_eq(&h, &handle));
+            let same = shell
+                .session(&handle.id)
+                .is_some_and(|h| Arc::ptr_eq(&h, &handle));
             if same {
                 tracing::info!(session = %handle.id, "收起收信时唤起的会话");
                 shell.close_session(&handle.id).await;
@@ -664,8 +720,14 @@ pub fn on_idle(shell: &AppShell, handle: &SessionHandle) {
     }
     let reply = last_reply(&handle.history.load());
     let body = match reply {
-        Some(t) => format!("{} 读完你的信、这一轮已经结束。它最后说的是：\n{t}", name_of(&handle.id, &handle.cwd.to_string_lossy(), 4)),
-        None => format!("{} 读完你的信、这一轮已经结束，但没有留下文字回答。", name_of(&handle.id, &handle.cwd.to_string_lossy(), 4)),
+        Some(t) => format!(
+            "{} 读完你的信、这一轮已经结束。它最后说的是：\n{t}",
+            name_of(&handle.id, &handle.cwd.to_string_lossy(), 4)
+        ),
+        None => format!(
+            "{} 读完你的信、这一轮已经结束，但没有留下文字回答。",
+            name_of(&handle.id, &handle.cwd.to_string_lossy(), 4)
+        ),
     };
     receipts(shell, handle, armed, &body);
 }
@@ -683,7 +745,12 @@ pub fn on_exit(shell: &AppShell, handle: &SessionHandle) {
         );
     }
     let armed: Vec<(String, String)> = std::mem::take(&mut *handle.inbox.armed.lock().unwrap());
-    receipts(shell, handle, armed, &format!("{name} 读到了你的信，但这一轮没跑完会话就关掉了。"));
+    receipts(
+        shell,
+        handle,
+        armed,
+        &format!("{name} 读到了你的信，但这一轮没跑完会话就关掉了。"),
+    );
 }
 
 /// 回执只送给**活着**的发信方：发信方都关了，没必要为一条回执把它续接起来。
@@ -769,7 +836,8 @@ pub fn transcript(shell: &AppShell, me: &str, to: &str, turns: usize) -> Result<
                 .into_iter()
                 .find(|d| d.meta.id == target.id)
                 .ok_or("会话文件找不到了")?;
-            let (thread, _) = carter::session::load(&entry).map_err(|e| format!("读取会话失败：{e}"))?;
+            let (thread, _) =
+                carter::session::load(&entry).map_err(|e| format!("读取会话失败：{e}"))?;
             (thread.messages, Vec::new())
         }
     };
@@ -785,7 +853,11 @@ pub fn transcript(shell: &AppShell, me: &str, to: &str, turns: usize) -> Result<
     let mut out = format!(
         "{}{} · {} · {}\n（只有正文与调过的工具名，没有工具输出）\n",
         target.name,
-        target.title.as_deref().map(|t| format!("「{t}」")).unwrap_or_default(),
+        target
+            .title
+            .as_deref()
+            .map(|t| format!("「{t}」"))
+            .unwrap_or_default(),
         target.cwd,
         target.state.label()
     );
@@ -819,7 +891,9 @@ pub fn transcript(shell: &AppShell, me: &str, to: &str, turns: usize) -> Result<
         out.push_str("\n\n[进行中的这一轮]");
         for item in live {
             match item {
-                crate::shell::LiveItem::Text(t) => out.push_str(&format!("\n{}", head(t.trim(), 1_500))),
+                crate::shell::LiveItem::Text(t) => {
+                    out.push_str(&format!("\n{}", head(t.trim(), 1_500)))
+                }
                 crate::shell::LiveItem::Tool { name, result, .. } => out.push_str(&format!(
                     "\n  （{name}{}）",
                     if result.is_none() { "，还在跑" } else { "" }
@@ -860,7 +934,12 @@ mod tests {
     }
 
     /// 一个带独立 `assistant.json` 的外壳，外加挂在上面的假会话（只有命令通道，没有 runner）。
-    fn assistant_shell(ids: &[&str]) -> (Arc<AppShell>, Vec<tokio::sync::mpsc::UnboundedReceiver<crate::protocol::Command>>) {
+    fn assistant_shell(
+        ids: &[&str],
+    ) -> (
+        Arc<AppShell>,
+        Vec<tokio::sync::mpsc::UnboundedReceiver<crate::protocol::Command>>,
+    ) {
         static N: AtomicU32 = AtomicU32::new(0);
         let dir = std::env::temp_dir().join(format!(
             "carter-peers-{}-{}",
@@ -891,7 +970,12 @@ mod tests {
     }
 
     fn send_req<'a>(to: &'a str, body: &'a str) -> SendRequest<'a> {
-        SendRequest { to, body, reply_to: None, notify_when_idle: false }
+        SendRequest {
+            to,
+            body,
+            reply_to: None,
+            notify_when_idle: false,
+        }
     }
 
     /// 助理按编号给一张停着的工单写信：信进了工单的待送队列，工单重新排队。
@@ -908,20 +992,34 @@ mod tests {
             .unwrap();
         // 暂停着：只看投递与状态，不真的开执行会话。
         shell.assistant.with(|s| s.settings.paused = true).unwrap();
-        let out = send(&shell, crate::assistant::CHAT_SESSION_ID, send_req("#1", "用 A 方案")).unwrap();
+        let out = send(
+            &shell,
+            crate::assistant::CHAT_SESSION_ID,
+            send_req("#1", "用 A 方案"),
+        )
+        .unwrap();
         assert!(out.contains("#1 修登录"), "{out}");
         let t = shell.assistant.read(|s| s.ticket(&id).cloned()).unwrap();
         assert_eq!(t.status, crate::assistant::TicketStatus::Queued);
         assert_eq!(t.pending, vec!["助理转达：用 A 方案".to_string()]);
 
-        let err = send(&shell, crate::assistant::CHAT_SESSION_ID, send_req("carter-app-79d8", "hi")).unwrap_err();
+        let err = send(
+            &shell,
+            crate::assistant::CHAT_SESSION_ID,
+            send_req("carter-app-79d8", "hi"),
+        )
+        .unwrap_err();
         assert!(err.contains("只能给工单写信"), "{err}");
     }
 
     /// 工单写给助理：记进助理对话（`Record`，不跑模型）；不是工单的会话写不进去。
     #[tokio::test]
     async fn a_ticket_writes_to_the_assistant_without_waking_it() {
-        let (shell, mut rx) = assistant_shell(&[crate::assistant::CHAT_SESSION_ID, "1-abcd1234-w", "2-ffff0000-x"]);
+        let (shell, mut rx) = assistant_shell(&[
+            crate::assistant::CHAT_SESSION_ID,
+            "1-abcd1234-w",
+            "2-ffff0000-x",
+        ]);
         shell
             .assistant
             .with(|s| {
@@ -929,11 +1027,19 @@ mod tests {
                 s.ticket_mut(&id).unwrap().session_id = Some("1-abcd1234-w".into());
             })
             .unwrap();
-        send(&shell, "1-abcd1234-w", send_req("assistant", "顺手发现注册也有同样的问题")).unwrap();
+        send(
+            &shell,
+            "1-abcd1234-w",
+            send_req("assistant", "顺手发现注册也有同样的问题"),
+        )
+        .unwrap();
         match rx[0].try_recv().unwrap() {
             crate::protocol::Command::Record { text } => {
                 assert!(text.starts_with(crate::assistant::REPORT_MARK), "{text}");
-                assert!(text.contains("#1 修登录") && text.contains("注册也有"), "{text}");
+                assert!(
+                    text.contains("#1 修登录") && text.contains("注册也有"),
+                    "{text}"
+                );
             }
             other => panic!("应当只记不跑，得到 {other:?}"),
         }
@@ -943,8 +1049,14 @@ mod tests {
 
     #[test]
     fn names_are_dir_plus_a_short_tag() {
-        assert_eq!(name_of("1793585875029-79d869a8-aa38", "/Users/x/code/carter-app", 4), "carter-app-79d8");
-        assert_eq!(name_of("1793585875029-79d869a8-aa38", "/Users/x/my proj", 8), "my-proj-79d869a8");
+        assert_eq!(
+            name_of("1793585875029-79d869a8-aa38", "/Users/x/code/carter-app", 4),
+            "carter-app-79d8"
+        );
+        assert_eq!(
+            name_of("1793585875029-79d869a8-aa38", "/Users/x/my proj", 8),
+            "my-proj-79d869a8"
+        );
         assert_eq!(name_of("assistant", "/", 4), "assistant");
     }
 
@@ -958,7 +1070,11 @@ mod tests {
             state: PeerState::Idle,
             updated_at: 0,
         };
-        let mut rows = vec![row("1-abcd1111-x"), row("2-abcd2222-y"), row("3-ffff0000-z")];
+        let mut rows = vec![
+            row("1-abcd1111-x"),
+            row("2-abcd2222-y"),
+            row("3-ffff0000-z"),
+        ];
         name_rows(&mut rows);
         assert_eq!(rows[0].name, "p-abcd1111");
         assert_eq!(rows[1].name, "p-abcd2222");
@@ -975,9 +1091,15 @@ mod tests {
         let text = inbox.take_prompt().unwrap();
         assert!(text.starts_with(PEER_MARK), "{text}");
         assert!(text.contains("2 封来信"), "{text}");
-        assert!(text.contains("reply_to=\"m2\""), "回复提示指向最后一封：{text}");
+        assert!(
+            text.contains("reply_to=\"m2\""),
+            "回复提示指向最后一封：{text}"
+        );
         assert_eq!(inbox.hops(), 3);
-        assert_eq!(inbox.armed.lock().unwrap().as_slice(), &[("1-abcd1234-x".to_string(), "m1".to_string())]);
+        assert_eq!(
+            inbox.armed.lock().unwrap().as_slice(),
+            &[("1-abcd1234-x".to_string(), "m1".to_string())]
+        );
         assert!(inbox.is_empty());
     }
 
@@ -1004,7 +1126,10 @@ mod tests {
             c
         })
         .await;
-        assert!(got.starts_with("ok\n\n【跨会话】来自 proj-abcd「改接口」 · m1"), "{got}");
+        assert!(
+            got.starts_with("ok\n\n【跨会话】来自 proj-abcd「改接口」 · m1"),
+            "{got}"
+        );
         assert!(got.contains("进行中到的"), "{got}");
         assert!(inbox.is_empty());
     }
@@ -1022,7 +1147,8 @@ mod tests {
             .map(|id| {
                 let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
                 std::mem::forget(rx);
-                let h = SessionHandle::new(id.to_string(), cwd_for(id).into(), model.clone(), None, tx);
+                let h =
+                    SessionHandle::new(id.to_string(), cwd_for(id).into(), model.clone(), None, tx);
                 shell.sessions.insert(id.to_string(), h.clone());
                 h
             })
@@ -1041,13 +1167,22 @@ mod tests {
     }
 
     fn req<'a>(to: &'a str, notify: bool) -> SendRequest<'a> {
-        SendRequest { to, body: "接口改了", reply_to: None, notify_when_idle: notify }
+        SendRequest {
+            to,
+            body: "接口改了",
+            reply_to: None,
+            notify_when_idle: notify,
+        }
     }
 
     /// 按短名送到对方收件箱；发给自己、发给助理对话、跳数用完都拒绝。
     #[tokio::test]
     async fn sending_by_name_and_the_refusals() {
-        let (shell, hs) = shell_with(&["1-aaaa0000-x", "2-bbbb0000-y", crate::assistant::CHAT_SESSION_ID]);
+        let (shell, hs) = shell_with(&[
+            "1-aaaa0000-x",
+            "2-bbbb0000-y",
+            crate::assistant::CHAT_SESSION_ID,
+        ]);
         let (a, b) = (name("1-aaaa0000-x"), name("2-bbbb0000-y"));
         let ok = send(&shell, "1-aaaa0000-x", req(&b, false)).unwrap();
         assert!(ok.contains(&format!("已送达 {b}")), "{ok}");
@@ -1056,13 +1191,29 @@ mod tests {
         assert!(text.contains(&format!("来自 {a}")), "{text}");
         assert_eq!(hs[1].inbox.hops(), 1);
 
-        assert!(send(&shell, "1-aaaa0000-x", req(&a, false)).unwrap_err().contains("自己"));
-        assert!(send(&shell, "1-aaaa0000-x", req("assistant", false)).unwrap_err().contains("助理"));
-        assert!(send(&shell, "1-aaaa0000-x", req("nope", false)).unwrap_err().contains("找不到"));
+        assert!(
+            send(&shell, "1-aaaa0000-x", req(&a, false))
+                .unwrap_err()
+                .contains("自己")
+        );
+        assert!(
+            send(&shell, "1-aaaa0000-x", req("assistant", false))
+                .unwrap_err()
+                .contains("助理")
+        );
+        assert!(
+            send(&shell, "1-aaaa0000-x", req("nope", false))
+                .unwrap_err()
+                .contains("找不到")
+        );
 
         // B 这一轮是由 1 跳的信引起的，它回信是 2 跳；跳数用完就拒发。
         hs[1].inbox.hops.store(MAX_HOPS, Ordering::SeqCst);
-        assert!(send(&shell, "2-bbbb0000-y", req(&a, false)).unwrap_err().contains("跳"));
+        assert!(
+            send(&shell, "2-bbbb0000-y", req(&a, false))
+                .unwrap_err()
+                .contains("跳")
+        );
         hs[1].inbox.reset_hops();
         assert!(send(&shell, "2-bbbb0000-y", req(&a, false)).is_ok());
     }
@@ -1077,10 +1228,16 @@ mod tests {
         assert!(hs[0].inbox.is_empty(), "还没读到，不该有回执");
 
         hs[1].inbox.take_prompt().unwrap();
-        hs[1].publish_history(&[WireMessage::new(Role::Assistant, vec![Block::text("已经按 v2 改好调用方")])]);
+        hs[1].publish_history(&[WireMessage::new(
+            Role::Assistant,
+            vec![Block::text("已经按 v2 改好调用方")],
+        )]);
         on_idle(&shell, &hs[1]);
         let r = hs[0].inbox.take_prompt().unwrap();
-        assert!(r.starts_with(&format!("【跨会话】回执 · {}（m1）", name("2-bbbb0000-y"))), "{r}");
+        assert!(
+            r.starts_with(&format!("【跨会话】回执 · {}（m1）", name("2-bbbb0000-y"))),
+            "{r}"
+        );
         assert!(r.contains("已经按 v2 改好调用方"), "{r}");
         on_idle(&shell, &hs[1]);
         assert!(hs[0].inbox.is_empty(), "回执只送一次");
@@ -1102,7 +1259,10 @@ mod tests {
         l.receipt = true;
         l.reply_to = Some("m3".into());
         let text = render(&[l], false);
-        assert!(text.starts_with("【跨会话】回执 · proj-abcd（m3）"), "{text}");
+        assert!(
+            text.starts_with("【跨会话】回执 · proj-abcd（m3）"),
+            "{text}"
+        );
         assert!(!text.contains("要回复用"), "回执不提示回复：{text}");
     }
 }

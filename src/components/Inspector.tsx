@@ -22,7 +22,6 @@
 // 一次流式回答几百到几千个 SSE 事件，一屏一屏铺下去要么滚不动、要么卡死。
 // 现在收在「事件流」区里：清单 + 详情、虚拟滚动、按事件名过滤（见 payload/EventStream.tsx）。
 
-import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronLeft,
   ChevronRight,
@@ -34,28 +33,33 @@ import {
   Search,
   X,
 } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
+  type ExchangeRecord,
+  type ExchangeSummary,
   getExchange,
+  type InspectedExchange,
   inspectExchange,
   listExchanges,
   purposeLabel,
-  type ExchangeRecord,
-  type ExchangeSummary,
-  type InspectedExchange,
 } from "../lib/api";
 import { fmtMs, fmtNumber } from "../lib/format";
 import { useStore } from "../store";
+import { FormattedView, RawView } from "./payload/formatted";
+import type { Side } from "./payload/kit";
+import { VisualView } from "./payload/visual";
 import { IconButton } from "./ui/Button";
 import { Input } from "./ui/Input";
-import { FormattedView, RawView } from "./payload/formatted";
-import { VisualView } from "./payload/visual";
-import type { Side } from "./payload/kit";
 
 type View = "visual" | "formatted" | "raw";
 
 const VIEW_TABS: { id: View; label: string; hint: string }[] = [
-  { id: "visual", label: "可视化", hint: "按语义拆开：请求参数、系统提示词、工具、上下文、回答、思考、token" },
+  {
+    id: "visual",
+    label: "可视化",
+    hint: "按语义拆开：请求参数、系统提示词、工具、上下文、回答、思考、token",
+  },
   { id: "formatted", label: "格式化", hint: "把请求体或响应体排成可折叠的 JSON 树" },
   { id: "raw", label: "原始", hint: "未经任何加工的字节，用来和上游逐字节对照" },
 ];
@@ -307,9 +311,7 @@ export function Inspector() {
   //
   // 记下是**哪一条**的解，而不是裸存一份：进行中的流每秒都在长，每次重解都先
   // 清空的话，界面会每秒闪一次「正在解读报文…」。换了一条才清。
-  const [inspected, setInspected] = useState<{ id: string; value: InspectedExchange } | null>(
-    null,
-  );
+  const [inspected, setInspected] = useState<{ id: string; value: InspectedExchange } | null>(null);
   const [view, setView] = useState<View>("visual");
   // 看哪一半。默认「请求」：打开面板时最常问的是「我到底发了什么」。
   const [side, setSide] = useState<Side>("request");
@@ -460,8 +462,9 @@ export function Inspector() {
     const q = query.trim().toLowerCase();
     if (!q) return all;
     return all.filter((s) =>
-      [s.url, s.model, s.channel, s.method, purposeLabel(s.purpose)]
-        .some((f) => f?.toLowerCase().includes(q)),
+      [s.url, s.model, s.channel, s.method, purposeLabel(s.purpose)].some((f) =>
+        f?.toLowerCase().includes(q),
+      ),
     );
   }, [list, turn, query]);
 
@@ -518,8 +521,7 @@ export function Inspector() {
             title="清除筛选"
             className="inline-flex items-center gap-1 rounded-full bg-bubble px-2 py-0.5 text-[11px] text-dim transition-colors hover:text-ink"
           >
-            <X size={11} />
-            第 {turn} 轮
+            <X size={11} />第 {turn} 轮
           </button>
         )}
         <IconButton className="ml-auto" title="关闭（Esc）" onClick={closeInspector}>
@@ -616,11 +618,7 @@ export function Inspector() {
               {/* 第一行：这条请求是什么（翻页、时间、渠道、模型）。 */}
               <div className="flex flex-wrap items-center gap-2">
                 <div className="flex items-center gap-0.5">
-                  <IconButton
-                    title="上一条请求（↑）"
-                    disabled={index <= 0}
-                    onClick={() => go(-1)}
-                  >
+                  <IconButton title="上一条请求（↑）" disabled={index <= 0} onClick={() => go(-1)}>
                     <ChevronLeft size={14} />
                   </IconButton>
                   <span className="min-w-14 text-center text-[11px] tabular-nums text-dim">
@@ -635,7 +633,10 @@ export function Inspector() {
                   </IconButton>
                 </div>
 
-                <span className="min-w-0 flex-1 truncate mono text-[11px] text-ink" title={record.url}>
+                <span
+                  className="min-w-0 flex-1 truncate mono text-[11px] text-ink"
+                  title={record.url}
+                >
                   {record.method} {record.url}
                 </span>
                 <span className="shrink-0 text-[11px] tabular-nums text-dim">

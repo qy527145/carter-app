@@ -70,12 +70,12 @@ fn parse_signal(args: &Value) -> Result<Signal, String> {
 fn ack(s: &Signal) -> String {
     match s {
         Signal::Completed { .. } => "已记录：目标完成。自动继续已停止。".to_string(),
-        Signal::Blocked { note } => format!(
-            "已记录：目标被卡住（{note}）。自动继续已停止，用户会看到这条说明。"
-        ),
-        Signal::NeedsUser { note } => format!(
-            "已记录：需要用户拍板（{note}）。自动继续已停止，等用户回答。"
-        ),
+        Signal::Blocked { note } => {
+            format!("已记录：目标被卡住（{note}）。自动继续已停止，用户会看到这条说明。")
+        }
+        Signal::NeedsUser { note } => {
+            format!("已记录：需要用户拍板（{note}）。自动继续已停止，等用户回答。")
+        }
     }
 }
 
@@ -184,9 +184,15 @@ mod tests {
     #[tokio::test]
     async fn a_completed_call_lands_in_the_shared_slot() {
         let (t, signal) = tool(true);
-        let res = t.execute(json!({"status": "completed", "note": "告警清零"})).await;
+        let res = t
+            .execute(json!({"status": "completed", "note": "告警清零"}))
+            .await;
         assert!(res.ok, "{}", res.content);
-        assert!(res.content.contains("停止"), "要告诉模型接下来会怎样：{}", res.content);
+        assert!(
+            res.content.contains("停止"),
+            "要告诉模型接下来会怎样：{}",
+            res.content
+        );
         assert_eq!(
             signal.take(),
             Some(Signal::Completed {
@@ -201,7 +207,11 @@ mod tests {
         let (t, signal) = tool(false);
         let res = t.execute(json!({"status": "completed"})).await;
         assert!(!res.ok);
-        assert!(res.content.contains("/goal"), "要把话说明白：{}", res.content);
+        assert!(
+            res.content.contains("/goal"),
+            "要把话说明白：{}",
+            res.content
+        );
         assert!(signal.take().is_none(), "被拒绝的调用不该留下信号");
     }
 }

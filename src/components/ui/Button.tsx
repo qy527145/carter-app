@@ -18,8 +18,7 @@ type Props = ButtonHTMLAttributes<HTMLButtonElement> & {
 };
 
 const VARIANTS: Record<Variant, string> = {
-  primary:
-    "bg-accent text-[var(--accent-contrast)] hover:opacity-90 disabled:hover:opacity-40",
+  primary: "bg-accent text-[var(--accent-contrast)] hover:opacity-90 disabled:hover:opacity-40",
   // 用 ink 的低透明度着色而不是某个底色 token：次要按钮会出现在 base /
   // card / elevated 任何一层上（模态里就是 elevated），写死底色的话总有一处
   // 和背景同色。ink 跟着主题翻转，5% 在任何一层上都只是「比周围略深一点」。
@@ -34,12 +33,7 @@ const SIZES: Record<Size, string> = {
   md: "gap-1.5 rounded-md px-3 py-1.5 text-sm",
 };
 
-export function Button({
-  variant = "secondary",
-  size = "md",
-  className = "",
-  ...rest
-}: Props) {
+export function Button({ variant = "secondary", size = "md", className = "", ...rest }: Props) {
   return (
     <button
       className={`carter-press inline-flex shrink-0 items-center justify-center font-medium outline-none disabled:cursor-not-allowed disabled:opacity-40 ${SIZES[size]} ${VARIANTS[variant]} ${className}`}
@@ -49,10 +43,7 @@ export function Button({
 }
 
 /** 只有图标的方形按钮。`title` 必填 —— 没有文字就得有可读的名字。 */
-export function IconButton({
-  className = "",
-  ...rest
-}: ButtonHTMLAttributes<HTMLButtonElement>) {
+export function IconButton({ className = "", ...rest }: ButtonHTMLAttributes<HTMLButtonElement>) {
   return (
     <button
       className={`carter-press inline-flex shrink-0 items-center justify-center rounded-md p-1.5 text-dim outline-none hover:bg-ink/5 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40 ${className}`}

@@ -6,8 +6,8 @@
 // 三个视图都按**同一个方向**切分（请求 / 响应），一次只画一侧：
 // 看请求时不必在页面上找「哪里开始是响应」，切页签就是一次换向。
 
-import { useState, type ReactNode } from "react";
 import { Check, ChevronDown, ChevronRight, Copy } from "lucide-react";
+import { type ReactNode, useState } from "react";
 
 import { copyText } from "../../lib/clipboard";
 import { fmtNumber } from "../../lib/format";
@@ -32,13 +32,7 @@ export function parseJson(text: string): unknown {
 // ---------------------------------------------------------------------------
 
 /** 复制一条文本。成功后图标变成对勾，和 toast 用同一个时长自己复位。 */
-export function CopyButton({
-  text,
-  title = "复制",
-}: {
-  text: string;
-  title?: string;
-}) {
+export function CopyButton({ text, title = "复制" }: { text: string; title?: string }) {
   const [done, setDone] = useState(false);
   return (
     <IconButton
@@ -118,13 +112,7 @@ export function Direction({
 }
 
 /** 标题行里的小胶囊。 */
-export function Pill({
-  children,
-  tone,
-}: {
-  children: ReactNode;
-  tone?: "ok" | "warn" | "bad";
-}) {
+export function Pill({ children, tone }: { children: ReactNode; tone?: "ok" | "warn" | "bad" }) {
   const cls =
     tone === "bad"
       ? "bg-[var(--error-bg)] text-[var(--danger)]"
@@ -222,7 +210,11 @@ export function LongText({
 export function JsonOrRaw({ text, label }: { text: string; label?: string }) {
   const parsed = parseJson(text);
   const pretty =
-    parsed === undefined ? null : typeof parsed === "string" ? parsed : JSON.stringify(parsed, null, 2);
+    parsed === undefined
+      ? null
+      : typeof parsed === "string"
+        ? parsed
+        : JSON.stringify(parsed, null, 2);
   return (
     <div className="space-y-1">
       {!pretty && label && <div className="text-[11px] text-dim">{label}</div>}
@@ -270,9 +262,7 @@ export function HeadersTable({ headers }: { headers: [string, string][] }) {
           <tbody>
             {headers.map(([k, v], i) => (
               <tr key={`${k}-${i}`} className={i % 2 ? "bg-base" : ""}>
-                <td className="w-40 border-r border-edge px-2 py-1 align-top mono text-dim">
-                  {k}
-                </td>
+                <td className="w-40 border-r border-edge px-2 py-1 align-top mono text-dim">{k}</td>
                 <td className="break-all px-2 py-1 mono text-ink">{v}</td>
               </tr>
             ))}

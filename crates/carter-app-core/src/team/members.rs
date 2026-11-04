@@ -130,17 +130,17 @@ impl Roster {
         if raw.starts_with("m-") {
             return self.by_id(raw);
         }
-        if let Some(id) = Identity::parse(raw) {
-            if !id.email.is_empty() {
-                if let Some(m) = self.by_email(&id.email) {
-                    return Some(m);
-                }
-            }
+        if let Some(id) = Identity::parse(raw)
+            && !id.email.is_empty()
+            && let Some(m) = self.by_email(&id.email)
+        {
+            return Some(m);
         }
-        if raw.contains('@') && !raw.contains('<') {
-            if let Some(m) = self.by_email(raw) {
-                return Some(m);
-            }
+        if raw.contains('@')
+            && !raw.contains('<')
+            && let Some(m) = self.by_email(raw)
+        {
+            return Some(m);
         }
         let lower = raw.trim_start_matches('@').to_lowercase();
         let mut hits = self
@@ -279,10 +279,10 @@ pub fn load_all(store: &super::store::Store) -> Roster {
             let Ok(text) = super::git::git(root, &["show", &format!("{sha}:{path}")]) else {
                 continue;
             };
-            if let Ok(m) = super::store::parse_json::<Member>(&text) {
-                if m.id == id {
-                    out.members.push(m);
-                }
+            if let Ok(m) = super::store::parse_json::<Member>(&text)
+                && m.id == id
+            {
+                out.members.push(m);
             }
         }
     }
@@ -368,7 +368,10 @@ pub fn join_and_announce(
     let me = super::git::local_identity(root)?;
     let (m, created) = join(store.root(), &me, how)?;
     // 「我是 X 的另一台机器」也改了文件（追加了邮箱），一样要提交。
-    let changed = created || load(store.root()).by_id(&m.id).is_some_and(|x| x.has_email(&me.email));
+    let changed = created
+        || load(store.root())
+            .by_id(&m.id)
+            .is_some_and(|x| x.has_email(&me.email));
     if changed && super::git::in_repo(root) {
         let rel = team_rel(store);
         let dir = format!("{rel}/{MEMBERS_DIR}");
@@ -472,9 +475,23 @@ mod tests {
     fn joining_twice_does_not_create_a_second_member() {
         let root = tmp();
         let me = id("xq <Xu.Qiao@Kotei.com.cn>");
-        let (a, new) = join(&root, &me, Join::New { name: "徐侨".into() }).unwrap();
+        let (a, new) = join(
+            &root,
+            &me,
+            Join::New {
+                name: "徐侨".into(),
+            },
+        )
+        .unwrap();
         assert!(new);
-        let (b, new) = join(&root, &me, Join::New { name: "别的名字".into() }).unwrap();
+        let (b, new) = join(
+            &root,
+            &me,
+            Join::New {
+                name: "别的名字".into(),
+            },
+        )
+        .unwrap();
         assert!(!new);
         assert_eq!(a.id, b.id);
         assert_eq!(load(&root).members.len(), 1);
@@ -483,26 +500,57 @@ mod tests {
     #[test]
     fn a_second_machine_attaches_to_the_existing_member() {
         let root = tmp();
-        let (m, _) = join(&root, &id("xq <work@corp>"), Join::New { name: "徐侨".into() }).unwrap();
+        let (m, _) = join(
+            &root,
+            &id("xq <work@corp>"),
+            Join::New {
+                name: "徐侨".into(),
+            },
+        )
+        .unwrap();
         join(
             &root,
             &id("wmymz <home@me>"),
-            Join::Existing { member_id: m.id.clone() },
+            Join::Existing {
+                member_id: m.id.clone(),
+            },
         )
         .unwrap();
         let r = load(&root);
         assert_eq!(r.members.len(), 1);
-        assert_eq!(r.me(&id("x <HOME@me>")).unwrap().id, m.id, "邮箱大小写不敏感");
+        assert_eq!(
+            r.me(&id("x <HOME@me>")).unwrap().id,
+            m.id,
+            "邮箱大小写不敏感"
+        );
         assert_eq!(r.me(&id("x <work@corp>")).unwrap().id, m.id);
     }
 
     #[test]
     fn references_resolve_in_every_historical_form() {
         let root = tmp();
-        let (m, _) = join(&root, &id("张三 <z@x>"), Join::New { name: "小张".into() }).unwrap();
+        let (m, _) = join(
+            &root,
+            &id("张三 <z@x>"),
+            Join::New {
+                name: "小张".into(),
+            },
+        )
+        .unwrap();
         let r = load(&root);
-        for raw in [m.id.as_str(), "张三 <z@x>", "Whoever <Z@X>", "z@x", "小张", "@小张"] {
-            assert_eq!(r.resolve(raw).map(|x| x.id.as_str()), Some(m.id.as_str()), "{raw}");
+        for raw in [
+            m.id.as_str(),
+            "张三 <z@x>",
+            "Whoever <Z@X>",
+            "z@x",
+            "小张",
+            "@小张",
+        ] {
+            assert_eq!(
+                r.resolve(raw).map(|x| x.id.as_str()),
+                Some(m.id.as_str()),
+                "{raw}"
+            );
         }
         assert_eq!(r.canonical("张三 <z@x>"), m.id, "写回时一律用 id");
         assert_eq!(r.canonical("外人 <o@x>"), "外人 <o@x>", "认不出的原样保留");
@@ -511,8 +559,16 @@ mod tests {
     }
 
     fn sh(dir: &Path, args: &[&str]) -> String {
-        let out = std::process::Command::new("git").current_dir(dir).args(args).output().unwrap();
-        assert!(out.status.success(), "git {args:?}：{}", String::from_utf8_lossy(&out.stderr));
+        let out = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}：{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
@@ -532,33 +588,74 @@ mod tests {
         sh(&dir, &["add", "wip.txt"]);
 
         sh(&dir, &["checkout", "-q", "-b", "feature"]);
-        let (m, created) = join_and_announce(&store, Join::New { name: "张三".into() }, None).unwrap();
+        let (m, created) = join_and_announce(
+            &store,
+            Join::New {
+                name: "张三".into(),
+            },
+            None,
+        )
+        .unwrap();
         assert!(created);
-        assert_eq!(sh(&dir, &["diff", "--cached", "--name-only"]), "wip.txt", "用户暂存的原样留着");
+        assert_eq!(
+            sh(&dir, &["diff", "--cached", "--name-only"]),
+            "wip.txt",
+            "用户暂存的原样留着"
+        );
         let last = sh(&dir, &["log", "-1", "--name-only", "--format=%s"]);
-        assert!(last.contains("张三 加入团队") && last.contains("members/"), "{last}");
+        assert!(
+            last.contains("张三 加入团队") && last.contains("members/"),
+            "{last}"
+        );
         assert!(!last.contains("wip.txt"), "{last}");
 
         let evs = crate::team::events::read(&dir, 10);
-        let j = evs.iter().find(|e| e.kind.is("join")).expect("要广播一条 join");
+        let j = evs
+            .iter()
+            .find(|e| e.kind.is("join"))
+            .expect("要广播一条 join");
         assert_eq!(j.from.as_deref(), Some(m.id.as_str()));
         assert!(j.addressed_to("m-anyone"), "join 发给全员");
 
         // 回到 main：工作区里没有这个成员文件，但名单里要有他。
         sh(&dir, &["stash", "-q"]);
         sh(&dir, &["checkout", "-q", "main"]);
-        assert!(load(store.root()).members.is_empty(), "main 的工作区里确实没有");
+        assert!(
+            load(store.root()).members.is_empty(),
+            "main 的工作区里确实没有"
+        );
         let all = load_all(&store);
-        assert_eq!(all.by_id(&m.id).map(|x| x.name.as_str()), Some("张三"), "别的分支上加入的也要认得");
+        assert_eq!(
+            all.by_id(&m.id).map(|x| x.name.as_str()),
+            Some("张三"),
+            "别的分支上加入的也要认得"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn duplicate_names_are_not_guessed() {
         let root = tmp();
-        join(&root, &id("a <a@x>"), Join::New { name: "小王".into() }).unwrap();
-        join(&root, &id("b <b@x>"), Join::New { name: "小王".into() }).unwrap();
-        assert!(load(&root).resolve("小王").is_none(), "重名时不能随便挑一个");
+        join(
+            &root,
+            &id("a <a@x>"),
+            Join::New {
+                name: "小王".into(),
+            },
+        )
+        .unwrap();
+        join(
+            &root,
+            &id("b <b@x>"),
+            Join::New {
+                name: "小王".into(),
+            },
+        )
+        .unwrap();
+        assert!(
+            load(&root).resolve("小王").is_none(),
+            "重名时不能随便挑一个"
+        );
     }
 
     #[test]

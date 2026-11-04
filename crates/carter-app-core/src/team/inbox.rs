@@ -43,10 +43,10 @@ pub fn sender(e: &Event, roster: &Roster) -> Option<String> {
 
 /// 这条事件是不是本机这个人发的。名单里还没有自己时按 git 邮箱比。
 fn from_me(e: &Event, me_id: Option<&str>, me: &Identity, roster: &Roster) -> bool {
-    if let (Some(id), Some(s)) = (me_id, sender(e, roster)) {
-        if id == s {
-            return true;
-        }
+    if let (Some(id), Some(s)) = (me_id, sender(e, roster))
+        && id == s
+    {
+        return true;
     }
     e.author
         .as_ref()
@@ -68,17 +68,16 @@ pub fn filter(
         if from_me(&e, me_id.as_deref(), me, roster) {
             continue;
         }
-        let to_me = me_id.as_deref().is_some_and(|id| e.to.iter().any(|t| t == id));
+        let to_me = me_id
+            .as_deref()
+            .is_some_and(|id| e.to.iter().any(|t| t == id));
         let reason = if to_me && (e.kind.is(EventKind::ASSIGN) || e.kind.is(EventKind::HANDOFF)) {
             "assigned"
         } else if to_me {
             "mention"
         } else if e.to.iter().any(|t| t == events::EVERYONE) {
             "broadcast"
-        } else if e
-            .target
-            .as_deref()
-            .is_some_and(|t| my_tasks.contains(t))
+        } else if e.target.as_deref().is_some_and(|t| my_tasks.contains(t))
             && (e.kind.is(EventKind::COMMENT)
                 || e.kind.is(EventKind::NOTE)
                 || e.kind.is(EventKind::HANDOFF)
@@ -94,7 +93,11 @@ pub fn filter(
 }
 
 /// 我负责的、还没完成的任务 id。
-pub fn my_task_ids(store: &Store, roster: &Roster, me: &Identity) -> std::collections::HashSet<String> {
+pub fn my_task_ids(
+    store: &Store,
+    roster: &Roster,
+    me: &Identity,
+) -> std::collections::HashSet<String> {
     let me_key = roster
         .me(me)
         .map(|m| m.id.clone())
@@ -102,10 +105,10 @@ pub fn my_task_ids(store: &Store, roster: &Roster, me: &Identity) -> std::collec
     let mut out = std::collections::HashSet::new();
     for goal in store.goals().items {
         for t in store.tasks(&goal.id).items {
-            if let Some(a) = t.assignee.as_deref() {
-                if roster.same(a, &me_key) {
-                    out.insert(t.id.clone());
-                }
+            if let Some(a) = t.assignee.as_deref()
+                && roster.same(a, &me_key)
+            {
+                out.insert(t.id.clone());
             }
         }
     }
@@ -131,17 +134,27 @@ pub fn line(item: &InboxItem, roster: &Roster, titles: &HashMap<String, String>)
         .and_then(|id| roster.by_id(&id).map(|m| m.name.clone()))
         .or_else(|| e.author.as_ref().map(|a| a.short().to_string()))
         .unwrap_or_else(|| "有人".into());
-    let via = if e.via.as_deref() == Some("carter") { "（经卡特）" } else { "" };
+    let via = if e.via.as_deref() == Some("carter") {
+        "（经卡特）"
+    } else {
+        ""
+    };
     let target = e
         .target
         .as_deref()
-        .map(|t| match titles.get(t).cloned().or_else(|| subject_title(&e.subject)) {
-            Some(title) => format!(" 「{title}」({t})"),
-            None => format!(" {t}"),
-        })
+        .map(
+            |t| match titles.get(t).cloned().or_else(|| subject_title(&e.subject)) {
+                Some(title) => format!(" 「{title}」({t})"),
+                None => format!(" {t}"),
+            },
+        )
         .unwrap_or_default();
     let body: String = e.body.replace('\n', " ").chars().take(200).collect();
-    let body = if body.is_empty() { String::new() } else { format!("：{body}") };
+    let body = if body.is_empty() {
+        String::new()
+    } else {
+        format!("：{body}")
+    };
     // 期限写原始毫秒值：这一行要**稳定**（观察源靠整行去重），按本地时区格式化的话
     // 换个时区就成了「新事件」。给模型读，毫秒值它看得懂。
     let due = e.due.map(|d| format!(" 期限 {d}")).unwrap_or_default();
@@ -237,7 +250,9 @@ mod tests {
         let (other, _) = join(
             &root,
             &Identity::parse("张三 <z@x>").unwrap(),
-            Join::New { name: "张三".into() },
+            Join::New {
+                name: "张三".into(),
+            },
         )
         .unwrap();
         let roster = load(&root);
@@ -263,7 +278,10 @@ mod tests {
 
         let line = line(&items[0], &roster, &HashMap::new());
         assert!(line.starts_with("[@我] 张三 提到"), "{line}");
-        assert!(line.ends_with("#e-mention"), "带 eid 才能去重与回头定位：{line}");
+        assert!(
+            line.ends_with("#e-mention"),
+            "带 eid 才能去重与回头定位：{line}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

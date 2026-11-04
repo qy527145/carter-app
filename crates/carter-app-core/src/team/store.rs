@@ -203,8 +203,7 @@ impl Store {
     pub fn tasks(&self, goal_id: &str) -> Loaded<Task> {
         let mut out = Loaded::default();
         if !valid_id(Kind::Goal, goal_id) {
-            out.issues
-                .push((goal_id.into(), "目标 id 不合法".into()));
+            out.issues.push((goal_id.into(), "目标 id 不合法".into()));
             return out;
         }
         let dir = self.tasks_dir(goal_id);
@@ -226,10 +225,7 @@ impl Store {
     }
 
     pub fn task(&self, goal_id: &str, task_id: &str) -> Result<Task, String> {
-        for (kind, id, what) in [
-            (Kind::Goal, goal_id, "目标"),
-            (Kind::Task, task_id, "任务"),
-        ] {
+        for (kind, id, what) in [(Kind::Goal, goal_id, "目标"), (Kind::Task, task_id, "任务")] {
             if !valid_id(kind, id) {
                 return Err(format!("{what} id `{id}` 不合法"));
             }
@@ -281,7 +277,7 @@ impl Store {
             match by_id.get(dep.as_str()) {
                 None => return Err(format!("依赖的任务 {dep} 不在这个目标里")),
                 Some(t) if t.goal_id != goal_id => {
-                    return Err(format!("依赖的任务 {dep} 属于别的目标"))
+                    return Err(format!("依赖的任务 {dep} 属于别的目标"));
                 }
                 _ => {}
             }
@@ -331,7 +327,8 @@ impl Store {
     pub fn goal_view(&self, goal_id: &str) -> Result<GoalView, String> {
         let goal = self.goal(goal_id)?;
         let loaded = self.tasks(goal_id);
-        let mut tasks: BTreeMap<&str, &Task> = loaded.items.iter().map(|t| (t.id.as_str(), t)).collect();
+        let mut tasks: BTreeMap<&str, &Task> =
+            loaded.items.iter().map(|t| (t.id.as_str(), t)).collect();
 
         let mut counts = Counts::default();
         for t in &loaded.items {
@@ -341,10 +338,10 @@ impl Store {
         // 子任务表：一次遍历建好，后面算进度与 `children` 都用它。
         let mut kids: HashMap<&str, Vec<&Task>> = HashMap::new();
         for t in &loaded.items {
-            if let Some(parent) = t.parent_id.as_deref() {
-                if tasks.contains_key(parent) {
-                    kids.entry(parent).or_default().push(t);
-                }
+            if let Some(parent) = t.parent_id.as_deref()
+                && tasks.contains_key(parent)
+            {
+                kids.entry(parent).or_default().push(t);
             }
         }
         for v in kids.values_mut() {
@@ -354,7 +351,12 @@ impl Store {
         let done: HashMap<&str, bool> = loaded
             .items
             .iter()
-            .map(|t| (t.id.as_str(), matches!(t.status, TaskStatus::Done | TaskStatus::Dropped)))
+            .map(|t| {
+                (
+                    t.id.as_str(),
+                    matches!(t.status, TaskStatus::Done | TaskStatus::Dropped),
+                )
+            })
             .collect();
 
         let mut views = Vec::with_capacity(loaded.items.len());
@@ -658,7 +660,11 @@ mod tests {
         .unwrap();
         let loaded = s.goals();
         assert_eq!(loaded.items.len(), 0);
-        assert!(loaded.issues[0].1.contains("冲突标记"), "{:?}", loaded.issues);
+        assert!(
+            loaded.issues[0].1.contains("冲突标记"),
+            "{:?}",
+            loaded.issues
+        );
     }
 
     #[test]
@@ -680,7 +686,11 @@ mod tests {
         // 引用一个不存在的任务。
         let mut c = Task::new(&g.id, "c", &me());
         c.depends_on = vec!["t-nope".into()];
-        assert!(s.validate_deps(&g.id, &c).unwrap_err().contains("不在这个目标里"));
+        assert!(
+            s.validate_deps(&g.id, &c)
+                .unwrap_err()
+                .contains("不在这个目标里")
+        );
 
         // 自己依赖自己。
         let mut d = Task::new(&g.id, "d", &me());
@@ -734,7 +744,11 @@ mod tests {
         let loaded = s.boards();
         assert!(loaded.issues.is_empty(), "{:?}", loaded.issues);
         assert_eq!(
-            loaded.items.iter().map(|b| b.id.as_str()).collect::<Vec<_>>(),
+            loaded
+                .items
+                .iter()
+                .map(|b| b.id.as_str())
+                .collect::<Vec<_>>(),
             ["b-0", "b-1"]
         );
         assert_eq!(loaded.items[1].title, "回顾");

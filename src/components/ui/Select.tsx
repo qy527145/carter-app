@@ -4,8 +4,8 @@
 // 唯一一个「怎么调都和输入框不像一套」的控件。手写一个按钮 + 绝对定位面板，
 // 代价是得自己做外部点击与 Escape 关闭。
 
-import { useEffect, useRef, useState } from "react";
 import { Check, ChevronDown } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 
 export type Option = {
   value: string;
@@ -83,9 +83,7 @@ export function Select({
                 {o.value === value && <Check size={12} />}
               </span>
               <span className="min-w-0 flex-1 truncate">{o.label ?? o.value}</span>
-              {o.hint && (
-                <span className="shrink-0 font-mono text-[10px] text-dim">{o.hint}</span>
-              )}
+              {o.hint && <span className="shrink-0 font-mono text-[10px] text-dim">{o.hint}</span>}
             </button>
           ))}
         </div>

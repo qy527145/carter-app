@@ -4,10 +4,10 @@
 // 直接操作 zustand store 而不是做成 hook：这些是「事件处理函数」而不是渲染逻辑，
 // 不需要订阅。`useStore.getState()` 在任何地方都拿得到同一份状态。
 
-import { landFlight } from "./flight";
-import * as api from "./api";
-import type { GoalCommand } from "./api";
 import { useStore, withCurrent } from "../store";
+import type { GoalCommand } from "./api";
+import * as api from "./api";
+import { landFlight } from "./flight";
 import { toastError, toastOk } from "./toast";
 
 /**

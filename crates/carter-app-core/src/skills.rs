@@ -445,12 +445,7 @@ fn external_root_of(scan: &Scan, name: &str) -> Option<PathBuf> {
 }
 
 /// 搬目录启停。项目与用户各有一对目录，形状完全一样。
-fn move_skill(
-    scan: &Scan,
-    name: &str,
-    to_enabled: bool,
-    kind: RootKind,
-) -> Result<(), String> {
+fn move_skill(scan: &Scan, name: &str, to_enabled: bool, kind: RootKind) -> Result<(), String> {
     let (enabled, disabled) = match kind {
         RootKind::Project => (
             scan.project_enabled
@@ -611,14 +606,14 @@ pub fn save(scan: &Scan, d: &SkillDraft) -> Result<PathBuf, String> {
     if !dir.join(name).is_dir() {
         // 同名的在另一侧（停用的那份）→ 拒绝。写下去就会出现两份同名目录，
         // 而列表只会把「启用」那份算进并集 —— 用户改的那份可能永远不生效。
-        if let Some((sibling, _)) = sibling_dir(scan, &dir, kind) {
-            if sibling.join(name).is_dir() {
-                return Err(format!(
-                    "`{name}` 在 {} 里已经有一份（启用 / 停用两侧各存一份会互相打架）：\
+        if let Some((sibling, _)) = sibling_dir(scan, &dir, kind)
+            && sibling.join(name).is_dir()
+        {
+            return Err(format!(
+                "`{name}` 在 {} 里已经有一份（启用 / 停用两侧各存一份会互相打架）：\
                      先在列表里处理那一份再保存。",
-                    sibling.display()
-                ));
-            }
+                sibling.display()
+            ));
         }
 
         // 名字撞上外部路径里已有的技能 → 拒绝。写下去会把那一份遮住，而那边
@@ -627,28 +622,27 @@ pub fn save(scan: &Scan, d: &SkillDraft) -> Result<PathBuf, String> {
         //
         // 例外：那个外部技能**已经被忽略**时不拒绝。它本来就不参与并集，同名不构成
         // 竞争，而且用户已经表达过「不要它」。
-        if !scan.ignored_here(name, RootKind::External) {
-            if let Some(root) = external_root_of(scan, name) {
-                return Err(format!(
-                    "外部扫描路径 {} 里已经有一个叫 `{name}` 的技能：写下去会把它遮住。\
+        if !scan.ignored_here(name, RootKind::External)
+            && let Some(root) = external_root_of(scan, name)
+        {
+            return Err(format!(
+                "外部扫描路径 {} 里已经有一个叫 `{name}` 的技能：写下去会把它遮住。\
                      换个名字，或者先把它忽略掉。",
-                    root.display()
-                ));
-            }
+                root.display()
+            ));
         }
 
         // 项目优先于用户：往用户目录写一个项目里已有的名字，模型用到的会是项目那份，
         // 刚写的这一份永远不生效。
-        if kind == RootKind::Local {
-            if let Some(project) = &scan.project_enabled {
-                if project.join(name).is_dir() {
-                    return Err(format!(
-                        "当前项目（{}）里已经有一个叫 `{name}` 的技能：项目优先于用户目录，\
+        if kind == RootKind::Local
+            && let Some(project) = &scan.project_enabled
+            && project.join(name).is_dir()
+        {
+            return Err(format!(
+                "当前项目（{}）里已经有一个叫 `{name}` 的技能：项目优先于用户目录，\
                          模型用到的会是那一份。要改它就编辑项目里那一行，或者换个名字。",
-                        project.display()
-                    ));
-                }
-            }
+                project.display()
+            ));
         }
     }
 
@@ -668,7 +662,10 @@ pub fn save(scan: &Scan, d: &SkillDraft) -> Result<PathBuf, String> {
 /// 与 `dir` 同类、但属于另一侧（启用 ↔ 停用）的目录。
 fn sibling_dir(scan: &Scan, dir: &Path, kind: RootKind) -> Option<(PathBuf, RootKind)> {
     let pair = match kind {
-        RootKind::Project => (scan.project_enabled.as_ref(), scan.project_disabled.as_ref()),
+        RootKind::Project => (
+            scan.project_enabled.as_ref(),
+            scan.project_disabled.as_ref(),
+        ),
         RootKind::Local => (Some(&scan.local_enabled), Some(&scan.local_disabled)),
         RootKind::External => return None,
     };
@@ -797,7 +794,12 @@ pub fn roots(scan: &Scan) -> Vec<SkillRootRow> {
     if let Some(project) = &scan.project_enabled {
         out.push(root_row(scan, &winners, project, RootKind::Project));
     }
-    out.push(root_row(scan, &winners, &scan.local_enabled, RootKind::Local));
+    out.push(root_row(
+        scan,
+        &winners,
+        &scan.local_enabled,
+        RootKind::Local,
+    ));
     out.extend(
         scan.externals
             .iter()
@@ -1248,7 +1250,10 @@ mod tests {
 
         assert!(set_enabled(&mut app, &scan, "excel", true, Some(&ext_s)).unwrap());
         assert!(!app.skill_ignored("excel"));
-        assert_eq!(names(&union_metas(&rescan(&f, &[&ext], &app))), vec!["excel"]);
+        assert_eq!(
+            names(&union_metas(&rescan(&f, &[&ext], &app))),
+            vec!["excel"]
+        );
         f.cleanup();
     }
 
@@ -1286,14 +1291,7 @@ mod tests {
         let mut app = AppSettings::default();
 
         // 外部那一行（readonly=true）→ 忽略名单。
-        assert!(set_enabled(
-            &mut app,
-            &scan,
-            "pdf",
-            false,
-            Some(&ext.to_string_lossy())
-        )
-        .unwrap());
+        assert!(set_enabled(&mut app, &scan, "pdf", false, Some(&ext.to_string_lossy())).unwrap());
         assert!(app.skill_ignored("pdf"));
         assert!(
             f.disabled().join("pdf").is_dir(),
@@ -1419,10 +1417,7 @@ mod tests {
         assert_eq!(codex_preset.paths.len(), 2, "用户技能 + 内置技能两条");
         assert_eq!(
             codex_preset.missing,
-            vec![codex
-                .join(".system")
-                .to_string_lossy()
-                .to_string()],
+            vec![codex.join(".system").to_string_lossy().to_string()],
             "已经加过的那条不该再出现在 missing 里"
         );
         assert!(codex_preset.hint.contains(".system"), "要说清为什么是两条");
@@ -1443,11 +1438,12 @@ mod tests {
         add_root(&mut app, "~/.claude/skills").unwrap();
         assert_eq!(
             app.skill_roots,
-            vec![home
-                .join(".claude")
-                .join("skills")
-                .to_string_lossy()
-                .to_string()],
+            vec![
+                home.join(".claude")
+                    .join("skills")
+                    .to_string_lossy()
+                    .to_string()
+            ],
             "存的是展开后的绝对路径，不是 `~` 原文 —— 这样读的每一处都不必再记得展开一次"
         );
     }
@@ -1499,14 +1495,16 @@ mod tests {
         assert!(find_body(&scan, "something-else").is_none());
         // 启停也照这个名字走，否则开关会「点了没反应」。
         let mut app = AppSettings::default();
-        assert!(set_enabled(
-            &mut app,
-            &scan,
-            "real-dir",
-            false,
-            Some(&ext.to_string_lossy())
-        )
-        .unwrap());
+        assert!(
+            set_enabled(
+                &mut app,
+                &scan,
+                "real-dir",
+                false,
+                Some(&ext.to_string_lossy())
+            )
+            .unwrap()
+        );
         assert!(app.skill_ignored("real-dir"));
         f.cleanup();
     }
@@ -1602,7 +1600,7 @@ mod tests {
         assert!(f.project_disabled().join("pdf").is_dir());
         assert!(!proj.join("pdf").is_dir());
         assert!(union_metas(&scan).is_empty(), "停用后不参与并集");
-        assert!(f.local().join("pdf").is_dir() == false, "用户目录不该多出东西");
+        assert!(!f.local().join("pdf").is_dir(), "用户目录不该多出东西");
 
         assert!(!set_enabled(&mut app, &scan, "pdf", true, Some(&src)).unwrap());
         assert!(proj.join("pdf").is_dir());

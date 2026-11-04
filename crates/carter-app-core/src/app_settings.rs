@@ -158,7 +158,10 @@ mod tests {
         static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         std::env::temp_dir()
-            .join(format!("carter-app-settings-{tag}-{}-{n}", std::process::id()))
+            .join(format!(
+                "carter-app-settings-{tag}-{}-{n}",
+                std::process::id()
+            ))
             .join("settings.json")
     }
 
@@ -169,7 +172,10 @@ mod tests {
         let s: AppSettings = serde_json::from_str(r#"{"theme":"light"}"#).unwrap();
         assert_eq!(s.theme, "light");
         assert_eq!(s.sidebar_width, 260, "没写的字段取默认值");
-        assert_eq!(s.conversation_mode, "detailed", "新增的呈现密度字段要能缺省");
+        assert_eq!(
+            s.conversation_mode, "detailed",
+            "新增的呈现密度字段要能缺省"
+        );
         assert!(s.disabled_tools.is_empty());
         assert!(s.skill_roots.is_empty(), "新增的扫描路径字段要能缺省");
         assert!(s.ignored_skills.is_empty());

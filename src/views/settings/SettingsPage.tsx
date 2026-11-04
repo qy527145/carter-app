@@ -7,11 +7,10 @@
 // 导航列用 `bg-sidebar`（整套色阶里最深的一档），选中项用 `bg-ink/10` 提亮 ——
 // 明暗两个主题下「选中 = 比周围亮」的关系一致，不需要分隔线。
 
-import { useEffect, useRef, useState } from "react";
 import {
+  Cable,
   ChevronLeft,
   Clock,
-  Cable,
   Cpu,
   FileDiff,
   Info,
@@ -22,10 +21,11 @@ import {
   Sparkles,
   Wrench,
 } from "lucide-react";
-
+import { useEffect, useRef, useState } from "react";
+import { useStore } from "../../store";
 import { AboutPage } from "./AboutPage";
-import { ChangesPage } from "./ChangesPage";
 import { AppearancePage } from "./AppearancePage";
+import { ChangesPage } from "./ChangesPage";
 import { ChannelsPage } from "./ChannelsPage";
 import { ConnectorsPage } from "./ConnectorsPage";
 import { McpPage } from "./McpPage";
@@ -34,7 +34,6 @@ import { SchedulesPage } from "./SchedulesPage";
 import { SessionsPage } from "./SessionsPage";
 import { SkillsPage } from "./SkillsPage";
 import { ToolsPage } from "./ToolsPage";
-import { useStore } from "../../store";
 
 // 分组：按「多久来一次」排 —— 接入（第一次配好就很少动）、能力（时常调）、
 // 数据（翻记录）、应用本身。组标题让十一项不再是一长串平铺。
@@ -180,7 +179,11 @@ export function SettingsPage() {
       <div ref={scrollRef} className="min-w-0 flex-1 overflow-y-auto [scrollbar-gutter:stable]">
         {/* key 让换页时重挂这一层，`.carter-enter` 才会重放 —— 页面是「换了一块」，
             不是原地变内容。只淡入 + 4px，快到不挡手。 */}
-        <div key={tab} role="tabpanel" className="carter-enter carter-settings mx-auto max-w-2xl px-8 py-8">
+        <div
+          key={tab}
+          role="tabpanel"
+          className="carter-enter carter-settings mx-auto max-w-2xl px-8 py-8"
+        >
           {tab === "channels" && <ChannelsPage />}
           {tab === "connectors" && <ConnectorsPage />}
           {tab === "models" && <ModelsPage />}

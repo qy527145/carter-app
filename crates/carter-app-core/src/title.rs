@@ -67,9 +67,10 @@ impl LlmProvider for NoThinking {
         // 用 `extra` 而不是 IR 的 `thinking` 字段：IR 里那个是"用多少思考"，
         // 表达不了"一点都不要"，而且 chat completions 的编码器根本不读它。
         // `extra` 是原样并进请求体的通道 —— 这正是它存在的理由。
-        req.wire
-            .extra
-            .insert("reasoning_effort".into(), serde_json::json!(NO_THINKING_VALUE));
+        req.wire.extra.insert(
+            "reasoning_effort".into(),
+            serde_json::json!(NO_THINKING_VALUE),
+        );
         self.inner.stream(req).await
     }
 }
@@ -109,7 +110,9 @@ mod tests {
     impl LlmProvider for Recorder {
         async fn stream(&self, req: ChatRequest) -> carter::Result<EventStream> {
             *self.seen.lock().unwrap() = Some(req);
-            Ok(Box::pin(futures::stream::iter(Vec::<carter::Result<StreamChunk>>::new())))
+            Ok(Box::pin(futures::stream::iter(Vec::<
+                carter::Result<StreamChunk>,
+            >::new())))
         }
     }
 
@@ -117,7 +120,10 @@ mod tests {
         let mut wire = carter::provider::WireRequest::new("deepseek-flash");
         wire.system = vec![Block::text("起个标题")];
         wire.messages = vec![WireMessage::new(Role::User, vec![Block::text("你好")])];
-        ChatRequest { protocol: None, wire }
+        ChatRequest {
+            protocol: None,
+            wire,
+        }
     }
 
     /// 关思考是**加一个字段**，不是改别的：请求的其余部分要原样过去。
@@ -130,7 +136,10 @@ mod tests {
         let _ = wrapped.stream(request()).await;
 
         let seen = inner.seen.lock().unwrap().take().expect("请求应到达内层");
-        assert_eq!(seen.wire.extra["reasoning_effort"], serde_json::json!("none"));
+        assert_eq!(
+            seen.wire.extra["reasoning_effort"],
+            serde_json::json!("none")
+        );
         assert_eq!(seen.wire.model, "deepseek-flash");
         assert_eq!(seen.wire.messages.len(), 1, "消息不能被改动");
     }
@@ -142,9 +151,15 @@ mod tests {
     #[test]
     fn only_verified_kinds_get_the_field() {
         assert!(supports_no_thinking("deepseek"));
-        assert!(supports_no_thinking("DeepSeek "), "大小写与空格不该影响判断");
+        assert!(
+            supports_no_thinking("DeepSeek "),
+            "大小写与空格不该影响判断"
+        );
         for other in ["anthropic", "openai", "ollama", "gemini", "groq", "custom"] {
-            assert!(!supports_no_thinking(other), "{other} 没实测过，不该发这个字段");
+            assert!(
+                !supports_no_thinking(other),
+                "{other} 没实测过，不该发这个字段"
+            );
         }
     }
 }

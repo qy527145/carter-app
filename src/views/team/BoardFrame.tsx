@@ -28,8 +28,8 @@
 // 框的高度跟着页面内容走（页面里的脚本用 ResizeObserver 回报），滚动交给外层 ——
 // 一页里套一个固定高度的滚动框，等于两层滚动条抢同一个滚轮。
 
-import { useEffect, useMemo, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { toastError } from "../../lib/toast";
 
@@ -199,7 +199,7 @@ export function BoardFrame({ html, title }: { html: string; title: string }) {
       // 只认自己这个框发来的；页面在不透明源里，`origin` 是 "null"，靠 source 判。
       if (e.source !== frame.current?.contentWindow) return;
       const m = e.data as { carterBoard?: number; type?: string; h?: number; url?: string };
-      if (!m || m.carterBoard !== 1) return;
+      if (m?.carterBoard !== 1) return;
       if (m.type === "size" && typeof m.h === "number" && Number.isFinite(m.h)) {
         // 封顶：一个写坏了的页面不该把框撑到几十万像素。
         setHeight(Math.min(Math.max(Math.ceil(m.h), 240), 20000));

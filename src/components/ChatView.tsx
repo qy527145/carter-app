@@ -9,17 +9,14 @@
 // 只有用户消息给一个气泡。工具与思考是嵌在其中的卡片 —— 它们是流程的一部分，
 // 不该跟正文抢同一层视觉重量。
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import {
+  ArrowDown,
   Bot,
   Brain,
   Check,
   ChevronRight,
   CircleCheck,
   Copy,
-  ArrowDown,
   Eraser,
   FileText,
   GitBranch,
@@ -38,13 +35,15 @@ import {
   Wrench,
   X,
 } from "lucide-react";
-
-import { historyToTurns, useStore, type Item, type Turn } from "../store";
+import { useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { getAssistantEpisode, newAssistantEpisode, type TurnTime } from "../lib/api";
 import { copyText } from "../lib/clipboard";
 import { useConversationMode } from "../lib/conversationMode";
 import { fmtDuration, fullTime, msgTime } from "../lib/format";
 import { displayName, modelTitle, useModelCatalog } from "../lib/modelLabel";
+import { parseContexts, stripContextTags } from "../lib/promptContext";
 import {
   ASSISTANT_CHAT_ID,
   clearChanges,
@@ -55,20 +54,20 @@ import {
   retryReply,
 } from "../lib/sessionOps";
 import { TOAST_MS, toastError } from "../lib/toast";
-import { FilePreviewModal } from "./FilePreview";
-import { MarkdownImage, MarkdownLink, MarkdownPre, transformMarkdownUrl } from "./Media";
+import { historyToTurns, type Item, type Turn, useStore } from "../store";
 import { AskForm } from "./AskForm";
 import { Composer, MessageImages } from "./Composer";
 import { ContextChips } from "./ContextChip";
-import { parseContexts, stripContextTags } from "../lib/promptContext";
-import { TeamTodoDock } from "./TeamTodoDock";
-import { TicketReply } from "./TicketReply";
+import { FilePreviewModal } from "./FilePreview";
 import { GoalBar } from "./GoalBar";
+import { MarkdownImage, MarkdownLink, MarkdownPre, transformMarkdownUrl } from "./Media";
 import { MemorySuggestBar } from "./MemorySuggestBar";
 import { ModePill } from "./ModePill";
+import { TeamTodoDock } from "./TeamTodoDock";
+import { TicketReply } from "./TicketReply";
 import { Glyph, ServerCard, ToolCard } from "./toolcards/ToolCard";
 import { IconButton } from "./ui/Button";
-import { hasSelection, useContextMenu, type MenuEntry } from "./ui/ContextMenu";
+import { hasSelection, type MenuEntry, useContextMenu } from "./ui/ContextMenu";
 import { Banner, Collapse, ConfirmDialog } from "./ui/Panel";
 
 type ImageItem = Extract<Item, { kind: "image" }>;
@@ -277,21 +276,13 @@ function ProcessGroup({ items, cwd }: { items: Item[]; cwd: string }) {
           {running ? `正在 ${running}…` : parts.join(" · ")}
         </span>
         {failed.length > 0 && (
-          <span className="shrink-0 text-[11px] text-[var(--danger)]">
-            {failed.length} 步失败
-          </span>
+          <span className="shrink-0 text-[11px] text-[var(--danger)]">{failed.length} 步失败</span>
         )}
       </button>
       <Collapse open={open}>
         <div className="space-y-2 border-t border-edge px-3 py-2">
           {items.map((it, i) => (
-            <ItemView
-              key={i}
-              item={it}
-              cwd={cwd}
-              writing={false}
-              isLast={i === items.length - 1}
-            />
+            <ItemView key={i} item={it} cwd={cwd} writing={false} isLast={i === items.length - 1} />
           ))}
         </div>
       </Collapse>
@@ -379,7 +370,12 @@ function Wave() {
     <span
       aria-hidden
       className="h-1.5 min-w-6 flex-1 bg-current opacity-50"
-      style={{ maskImage: WAVE_MASK, WebkitMaskImage: WAVE_MASK, maskRepeat: "repeat-x", WebkitMaskRepeat: "repeat-x" }}
+      style={{
+        maskImage: WAVE_MASK,
+        WebkitMaskImage: WAVE_MASK,
+        maskRepeat: "repeat-x",
+        WebkitMaskRepeat: "repeat-x",
+      }}
     />
   );
 }
@@ -908,8 +904,7 @@ function AssistantTurn({
       {segs
         ? segs.map((seg, i) => {
             const last = i === segs.length - 1;
-            if (seg.kind === "process")
-              return <ProcessGroup key={i} items={seg.items} cwd={cwd} />;
+            if (seg.kind === "process") return <ProcessGroup key={i} items={seg.items} cwd={cwd} />;
             // 「正在写」只算正在生成的那一段正文，与详细模式的判断口径一致。
             return (
               <ItemView
@@ -932,9 +927,7 @@ function AssistantTurn({
           ))}
       {/* 挂在整轮末尾，不挂在某一段正文后面：思考、跑工具的时候最后一项不是正文，
           挂在正文上这几段就看不出还在跑。等用户回答提问时不算在跑。 */}
-      {streaming && isLast && !awaitingUser && (
-        <GeneratingHint label={items.length === 0} />
-      )}
+      {streaming && isLast && !awaitingUser && <GeneratingHint label={items.length === 0} />}
       {/* 回答下面那一行小动作。悬停才浮出来，但一直占着位置 —— 否则鼠标移上来
           的一瞬间整段对话会跳一下。一条动作都没有时整行不渲染（纯工具输出的回答
           不该在末尾留一条空白）。 */}
@@ -943,47 +936,53 @@ function AssistantTurn({
           {/* 时间常显，在操作行**前面**：操作行静止时是透明的，时间不该跟着隐身。 */}
           <MsgTime at={done} extra={took} />
           {actions && (
-        <div className={ACTION_ROW}>
-          {answer && (
-            <ActionChip
-              icon={copied ? <Check size={12} className="carter-pop text-[var(--ok)]" /> : <Copy size={12} />}
-              label={copied ? "已复制" : "复制"}
-              onClick={() => void doCopy()}
-            />
-          )}
-          {canRetry && (
-            <ActionChip
-              icon={<RotateCcw size={12} />}
-              label="重试"
-              title={
-                retryAsks
-                  ? "沿用同样的上下文重写这条回复（会丢掉后面的对话）"
-                  : "沿用同样的上下文重写这条回复"
-              }
-              onClick={() => (retryAsks ? setConfirmingRetry(true) : onRetry?.())}
-            />
-          )}
-          {onFork && (
-            <ActionChip
-              icon={<GitBranch size={12} />}
-              label="分叉"
-              title="带着到这条回答为止的对话分叉出一条新会话，原来这条不受影响"
-              onClick={onFork}
-            />
-          )}
-          {/* 把这条回答对回产生它的那次 API 请求。轮次号对**历史消息**也成立
+            <div className={ACTION_ROW}>
+              {answer && (
+                <ActionChip
+                  icon={
+                    copied ? (
+                      <Check size={12} className="carter-pop text-[var(--ok)]" />
+                    ) : (
+                      <Copy size={12} />
+                    )
+                  }
+                  label={copied ? "已复制" : "复制"}
+                  onClick={() => void doCopy()}
+                />
+              )}
+              {canRetry && (
+                <ActionChip
+                  icon={<RotateCcw size={12} />}
+                  label="重试"
+                  title={
+                    retryAsks
+                      ? "沿用同样的上下文重写这条回复（会丢掉后面的对话）"
+                      : "沿用同样的上下文重写这条回复"
+                  }
+                  onClick={() => (retryAsks ? setConfirmingRetry(true) : onRetry?.())}
+                />
+              )}
+              {onFork && (
+                <ActionChip
+                  icon={<GitBranch size={12} />}
+                  label="分叉"
+                  title="带着到这条回答为止的对话分叉出一条新会话，原来这条不受影响"
+                  onClick={onFork}
+                />
+              )}
+              {/* 把这条回答对回产生它的那次 API 请求。轮次号对**历史消息**也成立
               （后端按同样口径算好，见 `view.rs`），所以切走再回来入口还在。
               侧边聊天不给（`showPayload=false`）：它不落盘、不抓包，按主对话的轮次号
               去开主对话的报文只会指错地方。 */}
-          {showPayloadChip && (
-            <ActionChip
-              icon={<ScanSearch size={12} />}
-              label="报文"
-              title={`查看第 ${t.turn} 轮发出的请求`}
-              onClick={() => openInspector(t.turn ?? null)}
-            />
-          )}
-        </div>
+              {showPayloadChip && (
+                <ActionChip
+                  icon={<ScanSearch size={12} />}
+                  label="报文"
+                  title={`查看第 ${t.turn} 轮发出的请求`}
+                  onClick={() => openInspector(t.turn ?? null)}
+                />
+              )}
+            </div>
           )}
         </div>
       )}
@@ -994,9 +993,7 @@ function AssistantTurn({
             <>
               这条回复之后的对话会被丢掉，模型会拿写这条回复时的同一份上下文重写一遍。
               <br />
-              <span className="text-dim">
-                只回滚对话，已经改过的文件、跑过的命令不会撤销。
-              </span>
+              <span className="text-dim">只回滚对话，已经改过的文件、跑过的命令不会撤销。</span>
             </>
           }
           confirmLabel="重新生成"
@@ -1083,35 +1080,39 @@ function UserTurn({
         <MessageImages text={rest} />
       </div>
       <div className="mt-1 flex items-center justify-end gap-2">
-      <div className={`${ACTION_ROW} justify-end`}>
-        <ActionChip
-          icon={copied ? <Check size={12} className="carter-pop text-[var(--ok)]" /> : <Copy size={12} />}
-          label={copied ? "已复制" : "复制"}
-          onClick={async () => {
-            if (await copyText(stripContextTags(turn.text), null)) setCopied(true);
-          }}
-        />
-        {onRetry && (
+        <div className={`${ACTION_ROW} justify-end`}>
           <ActionChip
-            icon={<RotateCcw size={12} />}
-            label="重试"
-            title={
-              retryAsks
-                ? "把这句话原样再问一遍（会丢掉后面的对话）"
-                : "把这句话原样再问一遍"
+            icon={
+              copied ? (
+                <Check size={12} className="carter-pop text-[var(--ok)]" />
+              ) : (
+                <Copy size={12} />
+              )
             }
-            onClick={retry}
+            label={copied ? "已复制" : "复制"}
+            onClick={async () => {
+              if (await copyText(stripContextTags(turn.text), null)) setCopied(true);
+            }}
           />
-        )}
-        {onFork && (
-          <ActionChip
-            icon={<GitBranch size={12} />}
-            label="分叉"
-            title="从这句话之前分叉出一条新会话，原话放进输入框（原来这条不受影响）"
-            onClick={onFork}
-          />
-        )}
-      </div>
+          {onRetry && (
+            <ActionChip
+              icon={<RotateCcw size={12} />}
+              label="重试"
+              title={
+                retryAsks ? "把这句话原样再问一遍（会丢掉后面的对话）" : "把这句话原样再问一遍"
+              }
+              onClick={retry}
+            />
+          )}
+          {onFork && (
+            <ActionChip
+              icon={<GitBranch size={12} />}
+              label="分叉"
+              title="从这句话之前分叉出一条新会话，原话放进输入框（原来这条不受影响）"
+              onClick={onFork}
+            />
+          )}
+        </div>
         {/* 时间常显，放在操作行**外面**：操作行静止时是透明的。 */}
         <MsgTime at={time?.started_at} />
       </div>
@@ -1122,9 +1123,7 @@ function UserTurn({
             <>
               这句之后的对话会被丢掉，模型会基于这句话重新回答。
               <br />
-              <span className="text-dim">
-                只回滚对话，已经改过的文件、跑过的命令不会撤销。
-              </span>
+              <span className="text-dim">只回滚对话，已经改过的文件、跑过的命令不会撤销。</span>
             </>
           }
           confirmLabel="重新提问"
@@ -1265,7 +1264,9 @@ function PeerTurn({ text }: { text: string }) {
       {letters.map((l, i) => (
         <div key={i} className="mt-1.5">
           {letters.length > 1 && <div className="text-xs text-dim">{l.from}</div>}
-          <div className={`whitespace-pre-wrap break-words text-sm ${l.receipt ? "text-dim" : "text-ink"}`}>
+          <div
+            className={`whitespace-pre-wrap break-words text-sm ${l.receipt ? "text-dim" : "text-ink"}`}
+          >
             {l.body}
           </div>
         </div>
@@ -1505,43 +1506,47 @@ function MessageList() {
 
   return (
     <div className="relative flex min-h-0 flex-1 flex-col">
-    <div ref={scrollRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto px-4 py-6 [overflow-anchor:none]">
-      <div ref={contentRef} className="mx-auto max-w-3xl">
-        {sessionId === ASSISTANT_CHAT_ID && (
-          <PastEpisodes
-            onGrow={() => {
-              settleUntil.current = performance.now() + SETTLE_MS;
-            }}
-          />
-        )}
-        {turns.length === 0 ? (
-          // 换会话的空档不画空状态：否则每次切换都先闪一下欢迎页。
-          sessionId === null ? null : sessionId === ASSISTANT_CHAT_ID ? (
-            hasEpisodes ? null : <AssistantEmptyState />
+      <div
+        ref={scrollRef}
+        onScroll={onScroll}
+        className="min-h-0 flex-1 overflow-y-auto px-4 py-6 [overflow-anchor:none]"
+      >
+        <div ref={contentRef} className="mx-auto max-w-3xl">
+          {sessionId === ASSISTANT_CHAT_ID && (
+            <PastEpisodes
+              onGrow={() => {
+                settleUntil.current = performance.now() + SETTLE_MS;
+              }}
+            />
+          )}
+          {turns.length === 0 ? (
+            // 换会话的空档不画空状态：否则每次切换都先闪一下欢迎页。
+            sessionId === null ? null : sessionId === ASSISTANT_CHAT_ID ? (
+              hasEpisodes ? null : (
+                <AssistantEmptyState />
+              )
+            ) : (
+              <EmptyState />
+            )
           ) : (
-            <EmptyState />
-          )
-        ) : (
-          <TurnList
-            turns={turns}
-            times={times}
-            streaming={streaming}
-            awaitingUser={awaitingUser}
-            cwd={cwd}
-            // 重试与分叉都作用在**这条会话**上 —— 侧边聊天那份 TurnList 一概不传。
-            onRetry={
-              sessionId
-                ? (turn, reply) =>
-                    reply ? retryReply(sessionId, turn) : regenerate(sessionId, turn)
-                : undefined
-            }
-            onFork={
-              sessionId ? (keep, draft) => void fork(sessionId, keep, draft) : undefined
-            }
-          />
-        )}
+            <TurnList
+              turns={turns}
+              times={times}
+              streaming={streaming}
+              awaitingUser={awaitingUser}
+              cwd={cwd}
+              // 重试与分叉都作用在**这条会话**上 —— 侧边聊天那份 TurnList 一概不传。
+              onRetry={
+                sessionId
+                  ? (turn, reply) =>
+                      reply ? retryReply(sessionId, turn) : regenerate(sessionId, turn)
+                  : undefined
+              }
+              onFork={sessionId ? (keep, draft) => void fork(sessionId, keep, draft) : undefined}
+            />
+          )}
+        </div>
       </div>
-    </div>
       {/* 「回到最新」：贴着输入框上沿居中浮着。生成中且不在底部时带一个点 ——
           告诉人下面还在出字。不用时淡出并让出点击。 */}
       <button
@@ -1724,8 +1729,7 @@ function EmptyState() {
       <div className="text-sm text-dim">
         {modelRef ? (
           <>
-            当前模型{" "}
-            {/* 悬停给出实际请求名与 meta —— 与输入框下方那处同一个写法。 */}
+            当前模型 {/* 悬停给出实际请求名与 meta —— 与输入框下方那处同一个写法。 */}
             <span className="mono text-ink" title={modelTitle(modelRef, models)}>
               {displayName(modelRef, models)}
             </span>

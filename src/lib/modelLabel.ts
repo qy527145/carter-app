@@ -14,9 +14,8 @@
 //   排查「为什么这个模型没按预期计费 / 能力不对」时要的正是这两个。
 
 import { useEffect, useState } from "react";
-
-import { listModels, type ModelRow } from "./api";
 import { useStore } from "../store";
+import { listModels, type ModelRow } from "./api";
 
 /** 引用拆成渠道与块名。没有 `/` 时整串当块名（老配置里可能是裸名字）。 */
 export function splitRef(reference: string): { channel: string; name: string } {
@@ -45,10 +44,7 @@ export function resolveRef(models: ModelRow[], apiName: string): string {
 }
 
 /** 展示写法：`渠道/显示名`。 */
-export function displayName(
-  reference: string,
-  models: ModelRow[],
-): string {
+export function displayName(reference: string, models: ModelRow[]): string {
   const { channel, name } = splitRef(reference);
   const row = rowOf(models, reference);
   const label = row?.label ?? name;
@@ -73,10 +69,7 @@ export function modelTitle(reference: string, models: ModelRow[]): string {
 /** 搜索时要能按四种写法都找到：引用、展示名、实际名、meta。 */
 export function modelSearchText(reference: string, models: ModelRow[]): string {
   const row = rowOf(models, reference);
-  return [reference, row?.label, row?.api_name, row?.meta]
-    .filter(Boolean)
-    .join(" ")
-    .toLowerCase();
+  return [reference, row?.label, row?.api_name, row?.meta].filter(Boolean).join(" ").toLowerCase();
 }
 
 // ---------------------------------------------------------------------------
@@ -106,13 +99,13 @@ function ensureCatalog(nonce: number): Promise<ModelRow[]> {
   catalog.loading = listModels()
     .then((rows) => {
       catalog.rows = rows;
-      catalog.listeners.forEach((f) => f());
+      for (const f of catalog.listeners) f();
       return rows;
     })
     .catch(() => {
       // 拉不到目录不是错误：模型标签退回显示引用本身，对话照常进行。
       catalog.rows = [];
-      catalog.listeners.forEach((f) => f());
+      for (const f of catalog.listeners) f();
       return [];
     });
   return catalog.loading;

@@ -161,7 +161,9 @@ pub enum ToolActionKind {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum GoalCommand {
     /// 设定 / 改写目标正文。
-    Set { objective: String },
+    Set {
+        objective: String,
+    },
     Clear,
     Pause,
     Resume,
@@ -370,7 +372,10 @@ pub enum SessionEvent {
     /// 才冒出来。
     Goal { goal: Option<GoalView> },
     /// 模型在等用户回答问题。前端渲染成表单，用 `answer_form` 回。
-    AskForm { id: u64, questions: Vec<AskQuestion> },
+    AskForm {
+        id: u64,
+        questions: Vec<AskQuestion>,
+    },
     /// 这一轮**实际**改了哪些文件（相对会话 cwd，`/` 分隔）。
     ///
     /// 来自轮首挂上、轮末收起的文件系统监听（见 `changes.rs`）—— 不是解析工具

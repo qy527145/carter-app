@@ -9,14 +9,13 @@
 // 不展示更糟（与工具页同一个道理）。
 
 import { useState } from "react";
-
-import { changeRules, setAppSettings, type AppSettings } from "../../lib/api";
-import { toastError } from "../../lib/toast";
-import { useAsync } from "../../lib/useAsync";
-import { useStore } from "../../store";
 import { Button } from "../../components/ui/Button";
 import { Textarea } from "../../components/ui/Input";
 import { Card, Section } from "../../components/ui/Panel";
+import { type AppSettings, changeRules, setAppSettings } from "../../lib/api";
+import { toastError } from "../../lib/toast";
+import { useAsync } from "../../lib/useAsync";
+import { useStore } from "../../store";
 import { AsyncBody, PageIntro } from "./AsyncBody";
 
 export function ChangesPage() {
@@ -70,8 +69,8 @@ export function ChangesPage() {
       <Section title="额外忽略规则">
         <Card>
           <div className="mb-2 text-xs leading-relaxed text-dim">
-            一行一条，相对会话的工作目录。含 <code className="mono">/</code> 的按相对路径
-            匹配（<code className="mono">dist/**</code>）；不含 <code className="mono">/</code> 的
+            一行一条，相对会话的工作目录。含 <code className="mono">/</code> 的按相对路径 匹配（
+            <code className="mono">dist/**</code>）；不含 <code className="mono">/</code> 的
             按任意层级的名字匹配（<code className="mono">*.log</code>、
             <code className="mono">__generated__</code>）。以 <code className="mono">#</code>{" "}
             开头的行是注释。
@@ -110,7 +109,10 @@ export function ChangesPage() {
                   <div className="mb-1 text-[11px] text-dim">目录（任意层级）</div>
                   <div className="flex flex-wrap gap-1">
                     {r.dirs.map((d) => (
-                      <span key={d} className="mono rounded bg-bubble px-1.5 py-0.5 text-[11px] text-ink">
+                      <span
+                        key={d}
+                        className="mono rounded bg-bubble px-1.5 py-0.5 text-[11px] text-ink"
+                      >
                         {d}
                       </span>
                     ))}
@@ -121,7 +123,10 @@ export function ChangesPage() {
                     <div className="mb-1 text-[11px] text-dim">文件名</div>
                     <div className="flex flex-wrap gap-1">
                       {r.files.map((f) => (
-                        <span key={f} className="mono rounded bg-bubble px-1.5 py-0.5 text-[11px] text-ink">
+                        <span
+                          key={f}
+                          className="mono rounded bg-bubble px-1.5 py-0.5 text-[11px] text-ink"
+                        >
                           {f}
                         </span>
                       ))}
@@ -138,10 +143,10 @@ export function ChangesPage() {
         <Card>
           <div className="space-y-2 text-xs leading-relaxed text-dim">
             <p>
-              工作目录在 git 仓库里时，清单会尊重{" "}
-              <code className="mono">.gitignore</code>（含嵌套的与全局 excludes）——
-              装了 git 就用 <code className="mono">git check-ignore</code> 判断，
-              没装则用进程内的同一套 ripgrep 引擎，两种情况下清单一致。
+              工作目录在 git 仓库里时，清单会尊重 <code className="mono">.gitignore</code>
+              （含嵌套的与全局 excludes）—— 装了 git 就用{" "}
+              <code className="mono">git check-ignore</code> 判断， 没装则用进程内的同一套 ripgrep
+              引擎，两种情况下清单一致。
             </p>
             <p>
               预览里的

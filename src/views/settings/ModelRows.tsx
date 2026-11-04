@@ -19,7 +19,6 @@
 // 这里改的是单个渠道下的模型定义（含实际模型名）；模型页是全部渠道摊平后看
 // 规格、设默认 / 副模型。两处读的是同一段配置。
 
-import { useState } from "react";
 import {
   ChevronDown,
   ChevronRight,
@@ -30,19 +29,14 @@ import {
   TriangleAlert,
   X,
 } from "lucide-react";
-
-import type { CatalogEntry, MetaInfo, ModelDetail, ModelDraft } from "../../lib/api";
-import { REASONING_EFFORTS, reasoningIsCustom, reasoningText } from "../../lib/protocols";
+import { useState } from "react";
 import { Button, IconButton } from "../../components/ui/Button";
 import { Input, Label } from "../../components/ui/Input";
 import { Badge } from "../../components/ui/Panel";
 import { Select } from "../../components/ui/Select";
-import {
-  CatalogError,
-  applyPick,
-  blockNameFor,
-  type Catalog,
-} from "./CatalogPicker";
+import type { CatalogEntry, MetaInfo, ModelDetail, ModelDraft } from "../../lib/api";
+import { REASONING_EFFORTS, reasoningIsCustom, reasoningText } from "../../lib/protocols";
+import { applyPick, blockNameFor, type Catalog, CatalogError } from "./CatalogPicker";
 import { MetaFacts, MetaSearchDialog, useMetaInfo } from "./ModelPickers";
 
 /**
@@ -159,7 +153,9 @@ export function ModelList({
               元数据按 <span className="mono">{catalogProvider}</span> 匹配
             </>
           ) : (
-            <>模型引用写作 <span className="mono">渠道名/显示名</span></>
+            <>
+              模型引用写作 <span className="mono">渠道名/显示名</span>
+            </>
           )}
         </span>
         <div className="ml-auto flex items-center gap-1.5">

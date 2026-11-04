@@ -37,7 +37,10 @@ export function newBoardHandoff(boards: { title: string }[]): string {
     body:
       `帮我建一块看板。\n\n` +
       (boards.length > 0
-        ? `目前已经有 ${boards.length} 块：${boards.slice(0, 5).map((b) => `「${b.title}」`).join("、")}${boards.length > 5 ? " 等" : ""}，新建的要和它们不重复。\n`
+        ? `目前已经有 ${boards.length} 块：${boards
+            .slice(0, 5)
+            .map((b) => `「${b.title}」`)
+            .join("、")}${boards.length > 5 ? " 等" : ""}，新建的要和它们不重复。\n`
         : "") +
       `\n先用 board_list 看一眼现有的，再想清楚这一块要回答什么问题，然后 board_new 建出来。` +
       `\n内容我在这条消息里补：要回顾哪一段、想看清什么。`,
@@ -180,12 +183,14 @@ export function layerize(tasks: TeamTask[]): Map<string, number> {
 // 成员
 // ---------------------------------------------------------------------------
 
-
 /**
  * 把一个「人」的引用解析成成员。任务里的 `assignee` 可能是成员 id（v1）、也可能是
  * `名字 <邮箱>`（v0 留下的），两种都认 —— 与后端 `Roster::resolve` 同一套规则。
  */
-export function findMember(people: TeamPeople | null, raw: string | null | undefined): TeamMember | null {
+export function findMember(
+  people: TeamPeople | null,
+  raw: string | null | undefined,
+): TeamMember | null {
   if (!people || !raw) return null;
   const r = raw.trim();
   if (r.startsWith("m-")) return people.members.find((m) => m.id === r) ?? null;
@@ -223,20 +228,22 @@ export function eventSender(e: TeamEvent): string | null {
 /** 事件种类 → 动词。不认识的原样给出去（协议：不认识的种类也要显示）。 */
 export function eventVerb(kind: string): string {
   return (
-    {
-      comment: "评论",
-      mention: "提到",
-      broadcast: "广播",
-      request: "请求",
-      assign: "指派",
-      handoff: "转交",
-      claim: "认领",
-      release: "释放",
-      join: "加入了团队",
-      note: "更新进展",
-      sync: "同步",
-    } as Record<string, string>
-  )[kind] ?? kind;
+    (
+      {
+        comment: "评论",
+        mention: "提到",
+        broadcast: "广播",
+        request: "请求",
+        assign: "指派",
+        handoff: "转交",
+        claim: "认领",
+        release: "释放",
+        join: "加入了团队",
+        note: "更新进展",
+        sync: "同步",
+      } as Record<string, string>
+    )[kind] ?? kind
+  );
 }
 
 /**

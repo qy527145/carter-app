@@ -179,7 +179,7 @@ fn list_dir(cwd: &Path, q: &str, dir_part: &str, name_part: &str, limit: usize) 
         return Vec::new();
     };
     // 用户写的是相对路径时展示相对路径；写了绝对路径就把前缀保留下来，
-// 这样菜单里看到的和输入框里打的是同一种形式。
+    // 这样菜单里看到的和输入框里打的是同一种形式。
     let relative = !dir_part.is_empty() && !Path::new(dir_part).is_absolute();
     let needle = name_part.to_lowercase();
     // (目录优先, 名字, 展示路径)
@@ -198,7 +198,10 @@ fn list_dir(cwd: &Path, q: &str, dir_part: &str, name_part: &str, limit: usize) 
         }
         let child = entry.path();
         let shown = if relative {
-            child.strip_prefix(cwd).map(Path::to_path_buf).unwrap_or_else(|_| child.clone())
+            child
+                .strip_prefix(cwd)
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|_| child.clone())
         } else {
             child
         };
@@ -210,7 +213,10 @@ fn list_dir(cwd: &Path, q: &str, dir_part: &str, name_part: &str, limit: usize) 
     }
     // 目录在前，其余按字母序。
     rows.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
-    rows.into_iter().take(limit).map(|(_, _, rel)| rel).collect()
+    rows.into_iter()
+        .take(limit)
+        .map(|(_, _, rel)| rel)
+        .collect()
 }
 
 /// 不带 `/` 的查询：全树子串搜索。
@@ -460,7 +466,11 @@ fn dir_for_context(dir: &Path, token: &str) -> Reference {
             "（{} 个文件未注入：{}{}；需要的话用 read_file 自己读）\n",
             skipped.len(),
             shown.join(", "),
-            if skipped.len() > shown.len() { " 等" } else { "" }
+            if skipped.len() > shown.len() {
+                " 等"
+            } else {
+                ""
+            }
         ));
     }
     out.push_str(&format!("--- end {label} ---\n"));
@@ -524,9 +534,9 @@ pub fn kind_of(path: &str) -> FileKind {
         .unwrap_or("")
         .to_ascii_lowercase();
     match ext.as_str() {
-        "rs" | "ts" | "tsx" | "js" | "jsx" | "py" | "go" | "java" | "c" | "h" | "cpp"
-        | "hpp" | "rb" | "php" | "swift" | "kt" | "cs" | "sh" | "ps1" | "toml" | "yaml"
-        | "yml" | "json" | "html" | "css" | "sql" => FileKind::Code,
+        "rs" | "ts" | "tsx" | "js" | "jsx" | "py" | "go" | "java" | "c" | "h" | "cpp" | "hpp"
+        | "rb" | "php" | "swift" | "kt" | "cs" | "sh" | "ps1" | "toml" | "yaml" | "yml"
+        | "json" | "html" | "css" | "sql" => FileKind::Code,
         "md" | "txt" | "rst" | "adoc" => FileKind::Doc,
         "csv" | "tsv" | "xlsx" | "parquet" => FileKind::Data,
         _ => FileKind::Other,
@@ -540,10 +550,8 @@ mod tests {
     fn tmp_dir(tag: &str) -> PathBuf {
         static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let d = std::env::temp_dir().join(format!(
-            "carter-app-cmd-{tag}-{}-{n}",
-            std::process::id()
-        ));
+        let d =
+            std::env::temp_dir().join(format!("carter-app-cmd-{tag}-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         d
     }
@@ -554,7 +562,10 @@ mod tests {
         std::fs::write(d.join("main.rs"), "fn main() {}").unwrap();
 
         let out = expand_file_refs("看看 @main.rs 有什么问题", &d);
-        assert!(out.contains("--- main.rs ---"), "框架要与 carter 一致：{out}");
+        assert!(
+            out.contains("--- main.rs ---"),
+            "框架要与 carter 一致：{out}"
+        );
         assert!(out.contains("fn main() {}"));
         assert!(out.contains("--- end main.rs ---"));
         assert!(out.starts_with("看看 "), "引用之外的文本要原样保留");
@@ -631,7 +642,11 @@ mod tests {
         let named = list_files(&d, "src", 50);
         assert_eq!(
             named,
-            vec!["src/".to_string(), "src/nested/".to_string(), "src/b.rs".to_string()],
+            vec![
+                "src/".to_string(),
+                "src/nested/".to_string(),
+                "src/b.rs".to_string()
+            ],
             "{named:?}"
         );
 
@@ -657,10 +672,7 @@ mod tests {
             "不该把 go/bin 之类混进来"
         );
         // 再打一个字继续筛，前缀匹配的排前面。
-        assert_eq!(
-            list_files(&d, "bin/n", 50),
-            vec!["bin/nested/".to_string()]
-        );
+        assert_eq!(list_files(&d, "bin/n", 50), vec!["bin/nested/".to_string()]);
         // 手打多级目录同样只读那一个目录。
         assert_eq!(
             list_files(&d, "bin/nested/", 50),
@@ -688,7 +700,10 @@ mod tests {
         assert!(out.contains("--- a.rs ---\nfn a() {}"), "{out}");
         assert!(out.contains("--- nested/b.rs ---\nfn b() {}"), "{out}");
         assert!(out.contains("--- nested/deep/c.rs ---\nfn c() {}"), "{out}");
-        assert!(!out.contains("node_modules"), "跳过名单里的目录不展开：{out}");
+        assert!(
+            !out.contains("node_modules"),
+            "跳过名单里的目录不展开：{out}"
+        );
         // 引用之外的文本原样保留。
         assert!(out.starts_with("看看 "), "{out}");
 
@@ -733,11 +748,17 @@ mod tests {
 
         // carter 的 BUILTINS 里有，但本应用做不到 / 已有等价入口 —— 不该出现。
         for absent in ["rewind", "resume", "cost", "context", "quit"] {
-            assert!(!names.contains(&absent), "`/{absent}` 不该出现在菜单里：{names:?}");
+            assert!(
+                !names.contains(&absent),
+                "`/{absent}` 不该出现在菜单里：{names:?}"
+            );
         }
         // 真的能执行的要在。
         for present in ["new", "model", "cwd", "help", "goal", "btw", "compact"] {
-            assert!(names.contains(&present), "`/{present}` 应当在菜单里：{names:?}");
+            assert!(
+                names.contains(&present),
+                "`/{present}` 应当在菜单里：{names:?}"
+            );
         }
         assert!(rows.iter().all(|r| r.kind == "builtin"));
 

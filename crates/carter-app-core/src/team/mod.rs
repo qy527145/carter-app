@@ -46,9 +46,9 @@ pub mod validate;
 
 pub use init::{InitOutcome, initialize};
 pub use model::{
-    Board, Category, CategoryFile, Counts, Goal, GoalStatus, GoalView,
-    Identity, Kind, Priority, Task, TaskStatus, TaskView, TeamMeta, between, new_id, valid_id,
+    Board, Category, CategoryFile, Counts, Goal, GoalStatus, GoalView, Identity, Kind, Priority,
+    Task, TaskStatus, TaskView, TeamMeta, between, new_id, valid_id,
 };
 pub use store::{Loaded, Store};
-pub use validate::{Issue, Report};
 pub use tool::TeamTool;
+pub use validate::{Issue, Report};

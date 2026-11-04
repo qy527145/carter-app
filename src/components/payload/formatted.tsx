@@ -16,8 +16,8 @@
 import type { ExchangeRecord } from "../../lib/api";
 import { fmtNumber } from "../../lib/format";
 import { EventStream } from "./EventStream";
-import { JsonTree, isPlainObject } from "./JsonTree";
-import { CopyButton, Direction, HeadersTable, Pill, Section, parseJson, type Side } from "./kit";
+import { isPlainObject, JsonTree } from "./JsonTree";
+import { CopyButton, Direction, HeadersTable, Pill, parseJson, Section, type Side } from "./kit";
 
 /** 一段可能不是 JSON 的正文：能成树就成树，否则原样。 */
 function JsonBody({

@@ -25,7 +25,10 @@ function legacyCopy(text: string): boolean {
   return ok;
 }
 
-export async function copyText(text: string, okMessage: string | null = "已复制"): Promise<boolean> {
+export async function copyText(
+  text: string,
+  okMessage: string | null = "已复制",
+): Promise<boolean> {
   try {
     if (navigator.clipboard?.writeText) {
       try {

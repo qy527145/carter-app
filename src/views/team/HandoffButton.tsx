@@ -27,8 +27,8 @@
 // 「卡特」在这一页的其它入口（问问卡特、让卡特拆解、让卡特改这块看板）都用
 // `Sparkles`。同一个动作在五处用同一个符号，人才不用每处重新认一遍。
 
-import type { MouseEvent } from "react";
 import { Sparkles } from "lucide-react";
+import type { MouseEvent } from "react";
 
 /**
  * 交办按钮。

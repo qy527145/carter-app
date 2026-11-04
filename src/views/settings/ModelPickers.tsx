@@ -12,7 +12,6 @@
 // 三个对话框都是「选完立刻回填、由调用方负责关」，不在这里保存 —— 保存只有一个
 // 入口（渠道编辑框底部的「保存」），否则用户取消编辑时会有一些行已经落盘了。
 
-import { useEffect, useMemo, useState } from "react";
 import {
   ChevronDown,
   ChevronRight,
@@ -23,22 +22,22 @@ import {
   Search,
   TriangleAlert,
 } from "lucide-react";
-
-import {
-  fetchUpstreamModels,
-  listCatalogModels,
-  lookupMetas,
-  recommendedCatalogModels,
-  searchCatalogModels,
-  type CatalogEntry,
-  type CatalogHit,
-  type MetaInfo,
-  type MetaMatch,
-} from "../../lib/api";
-import { fmtPrice, fmtTokens, capabilityLabel } from "../../lib/format";
+import { useEffect, useMemo, useState } from "react";
 import { Button } from "../../components/ui/Button";
 import { Input } from "../../components/ui/Input";
 import { Badge, Modal, Spinner } from "../../components/ui/Panel";
+import {
+  type CatalogEntry,
+  type CatalogHit,
+  fetchUpstreamModels,
+  listCatalogModels,
+  lookupMetas,
+  type MetaInfo,
+  type MetaMatch,
+  recommendedCatalogModels,
+  searchCatalogModels,
+} from "../../lib/api";
+import { capabilityLabel, fmtPrice, fmtTokens } from "../../lib/format";
 
 /** 匹配可靠度的中文标签与色调。`none` 不在这里 —— 那种行不该被默认勾上。 */
 export function matchLabel(kind: string): string {
@@ -92,7 +91,10 @@ export function useMetaInfo(metas: string[]): Record<string, MetaInfo | null> {
 }
 
 /** 一行模型在界面上的一句话说明：目录展示名 · 窗口。查不到时给一句提示。 */
-export function metaSummary(meta: string, info: MetaInfo | null | undefined): {
+export function metaSummary(
+  meta: string,
+  info: MetaInfo | null | undefined,
+): {
   text: string;
   warn: boolean;
 } {
@@ -267,11 +269,11 @@ export function UpstreamFetchDialog({
   const unmatched = (rows ?? []).filter((r) => r.checked && r.match_kind === "none").length;
 
   const toggle = (i: number) =>
-    setRows((rs) => rs && rs.map((r, j) => (j === i ? { ...r, checked: !r.checked } : r)));
+    setRows((rs) => (rs ? rs.map((r, j) => (j === i ? { ...r, checked: !r.checked } : r)) : null));
 
   const setShown = (on: boolean) => {
     const names = new Set(shown.map((r) => r.name));
-    setRows((rs) => rs && rs.map((r) => (names.has(r.name) ? { ...r, checked: on } : r)));
+    setRows((rs) => (rs ? rs.map((r) => (names.has(r.name) ? { ...r, checked: on } : r)) : null));
   };
 
   return (
@@ -291,9 +293,7 @@ export function UpstreamFetchDialog({
             disabled={checkedCount === 0}
             onClick={() =>
               onApply(
-                (rows ?? [])
-                  .filter((r) => r.checked)
-                  .map((r) => ({ name: r.name, meta: r.meta })),
+                (rows ?? []).filter((r) => r.checked).map((r) => ({ name: r.name, meta: r.meta })),
               )
             }
           >
@@ -326,8 +326,7 @@ export function UpstreamFetchDialog({
         <div className="space-y-2">
           <div className="flex items-center gap-2">
             <span className="flex items-center gap-1.5 text-[11px] text-dim">
-              <CloudDownload size={12} className="shrink-0" />
-              共 {rows?.length ?? 0} 个
+              <CloudDownload size={12} className="shrink-0" />共 {rows?.length ?? 0} 个
               {hint && (
                 <>
                   ，元数据优先按 <span className="mono text-ink">{hint}</span> 匹配
@@ -389,9 +388,7 @@ export function UpstreamFetchDialog({
                   <span className="min-w-0 flex-1">
                     {/* 标题优先目录展示名 —— 上游给的名字常常是 `deepseek-v4.1-flash`，
                         「DeepSeek V4.1 Flash」好读得多；真名放第二行对照。 */}
-                    <span className="block truncate text-xs text-ink">
-                      {r.label ?? r.name}
-                    </span>
+                    <span className="block truncate text-xs text-ink">{r.label ?? r.name}</span>
                     <span className="mono block truncate text-[11px] text-dim">
                       {r.name !== (r.label ?? r.name) && <>{r.name} · </>}
                       {r.meta ? (
@@ -589,8 +586,7 @@ export function CatalogDialog({
                       : "border-edge text-dim hover:text-ink"
                   }`}
                 >
-                  {f.label}{" "}
-                  <span className="tabular-nums opacity-70">{n}</span>
+                  {f.label} <span className="tabular-nums opacity-70">{n}</span>
                 </button>
               );
             })}
@@ -742,11 +738,7 @@ export function MetaSearchDialog({
       title={title}
       width={540}
       onClose={onClose}
-      footer={
-        <>
-          <Button onClick={onClose}>取消</Button>
-        </>
-      }
+      footer={<Button onClick={onClose}>取消</Button>}
     >
       <div className="relative mb-2">
         {loading ? (

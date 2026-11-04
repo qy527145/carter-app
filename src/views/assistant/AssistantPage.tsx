@@ -11,7 +11,6 @@
 //
 // 数据整份来自 store 里的 `assistant`（`assistant_changed` 时重拉），这页不自己存副本。
 
-import { useEffect, useState, type ReactNode } from "react";
 import {
   Check,
   ChevronRight,
@@ -30,38 +29,10 @@ import {
   Trash,
   X,
 } from "lucide-react";
-
-import {
-  approveAssistantDecision,
-  assistantTicketAction,
-  getAssistantEpisode,
-  saveAssistantMemory,
-  type AssistantEpisode,
-  type AssistantMemory,
-  deleteAssistantSource,
-  dismissAssistantDecision,
-  pollAssistantSource,
-  reassessAssistantDecision,
-  saveAssistantSettings,
-  saveAssistantSource,
-  testAssistantCommand,
-  type AssistantDecision,
-  type AssistantRule,
-  type AssistantSettings,
-  type AssistantSource,
-  type AssistantTicket,
-  type TicketStatus,
-  type Verdict,
-} from "../../lib/api";
-import { fullTime, relTime } from "../../lib/format";
-import { useModelCatalog } from "../../lib/modelLabel";
-import { openAssistantChat, openSession, refreshAssistant } from "../../lib/sessionOps";
-import { toastError, toastOk } from "../../lib/toast";
-import { useStore } from "../../store";
+import { type ReactNode, useEffect, useState } from "react";
 import { TicketReply } from "../../components/TicketReply";
 import { Button, IconButton } from "../../components/ui/Button";
 import { Field, Input, Segmented, Switch, Textarea } from "../../components/ui/Input";
-import { Select } from "../../components/ui/Select";
 import {
   Badge,
   Banner,
@@ -73,6 +44,34 @@ import {
   Modal,
   Section,
 } from "../../components/ui/Panel";
+import { Select } from "../../components/ui/Select";
+import {
+  type AssistantDecision,
+  type AssistantEpisode,
+  type AssistantMemory,
+  type AssistantRule,
+  type AssistantSettings,
+  type AssistantSource,
+  type AssistantTicket,
+  approveAssistantDecision,
+  assistantTicketAction,
+  deleteAssistantSource,
+  dismissAssistantDecision,
+  getAssistantEpisode,
+  pollAssistantSource,
+  reassessAssistantDecision,
+  saveAssistantMemory,
+  saveAssistantSettings,
+  saveAssistantSource,
+  type TicketStatus,
+  testAssistantCommand,
+  type Verdict,
+} from "../../lib/api";
+import { fullTime, relTime } from "../../lib/format";
+import { useModelCatalog } from "../../lib/modelLabel";
+import { openAssistantChat, openSession, refreshAssistant } from "../../lib/sessionOps";
+import { toastError, toastOk } from "../../lib/toast";
+import { useStore } from "../../store";
 import { PageIntro } from "../settings/AsyncBody";
 
 // ---------------------------------------------------------------------------
@@ -191,7 +190,10 @@ export function AssistantPage() {
           数据存在 <span className="mono">~/.carter-app/assistant.json</span>。
         </PageIntro>
 
-        <FirstRun hasSources={a.sources.length > 0} hasRules={a.settings.rules.some((r) => r.enabled)} />
+        <FirstRun
+          hasSources={a.sources.length > 0}
+          hasRules={a.settings.rules.some((r) => r.enabled)}
+        />
 
         {!nothingWaits && (
           <Section title="等你处理">
@@ -328,12 +330,20 @@ function TicketCard({ t }: { t: AssistantTicket }) {
             </IconButton>
           )}
           {canRetry && (
-            <IconButton title="从停下的地方再来一次" disabled={busy} onClick={() => act({ type: "retry" })}>
+            <IconButton
+              title="从停下的地方再来一次"
+              disabled={busy}
+              onClick={() => act({ type: "retry" })}
+            >
               <RotateCcw size={12} />
             </IconButton>
           )}
           {waiting && (
-            <IconButton title="看过了，结束" disabled={busy} onClick={() => act({ type: "done" }, "已结束")}>
+            <IconButton
+              title="看过了，结束"
+              disabled={busy}
+              onClick={() => act({ type: "done" }, "已结束")}
+            >
               <Check size={12} />
             </IconButton>
           )}
@@ -571,7 +581,7 @@ const EXAMPLES: { label: string; name: string; command: string; minutes: number 
     label: "主干 CI",
     name: "主干 CI 失败",
     command:
-      "gh run list --branch main --limit 10 --json databaseId,conclusion,displayTitle --jq '.[] | select(.conclusion==\"failure\") | \"CI 失败 #\\(.databaseId) \\(.displayTitle)\"'",
+      'gh run list --branch main --limit 10 --json databaseId,conclusion,displayTitle --jq \'.[] | select(.conclusion=="failure") | "CI 失败 #\\(.databaseId) \\(.displayTitle)"\'',
     minutes: 10,
   },
   {
@@ -664,7 +674,9 @@ function SourceEditor({
             <button
               key={x.label}
               className="rounded bg-ink/5 px-1.5 py-0.5 hover:bg-ink/10 hover:text-ink"
-              onClick={() => setD((p) => ({ ...p, name: x.name, command: x.command, every_minutes: x.minutes }))}
+              onClick={() =>
+                setD((p) => ({ ...p, name: x.name, command: x.command, every_minutes: x.minutes }))
+              }
             >
               {x.label}
             </button>
@@ -672,10 +684,19 @@ function SourceEditor({
         </div>
       )}
       <Field label="名字">
-        <Input value={d.name} onChange={(e) => set("name", e.target.value)} placeholder="例如：GitHub 通知" />
+        <Input
+          value={d.name}
+          onChange={(e) => set("name", e.target.value)}
+          placeholder="例如：GitHub 通知"
+        />
       </Field>
       <Field label="命令" hint="每行输出一件事。新出现的行会交给评估；第一次检查只记下现状。">
-        <Textarea mono rows={3} value={d.command} onChange={(e) => set("command", e.target.value)} />
+        <Textarea
+          mono
+          rows={3}
+          value={d.command}
+          onChange={(e) => set("command", e.target.value)}
+        />
       </Field>
       <Field label="工作目录" hint="命令在这里跑；这个来源开出来的工单也在这里干活">
         <Input mono value={d.cwd} onChange={(e) => set("cwd", e.target.value)} />
@@ -842,8 +863,15 @@ function SettingsEditor({
         </Button>
       </div>
 
-      <Field label="工作约定" hint="每张工单的执行对话都会读到：做到什么程度停、怎么交付、什么不能做">
-        <Textarea rows={5} value={d.scope} onChange={(e) => setD((p) => ({ ...p, scope: e.target.value }))} />
+      <Field
+        label="工作约定"
+        hint="每张工单的执行对话都会读到：做到什么程度停、怎么交付、什么不能做"
+      >
+        <Textarea
+          rows={5}
+          value={d.scope}
+          onChange={(e) => setD((p) => ({ ...p, scope: e.target.value }))}
+        />
       </Field>
       <div className="grid grid-cols-3 gap-3">
         <Field label="同时运行">
@@ -1066,7 +1094,10 @@ function EpisodeRow({ e }: { e: AssistantEpisode }) {
           size={11}
           className={`mt-0.5 shrink-0 text-dim transition-transform ${open ? "rotate-90" : ""}`}
         />
-        <span className="shrink-0 text-dim" title={`${fullTime(e.started_at)} ~ ${fullTime(e.ended_at)}`}>
+        <span
+          className="shrink-0 text-dim"
+          title={`${fullTime(e.started_at)} ~ ${fullTime(e.ended_at)}`}
+        >
           第 {e.number} 期 · {relTime(e.ended_at)}
         </span>
         <span className="min-w-0 flex-1 whitespace-pre-wrap text-ink/80">{e.summary}</span>

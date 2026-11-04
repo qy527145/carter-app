@@ -191,8 +191,13 @@ pub fn new_eid() -> String {
 /// trailer 的值里不能有空格（字段靠空格分隔）。有空格的值是调用方的 bug，
 /// 这里直接拒绝，而不是悄悄替换 —— 替换过的 id 指向的就不是原来那个东西了。
 fn check_value(key: &str, v: &str) -> Result<(), String> {
-    if v.is_empty() || v.chars().any(|c| c.is_whitespace() || c == ',' && key != "to") {
-        return Err(format!("事件字段 {key} 的值 `{v}` 不合法（不能为空、不能有空格）"));
+    if v.is_empty()
+        || v.chars()
+            .any(|c| c.is_whitespace() || c == ',' && key != "to")
+    {
+        return Err(format!(
+            "事件字段 {key} 的值 `{v}` 不合法（不能为空、不能有空格）"
+        ));
     }
     Ok(())
 }
@@ -220,12 +225,11 @@ pub fn render(d: &Draft) -> Result<(String, String), String> {
     if let Some(f) = d.from.as_deref().filter(|s| !s.is_empty()) {
         field("from", f)?;
     }
-    let to: Vec<&str> = d
-        .to
-        .iter()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .collect();
+    let to: Vec<&str> =
+        d.to.iter()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
     if !to.is_empty() {
         for t in &to {
             check_value("to", t)?;
@@ -377,10 +381,18 @@ pub fn parse_message(
 // ---------------------------------------------------------------------------
 
 fn rev(root: &Path, r: &str) -> Option<String> {
-    git(root, &["rev-parse", "--verify", "--quiet", &format!("{r}^{{commit}}")])
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    git(
+        root,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{r}^{{commit}}"),
+        ],
+    )
+    .ok()
+    .map(|s| s.trim().to_string())
+    .filter(|s| !s.is_empty())
 }
 
 /// 本地事件链的链尾。还没有任何事件时是 `None`。
@@ -501,7 +513,16 @@ fn rebase_onto_remote(root: &Path, remote: &str) -> Result<(), String> {
     )?;
     let mut parent = theirs.clone();
     for sha in mine.lines().map(str::trim).filter(|s| !s.is_empty()) {
-        let meta = git(root, &["log", "-1", "--format=%an%x1f%ae%x1f%ad%x1f%B", "--date=raw", sha])?;
+        let meta = git(
+            root,
+            &[
+                "log",
+                "-1",
+                "--format=%an%x1f%ae%x1f%ad%x1f%B",
+                "--date=raw",
+                sha,
+            ],
+        )?;
         let mut it = meta.splitn(4, '\u{1f}');
         let (an, ae, ad, msg) = (
             it.next().unwrap_or(""),
@@ -579,8 +600,8 @@ pub fn read(root: &Path, limit: usize) -> Vec<Event> {
     let mut out: Vec<Event> = all.into_iter().map(|(_, e)| e).collect();
     // 提交时间只到秒：同一秒里连写两条（界面点一下、模型紧跟着又发一条）时间相同。
     // 同秒的不按 SHA 排（那是随机的），保留 `git log` 给的顺序 —— 它沿着父子链走，
-    // 后写的在前。`sort_by` 是稳定排序，所以只按时间排就够了。
-    out.sort_by(|a, b| b.at.cmp(&a.at));
+    // 后写的在前。`sort_by_key` 是稳定排序，所以只按时间排就够了。
+    out.sort_by_key(|e| std::cmp::Reverse(e.at));
     out.truncate(limit);
     out
 }
@@ -596,7 +617,13 @@ pub fn chain(root: &Path, limit: usize) -> Vec<Event> {
     let count = format!("-n{limit}");
     git(
         root,
-        &["log", &count, "--topo-order", "--glob=refs/carter", LOG_FORMAT],
+        &[
+            "log",
+            &count,
+            "--topo-order",
+            "--glob=refs/carter",
+            LOG_FORMAT,
+        ],
     )
     .map(|raw| parse_log(&raw, false).into_iter().map(|(_, e)| e).collect())
     .unwrap_or_default()
@@ -673,7 +700,10 @@ mod tests {
         assert_eq!(e.via.as_deref(), Some("carter"));
         assert_eq!(e.reply_to.as_deref(), Some("e-0"));
         assert_eq!(e.due, Some(42));
-        assert_eq!(e.body, "接口定好了\n可以联调", "trailer 不进正文，多行正文原样保留");
+        assert_eq!(
+            e.body, "接口定好了\n可以联调",
+            "trailer 不进正文，多行正文原样保留"
+        );
         assert!(e.addressed_to("m-c"));
         assert!(!e.addressed_to("m-a"));
     }
@@ -783,12 +813,18 @@ mod tests {
         fetch(&a).unwrap();
         let bodies: Vec<String> = read(&a, 10).into_iter().map(|e| e.body).collect();
         for want in ["张三 1", "李四 1", "李四 2"] {
-            assert!(bodies.iter().any(|b| b == want), "张三那边缺「{want}」：{bodies:?}");
+            assert!(
+                bodies.iter().any(|b| b == want),
+                "张三那边缺「{want}」：{bodies:?}"
+            );
         }
         assert_eq!(bodies.len(), 3, "不能重复：{bodies:?}");
 
         // 重接之后作者不能变成推送的人。
-        let li = read(&b, 10).into_iter().find(|e| e.body == "李四 2").unwrap();
+        let li = read(&b, 10)
+            .into_iter()
+            .find(|e| e.body == "李四 2")
+            .unwrap();
         assert_eq!(li.author.unwrap().name, "李四");
 
         // 两边的链尾一致。

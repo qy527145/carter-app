@@ -93,7 +93,11 @@ pub fn normalize_root(raw: &str) -> Result<PathBuf, String> {
     let s = p.to_string_lossy();
     // 全是分隔符的根路径（`/`）去掉尾巴就成空串了，这时保留原样。
     let cleaned = s.trim_end_matches(['/', '\\']);
-    let cleaned = if cleaned.is_empty() { s.as_ref() } else { cleaned };
+    let cleaned = if cleaned.is_empty() {
+        s.as_ref()
+    } else {
+        cleaned
+    };
     // Windows 上统一成 `\`：同一个目录的两种写法（`C:/a/b` 与 `C:\a\b`）否则会
     // 在列表里各出现一行，去重也认不出来。
     #[cfg(windows)]

@@ -3,7 +3,6 @@
 // 侧栏与「会话」设置页共用这一份，只是密度不同（`variant`）—— 两处各写一遍
 // 必然会长歪，而「在侧栏删掉一条，设置页里还在」这类不一致最难解释。
 
-import { useRef, useState } from "react";
 import {
   Copy,
   FileJson,
@@ -14,20 +13,17 @@ import {
   Share,
   Trash,
 } from "lucide-react";
+import { useRef, useState } from "react";
 
 import type { SessionRow } from "../lib/api";
-import { bucketOf, fmtBytes, fullTime, relTime } from "../lib/format";
-import {
-  displayName,
-  modelTitle,
-  useModelCatalog,
-} from "../lib/modelLabel";
 import { copyText } from "../lib/clipboard";
+import { bucketOf, fmtBytes, fullTime, relTime } from "../lib/format";
+import { displayName, modelTitle, useModelCatalog } from "../lib/modelLabel";
 import * as ops from "../lib/sessionOps";
 import { useStore } from "../store";
-import { ConfirmDialog } from "./ui/Panel";
 import { IconButton } from "./ui/Button";
-import { hasSelection, useContextMenu, type MenuEntry } from "./ui/ContextMenu";
+import { hasSelection, type MenuEntry, useContextMenu } from "./ui/ContextMenu";
+import { ConfirmDialog } from "./ui/Panel";
 
 const BUCKETS = ["今天", "昨天", "更早"] as const;
 
@@ -148,7 +144,12 @@ function Row({
       shortcut: "↵",
       onSelect: () => ops.openSession(s.id),
     },
-    { label: "重命名", icon: <Pencil size={12} />, shortcut: "F2", onSelect: () => setRenaming(true) },
+    {
+      label: "重命名",
+      icon: <Pencil size={12} />,
+      shortcut: "F2",
+      onSelect: () => setRenaming(true),
+    },
     {
       label: "复制标题",
       icon: <Copy size={12} />,
@@ -230,7 +231,10 @@ function Row({
               if (e.key === "F2") {
                 e.preventDefault();
                 setRenaming(true);
-              } else if ((e.key === "Backspace" || e.key === "Delete") && (e.metaKey || e.key === "Delete")) {
+              } else if (
+                (e.key === "Backspace" || e.key === "Delete") &&
+                (e.metaKey || e.key === "Delete")
+              ) {
                 e.preventDefault();
                 setConfirming(true);
               } else if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) {

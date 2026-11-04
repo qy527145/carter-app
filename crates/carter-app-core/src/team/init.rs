@@ -22,8 +22,8 @@ use std::path::Path;
 
 use super::git;
 use super::model::{Identity, TeamMeta};
-use super::store::{DIR, Store};
 use super::skills;
+use super::store::{DIR, Store};
 
 /// 初始化的结果。界面拿它显示「做了什么」。
 #[derive(Debug, Clone, serde::Serialize)]
@@ -105,9 +105,8 @@ pub fn initialize(project_root: &Path, team_name: Option<&str>) -> Result<InitOu
         steps.push("没有任何东西需要提交（可能已经提交过）".into());
     }
 
-    let remote = git::has_remote(&repo_root).then(|| {
-        git::git(&repo_root, &["remote", "get-url", "origin"]).unwrap_or_default()
-    });
+    let remote = git::has_remote(&repo_root)
+        .then(|| git::git(&repo_root, &["remote", "get-url", "origin"]).unwrap_or_default());
     if remote.as_deref().unwrap_or("").trim().is_empty() {
         warnings.push("还没有配置远端（origin）。团队同步需要各人指向同一个 git 仓库。".into());
     }
@@ -132,11 +131,7 @@ fn create_skeleton(
     identity: &Identity,
     steps: &mut Vec<String>,
 ) -> Result<(), String> {
-    let dirs = [
-        root.to_path_buf(),
-        root.join("goals"),
-        root.join("boards"),
-    ];
+    let dirs = [root.to_path_buf(), root.join("goals"), root.join("boards")];
     let mut made = false;
     for d in &dirs {
         if !d.is_dir() {
@@ -328,7 +323,8 @@ mod tests {
     /// 造一个干净的临时 git 仓库，配好身份（不配身份时 git 会拒绝提交）。
     fn repo(tag: &str) -> PathBuf {
         let n = N.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("carter-init-{tag}-{}-{n}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("carter-init-{tag}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         for args in [
@@ -404,13 +400,24 @@ mod tests {
         .unwrap();
 
         let out = initialize(&dir, None).unwrap();
-        assert!(!root.join("bin").exists(), "旧脚本与空的 bin/ 都该没了：{:?}", out.steps);
+        assert!(
+            !root.join("bin").exists(),
+            "旧脚本与空的 bin/ 都该没了：{:?}",
+            out.steps
+        );
         let task = std::fs::read_to_string(root.join("skills/carter-task/SKILL.md")).unwrap();
-        assert!(task.contains("\"action\": \"task_new\""), "carter-task 要换成教工具的新版");
+        assert!(
+            task.contains("\"action\": \"task_new\""),
+            "carter-task 要换成教工具的新版"
+        );
         assert!(!task.contains("bin/carter-team"));
         let goal = std::fs::read_to_string(root.join("skills/carter-goal/SKILL.md")).unwrap();
         assert!(goal.contains("我们组自己的"), "用户改过的技能不能动");
-        assert!(out.steps.iter().any(|s| s.contains("carter-task（v1")), "{:?}", out.steps);
+        assert!(
+            out.steps.iter().any(|s| s.contains("carter-task（v1")),
+            "{:?}",
+            out.steps
+        );
     }
 
     #[test]
@@ -438,7 +445,11 @@ mod tests {
         let dir = repo("noremote");
         let out = initialize(&dir, None).unwrap();
         assert!(out.remote.is_none());
-        assert!(out.warnings.iter().any(|w| w.contains("远端")), "{:?}", out.warnings);
+        assert!(
+            out.warnings.iter().any(|w| w.contains("远端")),
+            "{:?}",
+            out.warnings
+        );
     }
 
     #[test]

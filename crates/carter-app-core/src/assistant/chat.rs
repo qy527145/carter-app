@@ -79,7 +79,12 @@ pub fn report_text(t: &Ticket) -> String {
         .clone()
         .or_else(|| t.summary.clone())
         .unwrap_or_default();
-    let mut s = format!("{REPORT_MARK}{} · {}\n{}", t.status.label(), t.label(), body.trim());
+    let mut s = format!(
+        "{REPORT_MARK}{} · {}\n{}",
+        t.status.label(),
+        t.label(),
+        body.trim()
+    );
     if !t.options.is_empty() {
         s.push_str("\n候选：");
         s.push_str(&t.options.join(" / "));
@@ -160,7 +165,13 @@ mod tests {
     #[test]
     fn a_report_carries_the_mark_and_prefers_the_question() {
         let mut s = super::super::State::default();
-        let id = s.open_ticket(&super::super::tests::source(), "修 CI", "修主干 CI", "x", vec![]);
+        let id = s.open_ticket(
+            &super::super::tests::source(),
+            "修 CI",
+            "修主干 CI",
+            "x",
+            vec![],
+        );
         let t = s.ticket_mut(&id).unwrap();
         t.summary = Some("改好了".into());
         t.question = Some("要推送吗？".into());
@@ -184,8 +195,13 @@ mod tests {
         let first = text.lines().next().unwrap();
         assert_eq!(first, format!("{REPORT_MARK}等你拍板 · #1 修登录"));
         assert!(text.ends_with("\n候选：A：改接口 / B：加适配层"), "{text}");
-        assert!(answered_text("#1 修登录", "用 A").starts_with(&format!("{REPORT_MARK}已答复 · #1 修登录\n")));
-        assert!(closed_text("#1 修登录").starts_with(&format!("{REPORT_MARK}已结束 · #1 修登录\n")));
+        assert!(
+            answered_text("#1 修登录", "用 A")
+                .starts_with(&format!("{REPORT_MARK}已答复 · #1 修登录\n"))
+        );
+        assert!(
+            closed_text("#1 修登录").starts_with(&format!("{REPORT_MARK}已结束 · #1 修登录\n"))
+        );
     }
 
     #[test]
@@ -194,7 +210,10 @@ mod tests {
         let report = WireMessage::user_text(format!("{REPORT_MARK}待查看 · #1 修 CI\n改好了"));
         let person = WireMessage::user_text("开工");
         assert!(is_report_turn(&[person.clone(), report.clone()]));
-        assert!(!is_report_turn(&[report, person]), "用户接着说话，工具就回来了");
+        assert!(
+            !is_report_turn(&[report, person]),
+            "用户接着说话，工具就回来了"
+        );
         assert!(!is_report_turn(&[]));
     }
 

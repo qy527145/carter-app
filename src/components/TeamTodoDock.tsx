@@ -24,10 +24,10 @@
 // 没有待办、项目没有团队目录、或者用户手动收起了 —— 这三种情况下它都该让位。
 // 常驻一条「暂无待办」是纯噪音：它不提供任何可行动的东西，却每天占用一行高度。
 
-import { useCallback, useEffect, useMemo, useState } from "react";
 import { Check, ChevronRight, CircleAlert, ListChecks } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { teamMyTasks, type TeamTodo } from "../lib/api";
+import { type TeamTodo, teamMyTasks } from "../lib/api";
 import type { PromptContext } from "../lib/promptContext";
 import { priorityTone } from "../lib/teamUi";
 import { useStore } from "../store";
@@ -216,9 +216,7 @@ function TodoRow({
       <span className="shrink-0 text-[10px]" style={{ color: priorityTone(todo.priority).fg }}>
         {todo.priority}
       </span>
-      <span className="min-w-0 flex-1 truncate text-left text-xs text-ink/90">
-        {todo.title}
-      </span>
+      <span className="min-w-0 flex-1 truncate text-left text-xs text-ink/90">{todo.title}</span>
       {todo.status === "doing" && (
         <span className="shrink-0 text-[10px] text-tone-blue">进行中</span>
       )}

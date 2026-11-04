@@ -231,16 +231,16 @@ fn relative(roots: &[PathBuf], path: &Path) -> Option<PathBuf> {
 /// * Windows 的 `canonicalize` 会加 `\\?\` 前缀，而事件不带 —— 两种都试。
 fn root_variants(root: &Path) -> Vec<PathBuf> {
     let mut out = vec![root.to_path_buf()];
-    if let Ok(c) = root.canonicalize() {
-        if !out.contains(&c) {
-            out.push(c.clone());
-        }
-        #[cfg(windows)]
-        if let Some(s) = c.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
-            let v = PathBuf::from(s);
-            if !out.contains(&v) {
-                out.push(v);
-            }
+    if let Ok(c) = root.canonicalize()
+        && !out.contains(&c)
+    {
+        out.push(c.clone());
+    }
+    #[cfg(windows)]
+    if let Some(s) = c.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+        let v = PathBuf::from(s);
+        if !out.contains(&v) {
+            out.push(v);
         }
     }
     out
@@ -651,7 +651,7 @@ pub fn diff_for(session_id: &str, since: u32, cwd: &Path, raw_path: &str) -> Fil
             return FileDiff::Unavailable {
                 path,
                 reason: "git diff 执行失败（文件可能在仓库之外）".into(),
-            }
+            };
         }
     };
     if out.trim().is_empty() {
@@ -814,7 +814,12 @@ pub fn record(
     record_to(&file_for(session_id), turn, files, baseline)
 }
 
-fn record_to(path: &Path, turn: u32, files: &[String], baseline: Option<&str>) -> Result<(), String> {
+fn record_to(
+    path: &Path,
+    turn: u32,
+    files: &[String],
+    baseline: Option<&str>,
+) -> Result<(), String> {
     let mut stored = match std::fs::read_to_string(path) {
         Ok(raw) => serde_json::from_str::<Stored>(&raw).unwrap_or_default(),
         Err(_) => Stored::default(),
@@ -1001,11 +1006,17 @@ mod tests {
             "sub/*.tmp".into(),
         ]);
         assert!(rules.matches("a.log"));
-        assert!(rules.matches("deep/dir/b.log"), "不含 / 的规则要匹配任意层级");
+        assert!(
+            rules.matches("deep/dir/b.log"),
+            "不含 / 的规则要匹配任意层级"
+        );
         assert!(rules.matches("dist/app.js"));
         assert!(rules.matches("deep/__generated__/x.rs"));
         assert!(rules.matches("sub/a.tmp"));
-        assert!(!rules.matches("sub/deep/a.tmp"), "含 / 的规则按相对路径匹配");
+        assert!(
+            !rules.matches("sub/deep/a.tmp"),
+            "含 / 的规则按相对路径匹配"
+        );
         assert!(!rules.matches("src/main.rs"));
     }
 
@@ -1197,7 +1208,10 @@ mod tests {
         ];
         let ignored = git_ignored_in_process(&dir, &files);
 
-        assert!(ignored.contains("a.log"), "顶层的 *.log 要被忽略：{ignored:?}");
+        assert!(
+            ignored.contains("a.log"),
+            "顶层的 *.log 要被忽略：{ignored:?}"
+        );
         assert!(ignored.contains("src/b.log"), "不含 / 的规则要匹配任意层级");
         assert!(ignored.contains("build/x.js"), "被忽略目录里的文件也算");
         assert!(ignored.contains("src/c.tmp"), "嵌套 .gitignore 要生效");

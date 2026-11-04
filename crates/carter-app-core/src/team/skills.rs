@@ -75,7 +75,10 @@ enum ScriptAction {
 
 /// 旧版命令行脚本的位置：`<项目根>/.carter/bin/carter-team`。
 fn legacy_script_path(project_root: &Path) -> PathBuf {
-    project_root.join(super::store::DIR).join("bin").join("carter-team")
+    project_root
+        .join(super::store::DIR)
+        .join("bin")
+        .join("carter-team")
 }
 
 /// 这份脚本是不是**我们自己写的**某一版（v1 没有版本行，靠开头认；v2 起第二行是
@@ -112,7 +115,9 @@ pub fn retire_script(project_root: &Path) -> Result<Option<String>, String> {
         // 只在空了的时候删：`remove_dir` 对非空目录会失败，正好是想要的语义。
         let _ = std::fs::remove_dir(bin);
     }
-    Ok(Some("移除旧的 bin/carter-team（改由 team 工具负责）".into()))
+    Ok(Some(
+        "移除旧的 bin/carter-team（改由 team 工具负责）".into(),
+    ))
 }
 
 /// 需要按版本升级的技能：`(名字, 当前版本, v1 的开头)`。
@@ -141,9 +146,9 @@ const SKILL_VERSIONS: &[(&str, u32, &str)] = &[
         "---\nname: carter-task\ndescription: 需要拆解任务、更新任务状态、认领任务",
     ),
     (
-    "carter-board",
-    2,
-    "---\nname: carter-board\ndescription: 需要做团队回顾、建一块看板、往看板上加卡片",
+        "carter-board",
+        2,
+        "---\nname: carter-board\ndescription: 需要做团队回顾、建一块看板、往看板上加卡片",
     ),
 ];
 
@@ -164,7 +169,6 @@ fn skill_action(existing: Option<&str>, current: u32, v1_head: &str) -> ScriptAc
         None => ScriptAction::Keep,
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // 技能正文
@@ -527,9 +531,13 @@ mod tests {
             let rest = &body[4..];
             let end = rest.find("\n---").expect("frontmatter 要闭合");
             let head = &rest[..end];
-            assert!(head.contains(&format!("name: {name}")), "{name} 的 name 对不上");
             assert!(
-                head.lines().any(|l| l.starts_with("description: ") && l.len() > 40),
+                head.contains(&format!("name: {name}")),
+                "{name} 的 name 对不上"
+            );
+            assert!(
+                head.lines()
+                    .any(|l| l.starts_with("description: ") && l.len() > 40),
                 "{name} 的 description 要写清什么时候读它"
             );
         }
@@ -542,13 +550,23 @@ mod tests {
             .find(|(n, ..)| *n == "carter-board")
             .unwrap();
         assert!(CARTER_BOARD.contains(&format!("<!-- carter-skill-version: {version} -->")));
-        assert_eq!(skill_action(Some(CARTER_BOARD), version, v1_head), ScriptAction::Keep);
+        assert_eq!(
+            skill_action(Some(CARTER_BOARD), version, v1_head),
+            ScriptAction::Keep
+        );
         // 旧版（教模型写 board.json 的那篇）原样留着：升级。
         let v1 = format!("{v1_head}，或者读现有看板来总结。\n---\n# 看板\n");
-        assert_eq!(skill_action(Some(&v1), version, v1_head), ScriptAction::Upgrade(1));
+        assert_eq!(
+            skill_action(Some(&v1), version, v1_head),
+            ScriptAction::Upgrade(1)
+        );
         // 用户自己重写过的：不碰。
         assert_eq!(
-            skill_action(Some("---\nname: carter-board\ndescription: 我们组自己的\n---\n"), version, v1_head),
+            skill_action(
+                Some("---\nname: carter-board\ndescription: 我们组自己的\n---\n"),
+                version,
+                v1_head
+            ),
             ScriptAction::Keep
         );
 
@@ -557,7 +575,10 @@ mod tests {
         std::fs::create_dir_all(dir.join("carter-board")).unwrap();
         std::fs::write(dir.join("carter-board/SKILL.md"), &v1).unwrap();
         let written = install_builtin(&dir).unwrap();
-        assert!(written.iter().any(|s| s.starts_with("carter-board（v1")), "{written:?}");
+        assert!(
+            written.iter().any(|s| s.starts_with("carter-board（v1")),
+            "{written:?}"
+        );
         let body = std::fs::read_to_string(dir.join("carter-board/SKILL.md")).unwrap();
         assert!(body.contains("board_new"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -585,10 +606,16 @@ mod tests {
                 body.contains(&format!("<!-- carter-skill-version: {version} -->")),
                 "{name} 要带版本标记"
             );
-            assert_eq!(skill_action(Some(body), version, v1_head), ScriptAction::Keep);
+            assert_eq!(
+                skill_action(Some(body), version, v1_head),
+                ScriptAction::Keep
+            );
             // v1：开头一致、没有版本标记。
             let v1 = format!("{v1_head}……（旧版正文，教 agent 调 carter-team 脚本）\n---\n");
-            assert_eq!(skill_action(Some(&v1), version, v1_head), ScriptAction::Upgrade(1));
+            assert_eq!(
+                skill_action(Some(&v1), version, v1_head),
+                ScriptAction::Upgrade(1)
+            );
         }
     }
 
@@ -619,7 +646,10 @@ mod tests {
         for (name, body) in BUILTINS {
             for piece in body.split("\"action\": \"").skip(1) {
                 let action = piece.split('"').next().unwrap();
-                assert!(legal.contains(&action), "{name} 提到的 action `{action}` 工具不认");
+                assert!(
+                    legal.contains(&action),
+                    "{name} 提到的 action `{action}` 工具不认"
+                );
             }
         }
     }
@@ -649,7 +679,11 @@ mod tests {
 
         // bin/ 里还有用户自己的别的东西：删脚本，不删目录。
         std::fs::create_dir_all(&bin).unwrap();
-        std::fs::write(bin.join("carter-team"), "#!/bin/sh\n# carter-team-version: 2\n").unwrap();
+        std::fs::write(
+            bin.join("carter-team"),
+            "#!/bin/sh\n# carter-team-version: 2\n",
+        )
+        .unwrap();
         std::fs::write(bin.join("mine.sh"), "echo hi\n").unwrap();
         retire_script(&root).unwrap();
         assert!(bin.join("mine.sh").is_file());

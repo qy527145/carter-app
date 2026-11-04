@@ -43,11 +43,11 @@ use std::sync::Arc;
 use carter::agent::Thread;
 use carter::config::Config;
 use carter::provider::WireMessage;
-use carter::registry::{fetch, ModelInfo};
+use carter::registry::{ModelInfo, fetch};
 use llm_adapt_core::{Block, Role};
 
 use crate::app_settings::AppSettings;
-use crate::session::{start_side, SideWiring};
+use crate::session::{SideWiring, start_side};
 use crate::shell::{AppShell, LiveItem, SessionHandle};
 use crate::view::MessageView;
 
@@ -201,8 +201,13 @@ fn render_context(history: &[WireMessage], live: &[LiveItem]) -> String {
                 LiveItem::Text(t) => {
                     s.push_str(&format!("助手：{}\n", t.trim()));
                 }
-                LiveItem::Tool { name, args, result, .. } => {
-                    s.push_str(&format!("助手调用工具 {name}({})\n", clip(args, TOOL_ARGS_MAX)));
+                LiveItem::Tool {
+                    name, args, result, ..
+                } => {
+                    s.push_str(&format!(
+                        "助手调用工具 {name}({})\n",
+                        clip(args, TOOL_ARGS_MAX)
+                    ));
                     match result {
                         Some(r) => s.push_str(&format!("  → {}\n", clip(r, TOOL_RESULT_MAX))),
                         None => s.push_str("  → （还在执行）\n"),
@@ -230,7 +235,10 @@ fn render_context(history: &[WireMessage], live: &[LiveItem]) -> String {
         kept.push(e.as_str());
     }
     if kept.len() < entries.len() {
-        out.push_str(&format!("（更早的 {} 条消息过长，已省略）\n\n", entries.len() - kept.len()));
+        out.push_str(&format!(
+            "（更早的 {} 条消息过长，已省略）\n\n",
+            entries.len() - kept.len()
+        ));
     }
     kept.reverse();
     out.push_str(&kept.join("\n"));
@@ -246,10 +254,8 @@ fn render_message(m: &WireMessage) -> Option<String> {
     let mut s = String::new();
     for b in &m.content {
         match b {
-            Block::Text { text, .. } => {
-                if !text.trim().is_empty() {
-                    s.push_str(&format!("{who}：{}\n", text.trim()));
-                }
+            Block::Text { text, .. } if !text.trim().is_empty() => {
+                s.push_str(&format!("{who}：{}\n", text.trim()));
             }
             Block::ToolUse { name, input, .. } => {
                 s.push_str(&format!(
@@ -257,7 +263,9 @@ fn render_message(m: &WireMessage) -> Option<String> {
                     clip(&input.to_string(), TOOL_ARGS_MAX)
                 ));
             }
-            Block::ToolResult { content, is_error, .. } => {
+            Block::ToolResult {
+                content, is_error, ..
+            } => {
                 let mark = if *is_error { "（出错）" } else { "" };
                 s.push_str(&format!(
                     "  → {mark}{}\n",
@@ -296,10 +304,7 @@ fn side_system(
 ) -> Vec<String> {
     let skill_metas = if config.skills.enabled {
         // 项目级技能跟着 cwd 走 —— 侧边会话与主会话在同一个项目里。
-        crate::skills::union_metas(&crate::skills::Scan::from_settings_at(
-            settings,
-            Some(cwd),
-        ))
+        crate::skills::union_metas(&crate::skills::Scan::from_settings_at(settings, Some(cwd)))
     } else {
         Vec::new()
     };

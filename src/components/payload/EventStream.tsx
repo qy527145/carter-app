@@ -16,14 +16,14 @@
 // 因为排障时用户要对着上游文档找的就是这个名字。搜索只做**原文子串**匹配，
 // 不做正则：用户敲的是字面量。
 
-import { useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { ArrowDownToLine, Lock, Search } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { fmtNumber } from "../../lib/format";
 import { IconButton } from "../ui/Button";
 import { Input } from "../ui/Input";
-import { JsonTree, isPlainObject } from "./JsonTree";
+import { isPlainObject, JsonTree } from "./JsonTree";
 import { CopyButton, JsonOrRaw, parseJson } from "./kit";
 import { kindsOf, parseSse, previewOf, type SseEvent } from "./sse";
 
@@ -150,10 +150,7 @@ export function EventStream({ raw, live }: { raw: string; live: boolean }) {
             <span className="w-24 shrink-0">事件</span>
             <span className="min-w-0 flex-1">这一片新增</span>
           </div>
-          <div
-            ref={scrollRef}
-            className="h-[40vh] min-h-40 overflow-y-auto overscroll-contain"
-          >
+          <div ref={scrollRef} className="h-[40vh] min-h-40 overflow-y-auto overscroll-contain">
             {filtered.length === 0 ? (
               <div className="px-2 py-4 text-[11px] text-dim">没有匹配的事件。</div>
             ) : (
@@ -181,9 +178,7 @@ export function EventStream({ raw, live }: { raw: string; live: boolean }) {
                       <span className="w-7 shrink-0 text-right tabular-nums text-dim/70">
                         {ev.seq + 1}
                       </span>
-                      <span className="w-24 shrink-0 truncate mono text-tone-blue">
-                        {ev.name}
-                      </span>
+                      <span className="w-24 shrink-0 truncate mono text-tone-blue">{ev.name}</span>
                       <span className={`min-w-0 flex-1 truncate ${active ? "text-ink" : ""}`}>
                         {previewOf(ev) || "—"}
                       </span>

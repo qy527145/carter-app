@@ -5,21 +5,20 @@
 //
 // 两个列表共用 `SessionList` 的行，行内动作只有一份实现。
 
-import { useEffect, useMemo, useState } from "react";
 import { Folder, Search, X } from "lucide-react";
-
-import { listSessions, searchSessions, type SearchHit, type SessionRow } from "../../lib/api";
-import { fmtBytes, fullTime, relTime, shortenPath } from "../../lib/format";
-import { displayName, modelTitle, useModelCatalog } from "../../lib/modelLabel";
-import { toastError } from "../../lib/toast";
-import { useAsync } from "../../lib/useAsync";
+import { useEffect, useMemo, useState } from "react";
 import { groupByProject, SessionList } from "../../components/SessionList";
-import { openSession } from "../../lib/sessionOps";
-import { useStore } from "../../store";
 import { Button, IconButton } from "../../components/ui/Button";
 import { Input } from "../../components/ui/Input";
-import { stripContextTags } from "../../lib/promptContext";
 import { Badge, Card, Spinner } from "../../components/ui/Panel";
+import { listSessions, type SearchHit, type SessionRow, searchSessions } from "../../lib/api";
+import { fmtBytes, fullTime, relTime, shortenPath } from "../../lib/format";
+import { displayName, modelTitle, useModelCatalog } from "../../lib/modelLabel";
+import { stripContextTags } from "../../lib/promptContext";
+import { openSession } from "../../lib/sessionOps";
+import { toastError } from "../../lib/toast";
+import { useAsync } from "../../lib/useAsync";
+import { useStore } from "../../store";
 import { AsyncBody, PageIntro } from "./AsyncBody";
 
 /** 搜索命中列表。与「列表」是两种视图，所以单独一块。 */
@@ -159,8 +158,8 @@ export function SessionsPage() {
       <PageIntro>
         这里是<strong className="font-medium text-ink">全部</strong>会话，按工作目录分组，
         包括当前对话之外的目录。会话文件在{" "}
-        <span className="mono">~/.carter/projects/&lt;项目&gt;/*.jsonl</span>，
-        与 carter 命令行共用 —— 那边也能 `/resume` 到这些对话。
+        <span className="mono">~/.carter/projects/&lt;项目&gt;/*.jsonl</span>， 与 carter 命令行共用
+        —— 那边也能 `/resume` 到这些对话。
         点开别的目录的会话时，工具与工作目录都跟着那条会话自己记的目录走。
       </PageIntro>
 

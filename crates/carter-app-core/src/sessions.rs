@@ -176,7 +176,8 @@ pub fn fork(id: &str, keep_before: Option<u32>) -> Result<String, String> {
 /// 要「删掉后半截」就只能靠快照整体替换（与 `/clear`、重试同一条路）。
 fn truncate_forked(id: &str, turn: u32) -> Result<(), String> {
     let entry = find(id).ok_or_else(|| format!("找不到新会话 {id}"))?;
-    let (mut thread, _) = carter::session::load(&entry).map_err(|e| format!("打开新会话失败：{e}"))?;
+    let (mut thread, _) =
+        carter::session::load(&entry).map_err(|e| format!("打开新会话失败：{e}"))?;
     crate::history::truncate_before_turn(&mut thread, turn)?;
     Ok(())
 }
@@ -330,8 +331,7 @@ pub enum ExportFormat {
 /// 把一条会话导出成可读文本。返回 (文件名, 内容)。
 pub fn export(id: &str, format: ExportFormat) -> Result<(String, String), String> {
     let entry = find(id).ok_or_else(|| format!("找不到会话 {id}"))?;
-    let (thread, meta) =
-        carter::session::load(&entry).map_err(|e| format!("读取会话失败：{e}"))?;
+    let (thread, meta) = carter::session::load(&entry).map_err(|e| format!("读取会话失败：{e}"))?;
 
     let title = meta.title.clone().unwrap_or_else(|| "未命名会话".into());
     let stem: String = title
@@ -424,7 +424,6 @@ fn message_json(msg: &WireMessage) -> serde_json::Value {
         }).collect::<Vec<_>>(),
     })
 }
-
 
 #[cfg(test)]
 mod tests {

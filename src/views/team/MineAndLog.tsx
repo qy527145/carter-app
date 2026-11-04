@@ -13,23 +13,30 @@
 //
 // 顶部是发广播的输入框：对全员说一句话（「main 冻结到周五」）不该绕去开一条对话。
 
-import { useEffect, useMemo, useState } from "react";
 import { Bell, CircleAlert, Inbox, ListChecks, Megaphone, Users } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 
 import {
-  teamAct,
-  teamInbox,
   type TeamEvent,
   type TeamGoal,
   type TeamInboxItem,
   type TeamOverview,
   type TeamTask,
+  teamAct,
+  teamInbox,
 } from "../../lib/api";
-import { eventSender, eventVerb, personName, priorityTone, since, statusTone } from "../../lib/teamUi";
+import {
+  eventSender,
+  eventVerb,
+  personName,
+  priorityTone,
+  since,
+  statusTone,
+} from "../../lib/teamUi";
 import { toastError } from "../../lib/toast";
+import { HandoffButton } from "./HandoffButton";
 import { usePeople } from "./people";
 import { PersonAvatar } from "./peopleUi";
-import { HandoffButton } from "./HandoffButton";
 import { Composer, Mentions, ViaCarter } from "./TaskDrawer";
 
 /** 已读到哪条：存本机。已读回执要是也打成事件，消息流会被淹没（协议第 4 节）。 */
@@ -116,8 +123,7 @@ export function MineTab({
         const a = t.assignee;
         const hit =
           a === me ||
-          (meMember &&
-            meMember.emails.some((e) => a.toLowerCase().includes(`<${e.toLowerCase()}>`)));
+          meMember?.emails.some((e) => a.toLowerCase().includes(`<${e.toLowerCase()}>`));
         if (hit && !mineIds.has(t.id)) {
           mineIds.add(t.id);
           out.push({ goal: g, task: t });
@@ -132,7 +138,8 @@ export function MineTab({
     const out: { goal: TeamGoal; task: TeamTask }[] = [];
     for (const g of data.goals) {
       if (g.status !== "active") continue;
-      for (const t of g.tasks) if (t.ready && !t.assignee && t.children.length === 0) out.push({ goal: g, task: t });
+      for (const t of g.tasks)
+        if (t.ready && !t.assignee && t.children.length === 0) out.push({ goal: g, task: t });
     }
     return out.slice(0, 8);
   }, [data.goals]);
@@ -213,7 +220,15 @@ export function MineTab({
         ) : (
           <div className="space-y-1">
             {inbox.slice(0, 12).map((i) => (
-              <EventRow key={i.sha} e={i} data={data} reason={REASON[i.reason]} fresh={i.at > seen} compact onOpenTask={onOpenTask} />
+              <EventRow
+                key={i.sha}
+                e={i}
+                data={data}
+                reason={REASON[i.reason]}
+                fresh={i.at > seen}
+                compact
+                onOpenTask={onOpenTask}
+              />
             ))}
           </div>
         )}
@@ -244,7 +259,11 @@ function Group({
         {title} · {items.length}
       </div>
       {items.length === 0 ? (
-        empty && <div className="rounded-xl bg-card px-3 py-5 text-center text-[11px] text-dim">{empty}</div>
+        empty && (
+          <div className="rounded-xl bg-card px-3 py-5 text-center text-[11px] text-dim">
+            {empty}
+          </div>
+        )
       ) : (
         <div className="space-y-1.5">
           {items.map(({ goal, task }) => {
@@ -267,7 +286,10 @@ function Group({
                   className="size-1.5 shrink-0 rounded-full"
                   style={{ background: task.ready ? "var(--tone-green)" : tone.fg }}
                 />
-                <span className="shrink-0 text-[10px]" style={{ color: priorityTone(task.priority).fg }}>
+                <span
+                  className="shrink-0 text-[10px]"
+                  style={{ color: priorityTone(task.priority).fg }}
+                >
                   {task.priority}
                 </span>
                 <span className="min-w-0 flex-1">
@@ -284,10 +306,7 @@ function Group({
                 >
                   {task.ready ? "可开工" : task.status_label}
                 </span>
-                <HandoffButton
-                  className="-my-1 -mr-2"
-                  onClick={() => onHandoff(goal, task)}
-                />
+                <HandoffButton className="-my-1 -mr-2" onClick={() => onHandoff(goal, task)} />
               </div>
             );
           })}
@@ -355,7 +374,10 @@ export function LogTab({
         />
       </div>
 
-      <div className="mb-2 flex items-center gap-1 rounded-lg bg-card p-0.5 text-[11px]" style={{ width: "fit-content" }}>
+      <div
+        className="mb-2 flex items-center gap-1 rounded-lg bg-card p-0.5 text-[11px]"
+        style={{ width: "fit-content" }}
+      >
         {(
           [
             ["mine", "跟我有关", inbox.length],
@@ -366,7 +388,9 @@ export function LogTab({
             key={id}
             onClick={() => setScope(id)}
             className={`flex items-center gap-1 rounded-md px-2 py-1 transition-colors ${
-              shown === id ? "bg-elevated font-medium text-ink shadow-soft" : "text-dim hover:text-ink"
+              shown === id
+                ? "bg-elevated font-medium text-ink shadow-soft"
+                : "text-dim hover:text-ink"
             }`}
           >
             {label}
@@ -456,11 +480,17 @@ function EventRow({
           {/* 任务文件跟着分支走：对方那个分支还没同步过来时这里找不到任务，退回抬头里带的标题。 */}
           {!target && e.target && (
             <span title={e.target} className="max-w-[16rem] truncate text-ink/80">
-              {subjectTitle(e.subject) ? `「${subjectTitle(e.subject)}」` : <span className="mono text-[10px] text-dim">{e.target}</span>}
+              {subjectTitle(e.subject) ? (
+                `「${subjectTitle(e.subject)}」`
+              ) : (
+                <span className="mono text-[10px] text-dim">{e.target}</span>
+              )}
             </span>
           )}
           {reason && (
-            <span className={`rounded px-1 text-[9px] ${fresh ? "bg-tone-orange-soft text-tone-orange" : "bg-bubble text-dim"}`}>
+            <span
+              className={`rounded px-1 text-[9px] ${fresh ? "bg-tone-orange-soft text-tone-orange" : "bg-bubble text-dim"}`}
+            >
               {reason}
             </span>
           )}

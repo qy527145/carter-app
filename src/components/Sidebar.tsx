@@ -4,7 +4,6 @@
 // 会话列表按工作目录（项目）分组折叠，只展开当前目录那组 —— 别的项目的会话
 // 一点就能找到，平时又不挤占当前项目的列表。
 
-import { useCallback, useEffect, useRef, useState } from "react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   ChevronRight,
@@ -14,11 +13,11 @@ import {
   ListCollapse,
   ListTree,
   MessageSquare,
+  Monitor,
+  Moon,
   MoreHorizontal,
   PanelLeftClose,
   PanelLeftOpen,
-  Monitor,
-  Moon,
   Plus,
   Radar,
   Search,
@@ -28,11 +27,11 @@ import {
   Trash,
   X,
 } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
-import { setAppSettings, type AppSettings, type SessionRow, type ThemePref } from "../lib/api";
+import { type AppSettings, type SessionRow, setAppSettings, type ThemePref } from "../lib/api";
 import { copyText } from "../lib/clipboard";
 import { baseName } from "../lib/format";
-import { toastError } from "../lib/toast";
 import { modelSearchText, useModelCatalog } from "../lib/modelLabel";
 import {
   ASSISTANT_CHAT_ID,
@@ -41,12 +40,13 @@ import {
   removeProject,
   startInDirectory,
 } from "../lib/sessionOps";
+import { toastError } from "../lib/toast";
+import { useStore } from "../store";
 import { groupByProject, SessionList } from "./SessionList";
 import { Button, IconButton } from "./ui/Button";
+import { type MenuEntry, useContextMenu } from "./ui/ContextMenu";
 import { Input } from "./ui/Input";
-import { useContextMenu, type MenuEntry } from "./ui/ContextMenu";
 import { Collapse, ConfirmDialog } from "./ui/Panel";
-import { useStore } from "../store";
 
 const THEMES: { id: ThemePref; label: string; icon: typeof Sun }[] = [
   { id: "system", label: "跟随系统", icon: Monitor },
@@ -69,10 +69,17 @@ function ThemeToggle() {
       /* 存不下就只是下次启动回到旧主题，不值得打断用户 */
     });
   };
-  const idx = Math.max(0, THEMES.findIndex((t) => t.id === settings.theme));
+  const idx = Math.max(
+    0,
+    THEMES.findIndex((t) => t.id === settings.theme),
+  );
 
   return (
-    <div role="radiogroup" aria-label="主题" className="relative flex rounded-md bg-ink/[0.04] p-0.5">
+    <div
+      role="radiogroup"
+      aria-label="主题"
+      className="relative flex rounded-md bg-ink/[0.04] p-0.5"
+    >
       {/* 选中块是一块滑过去的底，而不是三个按钮各自变色 —— 切换时眼睛跟着它走。 */}
       <span
         aria-hidden
@@ -243,7 +250,10 @@ function ProjectGroups({
                   {baseName(g.cwd) || "未知目录"}
                 </span>
                 {hidesActive && (
-                  <span title="当前会话在这一组里" className="size-1 shrink-0 rounded-full bg-ink" />
+                  <span
+                    title="当前会话在这一组里"
+                    className="size-1 shrink-0 rounded-full bg-ink"
+                  />
                 )}
                 <span className="ml-auto shrink-0 tabular-nums text-dim/70 group-hover/project:hidden">
                   {g.sessions.length}
@@ -315,8 +325,8 @@ function ProjectGroups({
           confirmLabel={`删除 ${deleting.count} 条会话`}
           message={
             <>
-              将删除 <span className="mono text-ink">{deleting.cwd}</span> 下的全部{" "}
-              {deleting.count} 条会话，包括它们的对话历史。
+              将删除 <span className="mono text-ink">{deleting.cwd}</span> 下的全部 {deleting.count}{" "}
+              条会话，包括它们的对话历史。
               <br />
               项目目录本身和里面的文件不受影响；会话记录会从磁盘上直接删掉，
               <strong className="font-medium">不可恢复</strong>。
@@ -378,10 +388,7 @@ function TeamEntry() {
   // 显示正在看哪个项目：入口本身就回答「点进去会看到谁的团队」。
   const teamCwd = useStore((s) => s.teamCwd);
   return (
-    <button
-      onClick={() => setView("team")}
-      className={`${NAV_ITEM} ${navState(view === "team")}`}
-    >
+    <button onClick={() => setView("team")} className={`${NAV_ITEM} ${navState(view === "team")}`}>
       <Target size={14} className={view === "team" ? "text-tone-violet" : ""} />
       目标与任务
       {teamCwd && (
@@ -523,133 +530,126 @@ export function Sidebar() {
         } ${resizing ? "" : "transition-[width] duration-200 ease-[var(--ease-out)]"}`}
       >
         <div style={{ width }} className="flex min-h-0 flex-1 flex-col">
-        {/* 品牌行 */}
-        <div className="flex items-center gap-2 px-3 pb-2 pt-3">
-          <div className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-ink text-[var(--accent-contrast)]">
-            <MessageSquare size={14} />
+          {/* 品牌行 */}
+          <div className="flex items-center gap-2 px-3 pb-2 pt-3">
+            <div className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-ink text-[var(--accent-contrast)]">
+              <MessageSquare size={14} />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-sm font-semibold tracking-tight">Carter</div>
+              {appInfo && <div className="text-[10px] text-dim">v{appInfo.version}</div>}
+            </div>
+            <IconButton
+              title={`收起侧栏（${MOD}B）`}
+              aria-label="收起侧栏"
+              onClick={() => setCollapsed(true)}
+            >
+              <PanelLeftClose size={14} />
+            </IconButton>
           </div>
-          <div className="min-w-0 flex-1">
-            <div className="truncate text-sm font-semibold tracking-tight">Carter</div>
-            {appInfo && <div className="text-[10px] text-dim">v{appInfo.version}</div>}
-          </div>
-          <IconButton
-            title={`收起侧栏（${MOD}B）`}
-            aria-label="收起侧栏"
-            onClick={() => setCollapsed(true)}
-          >
-            <PanelLeftClose size={14} />
-          </IconButton>
-        </div>
 
-        <div className="px-3 pb-3 pt-1">
-          <Button
-            variant="primary"
-            onClick={newSession}
-            title={`新对话（${MOD}N）`}
-            className="group/new w-full"
-          >
-            <Plus size={14} />
-            新对话
-            <kbd className="ml-auto font-sans text-[10px] font-normal opacity-0 transition-opacity group-hover/new:opacity-50">
-              {MOD}N
-            </kbd>
-          </Button>
-          <div className="mt-1.5 space-y-0.5">
-            <AssistantEntry />
-            <TeamEntry />
+          <div className="px-3 pb-3 pt-1">
+            <Button
+              variant="primary"
+              onClick={newSession}
+              title={`新对话（${MOD}N）`}
+              className="group/new w-full"
+            >
+              <Plus size={14} />
+              新对话
+              <kbd className="ml-auto font-sans text-[10px] font-normal opacity-0 transition-opacity group-hover/new:opacity-50">
+                {MOD}N
+              </kbd>
+            </Button>
+            <div className="mt-1.5 space-y-0.5">
+              <AssistantEntry />
+              <TeamEntry />
+            </div>
           </div>
-        </div>
 
-        {/* 常驻，不按会话条数隐藏 —— 会话列表短的时候藏起来省不了多少地方，
+          {/* 常驻，不按会话条数隐藏 —— 会话列表短的时候藏起来省不了多少地方，
             却让人以为「这个应用没有搜索」；而且隐藏期间 query 仍然在生效，
             会出现列表被过滤着、却没有输入框可以清空的状态。 */}
-        <div className="px-2 pb-2">
-          <div className="group/search relative">
-            <Search
-              size={12}
-              className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-dim"
-            />
-            <Input
-              ref={searchRef}
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Escape") {
-                  // 第一下清空，第二下（已经空了）把焦点还给页面。
-                  if (query) setQuery("");
-                  else e.currentTarget.blur();
-                } else if (e.key === "ArrowDown" || e.key === "Enter") {
-                  // 从搜索框直接走进结果：↓ 落到第一条，↵ 直接打开第一条。
-                  const first = document.querySelector<HTMLElement>(
-                    "aside [data-session-row]",
-                  );
-                  if (!first) return;
-                  e.preventDefault();
-                  if (e.key === "Enter") first.click();
-                  else first.focus();
-                }
-              }}
-              placeholder="搜索会话"
-              className="py-1.5 pl-7 pr-12 text-xs"
-            />
-            {query ? (
-              <button
-                onClick={() => {
-                  setQuery("");
-                  searchRef.current?.focus();
+          <div className="px-2 pb-2">
+            <div className="group/search relative">
+              <Search
+                size={12}
+                className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-dim"
+              />
+              <Input
+                ref={searchRef}
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") {
+                    // 第一下清空，第二下（已经空了）把焦点还给页面。
+                    if (query) setQuery("");
+                    else e.currentTarget.blur();
+                  } else if (e.key === "ArrowDown" || e.key === "Enter") {
+                    // 从搜索框直接走进结果：↓ 落到第一条，↵ 直接打开第一条。
+                    const first = document.querySelector<HTMLElement>("aside [data-session-row]");
+                    if (!first) return;
+                    e.preventDefault();
+                    if (e.key === "Enter") first.click();
+                    else first.focus();
+                  }
                 }}
-                aria-label="清空搜索"
-                className="carter-press absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-dim hover:text-ink"
-              >
-                <X size={12} />
-              </button>
-            ) : (
-              <kbd className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 font-sans text-[10px] text-dim/60 group-focus-within/search:opacity-0">
-                {MOD}K
-              </kbd>
-            )}
+                placeholder="搜索会话"
+                className="py-1.5 pl-7 pr-12 text-xs"
+              />
+              {query ? (
+                <button
+                  onClick={() => {
+                    setQuery("");
+                    searchRef.current?.focus();
+                  }}
+                  aria-label="清空搜索"
+                  className="carter-press absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-dim hover:text-ink"
+                >
+                  <X size={12} />
+                </button>
+              ) : (
+                <kbd className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 font-sans text-[10px] text-dim/60 group-focus-within/search:opacity-0">
+                  {MOD}K
+                </kbd>
+              )}
+            </div>
           </div>
-        </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
-          {listed.length === 0 && (
-            <div className="px-2 py-8 text-center text-xs leading-relaxed text-dim">
-              还没有历史会话
-              <div className="mt-1 text-dim/70">发出第一句话后，会话会出现在这里</div>
-            </div>
-          )}
-          {shown.length === 0 && listed.length > 0 && (
-            <div className="px-2 py-8 text-center text-xs text-dim">
-              没有匹配「{query.trim()}」的会话
-              <button
-                onClick={() => setView("settings")}
-                className="mt-1.5 block w-full text-dim/80 underline-offset-2 hover:text-ink hover:underline"
-              >
-                去「设置 · 会话」搜全文
-              </button>
-            </div>
-          )}
-          <ProjectGroups
-            sessions={shown}
-            activeId={sessionId}
-            currentCwd={cwd}
-            query={q}
-          />
-        </div>
+          <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
+            {listed.length === 0 && (
+              <div className="px-2 py-8 text-center text-xs leading-relaxed text-dim">
+                还没有历史会话
+                <div className="mt-1 text-dim/70">发出第一句话后，会话会出现在这里</div>
+              </div>
+            )}
+            {shown.length === 0 && listed.length > 0 && (
+              <div className="px-2 py-8 text-center text-xs text-dim">
+                没有匹配「{query.trim()}」的会话
+                <button
+                  onClick={() => setView("settings")}
+                  className="mt-1.5 block w-full text-dim/80 underline-offset-2 hover:text-ink hover:underline"
+                >
+                  去「设置 · 会话」搜全文
+                </button>
+              </div>
+            )}
+            <ProjectGroups sessions={shown} activeId={sessionId} currentCwd={cwd} query={q} />
+          </div>
 
-        {/* 底部：设置 + 主题。设置放在这里而不是顶部导航里 —— 它是「偶尔去一次」
+          {/* 底部：设置 + 主题。设置放在这里而不是顶部导航里 —— 它是「偶尔去一次」
             的地方，占着顶部第一屏的位置不值当；而左下角是这类入口的常规位置。 */}
-        <div className="space-y-1.5 border-t border-edge p-2">
-          <button
-            onClick={() => setView("settings")}
-            title={`设置（${MOD},）`}
-            className={`${NAV_ITEM} ${navState(view === "settings")}`}
-          >
-            <SettingsIcon size={14} />
-            设置
-          </button>
-          <ThemeToggle />
-        </div>
+          <div className="space-y-1.5 border-t border-edge p-2">
+            <button
+              onClick={() => setView("settings")}
+              title={`设置（${MOD},）`}
+              className={`${NAV_ITEM} ${navState(view === "settings")}`}
+            >
+              <SettingsIcon size={14} />
+              设置
+            </button>
+            <ThemeToggle />
+          </div>
         </div>
       </aside>
 

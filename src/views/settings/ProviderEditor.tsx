@@ -25,9 +25,12 @@
 // `null`，后端据此保持原样 —— 而不是把界面读到的值（可能是 `${VAR}`，
 // 也可能是插值后的明文）再写回去。见 core 的 `config_edit.rs`。
 
-import { useEffect, useMemo, useState } from "react";
 import { CircleCheck, TriangleAlert, X } from "lucide-react";
-
+import { useEffect, useMemo, useState } from "react";
+import { Button } from "../../components/ui/Button";
+import { Field, Input, Switch } from "../../components/ui/Input";
+import { Banner, ConfirmDialog, Modal } from "../../components/ui/Panel";
+import { Select } from "../../components/ui/Select";
 import {
   checkServerTools,
   deleteProvider,
@@ -35,33 +38,26 @@ import {
   getProviderDetail,
   listChannels,
   listProviderTemplates,
-  recommendedCatalogModels,
-  saveProvider,
   type ProviderDetail,
   type ProviderDraft,
   type ProviderTemplate,
+  recommendedCatalogModels,
+  saveProvider,
 } from "../../lib/api";
-import { PROTOCOLS, UNKNOWN_PROTOCOL_HINT, presetFor } from "../../lib/protocols";
-import { useAsync } from "../../lib/useAsync";
+import { PROTOCOLS, presetFor, UNKNOWN_PROTOCOL_HINT } from "../../lib/protocols";
 import { toastError } from "../../lib/toast";
+import { useAsync } from "../../lib/useAsync";
 import { useCatalog } from "./CatalogPicker";
+import { CatalogDialog, UpstreamFetchDialog } from "./ModelPickers";
 import {
-  CatalogDialog,
-  UpstreamFetchDialog,
-} from "./ModelPickers";
-import {
-  ModelList,
   blankModel,
+  ModelList,
+  type ModelState,
   rowFromEntry,
   rowFromUpstream,
   toDraft,
   toState,
-  type ModelState,
 } from "./ModelRows";
-import { Button } from "../../components/ui/Button";
-import { Field, Input, Switch } from "../../components/ui/Input";
-import { Banner, ConfirmDialog, Modal } from "../../components/ui/Panel";
-import { Select } from "../../components/ui/Select";
 
 export function ProviderEditor({
   /** `null` = 新建。 */
@@ -248,9 +244,7 @@ export function ProviderEditor({
     if (!nameLocked && (name.trim() === "" || name === kind)) setName(k);
     setTemplateId(null);
     if (!nameLocked) {
-      setModels((ms) =>
-        ms.every((m) => !m.name.trim() && !m.meta.trim()) ? [blankModel()] : ms,
-      );
+      setModels((ms) => (ms.every((m) => !m.name.trim() && !m.meta.trim()) ? [blankModel()] : ms));
     }
     setKind(k);
   };
@@ -397,11 +391,13 @@ export function ProviderEditor({
       <Field
         label="渠道名"
         hint={
-          duplicate
-            ? <span className="text-[var(--danger)]">已有同名渠道，换一个名字或去编辑它</span>
-            : renaming
-              ? "改名后默认模型、副模型、定时任务里的引用会一起改"
-              : "只能用字母、数字、-、_（它会变成配置里的表键）"
+          duplicate ? (
+            <span className="text-[var(--danger)]">已有同名渠道，换一个名字或去编辑它</span>
+          ) : renaming ? (
+            "改名后默认模型、副模型、定时任务里的引用会一起改"
+          ) : (
+            "只能用字母、数字、-、_（它会变成配置里的表键）"
+          )
         }
       >
         <Input
@@ -422,17 +418,12 @@ export function ProviderEditor({
             : "carter 不认识这个 Kind，按 Chat Completions 处理"
         }
       >
-        <Select
-          value={kind}
-          onChange={changeKind}
-          options={protocolOptions}
-        />
+        <Select value={kind} onChange={changeKind} options={protocolOptions} />
       </Field>
       {alias && (
         <div className="mb-3">
           <Banner kind="info">
-            这个渠道的 <span className="mono">kind = {alias.kind}</span>{" "}
-            是 carter 的别名，实际走{" "}
+            这个渠道的 <span className="mono">kind = {alias.kind}</span> 是 carter 的别名，实际走{" "}
             <span className="mono">{alias.protocol}</span>。留着也能用；改成上面的线协议
             并填好地址，配置会更直白。
           </Banner>

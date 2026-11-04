@@ -42,13 +42,22 @@ pub(crate) fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
         Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
     } else {
         let err = String::from_utf8_lossy(&out.stderr);
-        let tail: String = err.trim().lines().rev().take(3).collect::<Vec<_>>()
+        let tail: String = err
+            .trim()
+            .lines()
+            .rev()
+            .take(3)
+            .collect::<Vec<_>>()
             .into_iter()
             .rev()
             .collect::<Vec<_>>()
             .join(" / ");
         Err(if tail.is_empty() {
-            format!("git {} 退出码 {:?}", args.first().unwrap_or(&""), out.status.code())
+            format!(
+                "git {} 退出码 {:?}",
+                args.first().unwrap_or(&""),
+                out.status.code()
+            )
         } else {
             tail
         })
@@ -125,7 +134,11 @@ pub fn commit_turn(root: &Path, team_rel: &str, turn: u32) -> Result<Option<Stri
         }
         // 只列最多 6 个，再多就「等 n 个」—— 提交正文不是文件清单。
         if files.len() < 6 {
-            files.push(path.trim_start_matches(team_rel).trim_start_matches('/').to_string());
+            files.push(
+                path.trim_start_matches(team_rel)
+                    .trim_start_matches('/')
+                    .to_string(),
+            );
         }
     }
     let more = (added + modified + deleted).saturating_sub(files.len());
@@ -141,7 +154,9 @@ pub fn commit_turn(root: &Path, team_rel: &str, turn: u32) -> Result<Option<Stri
     let subject = format!("chore(carter): 第 {turn} 轮 · {summary}");
     let message = format!("{subject}\n\n{body}\n\nCarter-Team: kind=commit turn={turn}");
     git(root, &["commit", "-m", &message, "--", team_rel])?;
-    Ok(Some(git(root, &["rev-parse", "--short", "HEAD"]).unwrap_or_default()))
+    Ok(Some(
+        git(root, &["rev-parse", "--short", "HEAD"]).unwrap_or_default(),
+    ))
 }
 
 /// 从会话轮末调用：找得到团队目录就提交，找不到就算了。
@@ -202,7 +217,9 @@ pub fn commit_team(root: &Path, team_rel: &str, message: &str) -> Result<Option<
         return Ok(None);
     }
     git(root, &["commit", "-m", message, "--", team_rel])?;
-    Ok(Some(git(root, &["rev-parse", "--short", "HEAD"]).unwrap_or_default()))
+    Ok(Some(
+        git(root, &["rev-parse", "--short", "HEAD"]).unwrap_or_default(),
+    ))
 }
 
 /// 推当前分支。
@@ -227,13 +244,16 @@ pub fn remote_name(root: &Path) -> Option<String> {
     // 当前分支已经跟踪的那个远端（`remotes/upstream/main` 取 `upstream`）。
     if let Ok(up) = git(
         root,
-        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
-    ) {
-        if let Some((name, _)) = up.trim().split_once('/') {
-            if !name.is_empty() {
-                return Some(name.to_string());
-            }
-        }
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
+    ) && let Some((name, _)) = up.trim().split_once('/')
+        && !name.is_empty()
+    {
+        return Some(name.to_string());
     }
     git(root, &["remote"])
         .ok()?
@@ -365,20 +385,14 @@ fn sync_branch(root: &Path, remote: &str) -> Result<String, String> {
         return Ok("远端还没有这个分支，无需同步".into());
     }
 
-    let behind = git(
-        root,
-        &["rev-list", "--count", &format!("HEAD..{upstream}")],
-    )?
-    .trim()
-    .parse::<u32>()
-    .unwrap_or(0);
-    let ahead = git(
-        root,
-        &["rev-list", "--count", &format!("{upstream}..HEAD")],
-    )?
-    .trim()
-    .parse::<u32>()
-    .unwrap_or(0);
+    let behind = git(root, &["rev-list", "--count", &format!("HEAD..{upstream}")])?
+        .trim()
+        .parse::<u32>()
+        .unwrap_or(0);
+    let ahead = git(root, &["rev-list", "--count", &format!("{upstream}..HEAD")])?
+        .trim()
+        .parse::<u32>()
+        .unwrap_or(0);
 
     if behind == 0 {
         return Ok(if ahead > 0 {
@@ -455,7 +469,10 @@ mod tests {
 
         // 再提交一次：没有改动就该安静返回 None。
         assert!(commit_turn(&dir, ".carter", 8).unwrap().is_none());
-        assert_eq!(git(&dir, &["rev-list", "--count", "HEAD"]).unwrap().trim(), "2");
+        assert_eq!(
+            git(&dir, &["rev-list", "--count", "HEAD"]).unwrap().trim(),
+            "2"
+        );
 
         // 提交信息要能读出这一轮干了什么，并且带 trailer。
         let msg = git(&dir, &["log", "-1", "--format=%s%n%b"]).unwrap();
@@ -516,7 +533,11 @@ mod remote_tests {
     fn a_remote_not_named_origin_is_still_found() {
         let dir = repo("named");
         assert!(remote_name(&dir).is_none());
-        git(&dir, &["remote", "add", "upstream", "https://example.com/r.git"]).unwrap();
+        git(
+            &dir,
+            &["remote", "add", "upstream", "https://example.com/r.git"],
+        )
+        .unwrap();
 
         assert_eq!(remote_name(&dir).as_deref(), Some("upstream"));
         assert_eq!(
@@ -532,8 +553,16 @@ mod remote_tests {
     #[test]
     fn origin_wins_when_present() {
         let dir = repo("prefer");
-        git(&dir, &["remote", "add", "upstream", "https://example.com/up.git"]).unwrap();
-        git(&dir, &["remote", "add", "origin", "https://example.com/origin.git"]).unwrap();
+        git(
+            &dir,
+            &["remote", "add", "upstream", "https://example.com/up.git"],
+        )
+        .unwrap();
+        git(
+            &dir,
+            &["remote", "add", "origin", "https://example.com/origin.git"],
+        )
+        .unwrap();
         assert_eq!(remote_name(&dir).as_deref(), Some("origin"));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -543,12 +572,18 @@ mod remote_tests {
         let dir = repo("set");
         let msg = set_remote(&dir, "https://example.com/a.git").unwrap();
         assert!(msg.contains("添加"), "{msg}");
-        assert_eq!(remote_url(&dir).as_deref(), Some("https://example.com/a.git"));
+        assert_eq!(
+            remote_url(&dir).as_deref(),
+            Some("https://example.com/a.git")
+        );
 
         // 再配一次是改地址，不是加出第二个远端。
         let msg = set_remote(&dir, "https://example.com/b.git").unwrap();
         assert!(msg.contains("已改为"), "{msg}");
-        assert_eq!(remote_url(&dir).as_deref(), Some("https://example.com/b.git"));
+        assert_eq!(
+            remote_url(&dir).as_deref(),
+            Some("https://example.com/b.git")
+        );
         assert_eq!(
             git(&dir, &["remote"]).unwrap().lines().count(),
             1,

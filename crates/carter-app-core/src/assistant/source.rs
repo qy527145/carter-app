@@ -81,7 +81,9 @@ pub fn diff(state: &mut SourceState, output: &str) -> Vec<String> {
     if fresh.len() > MAX_NEW_PER_POLL {
         let more = fresh.len() - MAX_NEW_PER_POLL;
         fresh.truncate(MAX_NEW_PER_POLL);
-        fresh.push(format!("（还有 {more} 条新行没有列出 —— 命令的范围可能太宽了）"));
+        fresh.push(format!(
+            "（还有 {more} 条新行没有列出 —— 命令的范围可能太宽了）"
+        ));
     }
     fresh
 }
@@ -218,7 +220,11 @@ mod tests {
         let mut st = SourceState::default();
         diff(&mut st, "  a  \n\n");
         assert!(diff(&mut st, "a\n   \n").is_empty());
-        assert_eq!(diff(&mut st, "a\n x \n x\n"), vec!["x".to_string()], "同一次里重复的只算一次");
+        assert_eq!(
+            diff(&mut st, "a\n x \n x\n"),
+            vec!["x".to_string()],
+            "同一次里重复的只算一次"
+        );
     }
 
     #[test]
@@ -238,7 +244,10 @@ mod tests {
         diff(&mut st, &many);
         assert_eq!(st.seen.len(), MAX_SEEN);
         // 留下的是最近的：最后一行还在。
-        assert!(st.seen.contains(&fingerprint(&format!("{}", MAX_SEEN + 99))));
+        assert!(
+            st.seen
+                .contains(&fingerprint(&format!("{}", MAX_SEEN + 99)))
+        );
     }
 
     #[test]

@@ -1,14 +1,13 @@
 // 渠道页：渠道列表 + 新建/编辑 + 协议对照。
 
-import { useState } from "react";
 import { AlertTriangle, CircleCheck, CircleX, Plus, Star } from "lucide-react";
-
-import { listChannels, type ChannelRow } from "../../lib/api";
+import { useState } from "react";
+import { Button } from "../../components/ui/Button";
+import { Badge, Banner, Card } from "../../components/ui/Panel";
+import { type ChannelRow, listChannels } from "../../lib/api";
 import { presetFor } from "../../lib/protocols";
 import { useAsync } from "../../lib/useAsync";
 import { useStore } from "../../store";
-import { Button } from "../../components/ui/Button";
-import { Badge, Banner, Card } from "../../components/ui/Panel";
 import { AsyncBody, PageIntro } from "./AsyncBody";
 import { ProviderEditor } from "./ProviderEditor";
 
@@ -60,9 +59,7 @@ function ChannelCard({ c, onEdit }: { c: ChannelRow; onEdit: () => void }) {
           {c.models.length} 个模型
         </span>
         {c.supported_server_tools.length > 0 && (
-          <span className="text-dim">
-            服务端工具 {c.supported_server_tools.length} 个
-          </span>
+          <span className="text-dim">服务端工具 {c.supported_server_tools.length} 个</span>
         )}
       </div>
 
@@ -89,8 +86,8 @@ function ProtocolNotes() {
       <div className="mb-2 text-sm font-medium">三种线协议</div>
       <div className="space-y-2 text-[11px] leading-relaxed text-dim">
         <div>
-          <span className="mono text-ink">anthropic</span> —— Anthropic Messages。
-          服务端工具支持 web_search / web_fetch / code_execution / computer_use。
+          <span className="mono text-ink">anthropic</span> —— Anthropic Messages。 服务端工具支持
+          web_search / web_fetch / code_execution / computer_use。
         </div>
         <div>
           <span className="mono text-ink">openai_responses</span> —— OpenAI Responses。
@@ -102,10 +99,9 @@ function ProtocolNotes() {
           ，渠道里声明的会被明确报出来并忽略。
         </div>
         <div className="pt-1">
-          渠道用的是哪一种由 <span className="mono">kind</span> 决定；
-          kind 可以是别名（<span className="mono">deepseek</span>、
-          <span className="mono">ollama</span>…），carter 会把它映射到上面三种之一，
-          并补上默认地址。
+          渠道用的是哪一种由 <span className="mono">kind</span> 决定； kind 可以是别名（
+          <span className="mono">deepseek</span>、<span className="mono">ollama</span>…），carter
+          会把它映射到上面三种之一， 并补上默认地址。
         </div>
       </div>
     </div>
@@ -121,12 +117,7 @@ export function ChannelsPage() {
     <>
       <div className="mb-4 flex items-center gap-2">
         <h1 className="text-[16px] font-semibold">渠道</h1>
-        <Button
-          variant="primary"
-          size="sm"
-          className="ml-auto"
-          onClick={() => setEditing(null)}
-        >
+        <Button variant="primary" size="sm" className="ml-auto" onClick={() => setEditing(null)}>
           <Plus size={13} />
           新建渠道
         </Button>

@@ -46,12 +46,7 @@ export const PROTOCOLS: ProtocolPreset[] = [
     label: "OpenAI Responses",
     protocol: "openai_responses",
     defaultBaseUrl: "https://api.openai.com",
-    serverTools: [
-      "web_search",
-      "web_search_preview",
-      "code_interpreter",
-      "file_search",
-    ],
+    serverTools: ["web_search", "web_search_preview", "code_interpreter", "file_search"],
     metaProvider: "openai",
   },
   {
@@ -124,10 +119,7 @@ export const KIND_ALIASES: ProtocolPreset[] = [
 ];
 
 export function presetFor(kind: string): ProtocolPreset | undefined {
-  return (
-    PROTOCOLS.find((p) => p.kind === kind) ??
-    KIND_ALIASES.find((p) => p.kind === kind)
-  );
+  return PROTOCOLS.find((p) => p.kind === kind) ?? KIND_ALIASES.find((p) => p.kind === kind);
 }
 
 /** 用户填的 kind 不认识时的兜底说明。 */

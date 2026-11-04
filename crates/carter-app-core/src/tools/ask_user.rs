@@ -85,33 +85,32 @@ fn parse_one(q: &Value) -> Result<AskQuestion, String> {
         .ok_or("缺少 question")?
         .to_string();
 
-    let options: Vec<crate::protocol::AskOption> = q
-        .get("options")
-        .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|o| match o {
-                    // 新形态：{ label, description }
-                    Value::Object(_) => o
-                        .get("label")
-                        .and_then(Value::as_str)
-                        .map(|l| crate::protocol::AskOption {
-                            label: l.to_string(),
-                            description: o
-                                .get("description")
-                                .and_then(Value::as_str)
-                                .map(str::to_string),
+    let options: Vec<crate::protocol::AskOption> =
+        q.get("options")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|o| match o {
+                        // 新形态：{ label, description }
+                        Value::Object(_) => o.get("label").and_then(Value::as_str).map(|l| {
+                            crate::protocol::AskOption {
+                                label: l.to_string(),
+                                description: o
+                                    .get("description")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_string),
+                            }
                         }),
-                    // 旧形态：裸字符串
-                    Value::String(s) => Some(crate::protocol::AskOption {
-                        label: s.clone(),
-                        description: None,
-                    }),
-                    _ => None,
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+                        // 旧形态：裸字符串
+                        Value::String(s) => Some(crate::protocol::AskOption {
+                            label: s.clone(),
+                            description: None,
+                        }),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
 
     Ok(AskQuestion {
         question,

@@ -10,15 +10,15 @@
       // 真实设置在 ~/.carter-app/settings.json，但那要等应用启动后才读得到 ——
       // 不先这么做，深色用户每次启动都会看到一瞬白闪。
       // 取值约定与 src/lib/theme.ts 的 THEME_KEY 一致。
-      (function () {
+      (() => {
         try {
-          var pref = localStorage.getItem("carter.theme") || "dark";
-          var dark =
+          const pref = localStorage.getItem("carter.theme") || "dark";
+          const dark =
             pref === "dark" ||
             (pref === "system" &&
               window.matchMedia("(prefers-color-scheme: dark)").matches);
           if (dark) document.documentElement.classList.add("dark");
-        } catch (e) {
+        } catch {
           document.documentElement.classList.add("dark");
         }
       })();

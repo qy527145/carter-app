@@ -12,7 +12,6 @@
 // 不是 hash。所以图片存在 `attachments` 里、显示成缩略图，发送时才拼到文本末尾。
 // 历史消息里那些 token 由 `MessageImages` 渲染回图片。
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   CircleHelp,
@@ -25,6 +24,7 @@ import {
   ImagePlus,
   ListOrdered,
   LoaderCircle,
+  type LucideIcon,
   MessageSquarePlus,
   MessagesSquare,
   Send,
@@ -35,25 +35,25 @@ import {
   Target,
   X,
   Zap,
-  type LucideIcon,
 } from "lucide-react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import {
+  type CommandRow,
   listCommands,
   listFiles,
+  type ModelRow,
   readImage,
   saveImage,
   sendCommand,
-  type CommandRow,
-  type ModelRow,
 } from "../lib/api";
 import { landFlight } from "../lib/flight";
-import { contextSummary, formatContext, parseContexts } from "../lib/promptContext";
-import { toastError } from "../lib/toast";
 import { fmtTokens, shortenPath } from "../lib/format";
 import { displayName, modelTitle, useModelCatalog } from "../lib/modelLabel";
+import { contextSummary, formatContext, parseContexts } from "../lib/promptContext";
 import * as ops from "../lib/sessionOps";
-import { useStore, type QueuedPrompt } from "../store";
+import { toastError } from "../lib/toast";
+import { type QueuedPrompt, useStore } from "../store";
 import { ContextChips } from "./ContextChip";
 import { Glyph } from "./toolcards/ToolCard";
 
@@ -577,32 +577,27 @@ export function Composer() {
   // 粘贴图片
   // -------------------------------------------------------------------------
 
-  const onPaste = useCallback(
-    async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-      const images = Array.from(e.clipboardData.items).filter((it) =>
-        it.type.startsWith("image/"),
-      );
-      if (images.length === 0) return; // 普通文本粘贴，走默认行为
-      e.preventDefault();
-      setPasting(true);
-      try {
-        for (const it of images) {
-          const file = it.getAsFile();
-          if (!file) continue;
-          const buf = await file.arrayBuffer();
-          const b64 = arrayBufferToBase64(buf);
-          const ext = (it.type.split("/")[1] || "png").replace("jpeg", "jpg");
-          const token = await saveImage(b64, ext);
-          setAttachments((a) => (a.includes(token) ? a : [...a, token]));
-        }
-      } catch (err) {
-        toastError(err);
-      } finally {
-        setPasting(false);
+  const onPaste = useCallback(async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const images = Array.from(e.clipboardData.items).filter((it) => it.type.startsWith("image/"));
+    if (images.length === 0) return; // 普通文本粘贴，走默认行为
+    e.preventDefault();
+    setPasting(true);
+    try {
+      for (const it of images) {
+        const file = it.getAsFile();
+        if (!file) continue;
+        const buf = await file.arrayBuffer();
+        const b64 = arrayBufferToBase64(buf);
+        const ext = (it.type.split("/")[1] || "png").replace("jpeg", "jpg");
+        const token = await saveImage(b64, ext);
+        setAttachments((a) => (a.includes(token) ? a : [...a, token]));
       }
-    },
-    [],
-  );
+    } catch (err) {
+      toastError(err);
+    } finally {
+      setPasting(false);
+    }
+  }, []);
 
   // -------------------------------------------------------------------------
   // 发送 / 取消
@@ -719,7 +714,8 @@ export function Composer() {
   };
 
   const canSend =
-    (text.trim() !== "" || command !== null || contexts.length > 0 || attachments.length > 0) && !disabled;
+    (text.trim() !== "" || command !== null || contexts.length > 0 || attachments.length > 0) &&
+    !disabled;
   const commandRow = command ? commands.find((c) => c.name === command) : undefined;
 
   return (
@@ -756,44 +752,44 @@ export function Composer() {
           )}
 
           <div className="relative">
-          {command && (
-            <CommandTag
-              ref={commandRef}
-              name={command}
-              builtin={commandRow?.kind === "builtin"}
-              title={commandRow?.description}
-              onRemove={() => {
-                setCommand(null);
-                taRef.current?.focus();
-              }}
+            {command && (
+              <CommandTag
+                ref={commandRef}
+                name={command}
+                builtin={commandRow?.kind === "builtin"}
+                title={commandRow?.description}
+                onRemove={() => {
+                  setCommand(null);
+                  taRef.current?.focus();
+                }}
+              />
+            )}
+            <textarea
+              ref={taRef}
+              rows={1}
+              value={text}
+              onChange={(e) => onTextChange(e.target.value, e.target.selectionStart)}
+              onPaste={onPaste}
+              onKeyDown={onKeyDown}
+              disabled={disabled}
+              style={{ textIndent: indent }}
+              placeholder={
+                !connected
+                  ? "会话未就绪 —— 点「新对话」开始"
+                  : pendingAsk
+                    ? "请先回答上面的问题"
+                    : command
+                      ? commandRow?.argument_hint || "接着写，Enter 执行"
+                      : contexts.length > 0
+                        ? "想补充点什么？也可以直接按 Enter 交给卡特"
+                        : busy
+                          ? "可以接着说：Enter 排队，⌘/Ctrl+Enter 插队"
+                          : sessionId === ops.ASSISTANT_CHAT_ID
+                            ? "告诉助理要盯什么、什么事可以替你做，或回答它的问题"
+                            : "输入消息   / 命令   @ 引用文件/目录   可直接粘贴图片"
+              }
+              className="block max-h-48 min-h-14 w-full resize-none bg-transparent px-4 pb-1 pt-3.5 text-[15px] leading-relaxed text-ink outline-none placeholder:text-dim disabled:opacity-50"
             />
-          )}
-          <textarea
-            ref={taRef}
-            rows={1}
-            value={text}
-            onChange={(e) => onTextChange(e.target.value, e.target.selectionStart)}
-            onPaste={onPaste}
-            onKeyDown={onKeyDown}
-            disabled={disabled}
-            style={{ textIndent: indent }}
-            placeholder={
-              !connected
-                ? "会话未就绪 —— 点「新对话」开始"
-                : pendingAsk
-                  ? "请先回答上面的问题"
-                  : command
-                    ? commandRow?.argument_hint || "接着写，Enter 执行"
-                  : contexts.length > 0
-                    ? "想补充点什么？也可以直接按 Enter 交给卡特"
-                  : busy
-                    ? "可以接着说：Enter 排队，⌘/Ctrl+Enter 插队"
-                    : sessionId === ops.ASSISTANT_CHAT_ID
-                      ? "告诉助理要盯什么、什么事可以替你做，或回答它的问题"
-                      : "输入消息   / 命令   @ 引用文件/目录   可直接粘贴图片"
-            }
-            className="block max-h-48 min-h-14 w-full resize-none bg-transparent px-4 pb-1 pt-3.5 text-[15px] leading-relaxed text-ink outline-none placeholder:text-dim disabled:opacity-50"
-          />
           </div>
 
           {/* 输入框下的一行：模型、工作目录、发送。 */}
@@ -850,13 +846,7 @@ export function Composer() {
  * 的」，否则用户会以为模型正在回复一条它根本还没收到的消息。轮到了才挪进去
  * （`turn_started` 带 `prompt_id` 回来，见 store 的 `applyEvent`）。
  */
-function QueueStrip({
-  queued,
-  sessionId,
-}: {
-  queued: QueuedPrompt[];
-  sessionId: string | null;
-}) {
+function QueueStrip({ queued, sessionId }: { queued: QueuedPrompt[]; sessionId: string | null }) {
   const waiting = queued.filter((q) => !q.direct);
   if (waiting.length === 0) return null;
   return (
@@ -871,7 +861,10 @@ function QueueStrip({
             key={q.id}
             className="group flex items-center gap-2 rounded px-1 py-0.5 hover:bg-ink/5"
           >
-            <span className="min-w-0 flex-1 truncate text-xs text-dim" title={contextSummary(q.text)}>
+            <span
+              className="min-w-0 flex-1 truncate text-xs text-dim"
+              title={contextSummary(q.text)}
+            >
               {contextSummary(q.text)}
             </span>
             <button
@@ -1009,7 +1002,15 @@ function ContextRing() {
         <LoaderCircle size={14} className="animate-spin" />
       ) : (
         <svg width="14" height="14" viewBox="0 0 16 16" className="-rotate-90">
-          <circle cx="8" cy="8" r={R} fill="none" stroke="currentColor" strokeOpacity="0.18" strokeWidth="2.2" />
+          <circle
+            cx="8"
+            cy="8"
+            r={R}
+            fill="none"
+            stroke="currentColor"
+            strokeOpacity="0.18"
+            strokeWidth="2.2"
+          />
           <circle
             cx="8"
             cy="8"
@@ -1036,9 +1037,7 @@ function ModelPicker({ modelRef }: { modelRef: string }) {
   const pick = (ref: string) => {
     setOpen(false);
     if (!sessionId) return;
-    sendCommand(sessionId, { type: "set_model", model: ref }).catch((e) =>
-      setNotice(String(e)),
-    );
+    sendCommand(sessionId, { type: "set_model", model: ref }).catch((e) => setNotice(String(e)));
   };
 
   // 按渠道分组，一个渠道一段。
@@ -1101,7 +1100,9 @@ function ModelMenu({
       className="absolute bottom-full left-0 z-50 mb-2 max-h-80 w-72 overflow-y-auto rounded-lg bg-card py-1 shadow-lift"
     >
       {groups.length === 0 && (
-        <div className="px-3 py-2 text-xs text-dim">没有可用的模型，先去「设置 → 渠道」配一个。</div>
+        <div className="px-3 py-2 text-xs text-dim">
+          没有可用的模型，先去「设置 → 渠道」配一个。
+        </div>
       )}
       {groups.map(([provider, list]) => (
         <div key={provider}>
@@ -1113,8 +1114,12 @@ function ModelMenu({
               key={m.reference}
               onClick={() => onPick(m.reference)}
               title={`${m.reference}
-实际请求：${m.api_name}${m.meta ? `
-元数据：${m.meta}` : ""}`}
+实际请求：${m.api_name}${
+                m.meta
+                  ? `
+元数据：${m.meta}`
+                  : ""
+              }`}
               className={`flex w-full items-center gap-2 px-3 py-1.5 text-left transition-colors hover:bg-ink/5 ${
                 m.reference === current ? "text-ink" : "text-dim"
               }`}
@@ -1158,7 +1163,11 @@ function CwdPicker({ cwd }: { cwd: string }) {
       title={cwd ? `${cwd}\n点击切换（会新开一个会话）` : "选择工作目录"}
       className="flex min-w-0 max-w-[20rem] items-center gap-1.5 rounded-md px-1.5 py-1 text-[11px] text-dim transition-colors hover:bg-ink/5 hover:text-ink disabled:opacity-50"
     >
-      {busy ? <LoaderCircle size={11} className="animate-spin" /> : <Folder size={11} className="shrink-0" />}
+      {busy ? (
+        <LoaderCircle size={11} className="animate-spin" />
+      ) : (
+        <Folder size={11} className="shrink-0" />
+      )}
       <span className="mono truncate">{cwd ? shortenPath(cwd) : "选择目录"}</span>
     </button>
   );

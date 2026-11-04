@@ -10,34 +10,33 @@
 // 「这个渠道是哪家官方」由渠道列表里的 base_url 决定（而不是只看 kind）：
 // 把一个 kind=anthropic 的渠道指到中转站上时，用 anthropic 的目录会把名字逐个对错。
 
-import { useEffect, useMemo, useState } from "react";
 import { Search } from "lucide-react";
-
-import {
-  deleteModel,
-  detectCatalogProvider,
-  listChannels,
-  saveModel,
-  type ChannelRow,
-  type ModelRow,
-} from "../../lib/api";
-import {
-  REASONING_EFFORTS,
-  presetFor,
-  reasoningIsCustom,
-  reasoningText,
-} from "../../lib/protocols";
-import { toastError } from "../../lib/toast";
-import { useAsync } from "../../lib/useAsync";
+import { useEffect, useMemo, useState } from "react";
 import { Button } from "../../components/ui/Button";
 import { Field, Input } from "../../components/ui/Input";
 import { ConfirmDialog, Modal } from "../../components/ui/Panel";
 import { Select } from "../../components/ui/Select";
 import {
-  CatalogError,
-  CatalogPicker,
+  type ChannelRow,
+  deleteModel,
+  detectCatalogProvider,
+  listChannels,
+  type ModelRow,
+  saveModel,
+} from "../../lib/api";
+import {
+  presetFor,
+  REASONING_EFFORTS,
+  reasoningIsCustom,
+  reasoningText,
+} from "../../lib/protocols";
+import { toastError } from "../../lib/toast";
+import { useAsync } from "../../lib/useAsync";
+import {
   applyPick,
   blockNameFor,
+  CatalogError,
+  CatalogPicker,
   catalogIdOf,
   useCatalog,
 } from "./CatalogPicker";
@@ -250,8 +249,7 @@ export function ModelEditor({
       >
         {reasoningCustom ? (
           <div className="rounded-md border border-dashed border-edge px-3 py-2 text-sm text-dim">
-            配置里写的是{" "}
-            <span className="mono">{JSON.stringify(editing?.default_reasoning)}</span>
+            配置里写的是 <span className="mono">{JSON.stringify(editing?.default_reasoning)}</span>
             ，这种形态界面表达不了 —— 要改请编辑配置文件。
           </div>
         ) : (
@@ -295,8 +293,7 @@ export function ModelEditor({
               {editing.is_default && (
                 <>
                   <br />
-                  它当前是默认模型，删掉之后新会话会因为没有默认模型而起不来 ——
-                  记得另选一个。
+                  它当前是默认模型，删掉之后新会话会因为没有默认模型而起不来 —— 记得另选一个。
                 </>
               )}
             </>

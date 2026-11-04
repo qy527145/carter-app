@@ -73,8 +73,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64};
 
-use carter::agent::bootstrap::build_tools as carter_build_tools;
 use carter::agent::CancelToken;
+use carter::agent::bootstrap::build_tools as carter_build_tools;
 use carter::config::AgentConfig;
 use carter::provider::LlmProvider;
 use carter::registry::ModelInfo;
@@ -277,18 +277,30 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
             ConfigKind::RuleDelete,
             ConfigKind::Mode,
         ] {
-            push(Arc::new(AssistantConfigTool::new(store.clone(), kind)), &mut tools);
+            push(
+                Arc::new(AssistantConfigTool::new(store.clone(), kind)),
+                &mut tools,
+            );
         }
         for kind in [TicketKind::Dispatch, TicketKind::Act, TicketKind::Proposal] {
-            push(Arc::new(AssistantTicketTool::new(shell.clone(), kind)), &mut tools);
+            push(
+                Arc::new(AssistantTicketTool::new(shell.clone(), kind)),
+                &mut tools,
+            );
         }
         // 长期记忆与往期检索（见 `assistant/memory.rs`）。
-        push(Arc::new(AssistantMemoryTool::new(store.clone())), &mut tools);
+        push(
+            Arc::new(AssistantMemoryTool::new(store.clone())),
+            &mut tools,
+        );
         push(Arc::new(AssistantRecallTool::new(store)), &mut tools);
         // 与工单通信：给工单补话（`to="#3"`）、看它做到哪了。不给 `list_sessions` ——
         // 工单一览已经在系统提示的「现状」里，别的会话也不是助理该联系的。
         for kind in [peer::Kind::Send, peer::Kind::Read] {
-            push(Arc::new(peer::PeerTool::new(shell.clone(), session_id.clone(), kind)), &mut tools);
+            push(
+                Arc::new(peer::PeerTool::new(shell.clone(), session_id.clone(), kind)),
+                &mut tools,
+            );
         }
         return tools;
     }
@@ -333,13 +345,13 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
     }
 
     // 我们自己那个一次问一组问题的 ask_user。
-    if let Some(ask_tx) = ask_tx {
-        if settings.tool_enabled("ask_user_question") {
-            push(
-                Arc::new(AskUserTool::new(ask_tx, cancel.clone())),
-                &mut tools,
-            );
-        }
+    if let Some(ask_tx) = ask_tx
+        && settings.tool_enabled("ask_user_question")
+    {
+        push(
+            Arc::new(AskUserTool::new(ask_tx, cancel.clone())),
+            &mut tools,
+        );
     }
 
     // 子 agent 的工具池：主 registry 里的全部工具，去掉 `agent`（不能再派生）与
@@ -374,14 +386,20 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
     // 与 `goal_update` 同一个理由。
     if settings.tool_enabled("schedule") {
         push(
-            Arc::new(ScheduleTool::new(schedules, cwd.to_string_lossy().to_string())),
+            Arc::new(ScheduleTool::new(
+                schedules,
+                cwd.to_string_lossy().to_string(),
+            )),
             &mut tools,
         );
     }
 
     // 工单的结局。同样挂在快照之后：交不交工是主会话的决定，不是某个子 agent 的。
     if let Some((store, ticket_id)) = assistant {
-        push(Arc::new(AssistantReportTool::new(store, ticket_id)), &mut tools);
+        push(
+            Arc::new(AssistantReportTool::new(store, ticket_id)),
+            &mut tools,
+        );
     }
 
     // 团队目录（目标 / 任务 / 看板）。在快照之后：子 agent 拿的是主对话工具表的
@@ -506,7 +524,11 @@ mod tests {
         let skills: Vec<_> = swapped.iter().filter(|t| t.name() == "skill").collect();
         assert_eq!(skills.len(), 1, "必须恰好一个");
         // 给模型看的文档不变 —— 换的是实现，不是契约。
-        assert!(skills[0].description().contains("Skill"), "{}", skills[0].description());
+        assert!(
+            skills[0].description().contains("Skill"),
+            "{}",
+            skills[0].description()
+        );
         assert_eq!(
             skills[0].parameters()["required"][0],
             serde_json::json!("name"),

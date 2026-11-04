@@ -19,7 +19,6 @@
 // 布局引擎更可控，也不会为了「力导向好看」把顺序抖动掉 —— 团队图每次打开都长得
 // 不一样，人就记不住东西在哪。
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   ArrowRight,
@@ -35,40 +34,32 @@ import {
   Link2,
   ListChecks,
   LoaderCircle,
-  UserRound,
   MessageSquare,
   Plus,
   RefreshCw,
   Sparkles,
   Target,
+  UserRound,
 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
+  type TeamBoard,
+  type TeamGoal,
+  type TeamOverview,
+  type TeamStatus,
+  type TeamTask,
   teamBoardHtml,
   teamInitialize,
   teamOverview,
   teamSetRemote,
   teamStatus,
   teamSync,
-  type TeamBoard,
-  type TeamGoal,
-  type TeamOverview,
-  type TeamStatus,
-  type TeamTask,
 } from "../../lib/api";
+import { launchFlight, leaveMain } from "../../lib/flight";
 import { baseName } from "../../lib/format";
-import { leaveMain, launchFlight } from "../../lib/flight";
 import { contextSummary, formatContext } from "../../lib/promptContext";
 import { ASSISTANT_CHAT_ID, openProjectChat, startProjectChat } from "../../lib/sessionOps";
-import { toastError, toastOk } from "../../lib/toast";
-import { useStore } from "../../store";
-import { BoardFrame } from "./BoardFrame";
-import { LogTab, MineTab, markSeen, readSeen, useInbox } from "./MineAndLog";
-import { PeopleProvider, usePeople } from "./people";
-import { IdentityChip, JoinDialog, PersonAvatar } from "./peopleUi";
-import { BoardView, GRAPH_VIEWS, ListView, TimelineView, useGraphView } from "./GraphViews";
-import { HandoffButton } from "./HandoffButton";
-import { TaskDrawer } from "./TaskDrawer";
 import {
   layerize,
   newBoardHandoff,
@@ -78,6 +69,15 @@ import {
   statusTone,
   taskHandoff,
 } from "../../lib/teamUi";
+import { toastError, toastOk } from "../../lib/toast";
+import { useStore } from "../../store";
+import { BoardFrame } from "./BoardFrame";
+import { BoardView, GRAPH_VIEWS, ListView, TimelineView, useGraphView } from "./GraphViews";
+import { HandoffButton } from "./HandoffButton";
+import { LogTab, MineTab, markSeen, readSeen, useInbox } from "./MineAndLog";
+import { PeopleProvider, usePeople } from "./people";
+import { IdentityChip, JoinDialog, PersonAvatar } from "./peopleUi";
+import { TaskDrawer } from "./TaskDrawer";
 
 type Tab = "mine" | "graph" | "board" | "log";
 
@@ -314,18 +314,34 @@ function TeamPageBody({ onReloaded }: { onReloaded: () => void }) {
 
         {data && (
           <div className="flex items-center gap-1 rounded-lg bg-card p-0.5">
-            <TabButton active={tab === "mine"} onClick={() => setTab("mine")} icon={<UserRound size={12} />}>
+            <TabButton
+              active={tab === "mine"}
+              onClick={() => setTab("mine")}
+              icon={<UserRound size={12} />}
+            >
               我的
               {unread > 0 && <Dot n={unread} />}
             </TabButton>
-            <TabButton active={tab === "graph"} onClick={() => setTab("graph")} icon={<GitBranch size={12} />}>
+            <TabButton
+              active={tab === "graph"}
+              onClick={() => setTab("graph")}
+              icon={<GitBranch size={12} />}
+            >
               任务图
             </TabButton>
-            <TabButton active={tab === "board"} onClick={() => setTab("board")} icon={<Kanban size={12} />}>
+            <TabButton
+              active={tab === "board"}
+              onClick={() => setTab("board")}
+              icon={<Kanban size={12} />}
+            >
               看板
               {data.boards.length > 0 && <Count n={data.boards.length} />}
             </TabButton>
-            <TabButton active={tab === "log"} onClick={() => setTab("log")} icon={<ListChecks size={12} />}>
+            <TabButton
+              active={tab === "log"}
+              onClick={() => setTab("log")}
+              icon={<ListChecks size={12} />}
+            >
               动态
             </TabButton>
           </div>
@@ -365,7 +381,9 @@ function TeamPageBody({ onReloaded }: { onReloaded: () => void }) {
               </IconAction>
               <IconAction
                 onClick={() => void doSync()}
-                title={data.remote ? `同步远端 ${data.remote}（只做快进）` : "同步远端（还没配远端）"}
+                title={
+                  data.remote ? `同步远端 ${data.remote}（只做快进）` : "同步远端（还没配远端）"
+                }
               >
                 <GitMerge size={13} className={busy ? "animate-pulse" : ""} />
               </IconAction>
@@ -404,8 +422,8 @@ function TeamPageBody({ onReloaded }: { onReloaded: () => void }) {
                 团队同步的远端仓库
               </div>
               <p className="mb-2 text-[11px] leading-relaxed text-dim">
-                所有人指向同一个 git 仓库，目标与任务才能互相同步。
-                远端不必叫 <span className="mono">origin</span>，已有的任何一个都会被用上；
+                所有人指向同一个 git 仓库，目标与任务才能互相同步。 远端不必叫{" "}
+                <span className="mono">origin</span>，已有的任何一个都会被用上；
                 配好之后会立刻把当前分支推上去。
               </p>
               <div className="flex gap-1.5">
@@ -440,8 +458,7 @@ function TeamPageBody({ onReloaded }: { onReloaded: () => void }) {
           {data.warnings.length > 0 && (
             <div className="mx-5 mt-4 rounded-lg bg-warn-bg px-3 py-2 text-[11px] text-ink">
               <div className="mb-0.5 flex items-center gap-1.5 font-medium">
-                <CircleAlert size={12} />
-                有 {data.warnings.length} 个文件读不出来
+                <CircleAlert size={12} />有 {data.warnings.length} 个文件读不出来
               </div>
               {data.warnings.map((w) => (
                 <div key={w} className="mono truncate text-dim">
@@ -640,7 +657,9 @@ function ProjectList({
           >
             <Folder size={13} className={`shrink-0 ${st ? "text-tone-violet" : "text-dim"}`} />
             <div className="min-w-0 flex-1">
-              <div className={`truncate text-xs ${active ? "font-medium text-ink" : "text-ink/90"}`}>
+              <div
+                className={`truncate text-xs ${active ? "font-medium text-ink" : "text-ink/90"}`}
+              >
                 {st?.name || baseName(p)}
               </div>
               <div className="mono truncate text-[10px] text-dim">{p}</div>
@@ -677,8 +696,8 @@ function ChooseProject({ onPick }: { onPick: (cwd: string) => void }) {
           看哪个项目的目标与任务？
         </div>
         <p className="mb-3 text-xs leading-relaxed text-dim">
-          目标、任务和看板跟着项目走，存在项目的 <span className="mono">.carter/</span> 目录里，
-          随 git 与团队同步。
+          目标、任务和看板跟着项目走，存在项目的 <span className="mono">.carter/</span> 目录里， 随
+          git 与团队同步。
         </p>
         <div className="-mx-2">
           <ProjectList projects={projects} current="" onPick={onPick} />
@@ -692,15 +711,7 @@ function ChooseProject({ onPick }: { onPick: (cwd: string) => void }) {
 // 初始化
 // ---------------------------------------------------------------------------
 
-function InitPanel({
-  onInit,
-  busy,
-  cwd,
-}: {
-  onInit: () => void;
-  busy: boolean;
-  cwd: string;
-}) {
+function InitPanel({ onInit, busy, cwd }: { onInit: () => void; busy: boolean; cwd: string }) {
   return (
     <div className="flex flex-1 items-center justify-center p-8">
       <div className="w-full max-w-lg rounded-2xl bg-card p-6 shadow-soft">
@@ -783,12 +794,7 @@ function GraphTab({
         </div>
         <div className="flex gap-1.5 overflow-x-auto lg:block lg:space-y-1.5 lg:overflow-visible">
           {data.goals.map((g) => (
-            <GoalCard
-              key={g.id}
-              goal={g}
-              active={goal?.id === g.id}
-              onClick={() => onPick(g.id)}
-            />
+            <GoalCard key={g.id} goal={g} active={goal?.id === g.id} onClick={() => onPick(g.id)} />
           ))}
         </div>
       </div>
@@ -827,10 +833,7 @@ function GoalCard({
       }`}
     >
       <div className="mb-1 flex items-center gap-1.5">
-        <span
-          className="size-1.5 shrink-0 rounded-full"
-          style={{ background: tone.fg }}
-        />
+        <span className="size-1.5 shrink-0 rounded-full" style={{ background: tone.fg }} />
         <span className="truncate text-xs font-medium">{goal.title}</span>
       </div>
       <div className="mb-1.5 flex items-center gap-1.5 text-[10px] text-dim">
@@ -869,7 +872,8 @@ function GoalGraph({
   const [view, setView] = useGraphView();
   const assignees = useMemo(() => {
     const seen = new Map<string, number>();
-    for (const t of goal.tasks) if (t.assignee) seen.set(t.assignee, (seen.get(t.assignee) ?? 0) + 1);
+    for (const t of goal.tasks)
+      if (t.assignee) seen.set(t.assignee, (seen.get(t.assignee) ?? 0) + 1);
     return [...seen];
   }, [goal.tasks]);
   const layers = useMemo(() => layerize(goal.tasks), [goal.tasks]);
@@ -892,9 +896,7 @@ function GoalGraph({
         <div className="min-w-0">
           <h2 className="truncate text-[16px] font-semibold tracking-tight">{goal.title}</h2>
           {goal.description && (
-            <p className="mt-0.5 max-w-2xl text-xs leading-relaxed text-dim">
-              {goal.description}
-            </p>
+            <p className="mt-0.5 max-w-2xl text-xs leading-relaxed text-dim">{goal.description}</p>
           )}
         </div>
         <div className="flex items-center gap-2 text-[11px] text-dim">
@@ -903,9 +905,7 @@ function GoalGraph({
             {goal.counts.done}/{goal.counts.total - goal.counts.dropped} 完成
           </span>
           {goal.counts.blocked > 0 && (
-            <span style={{ color: "var(--tone-orange)" }}>
-              {goal.counts.blocked} 受阻
-            </span>
+            <span style={{ color: "var(--tone-orange)" }}>{goal.counts.blocked} 受阻</span>
           )}
           {goal.counts.doing > 0 && (
             <span style={{ color: "var(--tone-blue)" }}>{goal.counts.doing} 进行中</span>
@@ -935,7 +935,11 @@ function GoalGraph({
           放在按人筛上面一行：先定「怎么看」，再定「看谁」。 */}
       {goal.tasks.length > 0 && (
         <div className="mb-3 flex flex-wrap items-center gap-2">
-          <div className="flex items-center gap-0.5 rounded-lg bg-card p-0.5" role="tablist" aria-label="任务图视图">
+          <div
+            className="flex items-center gap-0.5 rounded-lg bg-card p-0.5"
+            role="tablist"
+            aria-label="任务图视图"
+          >
             {GRAPH_VIEWS.map((v) => {
               const Icon = v.icon;
               const active = view === v.id;
@@ -946,7 +950,9 @@ function GoalGraph({
                   aria-selected={active}
                   onClick={() => setView(v.id)}
                   className={`carter-press flex items-center gap-1 rounded-md px-2 py-1 text-[11px] transition-colors ${
-                    active ? "bg-elevated font-medium text-ink shadow-soft" : "text-dim hover:text-ink"
+                    active
+                      ? "bg-elevated font-medium text-ink shadow-soft"
+                      : "text-dim hover:text-ink"
                   }`}
                 >
                   <Icon size={11} />
@@ -1026,12 +1032,7 @@ function GoalGraph({
           onChanged={onChanged}
         />
       ) : (
-        <TimelineView
-          goal={goal}
-          who={who}
-          onOpen={(t) => onOpenTask(goal, t)}
-          onAsk={onAsk}
-        />
+        <TimelineView goal={goal} who={who} onOpen={(t) => onOpenTask(goal, t)} onAsk={onAsk} />
       )}
 
       {/* 依赖关系单独列一块：图上画箭头在横向溢出时会被裁掉，而「谁在等谁」
@@ -1098,9 +1099,7 @@ function TaskNode({
       }`}
       style={{
         // 能开工的左边挂一条彩色竖线 —— 一眼能扫出「现在能做哪几件」。
-        boxShadow: task.ready
-          ? "inset 2px 0 0 0 var(--tone-green), var(--shadow-soft)"
-          : undefined,
+        boxShadow: task.ready ? "inset 2px 0 0 0 var(--tone-green), var(--shadow-soft)" : undefined,
       }}
     >
       {/* 整块可点的那一层。`z-0` 铺满卡片；上面的交办按钮抬到 `z-10` 才接得到
@@ -1123,9 +1122,7 @@ function TaskNode({
         <span className="text-[10px]" style={{ color: priorityTone(task.priority).fg }}>
           {task.priority}
         </span>
-        {task.ready && (
-          <span className="text-[10px] text-tone-green">可开工</span>
-        )}
+        {task.ready && <span className="text-[10px] text-tone-green">可开工</span>}
         <span className="ml-auto flex items-center gap-1">
           {task.assignee ? (
             <span className="flex items-center gap-1 text-[10px] text-dim">
@@ -1133,7 +1130,9 @@ function TaskNode({
               <PersonAvatar person={task.assignee} size={16} />
             </span>
           ) : (
-            !closed && <span className="text-[10px] text-dim opacity-0 group-hover:opacity-100">待指派</span>
+            !closed && (
+              <span className="text-[10px] text-dim opacity-0 group-hover:opacity-100">待指派</span>
+            )
           )}
         </span>
       </div>
@@ -1141,9 +1140,7 @@ function TaskNode({
       <div className="relative z-[1] text-xs font-medium leading-snug">{task.title}</div>
 
       {parent && (
-        <div className="mt-0.5 truncate text-[10px] text-dim">
-          ↳ 在「{parent.title}」下
-        </div>
+        <div className="mt-0.5 truncate text-[10px] text-dim">↳ 在「{parent.title}」下</div>
       )}
 
       {task.blocked_reason && (
@@ -1211,7 +1208,9 @@ function BoardTab({
       .then((html) => {
         if (!live) return;
         // 内容没变就不换对象：srcdoc 一变 iframe 就重载，滚动位置与页面状态全丢。
-        setPage((prev) => (prev?.id === active.id && prev.html === html ? prev : { id: active.id, html }));
+        setPage((prev) =>
+          prev?.id === active.id && prev.html === html ? prev : { id: active.id, html },
+        );
         setError(null);
       })
       .catch((e) => live && setError(String(e)));
@@ -1250,13 +1249,15 @@ function BoardTab({
           </button>
         ))}
         <button
-          onClick={() => onAsk(
+          onClick={() =>
+            onAsk(
               formatContext({
                 kind: "board",
                 title: active.title,
                 body: `帮我改一下看板「${active.title}」（${active.id}）。`,
               }),
-            )}
+            )
+          }
           className="mt-2 flex w-full items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[11px] text-dim transition-colors hover:bg-ink/[0.04] hover:text-ink"
         >
           <Sparkles size={12} />

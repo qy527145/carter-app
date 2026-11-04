@@ -266,7 +266,10 @@ pub fn save_provider(doc: &mut DocumentMut, d: &ProviderDraft) -> Result<(), Str
     for m in &d.models {
         check_key("模型", &m.name)?;
         if m.meta.trim().is_empty() {
-            return Err(format!("模型 `{}` 的 meta 不能为空（形如 anthropic/claude-sonnet-4-5）", m.name));
+            return Err(format!(
+                "模型 `{}` 的 meta 不能为空（形如 anthropic/claude-sonnet-4-5）",
+                m.name
+            ));
         }
         let mt = child_table(models, &m.name)?;
         mt.insert("meta", value(m.meta.trim()));
@@ -331,7 +334,10 @@ pub fn set_compaction(doc: &mut DocumentMut, enabled: bool, ratio: f64) -> Resul
     let agent = child_table(doc.as_table_mut(), "agent")?;
     agent.insert("compact_enabled", value(enabled));
     // 两位小数足够，也免得 0.7 写成 0.7000000000000001。
-    agent.insert("compact_threshold_ratio", value((ratio * 100.0).round() / 100.0));
+    agent.insert(
+        "compact_threshold_ratio",
+        value((ratio * 100.0).round() / 100.0),
+    );
     Ok(())
 }
 
@@ -445,7 +451,11 @@ pub fn save_provider_reload(
     // 配置已经写成功了，这一步失败只记一笔，不回滚。
     if let Some(old) = d.rename_from.as_deref().filter(|o| *o != d.name) {
         for mut s in shell.schedules.list() {
-            if let Some(next) = s.model.as_deref().and_then(|r| renamed_ref(r, old, &d.name)) {
+            if let Some(next) = s
+                .model
+                .as_deref()
+                .and_then(|r| renamed_ref(r, old, &d.name))
+            {
                 s.model = Some(next);
                 if let Err(e) = shell.schedules.upsert(s) {
                     tracing::warn!("渠道改名后更新定时任务失败：{e}");
@@ -499,10 +509,7 @@ pub fn set_skills_enabled_reload(
     apply(shell, &doc)
 }
 
-pub fn save_mcp_server_reload(
-    shell: &crate::shell::AppShell,
-    d: &McpDraft,
-) -> Result<(), String> {
+pub fn save_mcp_server_reload(shell: &crate::shell::AppShell, d: &McpDraft) -> Result<(), String> {
     let mut doc = load_doc()?;
     save_mcp_server(&mut doc, d)?;
     apply(shell, &doc)
@@ -617,8 +624,8 @@ pub fn raw_default_reasoning() -> std::collections::HashMap<(String, String), se
 /// 取某个渠道的**原始**配置（含 `${VAR}` 字面量）。
 pub fn provider_detail(name: &str) -> Result<ProviderDetail, String> {
     let doc = load_doc()?;
-    let file: RawFile = toml_edit::de::from_str(&doc.to_string())
-        .map_err(|e| format!("解析配置失败：{e}"))?;
+    let file: RawFile =
+        toml_edit::de::from_str(&doc.to_string()).map_err(|e| format!("解析配置失败：{e}"))?;
     let p = file
         .providers
         .get(name)
@@ -728,19 +735,35 @@ whatever = true
         save_provider(&mut d, &draft).unwrap();
         let out = d.to_string();
         assert!(!out.contains("[providers.ws]"), "旧名字应当消失：\n{out}");
-        assert!(out.contains(r#"api_key = "${ANTHROPIC_API_KEY}""#), "密钥要跟着走：\n{out}");
+        assert!(
+            out.contains(r#"api_key = "${ANTHROPIC_API_KEY}""#),
+            "密钥要跟着走：\n{out}"
+        );
         assert!(out.contains("[providers.proxy.models.sonnet]"), "{out}");
-        assert!(out.contains(r#"model = "proxy/sonnet""#), "默认模型引用要改：\n{out}");
+        assert!(
+            out.contains(r#"model = "proxy/sonnet""#),
+            "默认模型引用要改：\n{out}"
+        );
 
         let mut d = doc();
         save_provider(
             &mut d,
-            &ProviderDraft { name: "other".into(), kind: "anthropic".into(), ..Default::default() },
+            &ProviderDraft {
+                name: "other".into(),
+                kind: "anthropic".into(),
+                ..Default::default()
+            },
         )
         .unwrap();
-        let clash = ProviderDraft { name: "other".into(), ..draft };
+        let clash = ProviderDraft {
+            name: "other".into(),
+            ..draft
+        };
         assert!(save_provider(&mut d, &clash).is_err());
-        assert!(d.to_string().contains("[providers.ws]"), "拒绝时原渠道不能动");
+        assert!(
+            d.to_string().contains("[providers.ws]"),
+            "拒绝时原渠道不能动"
+        );
     }
 
     /// 自动压缩：两个键写进 `[agent]`，越界的比例挡在外面。
@@ -827,8 +850,14 @@ whatever = true
         let out = d.to_string();
 
         assert!(!out.contains("api_key"), "清空的键该被删掉：\n{out}");
-        assert!(!out.contains("server_tools"), "空数组该删键而不是写 []：\n{out}");
-        assert!(!out.contains("api_name"), "清空的 api_name 该被删掉：\n{out}");
+        assert!(
+            !out.contains("server_tools"),
+            "空数组该删键而不是写 []：\n{out}"
+        );
+        assert!(
+            !out.contains("api_name"),
+            "清空的 api_name 该被删掉：\n{out}"
+        );
     }
 
     /// 新增一个渠道时，`[providers.<名>]` 与 `models` 表都要现建出来。
@@ -899,7 +928,10 @@ whatever = true
             ..Default::default()
         };
         let err = save_provider(&mut d, &draft).unwrap_err();
-        assert!(err.contains("只能用字母"), "错误信息要说清规则，实际：{err}");
+        assert!(
+            err.contains("只能用字母"),
+            "错误信息要说清规则，实际：{err}"
+        );
     }
 
     #[test]
@@ -958,7 +990,11 @@ whatever = true
             url: None,
             headers: vec![],
         };
-        assert!(save_mcp_server(&mut d, &base).unwrap_err().contains("command"));
+        assert!(
+            save_mcp_server(&mut d, &base)
+                .unwrap_err()
+                .contains("command")
+        );
 
         let http = McpDraft {
             transport: "http".into(),
@@ -1046,8 +1082,12 @@ whatever = true
     fn a_config_that_carter_cannot_parse_is_rolled_back() {
         with_temp_home("rollback", || {
             let path = config_path();
-            std::fs::write(&path, "GOOD = 1
-").unwrap();
+            std::fs::write(
+                &path,
+                "GOOD = 1
+",
+            )
+            .unwrap();
 
             // TOML 层面完全合法，但 `agent.model` 要的是字符串。
             let mut bad = DocumentMut::new();
@@ -1055,11 +1095,18 @@ whatever = true
             bad["agent"]["model"] = value(123_i64);
 
             let err = write_and_reload(&bad).unwrap_err();
-            assert!(err.contains("已还原"), "错误信息要说清做了什么，实际：{err}");
+            assert!(
+                err.contains("已还原"),
+                "错误信息要说清做了什么，实际：{err}"
+            );
 
             let after = std::fs::read_to_string(&path).unwrap();
-            assert_eq!(after, "GOOD = 1
-", "原内容必须原样回来");
+            assert_eq!(
+                after,
+                "GOOD = 1
+",
+                "原内容必须原样回来"
+            );
         });
     }
 

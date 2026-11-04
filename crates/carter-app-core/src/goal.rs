@@ -251,9 +251,9 @@ pub fn decide_after_turn(goal: &Goal, outcome: &TurnOutcome) -> Decision {
         return Decision::Set {
             status: GoalStatus::Paused,
             note: None,
-            notice: format!(
+            notice:
                 "本轮出错，已暂停目标模式（避免对着失败反复重试）。点目标条上的「继续」可以再来。"
-            ),
+                    .to_string(),
         };
     }
 
@@ -378,7 +378,6 @@ pub fn on_session_start(mut goal: Goal) -> (Goal, bool) {
     (goal, true)
 }
 
-
 /// 界面用的目标视图（IPC）。
 pub fn view(goal: &Goal) -> crate::protocol::GoalView {
     crate::protocol::GoalView {
@@ -392,7 +391,10 @@ pub fn view(goal: &Goal) -> crate::protocol::GoalView {
 
 /// 状态的迁移入口，供 `Command::Goal` 分支调用。返回 `None` = 这个动作在当前
 /// 状态下没有意义（例如「继续」一个不存在的目标），调用方据此给提示。
-pub fn apply_action(current: Option<Goal>, action: &crate::protocol::GoalCommand) -> Option<Option<Goal>> {
+pub fn apply_action(
+    current: Option<Goal>,
+    action: &crate::protocol::GoalCommand,
+) -> Option<Option<Goal>> {
     use crate::protocol::GoalCommand as A;
     match action {
         A::Set { objective } => {
@@ -434,10 +436,12 @@ pub fn apply_action(current: Option<Goal>, action: &crate::protocol::GoalCommand
                 g.idle_streak = 0;
                 Some(g.with_status(GoalStatus::Active, None))
             }),
-        A::Complete => current.filter(|g| g.status != GoalStatus::Completed).map(|g| {
-            let note = g.note.clone();
-            Some(g.with_status(GoalStatus::Completed, note))
-        }),
+        A::Complete => current
+            .filter(|g| g.status != GoalStatus::Completed)
+            .map(|g| {
+                let note = g.note.clone();
+                Some(g.with_status(GoalStatus::Completed, note))
+            }),
     }
 }
 
@@ -486,7 +490,10 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "{ not json").unwrap();
         assert!(load_from(&path).is_none());
-        assert!(load_from(&tmp_path("missing")).is_none(), "文件不存在也是 None");
+        assert!(
+            load_from(&tmp_path("missing")).is_none(),
+            "文件不存在也是 None"
+        );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
@@ -494,9 +501,20 @@ mod tests {
     /// 否则就是「删会话时顺手删掉别人文件」那一类事故。
     #[test]
     fn a_hostile_session_id_cannot_escape_the_goals_dir() {
-        let name = file_for("../evil/../../etc/passwd").file_name().unwrap().to_string_lossy().to_string();
-        assert!(!name.contains('/') && !name.contains('\\') && !name.contains(".."), "{name}");
-        assert!(file_for("side-0e1f").to_string_lossy().ends_with("side-0e1f.json"));
+        let name = file_for("../evil/../../etc/passwd")
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        assert!(
+            !name.contains('/') && !name.contains('\\') && !name.contains(".."),
+            "{name}"
+        );
+        assert!(
+            file_for("side-0e1f")
+                .to_string_lossy()
+                .ends_with("side-0e1f.json")
+        );
     }
 
     /// **盘上 active 的一律降级。** 用户关掉应用时目标还在跑，下次打开原样恢复
@@ -572,7 +590,11 @@ mod tests {
             ..outcome()
         };
         match decide_after_turn(&active(), &o) {
-            Decision::Set { status, note, notice } => {
+            Decision::Set {
+                status,
+                note,
+                notice,
+            } => {
                 assert_eq!(status, GoalStatus::Completed);
                 assert_eq!(note.as_deref(), Some("告警清零了"));
                 assert!(notice.contains("完成"), "{notice}");
@@ -681,7 +703,11 @@ mod tests {
     /// 暂停 / 完成 / 被卡住的目标，任何一轮结束都不该再动它。
     #[test]
     fn an_inactive_goal_is_left_alone() {
-        for st in [GoalStatus::Paused, GoalStatus::Completed, GoalStatus::Blocked] {
+        for st in [
+            GoalStatus::Paused,
+            GoalStatus::Completed,
+            GoalStatus::Blocked,
+        ] {
             let g = active().with_status(st, None);
             assert_eq!(decide_after_turn(&g, &outcome()), Decision::None);
             // 连模型的信号都不该改它：状态已经不在推进了。
@@ -702,9 +728,14 @@ mod tests {
         let mut old = active();
         old.status = GoalStatus::Paused;
         old.auto_continues = 5;
-        let got = apply_action(Some(old), &GoalCommand::Set { objective: " 换个说法 ".into() })
-            .unwrap()
-            .unwrap();
+        let got = apply_action(
+            Some(old),
+            &GoalCommand::Set {
+                objective: " 换个说法 ".into(),
+            },
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(got.objective, "换个说法", "要 trim");
         assert_eq!(got.status, GoalStatus::Active, "改正文 = 接着干");
         assert_eq!(got.auto_continues, 5, "换说法不该把计数清零");
@@ -716,7 +747,9 @@ mod tests {
         g.status = GoalStatus::Paused;
         g.auto_continues = MAX_AUTO_CONTINUES;
         g.idle_streak = 2;
-        let got = apply_action(Some(g), &GoalCommand::Resume).unwrap().unwrap();
+        let got = apply_action(Some(g), &GoalCommand::Resume)
+            .unwrap()
+            .unwrap();
         assert_eq!(got.status, GoalStatus::Active);
         assert_eq!(got.auto_continues, 0);
         assert_eq!(got.idle_streak, 0);
@@ -749,13 +782,22 @@ mod tests {
     #[test]
     fn no_op_actions_report_themselves() {
         let g = active();
-        assert!(apply_action(None, &GoalCommand::Clear).is_none(), "没有目标可清");
+        assert!(
+            apply_action(None, &GoalCommand::Clear).is_none(),
+            "没有目标可清"
+        );
         assert!(
             apply_action(Some(g.clone()), &GoalCommand::Resume).is_none(),
             "已经在推进，无从恢复"
         );
         assert!(
-            apply_action(Some(g.clone()), &GoalCommand::Set { objective: "   ".into() }).is_none(),
+            apply_action(
+                Some(g.clone()),
+                &GoalCommand::Set {
+                    objective: "   ".into()
+                }
+            )
+            .is_none(),
             "空正文不该建目标"
         );
         // 反过来：暂停一个正在推进的目标是**有意义**的，必须生效。
@@ -767,8 +809,15 @@ mod tests {
     fn the_signal_slot_hands_the_outcome_over_once() {
         let s = GoalSignal::default();
         assert!(s.take().is_none(), "没调过工具时是空的");
-        s.set(Signal::Blocked { note: "没网".into() });
-        assert_eq!(s.take(), Some(Signal::Blocked { note: "没网".into() }));
+        s.set(Signal::Blocked {
+            note: "没网".into(),
+        });
+        assert_eq!(
+            s.take(),
+            Some(Signal::Blocked {
+                note: "没网".into()
+            })
+        );
         assert!(s.take().is_none(), "读完就该清掉，不能影响下一轮");
     }
 }

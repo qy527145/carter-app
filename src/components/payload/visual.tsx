@@ -199,7 +199,7 @@ function ResponseBlocks({
           <div className="text-xs text-dim">（没有解析出内容）</div>
         )}
         <StreamSummary stats={stats} />
-        {resp && resp.usage && (
+        {resp?.usage && (
           <div className="rounded bg-base p-2">
             <div className="mb-1.5 text-[11px] font-medium text-dim">Token 消耗</div>
             <UsagePanel usage={resp.usage} />
@@ -271,7 +271,8 @@ export function VisualView({
     );
   }
 
-  const statusTone = status === null ? undefined : status >= 500 ? "bad" : status >= 400 ? "warn" : "ok";
+  const statusTone =
+    status === null ? undefined : status >= 500 ? "bad" : status >= 400 ? "warn" : "ok";
   const respRaw = streamText || responseBody;
 
   // 解不开时只对**解不出来的那一侧**提示：上游请求体常常不是它自己的协议
@@ -330,7 +331,11 @@ export function VisualView({
 
       <Direction
         label="响应"
-        headline={respRaw ? `${fmtNumber(respRaw.length)} 字符${streamText ? "（流式）" : ""}` : "还没有响应"}
+        headline={
+          respRaw
+            ? `${fmtNumber(respRaw.length)} 字符${streamText ? "（流式）" : ""}`
+            : "还没有响应"
+        }
         copy={respRaw || undefined}
         meta={
           <>

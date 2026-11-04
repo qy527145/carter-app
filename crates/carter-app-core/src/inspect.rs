@@ -479,7 +479,11 @@ mod tests {
         assert_eq!(r.messages[0].turn, Some(0));
         assert_eq!(r.tools[0].name, "bash");
         assert!(!r.tools[0].server_side);
-        assert!(r.params.iter().any(|p| p.key == "max_tokens" && p.value == "16000"));
+        assert!(
+            r.params
+                .iter()
+                .any(|p| p.key == "max_tokens" && p.value == "16000")
+        );
         // 默认的 tool_choice 不列进参数里。
         assert!(!r.params.iter().any(|p| p.key == "tool_choice"));
     }
@@ -511,7 +515,11 @@ mod tests {
         assert_eq!(v.stream.event_kinds[0].count, 6);
 
         let r = v.response.expect("响应应当解得开");
-        assert!(matches!(r.blocks[0], BlockView::Thinking { .. }), "{:?}", r.blocks);
+        assert!(
+            matches!(r.blocks[0], BlockView::Thinking { .. }),
+            "{:?}",
+            r.blocks
+        );
         match &r.blocks[1] {
             // 名字不能被拼成 bashbash —— 同一份字节发两遍的老毛病（见 llm_adapt 的
             // oai_chat mapper）。这条从**界面看到的这一侧**再守一次。
@@ -530,7 +538,11 @@ mod tests {
     fn a_non_streaming_response_decodes_from_the_body() {
         let body = r#"{"id":"c1","model":"m","choices":[{"message":{"role":"assistant",
             "content":"好了"},"finish_reason":"stop"}]}"#;
-        let v = inspect(&record("openai_chat", r#"{"model":"m","messages":[]}"#, body));
+        let v = inspect(&record(
+            "openai_chat",
+            r#"{"model":"m","messages":[]}"#,
+            body,
+        ));
         let r = v.response.expect("响应应当解得开");
         assert!(matches!(&r.blocks[0], BlockView::Text { text } if text == "好了"));
         assert_eq!(r.finish.as_deref(), Some("正常结束"));

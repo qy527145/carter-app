@@ -101,7 +101,8 @@ impl ShellCwd {
         }
         // 比较前都规范化：macOS 的 /tmp 是 /private/tmp 的链接，不规范化的话
         // 同一个目录会被当成「工作目录之外」。
-        let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let canon =
+            |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
         let root = canon(&self.root);
         let new = canon(reported);
         let mut cur = self.current.lock().unwrap();
@@ -110,7 +111,10 @@ impl ShellCwd {
                 return None;
             }
             *cur = reported.to_path_buf();
-            Some(format!("[cwd] 当前目录：{}（下一条命令在这里执行）", reported.display()))
+            Some(format!(
+                "[cwd] 当前目录：{}（下一条命令在这里执行）",
+                reported.display()
+            ))
         } else {
             *cur = self.root.clone();
             Some(format!(
@@ -149,7 +153,11 @@ fn with_cwd_trap(command: &str, marker: &std::path::Path) -> Option<String> {
         return None;
     }
     // Git Bash 的 `pwd` 是 `/c/Users/...`，`-W` 才是 Windows 认得的 `C:/Users/...`。
-    let pwd = if cfg!(windows) { "pwd -W 2>/dev/null || pwd" } else { "pwd" };
+    let pwd = if cfg!(windows) {
+        "pwd -W 2>/dev/null || pwd"
+    } else {
+        "pwd"
+    };
     // 换行而不是 `;` 分隔：命令以注释或 heredoc 结尾时也不会把 trap 吞进去。
     Some(format!("trap '{{ {pwd}; }} > \"{path}\"' EXIT\n{command}"))
 }
@@ -669,23 +677,14 @@ fn decode_oem(bytes: &[u8]) -> Option<String> {
     let src_len = i32::try_from(bytes.len()).ok()?;
 
     // 第一遍问长度。
-    let need = unsafe {
-        MultiByteToWideChar(
-            cp,
-            0,
-            bytes.as_ptr(),
-            src_len,
-            std::ptr::null_mut(),
-            0,
-        )
-    };
+    let need =
+        unsafe { MultiByteToWideChar(cp, 0, bytes.as_ptr(), src_len, std::ptr::null_mut(), 0) };
     if need <= 0 {
         return None;
     }
     let mut buf = vec![0u16; need as usize];
-    let got = unsafe {
-        MultiByteToWideChar(cp, 0, bytes.as_ptr(), src_len, buf.as_mut_ptr(), need)
-    };
+    let got =
+        unsafe { MultiByteToWideChar(cp, 0, bytes.as_ptr(), src_len, buf.as_mut_ptr(), need) };
     if got <= 0 {
         return None;
     }
@@ -747,7 +746,9 @@ mod tests {
         let dir = std::env::temp_dir();
         let tool = tool(dir.clone());
         // 用两边都有的命令：POSIX 下 `pwd` 在 cmd 下不存在，所以选一个绝对安全的。
-        let res = tool.execute(json!({"command": "echo hello-from-bash"})).await;
+        let res = tool
+            .execute(json!({"command": "echo hello-from-bash"}))
+            .await;
         assert!(res.ok, "{}", res.content);
         assert!(res.content.contains("hello-from-bash"), "{}", res.content);
         assert!(res.content.contains("exit_code=0"), "{}", res.content);
@@ -785,7 +786,12 @@ mod tests {
     #[tokio::test]
     async fn a_running_command_is_killed_promptly_on_cancel() {
         let cancel = CancelToken::new();
-        let tool = PlatformBash::new(ShellCwd::new(std::env::temp_dir()), cancel.clone(), None, "test");
+        let tool = PlatformBash::new(
+            ShellCwd::new(std::env::temp_dir()),
+            cancel.clone(),
+            None,
+            "test",
+        );
         let c = cancel.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(150)).await;
@@ -815,8 +821,10 @@ mod tests {
         let tool = Arc::new(tool(std::env::temp_dir()));
         let r = running.clone();
         let task = tokio::spawn(async move {
-            r.scope("t0", async move { tool.execute(json!({"command": "sleep 30"})).await })
-                .await
+            r.scope("t0", async move {
+                tool.execute(json!({"command": "sleep 30"})).await
+            })
+            .await
         });
 
         // 等命令真的开始跑，再按按钮。
@@ -838,10 +846,9 @@ mod tests {
         use super::super::control::RunningTools;
         use crate::protocol::ToolActionKind;
 
-        let shells = BackgroundShells::at(std::env::temp_dir().join(format!(
-            "carter-bg-adopt-{}",
-            std::process::id()
-        )));
+        let shells = BackgroundShells::at(
+            std::env::temp_dir().join(format!("carter-bg-adopt-{}", std::process::id())),
+        );
         let tool = Arc::new(PlatformBash::new(
             ShellCwd::new(std::env::temp_dir()),
             CancelToken::new(),
@@ -851,13 +858,10 @@ mod tests {
         let running = RunningTools::new();
         let r = running.clone();
         let task = tokio::spawn(async move {
-            r.scope(
-                "t0",
-                async move {
-                    tool.execute(json!({"command": "echo first-line; sleep 30"}))
-                        .await
-                },
-            )
+            r.scope("t0", async move {
+                tool.execute(json!({"command": "echo first-line; sleep 30"}))
+                    .await
+            })
             .await
         });
 
@@ -874,7 +878,10 @@ mod tests {
         // 给读取任务一点时间把输出写进日志。
         tokio::time::sleep(Duration::from_millis(300)).await;
         let (text, status) = shells.read("sh1").unwrap();
-        assert!(text.contains("first-line"), "日志里要有转后台之前的输出：{text}");
+        assert!(
+            text.contains("first-line"),
+            "日志里要有转后台之前的输出：{text}"
+        );
         assert!(status.is_running(), "命令应当还在跑：{status:?}");
         shells.kill_all();
     }
@@ -931,11 +938,19 @@ mod tests {
         let tool = tool(dir.clone());
         let res = tool.execute(json!({"command": "cd sub"})).await;
         assert!(res.ok, "{}", res.content);
-        assert!(res.content.contains("[cwd]"), "目录变了要告诉模型：{}", res.content);
+        assert!(
+            res.content.contains("[cwd]"),
+            "目录变了要告诉模型：{}",
+            res.content
+        );
 
         let res = tool.execute(json!({"command": "pwd -P"})).await;
         assert!(res.content.trim_end().ends_with("/sub"), "{}", res.content);
-        assert!(!res.content.contains("[cwd]"), "目录没变就别啰嗦：{}", res.content);
+        assert!(
+            !res.content.contains("[cwd]"),
+            "目录没变就别啰嗦：{}",
+            res.content
+        );
     }
 
     /// 失败的命令也照样跟随，退出码不能被 trap 吃掉。

@@ -4,10 +4,10 @@
 // `assistant_ticket_action` 的 reply，原话送进工单，不经过助理模型转述；后端顺手在
 // 助理对话里记一笔「已答复」，所以从哪答，助理都知道。
 
-import { useState } from "react";
-import { assistantTicketAction, type AssistantTicket } from "../lib/api";
-import { toastError, toastOk } from "../lib/toast";
 import { Check } from "lucide-react";
+import { useState } from "react";
+import { type AssistantTicket, assistantTicketAction } from "../lib/api";
+import { toastError, toastOk } from "../lib/toast";
 import { Button } from "./ui/Button";
 import { Input } from "./ui/Input";
 
@@ -73,7 +73,13 @@ export function TicketReply({ t, withDone = false }: { t: AssistantTicket; withD
           发送
         </Button>
         {withDone && (
-          <Button size="sm" variant="ghost" disabled={busy} onClick={done} title="看过了，不用再做什么，结束这张工单">
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={busy}
+            onClick={done}
+            title="看过了，不用再做什么，结束这张工单"
+          >
             <Check size={12} />
             结束
           </Button>

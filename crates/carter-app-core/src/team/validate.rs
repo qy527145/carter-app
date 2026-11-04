@@ -117,8 +117,11 @@ pub fn check_goal(path: &str, goal: &Goal) -> Vec<Issue> {
     }
     if goal.title.chars().count() > 200 {
         out.push(
-            Issue::new(path, format!("标题 {} 字，太长了", goal.title.chars().count()))
-                .with_fix("压到 200 字以内，细节写进 description"),
+            Issue::new(
+                path,
+                format!("标题 {} 字，太长了", goal.title.chars().count()),
+            )
+            .with_fix("压到 200 字以内，细节写进 description"),
         );
     }
     if goal.schema_version > SCHEMA_VERSION {
@@ -134,13 +137,13 @@ pub fn check_goal(path: &str, goal: &Goal) -> Vec<Issue> {
         );
     }
     // owner 写成一个人看的名字而不是身份串时，后面认领与「我的任务」都匹配不上。
-    if let Some(owner) = goal.owner.as_deref().filter(|o| !o.trim().is_empty()) {
-        if !owner.contains('<') {
-            out.push(
-                Issue::new(path, format!("owner `{owner}` 不是 `名字 <邮箱>` 的形式"))
-                    .with_fix("用 git 里那份身份写，比如 `张三 <zhang@example.com>`"),
-            );
-        }
+    if let Some(owner) = goal.owner.as_deref().filter(|o| !o.trim().is_empty())
+        && !owner.contains('<')
+    {
+        out.push(
+            Issue::new(path, format!("owner `{owner}` 不是 `名字 <邮箱>` 的形式"))
+                .with_fix("用 git 里那份身份写，比如 `张三 <zhang@example.com>`"),
+        );
     }
     out
 }
@@ -165,8 +168,11 @@ pub fn check_task(path: &str, task: &Task) -> Vec<Issue> {
     }
     if task.title.chars().count() > 200 {
         out.push(
-            Issue::new(path, format!("标题 {} 字，太长了", task.title.chars().count()))
-                .with_fix("压到 200 字以内，做法写进 description"),
+            Issue::new(
+                path,
+                format!("标题 {} 字，太长了", task.title.chars().count()),
+            )
+            .with_fix("压到 200 字以内，做法写进 description"),
         );
     }
     if task.status == TaskStatus::Blocked && task.blocked_reason.trim().is_empty() {
@@ -187,24 +193,20 @@ pub fn check_task(path: &str, task: &Task) -> Vec<Issue> {
         }
     }
     if task.depends_on.iter().any(|d| d == &task.id) {
-        out.push(
-            Issue::new(path, "depends_on 里有自己")
-                .with_fix("去掉这一条 —— 任务不能等自己"),
-        );
+        out.push(Issue::new(path, "depends_on 里有自己").with_fix("去掉这一条 —— 任务不能等自己"));
     }
     let mut seen = HashSet::new();
     for d in &task.depends_on {
         if !seen.insert(d.as_str()) {
-            out.push(
-                Issue::new(path, format!("depends_on 里 `{d}` 出现了两次"))
-                    .with_fix("去重"),
-            );
+            out.push(Issue::new(path, format!("depends_on 里 `{d}` 出现了两次")).with_fix("去重"));
         }
     }
-    if let Some(h) = task.estimate_hours {
-        if !h.is_finite() || h < 0.0 {
-            out.push(Issue::new(path, format!("estimate_hours 是 {h}，不合法")).with_fix("填一个非负数"));
-        }
+    if let Some(h) = task.estimate_hours
+        && (!h.is_finite() || h < 0.0)
+    {
+        out.push(
+            Issue::new(path, format!("estimate_hours 是 {h}，不合法")).with_fix("填一个非负数"),
+        );
     }
     if task.schema_version > SCHEMA_VERSION {
         out.push(Issue::new(
@@ -227,13 +229,13 @@ pub fn check_board(path: &str, board: &Board, goal_ids: &HashSet<String>) -> Vec
                 .with_fix("在 <head> 里加一个 <title>，列表里显示的就是它"),
         );
     }
-    if let Some(g) = board.goal_id.as_deref() {
-        if !goal_ids.contains(g) {
-            out.push(
-                Issue::new(path, format!("carter-goal 指向的目标 `{g}` 不存在"))
-                    .with_fix("改成一个现有目标的 id，或者把那条 <meta> 去掉"),
-            );
-        }
+    if let Some(g) = board.goal_id.as_deref()
+        && !goal_ids.contains(g)
+    {
+        out.push(
+            Issue::new(path, format!("carter-goal 指向的目标 `{g}` 不存在"))
+                .with_fix("改成一个现有目标的 id，或者把那条 <meta> 去掉"),
+        );
     }
     out
 }
@@ -255,7 +257,10 @@ pub fn check_task_set(goal_id: &str, tasks: &[Task]) -> Vec<Issue> {
             out.push(
                 Issue::new(
                     task_path(goal_id, &t.id),
-                    format!("goal_id 写的是 `{}`，但它放在 `{goal_id}` 目录下", t.goal_id),
+                    format!(
+                        "goal_id 写的是 `{}`，但它放在 `{goal_id}` 目录下",
+                        t.goal_id
+                    ),
                 )
                 .with_fix("两个地方改成一致 —— 通常是搬目录时漏改了文件里的字段"),
             );
@@ -277,13 +282,13 @@ pub fn check_task_set(goal_id: &str, tasks: &[Task]) -> Vec<Issue> {
                 Some(_) => {}
             }
         }
-        if let Some(p) = &t.parent_id {
-            if !by_id.contains_key(p.as_str()) {
-                out.push(
-                    Issue::new(path.as_str(), format!("父任务 `{p}` 不在这个目标里"))
-                        .with_fix("去掉 parent_id，它就变回根任务"),
-                );
-            }
+        if let Some(p) = &t.parent_id
+            && !by_id.contains_key(p.as_str())
+        {
+            out.push(
+                Issue::new(path.as_str(), format!("父任务 `{p}` 不在这个目标里"))
+                    .with_fix("去掉 parent_id，它就变回根任务"),
+            );
         }
     }
 
@@ -320,7 +325,9 @@ pub fn check_task_set(goal_id: &str, tasks: &[Task]) -> Vec<Issue> {
         }
     }
     // 同一个环会被每个成员各报一次，去个重。
-    out.sort_by(|a, b| (a.path.as_str(), a.message.as_str()).cmp(&(b.path.as_str(), b.message.as_str())));
+    out.sort_by(|a, b| {
+        (a.path.as_str(), a.message.as_str()).cmp(&(b.path.as_str(), b.message.as_str()))
+    });
     out.dedup_by(|a, b| a.path == b.path && a.message == b.message);
     out
 }
@@ -391,11 +398,8 @@ pub fn check_store(store: &super::store::Store) -> Report {
             };
             if !valid_id(Kind::Goal, goal_id) {
                 issues.push(
-                    Issue::new(
-                        format!("goals/{goal_id}"),
-                        "目录名不是一个合法的目标 id",
-                    )
-                    .with_fix("目录名就是目标的 id，改成 g-<时间戳>-<随机> 的形式"),
+                    Issue::new(format!("goals/{goal_id}"), "目录名不是一个合法的目标 id")
+                        .with_fix("目录名就是目标的 id，改成 g-<时间戳>-<随机> 的形式"),
                 );
                 continue;
             }
@@ -408,8 +412,11 @@ pub fn check_store(store: &super::store::Store) -> Report {
                 .and_then(|raw| super::store::parse_json::<Goal>(&raw))
             {
                 Err(e) => issues.push(
-                    Issue::new(format!("goals/{goal_id}/goal.json"), format!("解析失败：{e}"))
-                        .with_fix("按报错里的字段名改回来；拿不准就对照技能文档里的格式"),
+                    Issue::new(
+                        format!("goals/{goal_id}/goal.json"),
+                        format!("解析失败：{e}"),
+                    )
+                    .with_fix("按报错里的字段名改回来；拿不准就对照技能文档里的格式"),
                 ),
                 Ok(goal) => {
                     issues.extend(check_goal(&format!("goals/{goal_id}/goal.json"), &goal));
@@ -474,17 +481,30 @@ pub fn check_store(store: &super::store::Store) -> Report {
     }
     for board in &boards.items {
         checked += 1;
-        issues.extend(check_board(&format!("boards/{}.html", board.id), board, &goal_ids));
+        issues.extend(check_board(
+            &format!("boards/{}.html", board.id),
+            board,
+            &goal_ids,
+        ));
     }
     // 旧版的 `boards/<id>/board.json` 目录：现在不读了，留着只会让人以为它还有用。
     if let Ok(entries) = std::fs::read_dir(store.root().join("boards")) {
         for entry in entries.flatten() {
             let dir = entry.path();
             if dir.is_dir() && dir.join("board.json").is_file() {
-                let name = dir.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                let name = dir
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
                 issues.push(
-                    Issue::new(format!("boards/{name}/"), "旧格式的看板（board.json + cards/），已经不显示了")
-                        .with_fix(format!("让卡特把它改写成 boards/{name}.html，再删掉这个目录")),
+                    Issue::new(
+                        format!("boards/{name}/"),
+                        "旧格式的看板（board.json + cards/），已经不显示了",
+                    )
+                    .with_fix(format!(
+                        "让卡特把它改写成 boards/{name}.html，再删掉这个目录"
+                    )),
                 );
             }
         }
@@ -547,7 +567,11 @@ mod tests {
         c.parent_id = Some("t-gone".into());
 
         let issues = check_task_set(&g.id, &[a, b, c]);
-        let text = issues.iter().map(|i| i.render()).collect::<Vec<_>>().join("\n");
+        let text = issues
+            .iter()
+            .map(|i| i.render())
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(text.contains("依赖成环"), "{text}");
         assert!(text.contains("不在这个目标里"), "{text}");
         assert!(text.contains("父任务"), "{text}");
@@ -580,7 +604,10 @@ mod tests {
             .unwrap();
         store.save_board("b-bare", "<p>x</p>").unwrap();
         store
-            .save_board("b-dangling", &stamp_board("<p>x</p>", Some("t"), Some("g-gone")))
+            .save_board(
+                "b-dangling",
+                &stamp_board("<p>x</p>", Some("t"), Some("g-gone")),
+            )
             .unwrap();
         // 旧格式留下的目录。
         std::fs::create_dir_all(root.join("boards/b-old/cards")).unwrap();
@@ -588,9 +615,15 @@ mod tests {
 
         let text = check_store(&store).render();
         assert!(!text.contains("b-ok"), "{text}");
-        assert!(text.contains("boards/b-bare.html") && text.contains("<title>"), "{text}");
+        assert!(
+            text.contains("boards/b-bare.html") && text.contains("<title>"),
+            "{text}"
+        );
         assert!(text.contains("g-gone"), "{text}");
-        assert!(text.contains("boards/b-old/") && text.contains("旧格式"), "{text}");
+        assert!(
+            text.contains("boards/b-old/") && text.contains("旧格式"),
+            "{text}"
+        );
     }
 
     /// 这正是用户遇到的那一次：`"P3"` 写进文件，而某个版本的应用只认 `"p3"`。
@@ -599,7 +632,9 @@ mod tests {
     fn a_file_with_the_wrong_case_parses_and_validates_clean() {
         let g = Goal::new("g", &me());
         let _ = std::fs::create_dir_all(tmp("case").join("goals"));
-        let raw = serde_json::to_string(&g).unwrap().replace("\"P2\"", "\"P3\"");
+        let raw = serde_json::to_string(&g)
+            .unwrap()
+            .replace("\"P2\"", "\"P3\"");
         // 现在的实现大小写都认，所以解析得进来。
         let back: Goal = super::super::store::parse_json(&raw).unwrap();
         assert_eq!(back.priority, Priority::P3);
@@ -653,6 +688,10 @@ mod tests {
         let report = check_store(&store);
         assert!(report.ok(), "{}", report.render());
         assert!(report.render().contains("校验通过"));
-        assert!(report.checked >= 3, "team.json + goal + task = {}", report.checked);
+        assert!(
+            report.checked >= 3,
+            "team.json + goal + task = {}",
+            report.checked
+        );
     }
 }

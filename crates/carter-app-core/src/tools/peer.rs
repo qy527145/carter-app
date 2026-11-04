@@ -36,7 +36,10 @@ impl PeerTool {
 }
 
 fn str_arg<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
-    args.get(key).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty())
+    args.get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
 }
 
 #[async_trait::async_trait]
@@ -110,7 +113,10 @@ impl Tool for PeerTool {
                 let all = args.get("all").and_then(Value::as_bool).unwrap_or(false);
                 let rows = peers::list(&self.shell, &self.me, all);
                 let others: Vec<_> = rows.iter().filter(|p| p.id != self.me).collect();
-                let me = rows.iter().find(|p| p.id == self.me).map(|p| p.name.clone());
+                let me = rows
+                    .iter()
+                    .find(|p| p.id == self.me)
+                    .map(|p| p.name.clone());
                 let mut out = format!("你自己：{}\n", me.as_deref().unwrap_or("（未列出）"));
                 if others.is_empty() {
                     out.push_str(if all {
@@ -131,7 +137,9 @@ impl Tool for PeerTool {
                     ));
                 }
                 if rows.iter().any(|p| p.state == PeerState::Dormant) {
-                    out.push_str("\n「未运行」的会话收到信会在后台续接起来处理，用户打开它能看到全过程。");
+                    out.push_str(
+                        "\n「未运行」的会话收到信会在后台续接起来处理，用户打开它能看到全过程。",
+                    );
                 }
                 ToolResult::ok(out.trim_end().to_string())
             }
@@ -146,7 +154,10 @@ impl Tool for PeerTool {
                     to,
                     body: message,
                     reply_to: str_arg(&args, "reply_to").map(str::to_string),
-                    notify_when_idle: args.get("notify_when_idle").and_then(Value::as_bool).unwrap_or(false),
+                    notify_when_idle: args
+                        .get("notify_when_idle")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
                 };
                 match peers::send(&self.shell, &self.me, req) {
                     Ok(s) => ToolResult::ok(s),
@@ -157,7 +168,11 @@ impl Tool for PeerTool {
                 let Some(to) = str_arg(&args, "to") else {
                     return ToolResult::err("缺少 to");
                 };
-                let turns = args.get("turns").and_then(Value::as_u64).unwrap_or(3).clamp(1, 20) as usize;
+                let turns = args
+                    .get("turns")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(3)
+                    .clamp(1, 20) as usize;
                 match peers::transcript(&self.shell, &self.me, to, turns) {
                     Ok(s) => ToolResult::ok(s),
                     Err(e) => ToolResult::err(format!("read_session: {e}")),

@@ -415,7 +415,15 @@ impl State {
         task: &str,
         events: Vec<String>,
     ) -> String {
-        self.open(rule, &source.id, &source.name, &source.cwd, title, task, events)
+        self.open(
+            rule,
+            &source.id,
+            &source.name,
+            &source.cwd,
+            title,
+            task,
+            events,
+        )
     }
 
     /// 用户在助理对话里直接指派的一张工单（见 `assistant_dispatch`）。没有规则、没有事件：
@@ -477,7 +485,11 @@ impl State {
             return;
         }
         ended.sort_by_key(|e| std::cmp::Reverse(e.0));
-        let drop: Vec<String> = ended.split_off(MAX_ENDED_TICKETS).into_iter().map(|e| e.1).collect();
+        let drop: Vec<String> = ended
+            .split_off(MAX_ENDED_TICKETS)
+            .into_iter()
+            .map(|e| e.1)
+            .collect();
         self.tickets.retain(|t| !drop.contains(&t.id));
     }
 
@@ -616,7 +628,9 @@ impl AssistantStore {
         session_id: &str,
     ) -> Option<(Arc<SessionHandle>, bool)> {
         let mut w = self.workers.lock().unwrap();
-        if w.get(session_id).is_some_and(|(h, _)| h.close.is_cancelled()) {
+        if w.get(session_id)
+            .is_some_and(|(h, _)| h.close.is_cancelled())
+        {
             return w.remove(session_id);
         }
         None
@@ -725,7 +739,13 @@ pub(crate) mod tests {
         store
             .with(|s| {
                 s.sources.push(source());
-                s.open_ticket(&source(), "修错字", "改错字", "把 README 的错字改掉", vec!["x".into()]);
+                s.open_ticket(
+                    &source(),
+                    "修错字",
+                    "改错字",
+                    "把 README 的错字改掉",
+                    vec!["x".into()],
+                );
             })
             .unwrap();
         let again = AssistantStore::open(path).snapshot();
@@ -778,7 +798,11 @@ pub(crate) mod tests {
         let a = s.ticket(&a).unwrap();
         assert_eq!(a.status, TicketStatus::Queued);
         assert_eq!(a.pending[0], RECOVERY_NOTE);
-        assert_eq!(s.ticket(&b).unwrap().status, TicketStatus::Ready, "等人看的不动");
+        assert_eq!(
+            s.ticket(&b).unwrap().status,
+            TicketStatus::Ready,
+            "等人看的不动"
+        );
     }
 
     #[test]
@@ -818,21 +842,23 @@ pub(crate) mod tests {
 
     #[test]
     fn rules_are_found_by_name_or_id_but_only_when_enabled() {
-        let mut st = Settings::default();
-        st.rules = vec![
-            Rule {
-                id: "r1".into(),
-                name: "修 CI".into(),
-                instruction: "主干 CI 挂了就修".into(),
-                enabled: true,
-            },
-            Rule {
-                id: "r2".into(),
-                name: "停用的".into(),
-                instruction: "x".into(),
-                enabled: false,
-            },
-        ];
+        let st = Settings {
+            rules: vec![
+                Rule {
+                    id: "r1".into(),
+                    name: "修 CI".into(),
+                    instruction: "主干 CI 挂了就修".into(),
+                    enabled: true,
+                },
+                Rule {
+                    id: "r2".into(),
+                    name: "停用的".into(),
+                    instruction: "x".into(),
+                    enabled: false,
+                },
+            ],
+            ..Settings::default()
+        };
         assert_eq!(st.find_rule("修 CI").unwrap().id, "r1");
         assert_eq!(st.find_rule("r1").unwrap().id, "r1");
         assert!(st.find_rule("停用的").is_none());
@@ -935,7 +961,11 @@ pub fn status_text(store: &AssistantStore) -> String {
             Mode::Observe => "只观察（命中只记录，等用户批准）",
             Mode::Auto => "自动接单（命中就开工）",
         },
-        if s.settings.paused { "**已暂停**" } else { "运行中" },
+        if s.settings.paused {
+            "**已暂停**"
+        } else {
+            "运行中"
+        },
         s.settings.max_running
     ));
 
@@ -1000,7 +1030,11 @@ mod chat_tests {
 
     #[test]
     fn the_segment_shows_the_current_configuration() {
-        let dir = std::env::temp_dir().join(format!("carter-chatseg-{}-{}", std::process::id(), now_ms()));
+        let dir = std::env::temp_dir().join(format!(
+            "carter-chatseg-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let store = AssistantStore::open(dir.join("assistant.json"));
         store
@@ -1026,7 +1060,11 @@ mod chat_tests {
 
     #[test]
     fn an_empty_assistant_says_so_instead_of_showing_blanks() {
-        let dir = std::env::temp_dir().join(format!("carter-chatempty-{}-{}", std::process::id(), now_ms()));
+        let dir = std::env::temp_dir().join(format!(
+            "carter-chatempty-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let seg = chat_segment(&AssistantStore::open(dir.join("assistant.json")));
         assert!(seg.contains("（还没有）"));

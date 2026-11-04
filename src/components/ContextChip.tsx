@@ -3,8 +3,8 @@
 // 一次可以摆好几枚（「我的任务」里勾选几件事一起交给卡特）。多枚时排成一列而不是
 // 挤成一行：标题要被读完整才有意义，截断成一排「任务 · 修复…」等于什么都没说。
 
-import { useState } from "react";
 import { ChevronDown, Kanban, ListChecks, Target, X } from "lucide-react";
+import { useState } from "react";
 
 import { CONTEXT_LABEL, type PromptContext } from "../lib/promptContext";
 import { Collapse } from "./ui/Panel";
@@ -94,7 +94,11 @@ export function ContextChips({
   return (
     <div className={`flex flex-col gap-1 border-l-2 border-edge-strong/40 pl-2 ${className}`}>
       {contexts.map((c, i) => (
-        <ContextChip key={`${c.kind}:${c.title}:${i}`} context={c} onRemove={onRemove ? () => onRemove(i) : undefined} />
+        <ContextChip
+          key={`${c.kind}:${c.title}:${i}`}
+          context={c}
+          onRemove={onRemove ? () => onRemove(i) : undefined}
+        />
       ))}
     </div>
   );

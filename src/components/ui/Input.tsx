@@ -4,7 +4,6 @@
 // 把边框整个换成实色：环是「双环」，内圈压深描边、外圈淡淡铺开，靠近时是
 // 一圈咬住边缘的暗环。单纯把边框从 7% 透明度跳到实色太跳，会抢走内容本身。
 
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type {
   InputHTMLAttributes,
   LabelHTMLAttributes,
@@ -12,6 +11,7 @@ import type {
   Ref,
   TextareaHTMLAttributes,
 } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 const FIELD_BASE =
   "carter-field w-full rounded-md border border-edge bg-base px-3 py-2 text-sm text-ink " +
@@ -24,9 +24,7 @@ type InputProps = InputHTMLAttributes<HTMLInputElement> & {
 };
 
 export function Input({ className = "", mono = false, ...rest }: InputProps) {
-  return (
-    <input className={`${FIELD_BASE} ${mono ? "mono" : ""} ${className}`} {...rest} />
-  );
+  return <input className={`${FIELD_BASE} ${mono ? "mono" : ""} ${className}`} {...rest} />;
 }
 
 type TextareaProps = TextareaHTMLAttributes<HTMLTextAreaElement> & { mono?: boolean };
@@ -68,9 +66,7 @@ export function Switch({
           「事情办成了」的小反馈，Q 一下不轻浮。开关轨道本身不用，那会显得黏。 */}
       <span
         className={`block h-3 w-3 rounded-full transition-transform duration-200 ease-[cubic-bezier(0.34,1.56,0.64,1)] ${
-          checked
-            ? "translate-x-[16px] bg-[var(--accent-contrast)]"
-            : "translate-x-[2px] bg-dim"
+          checked ? "translate-x-[16px] bg-[var(--accent-contrast)]" : "translate-x-[2px] bg-dim"
         }`}
       />
     </button>
@@ -178,7 +174,5 @@ export function Field({
 }
 
 export function Label({ className = "", ...rest }: LabelHTMLAttributes<HTMLLabelElement>) {
-  return (
-    <label className={`text-xs font-medium text-dim ${className}`} {...rest} />
-  );
+  return <label className={`text-xs font-medium text-dim ${className}`} {...rest} />;
 }

@@ -173,7 +173,13 @@ impl CaptureStore {
         // 会话 id 是 uuid，但外部写入不该能靠 `../` 逃出这个目录。
         let safe: String = session_id
             .chars()
-            .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' })
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect();
         self.root.join(format!("{safe}.jsonl"))
     }
@@ -230,8 +236,7 @@ impl CaptureStore {
             .values()
             .find(|p| {
                 p.rec.id == id
-                    && p.rec.meta.as_ref().and_then(|m| m.session_id.as_deref())
-                        == Some(session_id)
+                    && p.rec.meta.as_ref().and_then(|m| m.session_id.as_deref()) == Some(session_id)
             })
             .map(|p| p.rec.clone())
         {
@@ -337,12 +342,12 @@ impl CaptureStore {
         self.append(sid, &p.rec);
         // 摘要缓存已在用的话跟着追加；还没查询过就不用管 —— 首次 `briefs()`
         // 会把这份记录一并从文件里读出来。
-        if let Ok(mut cache) = self.briefs.lock() {
-            if let Some(list) = cache.get_mut(sid) {
-                // 与 `briefs()` 首次建表并发时可能已经包含这一条。
-                if !list.iter().any(|b| b.id == p.rec.id) {
-                    list.push(p.rec.brief());
-                }
+        if let Ok(mut cache) = self.briefs.lock()
+            && let Some(list) = cache.get_mut(sid)
+        {
+            // 与 `briefs()` 首次建表并发时可能已经包含这一条。
+            if !list.iter().any(|b| b.id == p.rec.id) {
+                list.push(p.rec.brief());
             }
         }
     }
@@ -479,10 +484,8 @@ mod tests {
         // 并发跑测试时毫秒级时间戳会撞，必须再加个递增序号。
         static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "carter-app-cap-{}-{n}",
-            crate::protocol::now_ms()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("carter-app-cap-{}-{n}", crate::protocol::now_ms()));
         (Arc::new(CaptureStore::open(dir.clone())), dir)
     }
 
@@ -602,7 +605,11 @@ mod tests {
         a.before_request(&ra);
         b.before_request(&rb);
 
-        let ids: Vec<_> = store.active_briefs("s1").into_iter().map(|r| r.id).collect();
+        let ids: Vec<_> = store
+            .active_briefs("s1")
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
         assert_eq!(ids.len(), 2);
         assert_ne!(ids[0], ids[1]);
         let _ = std::fs::remove_dir_all(dir);
@@ -659,7 +666,10 @@ mod tests {
             },
         );
         // 文件名被清洗过，仍然落在这个目录里。
-        let written: Vec<_> = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).collect();
+        let written: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
         assert_eq!(written.len(), 1);
         assert!(!written[0].file_name().to_string_lossy().contains(".."));
         let _ = std::fs::remove_dir_all(dir);

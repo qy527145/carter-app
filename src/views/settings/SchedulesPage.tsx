@@ -17,28 +17,27 @@
 // 这种本机时间。存盘用 epoch 毫秒，跨时区/夏令时由 `Date` 与后端的
 // `chrono::Local` 各自算，不在这里抠。
 
-import { useState } from "react";
 import { Clock, Pencil, Play, Plus, Trash } from "lucide-react";
-
+import { useState } from "react";
+import { Button, IconButton } from "../../components/ui/Button";
+import { Field, Input, Segmented, Switch, Textarea } from "../../components/ui/Input";
+import { Badge, Banner, Card, ConfirmDialog, Modal } from "../../components/ui/Panel";
+import { Select } from "../../components/ui/Select";
 import {
   deleteSchedule,
   listSchedules,
   runSchedule,
-  saveSchedule,
-  toggleSchedule,
   type Schedule,
   type ScheduleKind,
+  saveSchedule,
+  toggleSchedule,
 } from "../../lib/api";
 import { fullTime, relTime } from "../../lib/format";
+import { useModelCatalog } from "../../lib/modelLabel";
 import { openSession } from "../../lib/sessionOps";
 import { toastError, toastOk } from "../../lib/toast";
 import { useAsync } from "../../lib/useAsync";
-import { useModelCatalog } from "../../lib/modelLabel";
 import { useStore } from "../../store";
-import { Button, IconButton } from "../../components/ui/Button";
-import { Field, Input, Segmented, Switch, Textarea } from "../../components/ui/Input";
-import { Select } from "../../components/ui/Select";
-import { Badge, Banner, Card, ConfirmDialog, Modal } from "../../components/ui/Panel";
 import { AsyncBody, PageIntro } from "./AsyncBody";
 
 type Mode = "once" | "interval" | "daily";
@@ -125,8 +124,7 @@ function draftOf(s: Schedule | null): Draft {
     mode: k.kind,
     atLocal: toInput(k.kind === "once" ? k.at_ms : Date.now() + 24 * 60 * 60 * 1000),
     everyMinutes: String(k.kind === "interval" ? k.every_minutes : 60),
-    dailyTime:
-      k.kind === "daily" ? `${pad(k.hour)}:${pad(k.minute)}` : "09:00",
+    dailyTime: k.kind === "daily" ? `${pad(k.hour)}:${pad(k.minute)}` : "09:00",
     cwd: s.cwd,
     model: s.model ?? "",
     // 过期的一次性任务只能靠改时间重新用（见文件头），改了时间就是想让它再跑。
@@ -145,8 +143,7 @@ function ScheduleEditor({
   const [saving, setSaving] = useState(false);
   const models = useModelCatalog();
 
-  const set = <K extends keyof Draft>(k: K, v: Draft[K]) =>
-    setD((prev) => ({ ...prev, [k]: v }));
+  const set = <K extends keyof Draft>(k: K, v: Draft[K]) => setD((prev) => ({ ...prev, [k]: v }));
 
   // 客户端先挡一遍明显不对的输入。真正的校验在后端 —— 这里只是为了不让用户
   // 填完再吃一个错，两边的规则仍需保持一致。
@@ -161,8 +158,7 @@ function ScheduleEditor({
         ? Number.isInteger(everyMinutes) && everyMinutes >= 1 && everyMinutes <= 30 * 24 * 60
         : daily !== null && Number(daily[1]) <= 23 && Number(daily[2]) <= 59;
 
-  const valid =
-    d.name.trim() !== "" && d.prompt.trim() !== "" && d.cwd.trim() !== "" && kindOk;
+  const valid = d.name.trim() !== "" && d.prompt.trim() !== "" && d.cwd.trim() !== "" && kindOk;
 
   async function submit() {
     const kind: ScheduleKind =
@@ -336,21 +332,16 @@ export function SchedulesPage() {
     <>
       <div className="mb-4 flex items-center gap-2">
         <h1 className="text-[16px] font-semibold">定时任务</h1>
-        <Button
-          variant="primary"
-          size="sm"
-          className="ml-auto"
-          onClick={() => setEditing(null)}
-        >
+        <Button variant="primary" size="sm" className="ml-auto" onClick={() => setEditing(null)}>
           <Plus size={13} />
           新建任务
         </Button>
       </div>
 
       <PageIntro>
-        也可以直接在对话里说「每天九点帮我看看 CI」，模型会调{" "}
-        <span className="mono">schedule</span> 工具建好，建完这里就能看到。
-        数据存在 <span className="mono">~/.carter-app/schedules.json</span>。
+        也可以直接在对话里说「每天九点帮我看看 CI」，模型会调 <span className="mono">schedule</span>{" "}
+        工具建好，建完这里就能看到。 数据存在{" "}
+        <span className="mono">~/.carter-app/schedules.json</span>。
       </PageIntro>
 
       <div className="space-y-2">
@@ -435,9 +426,7 @@ export function SchedulesPage() {
                       <Banner kind="error">
                         上次触发失败：{s.last_error}
                         <br />
-                        <span className="text-dim">
-                          定时器会按原节奏继续，下一次照常尝试。
-                        </span>
+                        <span className="text-dim">定时器会按原节奏继续，下一次照常尝试。</span>
                       </Banner>
                     )}
                   </Card>

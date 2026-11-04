@@ -108,7 +108,10 @@ impl Tool for CwdScoped {
                 match m.get("path").and_then(Value::as_str) {
                     Some(p) if !p.trim().is_empty() => {
                         let abs = resolve(&self.cwd, p);
-                        m.insert("path".into(), Value::String(abs.to_string_lossy().into_owned()));
+                        m.insert(
+                            "path".into(),
+                            Value::String(abs.to_string_lossy().into_owned()),
+                        );
                     }
                     // `None` = 没给 path。glob / grep 的「缺省当前目录」指的是进程的
                     // 当前目录，在 GUI 里那是错的地方 —— 补上会话的 cwd。
@@ -177,7 +180,11 @@ mod tests {
     /// 相对路径必须落到会话的 cwd 下 —— 这是整件事的起因。
     #[tokio::test]
     async fn a_relative_path_resolves_against_the_session_cwd() {
-        let cwd = if cfg!(windows) { r"C:\work\proj" } else { "/work/proj" };
+        let cwd = if cfg!(windows) {
+            r"C:\work\proj"
+        } else {
+            "/work/proj"
+        };
         let a = args_of(cwd, json!({"path": "src/main.rs"})).await;
         let got = Path::new(a["path"].as_str().unwrap());
         assert_eq!(got, Path::new(cwd).join("src").join("main.rs"));
@@ -186,8 +193,16 @@ mod tests {
     /// 绝对路径不能被改写 —— 模型显式指定的位置就是它要的位置。
     #[tokio::test]
     async fn an_absolute_path_is_left_alone() {
-        let other = if cfg!(windows) { r"D:\otherile.txt" } else { "/other/file.txt" };
-        let cwd = if cfg!(windows) { r"C:\work\proj" } else { "/work/proj" };
+        let other = if cfg!(windows) {
+            r"D:\otherile.txt"
+        } else {
+            "/other/file.txt"
+        };
+        let cwd = if cfg!(windows) {
+            r"C:\work\proj"
+        } else {
+            "/work/proj"
+        };
         let a = args_of(cwd, json!({"path": other})).await;
         assert_eq!(Path::new(a["path"].as_str().unwrap()), Path::new(other));
     }
@@ -196,7 +211,11 @@ mod tests {
     /// 必须补上会话的 cwd，否则搜索范围完全不对。
     #[tokio::test]
     async fn a_missing_path_gets_the_cwd_injected() {
-        let cwd = if cfg!(windows) { r"C:\work\proj" } else { "/work/proj" };
+        let cwd = if cfg!(windows) {
+            r"C:\work\proj"
+        } else {
+            "/work/proj"
+        };
         let a = args_of(cwd, json!({"pattern": "**/*.rs"})).await;
         assert_eq!(Path::new(a["path"].as_str().unwrap()), Path::new(cwd));
         // 模式本身不能被改写。
@@ -225,7 +244,9 @@ mod tests {
     /// 模型很爱写 `~/...`，而 `std::fs` 不认 `~`。
     #[test]
     fn a_tilde_is_expanded() {
-        let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).ok();
+        let home = std::env::var("USERPROFILE")
+            .or_else(|_| std::env::var("HOME"))
+            .ok();
         if let Some(home) = home {
             let p = resolve(Path::new("/elsewhere"), "~/.carter/facts.md");
             assert_eq!(
@@ -237,9 +258,11 @@ mod tests {
             );
         }
         // 不认识的形式原样留着，别自作主张。
-        assert!(resolve(Path::new("/w"), "~bob/x")
-            .to_string_lossy()
-            .contains("~bob"));
+        assert!(
+            resolve(Path::new("/w"), "~bob/x")
+                .to_string_lossy()
+                .contains("~bob")
+        );
     }
 
     #[test]
@@ -247,7 +270,13 @@ mod tests {
         for n in ["read_file", "write_file", "edit_file", "glob", "grep"] {
             assert!(CwdScoped::applies_to(n), "{n} 应当按 cwd 解析");
         }
-        for n in ["bash", "todo_write", "task", "save_memory", "ask_user_question"] {
+        for n in [
+            "bash",
+            "todo_write",
+            "task",
+            "save_memory",
+            "ask_user_question",
+        ] {
             assert!(!CwdScoped::applies_to(n), "{n} 不该被改写参数");
         }
     }

@@ -162,7 +162,10 @@ fn nonempty(v: &Option<String>) -> Option<String> {
 pub fn validate(raw: &Raw, settings: &Settings, state: &State) -> Outcome {
     let reason = nonempty(&raw.reason).unwrap_or_else(|| "（模型没给理由）".into());
     let ignore = |why: &str| Outcome::Ignore {
-        reason: format!("{why}（模型原本的判断：{} —— {reason}）", raw.decision.trim()),
+        reason: format!(
+            "{why}（模型原本的判断：{} —— {reason}）",
+            raw.decision.trim()
+        ),
     };
     match raw.decision.trim().to_ascii_lowercase().as_str() {
         "accept" => {
@@ -212,7 +215,11 @@ pub fn resolve(
         Some(config.agent.model.clone()),
     ];
     let mut last = String::from("没有可用的模型");
-    for r in candidates.into_iter().flatten().filter(|r| !r.trim().is_empty()) {
+    for r in candidates
+        .into_iter()
+        .flatten()
+        .filter(|r| !r.trim().is_empty())
+    {
         match carter::provider::resolve_provider(config, &cache, &r, vec![]) {
             Ok(p) => return Ok((p.provider, p.model)),
             Err(e) => last = format!("模型 {r} 解析不出来：{e}"),
@@ -222,7 +229,11 @@ pub fn resolve(
 }
 
 /// 调一次模型，拿回原样的文本。
-pub async fn ask(provider: &dyn LlmProvider, model: &ModelInfo, user: String) -> Result<String, String> {
+pub async fn ask(
+    provider: &dyn LlmProvider,
+    model: &ModelInfo,
+    user: String,
+) -> Result<String, String> {
     ask_with(provider, model, SYSTEM, user, MAX_TOKENS).await
 }
 
@@ -298,7 +309,8 @@ mod tests {
 
     #[test]
     fn json_is_dug_out_of_chatter_and_fences() {
-        let r = parse("好的。\n```json\n{\"decision\":\"ignore\",\"reason\":\"闲聊\"}\n```").unwrap();
+        let r =
+            parse("好的。\n```json\n{\"decision\":\"ignore\",\"reason\":\"闲聊\"}\n```").unwrap();
         assert_eq!(r.decision, "ignore");
         assert!(parse("没有 JSON").is_err());
     }
@@ -314,13 +326,18 @@ mod tests {
             reason: Some("主干挂了".into()),
             ..Default::default()
         };
-        assert!(matches!(validate(&ok, &settings(), &st), Outcome::Accept { rule, .. } if rule == "修 CI"));
+        assert!(
+            matches!(validate(&ok, &settings(), &st), Outcome::Accept { rule, .. } if rule == "修 CI")
+        );
 
         let disabled = Raw {
             rule: Some("停用".into()),
             ..ok_clone(&ok)
         };
-        assert!(matches!(validate(&disabled, &settings(), &st), Outcome::Ignore { .. }));
+        assert!(matches!(
+            validate(&disabled, &settings(), &st),
+            Outcome::Ignore { .. }
+        ));
 
         let no_task = Raw {
             task: None,
@@ -364,10 +381,16 @@ mod tests {
             ticket: Some("#9".into()),
             ..ok_clone(&raw)
         };
-        assert!(matches!(validate(&missing, &settings(), &st), Outcome::Ignore { .. }));
+        assert!(matches!(
+            validate(&missing, &settings(), &st),
+            Outcome::Ignore { .. }
+        ));
 
         st.ticket_mut(&id).unwrap().status = TicketStatus::Stopped;
-        assert!(matches!(validate(&raw, &settings(), &st), Outcome::Ignore { .. }), "叫停的不收");
+        assert!(
+            matches!(validate(&raw, &settings(), &st), Outcome::Ignore { .. }),
+            "叫停的不收"
+        );
     }
 
     #[test]
@@ -414,20 +437,31 @@ mod live {
             rules: vec![Rule {
                 id: "r1".into(),
                 name: "修主干 CI".into(),
-                instruction: "main 分支的 CI 失败时，定位原因并在新分支上修好、跑通测试，不推送。".into(),
+                instruction: "main 分支的 CI 失败时，定位原因并在新分支上修好、跑通测试，不推送。"
+                    .into(),
                 enabled: true,
             }],
             ..Default::default()
         };
         let state = State::default();
 
-        let hit = prompt(&settings, &state, "主干 CI", &["CI 失败 #812 fix: 调整解析器 (main)".into()]);
+        let hit = prompt(
+            &settings,
+            &state,
+            "主干 CI",
+            &["CI 失败 #812 fix: 调整解析器 (main)".into()],
+        );
         let answer = ask(&*provider, &model, hit).await.expect("调用失败");
         println!("命中：{answer}");
         let out = validate(&parse(&answer).expect("不是 JSON"), &settings, &state);
         assert!(matches!(out, Outcome::Accept { .. }), "{out:?}");
 
-        let noise = prompt(&settings, &state, "主干 CI", &["CI 成功 #813 docs: 改错字 (main)".into()]);
+        let noise = prompt(
+            &settings,
+            &state,
+            "主干 CI",
+            &["CI 成功 #813 docs: 改错字 (main)".into()],
+        );
         let answer = ask(&*provider, &model, noise).await.expect("调用失败");
         println!("噪音：{answer}");
         let out = validate(&parse(&answer).expect("不是 JSON"), &settings, &state);

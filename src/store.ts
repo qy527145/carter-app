@@ -26,21 +26,21 @@
 import { create } from "zustand";
 
 import type {
-  AssistantView,
+  AgentRun,
   AppInfo,
   AppSettings,
   AskQuestion,
+  AssistantView,
   BlockView,
+  ContextView,
   CreatedSession,
   CreatedSide,
-  LiveView,
-  ContextView,
   GoalView,
+  LiveView,
   MemoryCandidate,
   MessageView,
   SessionEvent,
   SessionRow,
-  AgentRun,
   TodoView,
   TurnFiles,
   TurnPrompt,
@@ -563,9 +563,7 @@ export function reduceConv(c: Conv, e: SessionEvent, sessionId?: string): Partia
       return {
         memorySuggestions: [
           ...c.memorySuggestions,
-          ...e.candidates.filter(
-            (n) => !c.memorySuggestions.some((o) => o.content === n.content),
-          ),
+          ...e.candidates.filter((n) => !c.memorySuggestions.some((o) => o.content === n.content)),
         ],
       };
     case "title":
@@ -655,10 +653,7 @@ const SUMMARY_PREFIX = "【历史摘要·";
  * 那一段是展开后的正文，直接拿来回填「编辑」框等于把整份文件摊进去 —— 查得到
  * 原文就挂在 `raw` 上，查不到时「编辑」退回气泡里显示的那段（见 `UserTurn`）。
  */
-export function historyToTurns(
-  history: MessageView[],
-  prompts: TurnPrompt[] = [],
-): Turn[] {
+export function historyToTurns(history: MessageView[], prompts: TurnPrompt[] = []): Turn[] {
   const rawOf = new Map(prompts.map((p) => [p.turn, p.text]));
   let turns: Turn[] = [];
   // 上一条用户消息是「自动继续」的注入 → 接下来的助手轮是目标模式推起来的。
@@ -696,12 +691,14 @@ export function historyToTurns(
       if (text) turns.push({ role: "assistant", items: [{ kind: "note", text }] });
       continue;
     }
-    const items = msg.blocks
-      .map(blockToItem)
-      .filter((x): x is Item => x !== null);
+    const items = msg.blocks.map(blockToItem).filter((x): x is Item => x !== null);
     const first = items[0];
     if (first?.kind === "text" && first.text.startsWith(SUMMARY_PREFIX)) {
-      items.unshift({ kind: "note", cursor: true, text: "较早的对话已压缩成下面这段摘要，模型从这里看起" });
+      items.unshift({
+        kind: "note",
+        cursor: true,
+        text: "较早的对话已压缩成下面这段摘要，模型从这里看起",
+      });
     }
     if (items.length) {
       // `turn` 由后端算好（见 `view.rs`）—— 界面上「这条回答对应哪次请求」全靠它，
@@ -964,9 +961,7 @@ export const useStore = create<Store>((set) => ({
       // 撤掉时保持其余卡片的先后：那个顺序是用户表达的意思。
       return {
         composerContexts:
-          hit >= 0
-            ? s.composerContexts.filter((_, i) => i !== hit)
-            : [...s.composerContexts, card],
+          hit >= 0 ? s.composerContexts.filter((_, i) => i !== hit) : [...s.composerContexts, card],
       };
     }),
 
@@ -1024,14 +1019,12 @@ export const useStore = create<Store>((set) => ({
     }),
 
   enqueuePrompt: (p) =>
-    set((s) =>
-      s.queued.some((x) => x.id === p.id) ? {} : { queued: [...s.queued, p] },
-    ),
+    set((s) => (s.queued.some((x) => x.id === p.id) ? {} : { queued: [...s.queued, p] })),
 
   removeQueuedPrompt: (id) =>
-    set((s) => (s.queued.some((x) => x.id === id)
-      ? { queued: s.queued.filter((x) => x.id !== id) }
-      : {})),
+    set((s) =>
+      s.queued.some((x) => x.id === id) ? { queued: s.queued.filter((x) => x.id !== id) } : {},
+    ),
 
   restoreQueued: (list) => set({ queued: list }),
 
@@ -1055,9 +1048,7 @@ export const useStore = create<Store>((set) => ({
 
   addSideUserTurn: (text) =>
     set((s) =>
-      s.side
-        ? { side: { ...s.side, turns: [...s.side.turns, { role: "user", text }] } }
-        : {},
+      s.side ? { side: { ...s.side, turns: [...s.side.turns, { role: "user", text }] } } : {},
     ),
 
   applySideEvent: (e) =>
@@ -1090,6 +1081,5 @@ export const useStore = create<Store>((set) => ({
       return { side: next };
     }),
 
-  setSideNotice: (notice) =>
-    set((s) => (s.side ? { side: { ...s.side, notice } } : {})),
+  setSideNotice: (notice) => set((s) => (s.side ? { side: { ...s.side, notice } } : {})),
 }));

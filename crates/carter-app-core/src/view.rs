@@ -181,10 +181,7 @@ fn server_activity_summary(raw: &serde_json::Value) -> String {
             .and_then(|q| q.as_str())
             .unwrap_or("")
             .to_string(),
-        "server_tool_use" => raw
-            .get("input")
-            .map(|i| i.to_string())
-            .unwrap_or_default(),
+        "server_tool_use" => raw.get("input").map(|i| i.to_string()).unwrap_or_default(),
         "web_search_tool_result" => {
             let n = raw
                 .get("content")

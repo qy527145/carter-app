@@ -24,18 +24,18 @@
 // 相对的 `<script src="./chart.js">` 在 `srcdoc` 里没有基准地址，会加载不到；这类页面
 // 用「在浏览器中打开」看原文件。图表通常自带 CDN 或全部内联，不受影响。
 
+import { openPath, openUrl } from "@tauri-apps/plugin-opener";
+import { ChevronRight, Code, ExternalLink, LoaderCircle, Maximize2 } from "lucide-react";
 import {
+  type CSSProperties,
+  type ReactElement,
+  type ReactNode,
   useEffect,
   useMemo,
   useRef,
   useState,
-  type CSSProperties,
-  type ReactElement,
-  type ReactNode,
 } from "react";
-import { openPath, openUrl } from "@tauri-apps/plugin-opener";
 import { defaultUrlTransform } from "react-markdown";
-import { ChevronRight, Code, ExternalLink, LoaderCircle, Maximize2 } from "lucide-react";
 
 import { previewFile, readImage } from "../lib/api";
 import { toastError } from "../lib/toast";
@@ -333,15 +333,7 @@ function ZoomableImage({
  * `src` 三种形态：`carter-img:<hash>.<ext>`（图片库引用）、远端 / data URL、本地路径
  * （按会话 cwd 解析）。
  */
-export function MarkdownImage({
-  src,
-  alt,
-  cwd,
-}: {
-  src: string;
-  alt?: string;
-  cwd: string;
-}) {
+export function MarkdownImage({ src, alt, cwd }: { src: string; alt?: string; cwd: string }) {
   const img = useImage(cwd, src);
   // 没写 src 的 `<img>`（模型偶尔会这么写）不该变成一个「这不是图片」的占位。
   if (!src.trim()) return null;
@@ -523,7 +515,9 @@ export function HtmlFrame({
 /** 从 `<svg>` 开标签里取出宽高比（`viewBox` 优先，其次 width/height）。 */
 function svgRatio(svg: string): number {
   const tag = /<svg\b[^>]*>/i.exec(svg)?.[0] ?? "";
-  const vb = /viewBox\s*=\s*["']\s*([-\d.]+)[\s,]+([-\d.]+)[\s,]+([-\d.]+)[\s,]+([-\d.]+)/i.exec(tag);
+  const vb = /viewBox\s*=\s*["']\s*([-\d.]+)[\s,]+([-\d.]+)[\s,]+([-\d.]+)[\s,]+([-\d.]+)/i.exec(
+    tag,
+  );
   if (vb) {
     const w = Number(vb[3]);
     const h = Number(vb[4]);
@@ -1000,7 +994,9 @@ export function MarkdownPre({ children, live }: { children?: ReactNode; live: bo
     // 是一行折叠的状态条（见 `StreamingArtifact`）—— 半张图铺在正文里只会占地方
     // 和闪。`live={false}` 是给卡片本身的：它已经稳定，页签与全屏都该能用了。
     if (!live || blockComplete(lang, html)) {
-      return <HtmlArtifact html={html} title={lang.toUpperCase()} live={false} svg={lang === "svg"} />;
+      return (
+        <HtmlArtifact html={html} title={lang.toUpperCase()} live={false} svg={lang === "svg"} />
+      );
     }
     return <StreamingArtifact lang={lang} src={html} />;
   }

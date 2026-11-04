@@ -21,7 +21,6 @@
 //
 // 加飞书只需要往 `connectors.rs` 的 `VENDORS` 里再加一项，这个页面一行不用改。
 
-import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
@@ -35,26 +34,27 @@ import {
   Sparkles,
   X,
 } from "lucide-react";
-
-import { EVENT_NAME, type AppEvent } from "../../lib/api";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Button } from "../../components/ui/Button";
+import { Field, Input, Switch } from "../../components/ui/Input";
+import { Badge, Banner, Card, Modal, Spinner } from "../../components/ui/Panel";
 import {
+  type AppEvent,
   addMailAccount,
+  type ConnectorRow,
   cancelConnectorLogin,
   configureConnectorApp,
+  EVENT_NAME,
   installConnectorCli,
   installConnectorSkill,
   listConnectors,
   loginConnector,
   logoutConnector,
-  removeMailAccount,
-  type ConnectorRow,
   type MailAccountDraft,
+  removeMailAccount,
 } from "../../lib/api";
 import { toastError, toastOk } from "../../lib/toast";
 import { useAsync } from "../../lib/useAsync";
-import { Button } from "../../components/ui/Button";
-import { Field, Input, Switch } from "../../components/ui/Input";
-import { Badge, Banner, Card, Modal, Spinner } from "../../components/ui/Panel";
 import { AsyncBody, PageIntro } from "./AsyncBody";
 
 type Job = "install-cli" | "install-skill" | "configure-app" | "login" | "logout";
@@ -83,13 +83,7 @@ type Progress = {
   error: string | null;
 };
 
-function StatusLine({
-  ok,
-  children,
-}: {
-  ok: boolean;
-  children: React.ReactNode;
-}) {
+function StatusLine({ ok, children }: { ok: boolean; children: React.ReactNode }) {
   return (
     <div className="flex items-start gap-1.5 text-xs leading-relaxed">
       {ok ? (
@@ -167,9 +161,7 @@ function ConnectorCard({ row, onStart }: { row: ConnectorRow; onStart: (job: Job
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <span className="text-sm font-medium">{row.name}</span>
-            <Badge tone={row.ready ? "green" : "orange"}>
-              {row.ready ? "已连接" : "未就绪"}
-            </Badge>
+            <Badge tone={row.ready ? "green" : "orange"}>{row.ready ? "已连接" : "未就绪"}</Badge>
           </div>
           <p className="mt-1 text-xs leading-relaxed text-dim">{row.blurb}</p>
         </div>
@@ -209,7 +201,11 @@ function ConnectorCard({ row, onStart }: { row: ConnectorRow; onStart: (job: Job
           </Button>
         )}
         {cli.path !== null && row.auth_kind === "account" && (
-          <Button size="sm" variant={auth.logged_in ? "secondary" : "primary"} onClick={() => setShowMail(!showMail)}>
+          <Button
+            size="sm"
+            variant={auth.logged_in ? "secondary" : "primary"}
+            onClick={() => setShowMail(!showMail)}
+          >
             <LogIn size={12} />
             添加账号
           </Button>
@@ -310,16 +306,14 @@ function ConnectorCard({ row, onStart }: { row: ConnectorRow; onStart: (job: Job
         >
           {showHint ? "收起手动安装命令" : "装不上？看手动安装命令"}
         </button>
-        <span className="ml-auto text-[10px] text-dim">
-          {row.id}
-        </span>
+        <span className="ml-auto text-[10px] text-dim">{row.id}</span>
       </div>
       {showHint && (
         <div className="space-y-2 rounded-lg bg-base p-2.5">
           <p className="text-[11px] leading-relaxed text-dim">
             自动安装只是替你跑下面这条命令。在终端里跑完、确认{" "}
-            <span className="mono">{cli.name}</span> 能用了，再回来点「重装 CLI」以外
-            的任何按钮 —— 界面会自己认出它。
+            <span className="mono">{cli.name}</span> 能用了，再回来点「重装 CLI」以外 的任何按钮 ——
+            界面会自己认出它。
           </p>
           <pre className="mono max-h-32 overflow-auto whitespace-pre-wrap break-all rounded-md bg-card p-2 text-[10px] leading-relaxed text-dim">
             {row.install_hint}
@@ -331,7 +325,11 @@ function ConnectorCard({ row, onStart }: { row: ConnectorRow; onStart: (job: Job
 }
 
 /** 进程跑着的时候那块弹窗：日志 + （登录时）授权页 + 取消。 */
-function ProgressDialog({ p, onCancel, onClose }: {
+function ProgressDialog({
+  p,
+  onCancel,
+  onClose,
+}: {
   p: Progress;
   onCancel: () => void;
   onClose: () => void;
@@ -370,11 +368,7 @@ function ProgressDialog({ p, onCancel, onClose }: {
             <div className="mb-2">
               浏览器没有自动弹出、或扫到一半关了，可以点下面这个按钮重新打开授权页。
             </div>
-            <Button
-              size="sm"
-              variant="primary"
-              onClick={() => openUrl(url).catch(toastError)}
-            >
+            <Button size="sm" variant="primary" onClick={() => openUrl(url).catch(toastError)}>
               <ScanLine size={12} />
               打开授权页扫码
             </Button>
@@ -508,16 +502,13 @@ export function ConnectorsPage() {
   return (
     <>
       <PageIntro>
-        连接器把外部 IM 接进本应用：底层是厂商官方的 CLI 加配套技能，本应用只负责安装、登录与状态展示。
+        连接器把外部 IM 接进本应用：底层是厂商官方的 CLI
+        加配套技能，本应用只负责安装、登录与状态展示。
         装好并登录之后，直接在对话里说「帮我看看明天的日程」这类话就行。
       </PageIntro>
 
       <div className="mb-4 flex items-center gap-2 rounded-lg bg-card px-3 py-2 text-xs text-dim">
-        <Switch
-          checked={recommend}
-          onChange={setRecommend}
-          label="登录时顺带授权推荐权限"
-        />
+        <Switch checked={recommend} onChange={setRecommend} label="登录时顺带授权推荐权限" />
         <span className="min-w-0 flex-1 leading-relaxed">
           登录时一次性授予官方推荐的全部数据权限。不勾的话，第一次用某个能力时会各自弹一次授权页 ——
           功能一样，只是更碎。
@@ -528,11 +519,7 @@ export function ConnectorsPage() {
         {(rows) => (
           <div className="space-y-3">
             {rows.map((row) => (
-              <ConnectorCard
-                key={row.id}
-                row={row}
-                onStart={(job) => void start(row, job)}
-              />
+              <ConnectorCard key={row.id} row={row} onStart={(job) => void start(row, job)} />
             ))}
           </div>
         )}

@@ -8,7 +8,6 @@
 //
 // 文本 / 图片 / 二进制 / 已经没了这些情况后端已经分好类，这里只负责按 `kind` 画。
 
-import { useEffect, useMemo, useState } from "react";
 import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   Check,
@@ -19,17 +18,13 @@ import {
   LoaderCircle,
   TriangleAlert,
 } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 
-import {
-  fileDiff,
-  previewFile,
-  type FileDiff,
-  type FilePreview as Preview,
-} from "../lib/api";
+import { type FileDiff, fileDiff, type FilePreview as Preview, previewFile } from "../lib/api";
 import { copyText } from "../lib/clipboard";
 import { fmtBytes, relTime } from "../lib/format";
-import { toastError, TOAST_MS } from "../lib/toast";
-import { HtmlFrame, SvgCanvas, isHtmlFile, isSvgPath } from "./Media";
+import { TOAST_MS, toastError } from "../lib/toast";
+import { HtmlFrame, isHtmlFile, isSvgPath, SvgCanvas } from "./Media";
 import { Button } from "./ui/Button";
 import { Segmented } from "./ui/Input";
 import { Modal } from "./ui/Panel";
@@ -55,7 +50,9 @@ function Notice({ kind, children }: { kind?: "warn" | "error"; children: React.R
       : "border-[var(--warn-border)] bg-[var(--warn-bg)]";
   const icon = kind === "error" ? "text-[var(--danger)]" : "text-tone-orange";
   return (
-    <div className={`mb-2 flex items-start gap-2 rounded-lg border px-3 py-2 text-xs leading-relaxed ${tone}`}>
+    <div
+      className={`mb-2 flex items-start gap-2 rounded-lg border px-3 py-2 text-xs leading-relaxed ${tone}`}
+    >
       <TriangleAlert size={13} className={`icon-optical shrink-0 ${icon}`} />
       <div className="min-w-0 flex-1">{children}</div>
     </div>
@@ -314,7 +311,10 @@ export function FilePreviewModal({
               ) : null}
               {isHtmlFile(path) && htmlTab === "render" ? (
                 isSvgPath(path) ? (
-                  <SvgCanvas svg={preview.content} maxHeight={Math.round(window.innerHeight * 0.5)} />
+                  <SvgCanvas
+                    svg={preview.content}
+                    maxHeight={Math.round(window.innerHeight * 0.5)}
+                  />
                 ) : (
                   <HtmlFrame
                     html={preview.content}

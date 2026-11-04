@@ -7,15 +7,14 @@
 // carter CLI 读不到它、也不会受它影响 —— 页面上必须把这句话说出来，
 // 否则用户会以为在命令行里也关掉了。
 
-import { useState } from "react";
 import { ChevronRight } from "lucide-react";
-
-import { listTools, setAppSettings, type AppSettings, type ToolRow } from "../../lib/api";
+import { useState } from "react";
+import { Switch } from "../../components/ui/Input";
+import { Banner, Card, Collapse } from "../../components/ui/Panel";
+import { type AppSettings, listTools, setAppSettings, type ToolRow } from "../../lib/api";
 import { toastError } from "../../lib/toast";
 import { useAsync } from "../../lib/useAsync";
 import { useStore } from "../../store";
-import { Switch } from "../../components/ui/Input";
-import { Banner, Card, Collapse } from "../../components/ui/Panel";
 import { AsyncBody, PageIntro } from "./AsyncBody";
 
 function ToolItem({ t, onToggle }: { t: ToolRow; onToggle: (v: boolean) => void }) {
@@ -94,15 +93,15 @@ export function ToolsPage() {
       <PageIntro>
         这里列的是
         <strong className="font-medium text-ink">本地会执行</strong>的工具。
-        厂商在服务端执行的（web_search 等）属于渠道能力，见「渠道」页；MCP 提供的工具
-        要连上 server 才知道名字，见「MCP」页。
+        厂商在服务端执行的（web_search 等）属于渠道能力，见「渠道」页；MCP 提供的工具 要连上 server
+        才知道名字，见「MCP」页。
       </PageIntro>
 
       <div className="mb-4">
         <Banner kind="warn">
           工具开关存在 <span className="mono">~/.carter-app/settings.json</span>，
-          <strong className="font-medium">只对本应用生效</strong> ——
-          carter 命令行读不到它，在那边这些工具依然是开着的。
+          <strong className="font-medium">只对本应用生效</strong> —— carter
+          命令行读不到它，在那边这些工具依然是开着的。
         </Banner>
       </div>
 

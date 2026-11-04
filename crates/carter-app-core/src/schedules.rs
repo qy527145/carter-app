@@ -207,7 +207,9 @@ fn validate_kind(kind: &ScheduleKind, now: u64) -> Result<(), String> {
         }
         ScheduleKind::Daily { hour, minute } => {
             if hour > 23 || minute > 59 {
-                return Err(format!("时间 {hour}:{minute} 不合法（小时 0-23，分钟 0-59）"));
+                return Err(format!(
+                    "时间 {hour}:{minute} 不合法（小时 0-23，分钟 0-59）"
+                ));
             }
             Ok(())
         }
@@ -250,10 +252,10 @@ pub fn next_daily(after_ms: u64, hour: u32, minute: u32) -> u64 {
                 // 春季跳表：这个钟点在今天不存在。
                 LocalResult::None => None,
             };
-            if let Some(ms) = candidate {
-                if ms as u64 > after_ms {
-                    return ms as u64;
-                }
+            if let Some(ms) = candidate
+                && ms as u64 > after_ms
+            {
+                return ms as u64;
             }
         }
         match date.succ_opt() {
@@ -399,9 +401,7 @@ impl ScheduleStore {
     pub fn set_enabled(&self, id: &str, enabled: bool) -> Result<Option<Schedule>, String> {
         let now = now_ms();
         self.with(|list| {
-            let Some(s) = list.iter_mut().find(|s| s.id == id) else {
-                return None;
-            };
+            let s = list.iter_mut().find(|s| s.id == id)?;
             s.enabled = enabled;
             if enabled && s.next_at <= now {
                 s.reschedule();
@@ -550,9 +550,13 @@ pub async fn fire_now(shell: &Arc<crate::shell::AppShell>, id: &str) -> Result<S
 ///
 /// 返回新会话 id。失败不抛给调用方 —— 触发是后台行为，用户看到的是界面上那条
 /// 红字（`AppEvent::ScheduleFired` 的 `error`），而不是一个没人接的错误。
-async fn fire(shell: &Arc<crate::shell::AppShell>, s: &Schedule, now: u64) -> Result<String, String> {
+async fn fire(
+    shell: &Arc<crate::shell::AppShell>,
+    s: &Schedule,
+    now: u64,
+) -> Result<String, String> {
     use crate::protocol::Command;
-    use crate::session::{start_session, SessionOptions};
+    use crate::session::{SessionOptions, start_session};
 
     let opts = SessionOptions {
         cwd: PathBuf::from(&s.cwd),
@@ -596,7 +600,9 @@ async fn fire(shell: &Arc<crate::shell::AppShell>, s: &Schedule, now: u64) -> Re
         return Err(msg);
     }
 
-    shell.schedules.record_fired(&s.id, now, Some(&session_id), None);
+    shell
+        .schedules
+        .record_fired(&s.id, now, Some(&session_id), None);
     shell.emit(crate::protocol::AppEvent::ScheduleFired {
         schedule_id: s.id.clone(),
         name: s.name.clone(),
@@ -621,8 +627,16 @@ mod tests {
     }
 
     fn every(minutes: u64) -> Schedule {
-        Schedule::new("测试", "跑一下", ScheduleKind::Interval { every_minutes: minutes }, "/tmp", None)
-            .unwrap()
+        Schedule::new(
+            "测试",
+            "跑一下",
+            ScheduleKind::Interval {
+                every_minutes: minutes,
+            },
+            "/tmp",
+            None,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -765,30 +779,38 @@ mod tests {
                 .unwrap_or_default()
         };
         assert!(err(ScheduleKind::Interval { every_minutes: 0 }).contains("间隔"));
-        assert!(err(ScheduleKind::Interval {
-            every_minutes: MAX_INTERVAL_MINUTES + 1
-        })
-        .contains("间隔"));
-        assert!(err(ScheduleKind::Daily {
-            hour: 24,
-            minute: 0
-        })
-        .contains("不合法"));
+        assert!(
+            err(ScheduleKind::Interval {
+                every_minutes: MAX_INTERVAL_MINUTES + 1
+            })
+            .contains("间隔")
+        );
+        assert!(
+            err(ScheduleKind::Daily {
+                hour: 24,
+                minute: 0
+            })
+            .contains("不合法")
+        );
         assert!(err(ScheduleKind::Once { at_ms: 1 }).contains("过去了"));
-        assert!(Schedule::new("", "p", ScheduleKind::Interval { every_minutes: 5 }, "/tmp", None)
+        assert!(
+            Schedule::new(
+                "",
+                "p",
+                ScheduleKind::Interval { every_minutes: 5 },
+                "/tmp",
+                None
+            )
             .unwrap_err()
-            .contains("name"));
+            .contains("name")
+        );
     }
 
     #[test]
     fn local_times_parse_in_the_documented_format() {
         let ms = parse_local("2026-03-01 09:30").unwrap();
         assert_eq!(fmt_local(ms), "2026-03-01 09:30");
-        assert_eq!(
-            parse_local("2026/03/01 09:30").unwrap(),
-            ms,
-            "斜杠写法也认"
-        );
+        assert_eq!(parse_local("2026/03/01 09:30").unwrap(), ms, "斜杠写法也认");
         assert!(parse_local("明天早上").is_err());
     }
 
@@ -817,11 +839,7 @@ mod tests {
             "每 90 分钟"
         );
         assert_eq!(
-            ScheduleKind::Daily {
-                hour: 9,
-                minute: 5
-            }
-            .label(),
+            ScheduleKind::Daily { hour: 9, minute: 5 }.label(),
             "每天 09:05"
         );
     }

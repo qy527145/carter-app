@@ -4,10 +4,9 @@
 // 错误样式各不相同。收成一个组件之后，出错时「重试」按钮也只有一个实现。
 
 import type { ReactNode } from "react";
-
-import type { AsyncState } from "../../lib/useAsync";
-import { Banner, EmptyState, Loading } from "../../components/ui/Panel";
 import { Button } from "../../components/ui/Button";
+import { Banner, EmptyState, Loading } from "../../components/ui/Panel";
+import type { AsyncState } from "../../lib/useAsync";
 
 export function AsyncBody<T>({
   state,

@@ -17,12 +17,11 @@
 //! 缓冲**必须**在非增量事件到达前刷掉：`text_end` / `tool_started` 的语义依赖
 //! 「此前所有增量都已落地」，否则文字会被归到下一个 item 上。
 
-import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
-
-import { EVENT_NAME, type AppEvent, type SessionEvent } from "./api";
-import { refreshAssistant, refreshSessions } from "./sessionOps";
+import { useEffect } from "react";
 import { useStore } from "../store";
+import { type AppEvent, EVENT_NAME, type SessionEvent } from "./api";
+import { refreshAssistant, refreshSessions } from "./sessionOps";
 
 type Chunk = { kind: "text" | "thinking"; text: string };
 

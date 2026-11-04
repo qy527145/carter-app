@@ -7,9 +7,8 @@
 // （见 core 的 `memory_suggest.rs`）。
 
 import { Brain, Check, X } from "lucide-react";
-
-import * as api from "../lib/api";
 import type { MemoryCandidate } from "../lib/api";
+import * as api from "../lib/api";
 import { toastError, toastOk } from "../lib/toast";
 import { useStore } from "../store";
 import { IconButton } from "./ui/Button";

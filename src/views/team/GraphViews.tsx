@@ -25,16 +25,10 @@
 // 拖拽之外还有键盘：卡片聚焦后按 ←/→ 在列之间挪。只有拖拽的话，这块对键盘用户
 // 等于不存在。
 
+import { ArrowRight, CalendarRange, Check, Columns3, LayoutList } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
-import {
-  ArrowRight,
-  CalendarRange,
-  Check,
-  Columns3,
-  LayoutList,
-} from "lucide-react";
 
-import { teamAct, type TeamGoal, type TeamTask } from "../../lib/api";
+import { type TeamGoal, type TeamTask, teamAct } from "../../lib/api";
 import { personName, priorityTone, statusTone, taskHandoff } from "../../lib/teamUi";
 import { toastError } from "../../lib/toast";
 import { HandoffButton } from "./HandoffButton";
@@ -214,10 +208,7 @@ export function BoardView({
             }`}
           >
             <header className="mb-1.5 flex items-center gap-1.5 px-1">
-              <span
-                className="size-1.5 shrink-0 rounded-full"
-                style={{ background: tone.fg }}
-              />
+              <span className="size-1.5 shrink-0 rounded-full" style={{ background: tone.fg }} />
               <span className="text-[11px] font-medium">{col.label}</span>
               <span className="text-[10px] tabular-nums text-dim">{items.length}</span>
             </header>
@@ -655,7 +646,10 @@ export function TimelineView({
                       className="size-1.5 shrink-0 rounded-full"
                       style={{ background: tone.fg }}
                     />
-                    <span className="shrink-0 text-[9px]" style={{ color: priorityTone(t.priority).fg }}>
+                    <span
+                      className="shrink-0 text-[9px]"
+                      style={{ color: priorityTone(t.priority).fg }}
+                    >
                       {t.priority}
                     </span>
                     <span className="min-w-0 flex-1 truncate text-[11px]">{t.title}</span>

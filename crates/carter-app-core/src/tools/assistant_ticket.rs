@@ -160,16 +160,13 @@ impl Tool for AssistantTicketTool {
             return ToolResult::err(format!("{}: 缺少 ticket", self.name()));
         };
         let Some((id, label)) = resolve(&self.shell.assistant, &key) else {
-            let live: Vec<String> = self
-                .shell
-                .assistant
-                .read(|s| {
-                    s.tickets
-                        .iter()
-                        .filter(|t| !t.status.ended())
-                        .map(|t| format!("{}（{}）", t.label(), t.status.label()))
-                        .collect()
-                });
+            let live: Vec<String> = self.shell.assistant.read(|s| {
+                s.tickets
+                    .iter()
+                    .filter(|t| !t.status.ended())
+                    .map(|t| format!("{}（{}）", t.label(), t.status.label()))
+                    .collect()
+            });
             return ToolResult::err(format!(
                 "{}: 找不到工单 `{key}`。现在有的：{}",
                 self.name(),
@@ -274,9 +271,17 @@ impl Tool for AssistantMemoryTool {
         let source = op.source.clone().unwrap_or_else(|| "对话里当场说的".into());
         let said = vec![source.clone()];
         let now = crate::protocol::now_ms();
-        let op = MemoryOp { source: Some(source), ..op };
-        match self.store.with(|s| memory::apply_ops(&mut s.memories, std::slice::from_ref(&op), &said, now)) {
-            Ok(0) => ToolResult::err("assistant_memory: 没改动（id 不对，或者已经有一模一样的一条）"),
+        let op = MemoryOp {
+            source: Some(source),
+            ..op
+        };
+        match self
+            .store
+            .with(|s| memory::apply_ops(&mut s.memories, std::slice::from_ref(&op), &said, now))
+        {
+            Ok(0) => {
+                ToolResult::err("assistant_memory: 没改动（id 不对，或者已经有一模一样的一条）")
+            }
             Ok(_) => ToolResult::ok(match op.op.as_str() {
                 "add" => format!("已记下：{}", op.text.unwrap_or_default()),
                 "update" => format!("已改成：{}", op.text.unwrap_or_default()),
@@ -325,7 +330,11 @@ impl Tool for AssistantRecallTool {
         let Some(query) = field(&args, "query") else {
             return ToolResult::err("assistant_recall: 缺少 query");
         };
-        let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(12).clamp(1, 40) as usize;
+        let limit = args
+            .get("limit")
+            .and_then(Value::as_u64)
+            .unwrap_or(12)
+            .clamp(1, 40) as usize;
         let episodes = self.store.read(|s| s.episodes.clone());
         if episodes.is_empty() {
             return ToolResult::ok("还没有往期存档（这是第一期）。");
@@ -377,7 +386,11 @@ const MAX_DISPATCH: usize = 20;
 
 impl AssistantTicketTool {
     async fn dispatch(&self, args: Value) -> ToolResult {
-        let Some(tasks) = args.get("tasks").and_then(Value::as_array).filter(|t| !t.is_empty()) else {
+        let Some(tasks) = args
+            .get("tasks")
+            .and_then(Value::as_array)
+            .filter(|t| !t.is_empty())
+        else {
             return ToolResult::err("assistant_dispatch: 缺少 tasks");
         };
         if tasks.len() > MAX_DISPATCH {
@@ -388,11 +401,19 @@ impl AssistantTicketTool {
         // 先全部校验再开单：派到一半失败，用户会得到半批工单和一句报错。
         let mut picked = Vec::new();
         for (i, t) in tasks.iter().enumerate() {
-            let (Some(title), Some(task), Some(cwd)) = (field(t, "title"), field(t, "task"), field(t, "cwd")) else {
-                return ToolResult::err(format!("assistant_dispatch: 第 {} 个 task 缺 title / task / cwd", i + 1));
+            let (Some(title), Some(task), Some(cwd)) =
+                (field(t, "title"), field(t, "task"), field(t, "cwd"))
+            else {
+                return ToolResult::err(format!(
+                    "assistant_dispatch: 第 {} 个 task 缺 title / task / cwd",
+                    i + 1
+                ));
             };
             if !std::path::Path::new(&cwd).is_absolute() || !std::path::Path::new(&cwd).is_dir() {
-                return ToolResult::err(format!("assistant_dispatch: 第 {} 个 task 的目录 {cwd} 不存在（要绝对路径）", i + 1));
+                return ToolResult::err(format!(
+                    "assistant_dispatch: 第 {} 个 task 的目录 {cwd} 不存在（要绝对路径）",
+                    i + 1
+                ));
             }
             picked.push((title, task, cwd));
         }
@@ -411,7 +432,10 @@ impl AssistantTicketTool {
         };
         self.shell.emit(crate::protocol::AppEvent::AssistantChanged);
         launch_queued(&self.shell).await;
-        let (paused, max) = self.shell.assistant.read(|s| (s.settings.paused, s.settings.max_running));
+        let (paused, max) = self
+            .shell
+            .assistant
+            .read(|s| (s.settings.paused, s.settings.max_running));
         let mut out = format!("已派出 {} 张工单：{}。", labels.len(), labels.join("、"));
         if paused {
             out.push_str("助理现在**已暂停**，工单都在排队，恢复后才开工 —— 告诉用户。");
@@ -489,7 +513,11 @@ mod tests {
             ]}))
             .await;
         assert!(ok.ok, "{}", ok.content);
-        assert!(ok.content.contains("已暂停"), "暂停时要说清楚：{}", ok.content);
+        assert!(
+            ok.content.contains("已暂停"),
+            "暂停时要说清楚：{}",
+            ok.content
+        );
         let tickets = store.read(|s| s.tickets.clone());
         assert_eq!(tickets.len(), 2);
         assert_eq!(tickets[0].label(), "#1 修 bug 1");
@@ -509,12 +537,22 @@ mod tests {
         let store = AssistantStore::open(dir.join("assistant.json"));
         store
             .with(|s| {
-                s.open_ticket(&crate::assistant::tests::source(), "r", "修主干 CI", "x", vec![])
+                s.open_ticket(
+                    &crate::assistant::tests::source(),
+                    "r",
+                    "修主干 CI",
+                    "x",
+                    vec![],
+                )
             })
             .unwrap();
         let (id, label) = resolve(&store, "#1").expect("按编号");
         assert_eq!(label, "#1 修主干 CI");
-        assert_eq!(resolve(&store, "1").map(|x| x.0), Some(id.clone()), "不带 # 也认");
+        assert_eq!(
+            resolve(&store, "1").map(|x| x.0),
+            Some(id.clone()),
+            "不带 # 也认"
+        );
         assert_eq!(resolve(&store, "修主干 CI").map(|x| x.0), Some(id));
         assert!(resolve(&store, "#9").is_none());
     }

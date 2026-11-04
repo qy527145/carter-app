@@ -7,8 +7,8 @@
 // 形状不同（报文里 `tool_result` 单独成块），所以不能直接复用组件；但它们讲的
 // 是同一批概念，配色与措辞保持一致。
 
-import { useState } from "react";
 import { ChevronDown, ChevronRight, FileText, Wrench } from "lucide-react";
+import { useState } from "react";
 
 import type { BlockView, InspectedTool, MessageView } from "../../lib/api";
 import { LongText } from "./kit";
@@ -209,9 +209,7 @@ export function ToolCard({ tool }: { tool: InspectedTool }) {
           <span className="rounded bg-bubble px-1 text-[10px] text-dim">厂商执行</span>
         )}
         {!open && tool.description && (
-          <span className="min-w-0 flex-1 truncate text-[11px] text-dim">
-            {tool.description}
-          </span>
+          <span className="min-w-0 flex-1 truncate text-[11px] text-dim">{tool.description}</span>
         )}
       </button>
       {open && (
@@ -225,4 +223,3 @@ export function ToolCard({ tool }: { tool: InspectedTool }) {
     </div>
   );
 }
-

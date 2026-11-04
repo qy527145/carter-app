@@ -3,8 +3,8 @@
 // 这些是全应用反复出现的那几个形状，集中在这里是为了让「一个面板长什么样」
 // 只有一处定义 —— 以前散在各个页里，同样的卡片在三个文件里是三种写法。
 
-import { useEffect, useRef, type ReactNode } from "react";
 import { LoaderCircle, X } from "lucide-react";
+import { type ReactNode, useEffect, useRef } from "react";
 
 // ---------------------------------------------------------------------------
 // 模态
@@ -76,7 +76,7 @@ export function Modal({
     document.addEventListener("keydown", onKey);
     return () => {
       document.removeEventListener("keydown", onKey);
-      if (prev && prev.isConnected) prev.focus();
+      if (prev?.isConnected) prev.focus();
     };
   }, []);
 
@@ -310,10 +310,7 @@ export function Badge({
 }) {
   if (!tone) {
     return (
-      <span
-        title={title}
-        className="shrink-0 rounded bg-bubble px-1.5 py-0.5 text-[10px] text-dim"
-      >
+      <span title={title} className="shrink-0 rounded bg-bubble px-1.5 py-0.5 text-[10px] text-dim">
         {children}
       </span>
     );
@@ -380,7 +377,9 @@ export function Banner({
         : "border-edge bg-card";
 
   return (
-    <div className={`flex items-start gap-2 rounded-lg border px-3 py-2 text-xs leading-relaxed ${cls}`}>
+    <div
+      className={`flex items-start gap-2 rounded-lg border px-3 py-2 text-xs leading-relaxed ${cls}`}
+    >
       <div className="min-w-0 flex-1">{children}</div>
       {action}
       {onClose && (

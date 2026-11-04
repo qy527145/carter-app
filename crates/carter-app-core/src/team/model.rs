@@ -55,8 +55,12 @@ macro_rules! string_enum {
         impl<'de> ::serde::Deserialize<'de> for $ty {
             fn deserialize<D: ::serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
                 let raw = <String as ::serde::Deserialize>::deserialize(d)?;
-                Self::parse(&raw)
-                    .ok_or_else(|| ::serde::de::Error::custom($crate::team::model::bad_value(&raw, &<$ty>::allowed())))
+                Self::parse(&raw).ok_or_else(|| {
+                    ::serde::de::Error::custom($crate::team::model::bad_value(
+                        &raw,
+                        &<$ty>::allowed(),
+                    ))
+                })
             }
         }
     };
@@ -111,10 +115,10 @@ pub fn new_id(kind: Kind) -> String {
     static SEQ: AtomicU64 = AtomicU64::new(0);
 
     let ms = crate::protocol::now_ms();
-    let n = (ms as u64)
-        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        .rotate_left(17)
-        ^ SEQ.fetch_add(1, Ordering::Relaxed).wrapping_mul(0x2545_F491_4F6C_DD1D)
+    let n = ms.wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(17)
+        ^ SEQ
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_mul(0x2545_F491_4F6C_DD1D)
         ^ (std::process::id() as u64).wrapping_shl(24);
     let rand = to_base36(n % (36 * 36 * 36 * 36));
     format!("{}-{}-{:0>4}", kind.prefix(), to_base36(ms), rand)
@@ -179,20 +183,20 @@ impl Identity {
         if raw.is_empty() {
             return None;
         }
-        if let (Some(open), Some(close)) = (raw.find('<'), raw.rfind('>')) {
-            if close > open {
-                let name = raw[..open].trim();
-                let email = raw[open + 1..close].trim();
-                if !email.is_empty() {
-                    return Some(Self {
-                        name: if name.is_empty() {
-                            email.split('@').next().unwrap_or(email).to_string()
-                        } else {
-                            name.to_string()
-                        },
-                        email: email.to_string(),
-                    });
-                }
+        if let (Some(open), Some(close)) = (raw.find('<'), raw.rfind('>'))
+            && close > open
+        {
+            let name = raw[..open].trim();
+            let email = raw[open + 1..close].trim();
+            if !email.is_empty() {
+                return Some(Self {
+                    name: if name.is_empty() {
+                        email.split('@').next().unwrap_or(email).to_string()
+                    } else {
+                        name.to_string()
+                    },
+                    email: email.to_string(),
+                });
             }
         }
         Some(Self {
@@ -203,7 +207,11 @@ impl Identity {
 
     /// 界面上那个短名字。
     pub fn short(&self) -> &str {
-        if self.name.is_empty() { &self.email } else { &self.name }
+        if self.name.is_empty() {
+            &self.email
+        } else {
+            &self.name
+        }
     }
 }
 
@@ -286,21 +294,16 @@ impl GoalStatus {
 ///
 /// 现在往**大写**这一边收：它是人写、脚本写、issue 里写的形式。旧文件里的
 /// `"p2"` 照样读得进来，下次写回时自动变成 `"P2"`，不需要迁移。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Priority {
     P0,
     P1,
+    #[default]
     P2,
     P3,
 }
 
 string_enum!(Priority);
-
-impl Default for Priority {
-    fn default() -> Self {
-        Priority::P2
-    }
-}
 
 impl Priority {
     pub fn as_str(self) -> &'static str {
@@ -481,7 +484,10 @@ impl TaskStatus {
 
     /// 还占着「待办」名额的状态。`done` / `dropped` 不算。
     pub fn is_open(self) -> bool {
-        matches!(self, TaskStatus::Todo | TaskStatus::Doing | TaskStatus::Blocked)
+        matches!(
+            self,
+            TaskStatus::Todo | TaskStatus::Doing | TaskStatus::Blocked
+        )
     }
 }
 
@@ -671,14 +677,18 @@ fn attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
             continue;
         }
         let rest = tag[from..].trim_start();
-        let Some(rest) = rest.strip_prefix('=') else { continue };
+        let Some(rest) = rest.strip_prefix('=') else {
+            continue;
+        };
         let rest = rest.trim_start();
         let quote = rest.chars().next()?;
         if quote == '"' || quote == '\'' {
             let body = &rest[1..];
             return body.find(quote).map(|e| &body[..e]);
         }
-        let e = rest.find(|c: char| c.is_whitespace() || c == '/').unwrap_or(rest.len());
+        let e = rest
+            .find(|c: char| c.is_whitespace() || c == '/')
+            .unwrap_or(rest.len());
         return Some(&rest[..e]);
     }
     None
@@ -988,7 +998,11 @@ mod tests {
             <TITLE> 十月回顾 &amp; 计划 </TITLE></head><body>…</body></html>"#;
         let b = Board::parse("b-x", html.into());
         assert_eq!(b.title, "十月回顾 & 计划");
-        assert_eq!(b.goal_id.as_deref(), Some("g-abc"), "属性顺序、引号种类都要认");
+        assert_eq!(
+            b.goal_id.as_deref(),
+            Some("g-abc"),
+            "属性顺序、引号种类都要认"
+        );
         // 没写标题就退回文件名，列表里不至于出现一行空白。
         assert_eq!(Board::parse("b-y", "<p>hi</p>".into()).title, "b-y");
     }
@@ -997,7 +1011,10 @@ mod tests {
     fn stamping_replaces_or_inserts_without_breaking_the_doctype() {
         let html = "<!DOCTYPE html><html><head><title>旧</title></head><body><header>h</header></body></html>";
         let out = stamp_board(html, Some("新 <标题>"), Some("g-1"));
-        assert!(out.starts_with("<!DOCTYPE html>"), "doctype 前面不能塞东西：{out}");
+        assert!(
+            out.starts_with("<!DOCTYPE html>"),
+            "doctype 前面不能塞东西：{out}"
+        );
         assert!(out.contains("<title>新 &lt;标题&gt;</title>"));
         assert!(!out.contains("旧"));
         assert_eq!(html_meta(&out, "carter-goal").as_deref(), Some("g-1"));
@@ -1045,16 +1062,33 @@ mod enum_tests {
 
     #[test]
     fn bad_priority_names_the_legal_values() {
-        let e = serde_json::from_str::<Priority>("\"急\"").unwrap_err().to_string();
+        let e = serde_json::from_str::<Priority>("\"急\"")
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("P0 / P1 / P2 / P3"), "{e}");
     }
 
     #[test]
     fn statuses_go_the_same_way() {
-        assert_eq!(serde_json::from_str::<TaskStatus>("\"Done\"").unwrap(), TaskStatus::Done);
-        assert_eq!(serde_json::from_str::<TaskStatus>("\"doing\"").unwrap(), TaskStatus::Doing);
-        assert_eq!(serde_json::to_string(&TaskStatus::Blocked).unwrap(), "\"blocked\"");
-        assert_eq!(serde_json::from_str::<GoalStatus>("\"ARCHIVED\"").unwrap(), GoalStatus::Archived);
-        assert_eq!(serde_json::to_string(&GoalStatus::Done).unwrap(), "\"done\"");
+        assert_eq!(
+            serde_json::from_str::<TaskStatus>("\"Done\"").unwrap(),
+            TaskStatus::Done
+        );
+        assert_eq!(
+            serde_json::from_str::<TaskStatus>("\"doing\"").unwrap(),
+            TaskStatus::Doing
+        );
+        assert_eq!(
+            serde_json::to_string(&TaskStatus::Blocked).unwrap(),
+            "\"blocked\""
+        );
+        assert_eq!(
+            serde_json::from_str::<GoalStatus>("\"ARCHIVED\"").unwrap(),
+            GoalStatus::Archived
+        );
+        assert_eq!(
+            serde_json::to_string(&GoalStatus::Done).unwrap(),
+            "\"done\""
+        );
     }
 }

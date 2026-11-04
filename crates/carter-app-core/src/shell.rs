@@ -229,11 +229,15 @@ impl LiveLog {
     pub fn tool_finished(&self, call_id: &str, content: &str) {
         let mut live = self.0.lock().unwrap();
         for item in live.iter_mut().rev() {
-            if let LiveItem::Tool { call_id: id, result, .. } = item {
-                if id == call_id {
-                    *result = Some(content.to_string());
-                    return;
-                }
+            if let LiveItem::Tool {
+                call_id: id,
+                result,
+                ..
+            } = item
+                && id == call_id
+            {
+                *result = Some(content.to_string());
+                return;
             }
         }
     }
@@ -349,7 +353,10 @@ impl AppShell {
         )
         .await;
         if waited.is_err() {
-            tracing::warn!(session = id, "关闭会话：5 秒内没有退出，重开会被拒绝直到它退出");
+            tracing::warn!(
+                session = id,
+                "关闭会话：5 秒内没有退出，重开会被拒绝直到它退出"
+            );
         }
         // 超时**不**清标记：旧 runner 还攥着会话文件，这时按 id 重开就是两个写者 ——
         // 历史交错，`tool_result` 与它的 `tool_use` 被隔开，之后每次请求都 400。
@@ -368,7 +375,9 @@ impl AppShell {
     /// 助理在跑的工单会话不归界面管，由助理自己收（`runtime::on_idle`）。
     pub async fn detach_session(self: &Arc<Self>, id: &str) {
         use std::sync::atomic::Ordering::SeqCst;
-        let Some(handle) = self.session(id) else { return };
+        let Some(handle) = self.session(id) else {
+            return;
+        };
         handle.attached.store(false, SeqCst);
         if self.assistant.is_worker(id) {
             return;
@@ -384,7 +393,10 @@ impl AppShell {
         tokio::spawn(async move {
             loop {
                 let check = match rx.recv().await {
-                    Ok(AppEvent::Session { session_id, event: SessionEvent::Idle }) => session_id == id,
+                    Ok(AppEvent::Session {
+                        session_id,
+                        event: SessionEvent::Idle,
+                    }) => session_id == id,
                     Ok(_) => false,
                     // 积压时 Idle 可能被挤掉了：照样核对一次。
                     Err(broadcast::error::RecvError::Lagged(_)) => true,
@@ -435,7 +447,11 @@ impl AppShell {
             out.extend(self.close_tree(&child));
         }
         if let Some((_, handle)) = self.sessions.remove(id) {
-            tracing::info!(session = id, busy = handle.busy.load(std::sync::atomic::Ordering::SeqCst), "关闭会话");
+            tracing::info!(
+                session = id,
+                busy = handle.busy.load(std::sync::atomic::Ordering::SeqCst),
+                "关闭会话"
+            );
             handle.close.set();
             handle.cancel.set();
             handle.asks.clear();
@@ -500,7 +516,10 @@ mod tests {
         let (tx, rx) = oneshot::channel();
         asks.insert(7, Vec::new(), tx);
         // 两个问题，第一个多选。
-        let answers = vec![vec!["a".to_string(), "b".to_string()], vec!["c".to_string()]];
+        let answers = vec![
+            vec!["a".to_string(), "b".to_string()],
+            vec!["c".to_string()],
+        ];
         assert!(asks.answer(7, answers.clone()));
         assert_eq!(rx.await.unwrap(), answers, "答案要按问题分组原样送到");
         // 只能答一次。
@@ -607,7 +626,10 @@ mod tests {
             done.close.cancelled().await;
             done.done.set();
         });
-        shell.emit(AppEvent::Session { session_id: "b1".into(), event: SessionEvent::Idle });
+        shell.emit(AppEvent::Session {
+            session_id: "b1".into(),
+            event: SessionEvent::Idle,
+        });
         for _ in 0..50 {
             if shell.session("b1").is_none() {
                 break;
@@ -627,7 +649,10 @@ mod tests {
         shell.detach_session("b2").await;
         h.attached.store(true, SeqCst);
         h.busy.store(false, SeqCst);
-        shell.emit(AppEvent::Session { session_id: "b2".into(), event: SessionEvent::Idle });
+        shell.emit(AppEvent::Session {
+            session_id: "b2".into(),
+            event: SessionEvent::Idle,
+        });
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         assert!(shell.session("b2").is_some());
         assert!(!h.close.is_cancelled());

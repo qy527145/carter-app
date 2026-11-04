@@ -108,51 +108,55 @@ pub enum AuthKind {
 }
 
 /// 支持的连接器。顺序 = 界面上的顺序。
-pub static VENDORS: &[Vendor] = &[Vendor {
-    id: "dingtalk",
-    name: "钉钉",
-    blurb: "日历、待办、通讯录、群消息、审批、钉钉文档与云盘。底层是钉钉官方的 dws CLI 与配套 skill。",
-    cli: "dws",
-    skill: "dws",
-    // 安装脚本默认落在 `~/.local/bin`；`DWS_NO_SKILLS=1` 让它只装二进制 ——
-    // skill 由本模块单独搬进本应用的技能目录（见模块头），不往别的 Agent 目录里铺。
-    install_unix: "curl -fsSL https://raw.githubusercontent.com/DingTalk-Real-AI/dingtalk-workspace-cli/main/scripts/install.sh | DWS_NO_SKILLS=1 sh",
-    install_windows: "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$env:DWS_NO_SKILLS='1'; irm https://raw.githubusercontent.com/DingTalk-Real-AI/dingtalk-workspace-cli/main/scripts/install.ps1 | iex\"",
-    docs: "https://github.com/DingTalk-Real-AI/dingtalk-workspace-cli",
-    version_args: &["version", "-f", "json"],
-    skill_source: SkillSource::SkillSetup,
-    auth: AuthKind::Oauth,
-},
-Vendor {
-    id: "feishu",
-    name: "飞书",
-    blurb: "日历、任务、通讯录、消息、云文档、多维表格、邮箱、审批与会议纪要。底层是飞书官方的 lark-cli 与内置的 lark-suite 技能。",
-    cli: "lark-cli",
-    skill: "lark-suite",
-    // 官方推荐 npm 分发；二进制由 npm 包的 postinstall 下载。
-    install_unix: "npm install -g @larksuite/cli",
-    install_windows: "npm install -g @larksuite/cli",
-    docs: "https://github.com/larksuite/cli",
-    // lark-cli 没有 `version` 子命令，只认 `--version`。
-    version_args: &["--version"],
-    skill_source: SkillSource::EmbeddedSuite,
-    auth: AuthKind::AppThenOauth,
-},
-Vendor {
-    id: "mail",
-    name: "邮件",
-    blurb: "通过 IMAP / SMTP 收发邮件、下载附件、查本地通讯录。底层是自研的 mail-cli 与配套 mail-skill，发信默认 dry-run 且受白名单约束。",
-    cli: "mail-cli",
-    skill: "mail-skill",
-    // cargo-dist 的安装脚本，二进制落在 `~/.cargo/bin`。
-    install_unix: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/qy527145/mail-cli/releases/latest/download/mail-cli-installer.sh | sh",
-    install_windows: "powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm https://github.com/qy527145/mail-cli/releases/latest/download/mail-cli-installer.ps1 | iex\"",
-    docs: "https://github.com/qy527145/mail-cli",
-    version_args: &["--version"],
-    // raw.githubusercontent.com 在部分网络下会超时，GitHub contents API 配 `Accept: application/vnd.github.raw` 实测可用。
-    skill_source: SkillSource::RawUrl("https://api.github.com/repos/qy527145/mail-cli/contents/skills/mail-skill/SKILL.md"),
-    auth: AuthKind::Account,
-}];
+pub static VENDORS: &[Vendor] = &[
+    Vendor {
+        id: "dingtalk",
+        name: "钉钉",
+        blurb: "日历、待办、通讯录、群消息、审批、钉钉文档与云盘。底层是钉钉官方的 dws CLI 与配套 skill。",
+        cli: "dws",
+        skill: "dws",
+        // 安装脚本默认落在 `~/.local/bin`；`DWS_NO_SKILLS=1` 让它只装二进制 ——
+        // skill 由本模块单独搬进本应用的技能目录（见模块头），不往别的 Agent 目录里铺。
+        install_unix: "curl -fsSL https://raw.githubusercontent.com/DingTalk-Real-AI/dingtalk-workspace-cli/main/scripts/install.sh | DWS_NO_SKILLS=1 sh",
+        install_windows: "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$env:DWS_NO_SKILLS='1'; irm https://raw.githubusercontent.com/DingTalk-Real-AI/dingtalk-workspace-cli/main/scripts/install.ps1 | iex\"",
+        docs: "https://github.com/DingTalk-Real-AI/dingtalk-workspace-cli",
+        version_args: &["version", "-f", "json"],
+        skill_source: SkillSource::SkillSetup,
+        auth: AuthKind::Oauth,
+    },
+    Vendor {
+        id: "feishu",
+        name: "飞书",
+        blurb: "日历、任务、通讯录、消息、云文档、多维表格、邮箱、审批与会议纪要。底层是飞书官方的 lark-cli 与内置的 lark-suite 技能。",
+        cli: "lark-cli",
+        skill: "lark-suite",
+        // 官方推荐 npm 分发；二进制由 npm 包的 postinstall 下载。
+        install_unix: "npm install -g @larksuite/cli",
+        install_windows: "npm install -g @larksuite/cli",
+        docs: "https://github.com/larksuite/cli",
+        // lark-cli 没有 `version` 子命令，只认 `--version`。
+        version_args: &["--version"],
+        skill_source: SkillSource::EmbeddedSuite,
+        auth: AuthKind::AppThenOauth,
+    },
+    Vendor {
+        id: "mail",
+        name: "邮件",
+        blurb: "通过 IMAP / SMTP 收发邮件、下载附件、查本地通讯录。底层是自研的 mail-cli 与配套 mail-skill，发信默认 dry-run 且受白名单约束。",
+        cli: "mail-cli",
+        skill: "mail-skill",
+        // cargo-dist 的安装脚本，二进制落在 `~/.cargo/bin`。
+        install_unix: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/qy527145/mail-cli/releases/latest/download/mail-cli-installer.sh | sh",
+        install_windows: "powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm https://github.com/qy527145/mail-cli/releases/latest/download/mail-cli-installer.ps1 | iex\"",
+        docs: "https://github.com/qy527145/mail-cli",
+        version_args: &["--version"],
+        // raw.githubusercontent.com 在部分网络下会超时，GitHub contents API 配 `Accept: application/vnd.github.raw` 实测可用。
+        skill_source: SkillSource::RawUrl(
+            "https://api.github.com/repos/qy527145/mail-cli/contents/skills/mail-skill/SKILL.md",
+        ),
+        auth: AuthKind::Account,
+    },
+];
 
 pub fn vendor(id: &str) -> Option<&'static Vendor> {
     VENDORS.iter().find(|v| v.id == id)
@@ -359,10 +363,10 @@ async fn cli_version(v: &Vendor, cli: &Path) -> Option<String> {
 /// `mail-cli 0.1.0`、老版 dws 的 `dws version v1.0.46 (...)`）。先试 JSON，
 /// 再取第一个以数字开头（可带 v）的词。
 fn parse_version(raw: &str) -> Option<String> {
-    if let Ok(j) = serde_json::from_str::<serde_json::Value>(raw) {
-        if let Some(s) = j.get("version").and_then(|x| x.as_str()) {
-            return Some(s.to_string());
-        }
+    if let Ok(j) = serde_json::from_str::<serde_json::Value>(raw)
+        && let Some(s) = j.get("version").and_then(|x| x.as_str())
+    {
+        return Some(s.to_string());
     }
     raw.split_whitespace()
         .map(|w| w.trim_start_matches('v'))
@@ -508,7 +512,10 @@ async fn lark_auth_state(cli: &Path) -> AuthState {
         Err(s) => return s,
     };
     if j.get("ok").and_then(|x| x.as_bool()) == Some(false) {
-        let sub = j.pointer("/error/subtype").and_then(|x| x.as_str()).unwrap_or("");
+        let sub = j
+            .pointer("/error/subtype")
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
         if sub == "not_configured" {
             return AuthState {
                 message: Some("还没有配置飞书应用".into()),
@@ -517,17 +524,33 @@ async fn lark_auth_state(cli: &Path) -> AuthState {
             };
         }
         return AuthState {
-            message: j.pointer("/error/message").and_then(|x| x.as_str()).map(String::from),
-            hint: j.pointer("/error/hint").and_then(|x| x.as_str()).map(String::from),
+            message: j
+                .pointer("/error/message")
+                .and_then(|x| x.as_str())
+                .map(String::from),
+            hint: j
+                .pointer("/error/hint")
+                .and_then(|x| x.as_str())
+                .map(String::from),
             ..Default::default()
         };
     }
     let user = j.pointer("/identities/user");
-    let s = |k: &str| user.and_then(|u| u.get(k)).and_then(|x| x.as_str()).map(String::from);
-    if user.and_then(|u| u.get("available")).and_then(|x| x.as_bool()) != Some(true) {
+    let s = |k: &str| {
+        user.and_then(|u| u.get(k))
+            .and_then(|x| x.as_str())
+            .map(String::from)
+    };
+    if user
+        .and_then(|u| u.get("available"))
+        .and_then(|x| x.as_bool())
+        != Some(true)
+    {
         return AuthState {
             message: s("message").or_else(|| Some("还没有登录用户身份".into())),
-            hint: Some("点「扫码登录」授权用户身份；只有应用身份时，模型看不到你个人的日历与文档。".into()),
+            hint: Some(
+                "点「扫码登录」授权用户身份；只有应用身份时，模型看不到你个人的日历与文档。".into(),
+            ),
             ..Default::default()
         };
     }
@@ -572,7 +595,11 @@ async fn mail_auth_state(cli: &Path) -> AuthState {
         .iter()
         .find(|a| a.get("name").and_then(|x| x.as_str()) == def)
         .or(accounts.first());
-    let pick = |p: &str| acc.and_then(|a| a.pointer(p)).and_then(|x| x.as_str()).map(String::from);
+    let pick = |p: &str| {
+        acc.and_then(|a| a.pointer(p))
+            .and_then(|x| x.as_str())
+            .map(String::from)
+    };
     AuthState {
         logged_in: true,
         user_name: pick("/email"),
@@ -755,12 +782,7 @@ pub async fn install_skill(shell: &AppShell, id: &str) -> Result<(), String> {
 /// 装技能里**跟 UI 无关**的那一半：临时目录里跑 `skill setup`，再把产物搬进 `dst`。
 ///
 /// 从 [`install_skill`] 里拆出来是为了能真跑一遍（`AppShell` 要一整套配置与会话表）。
-async fn fetch_skill(
-    shell: &AppShell,
-    v: &Vendor,
-    cli: &Path,
-    dst: &Path,
-) -> Result<(), String> {
+async fn fetch_skill(shell: &AppShell, v: &Vendor, cli: &Path, dst: &Path) -> Result<(), String> {
     let tmp = std::env::temp_dir().join(format!(
         "carter-connector-{}-{}-{}",
         v.id,
@@ -774,9 +796,16 @@ async fn fetch_skill(
         let out_dir = tmp.join("skill");
         let _ = std::fs::create_dir_all(&out_dir);
         let mut curl = tokio::process::Command::new("curl");
-        curl.args(["-fsSL", "--max-time", "30", "-H", "Accept: application/vnd.github.raw", "-o"])
-            .arg(out_dir.join("SKILL.md"))
-            .arg(url);
+        curl.args([
+            "-fsSL",
+            "--max-time",
+            "30",
+            "-H",
+            "Accept: application/vnd.github.raw",
+            "-o",
+        ])
+        .arg(out_dir.join("SKILL.md"))
+        .arg(url);
         let status = run_streamed(shell, v, curl, Duration::from_secs(60), false).await;
         let result = match status {
             Err(e) => Err(e),
@@ -789,7 +818,9 @@ async fn fetch_skill(
 
     let mut cmd = tokio::process::Command::new(cli);
     let setup_args: &[&str] = match v.skill_source {
-        SkillSource::SkillSetup => &["skill", "setup", "--mode", "mono", "--target", "agents", "--yes"],
+        SkillSource::SkillSetup => &[
+            "skill", "setup", "--mode", "mono", "--target", "agents", "--yes",
+        ],
         // 飞书技能内嵌在二进制里；临时 HOME 里同步 suite 布局，只产出一个 lark-suite 技能。
         SkillSource::EmbeddedSuite => &["update", "--skills-layout", "suite", "--json"],
         SkillSource::RawUrl(_) => unreachable!("上面已经处理"),
@@ -819,7 +850,10 @@ async fn fetch_skill(
 /// 会留下一个「装了但缺文件」的技能目录，比没装更难查。
 fn copy_skill_dir(src: &Path, dst: &Path) -> Result<(), String> {
     if !src.join("SKILL.md").is_file() {
-        return Err(format!("`skill setup` 没有产出技能：{} 里找不到 SKILL.md", src.display()));
+        return Err(format!(
+            "`skill setup` 没有产出技能：{} 里找不到 SKILL.md",
+            src.display()
+        ));
     }
     if let Some(parent) = dst.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("建技能目录失败：{e}"))?;
@@ -842,7 +876,8 @@ fn copy_skill_dir(src: &Path, dst: &Path) -> Result<(), String> {
 
 fn copy_tree(src: &Path, dst: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dst).map_err(|e| format!("建目录失败：{e}"))?;
-    for entry in std::fs::read_dir(src).map_err(|e| format!("读 {} 失败：{e}", src.display()))? {
+    for entry in std::fs::read_dir(src).map_err(|e| format!("读 {} 失败：{e}", src.display()))?
+    {
         let entry = entry.map_err(|e| e.to_string())?;
         let from = entry.path();
         let to = dst.join(entry.file_name());
@@ -1088,7 +1123,9 @@ pub async fn remove_mail_account(shell: &AppShell, id: &str, name: &str) -> Resu
 pub fn cancel_login(id: &str) {
     let pid = logins().as_ref().and_then(|m| m.get(id).copied());
     let Some(pid) = pid else { return };
-    cancelled_set().get_or_insert_with(Default::default).insert(id.to_string());
+    cancelled_set()
+        .get_or_insert_with(Default::default)
+        .insert(id.to_string());
     crate::tools::background::kill_process_tree(pid);
 }
 
@@ -1165,12 +1202,10 @@ async fn run_streamed(
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("启动 {} 失败：{e}", v.cli))?;
-    if register_login {
-        if let Some(pid) = child.id() {
-            logins()
-                .get_or_insert_with(HashMap::new)
-                .insert(v.id.to_string(), pid);
-        }
+    if register_login && let Some(pid) = child.id() {
+        logins()
+            .get_or_insert_with(HashMap::new)
+            .insert(v.id.to_string(), pid);
     }
 
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
@@ -1188,15 +1223,14 @@ async fn run_streamed(
         tokio::select! {
             line = rx.recv() => {
                 let Some(line) = line else { break };
-                if let Some(url) = auth_url(&line) {
-                    if !seen_url {
+                if let Some(url) = auth_url(&line)
+                    && !seen_url {
                         seen_url = true;
                         shell.emit(AppEvent::ConnectorAuthUrl {
                             vendor: v.id.to_string(),
                             url,
                         });
                     }
-                }
                 shell.emit(AppEvent::ConnectorOutput {
                     vendor: v.id.to_string(),
                     line,
@@ -1232,10 +1266,7 @@ async fn run_streamed(
     Ok(status)
 }
 
-fn pump<R: AsyncRead + Unpin + Send + 'static>(
-    r: Option<R>,
-    tx: mpsc::UnboundedSender<String>,
-) {
+fn pump<R: AsyncRead + Unpin + Send + 'static>(r: Option<R>, tx: mpsc::UnboundedSender<String>) {
     let Some(r) = r else { return };
     tokio::spawn(async move {
         let mut lines = BufReader::new(r).lines();
@@ -1286,7 +1317,10 @@ mod tests {
             "---\nname: dws\ndescription: x\ncli_version: \">=1.0.15\"\n---\n\ncli_version: not this one\n",
         )
         .unwrap();
-        assert_eq!(frontmatter_value(&p, "cli_version"), Some(">=1.0.15".into()));
+        assert_eq!(
+            frontmatter_value(&p, "cli_version"),
+            Some(">=1.0.15".into())
+        );
         assert_eq!(frontmatter_value(&p, "missing"), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1318,14 +1352,23 @@ mod tests {
         std::fs::create_dir_all(&dst).unwrap();
         std::fs::write(dst.join("SKILL.md"), "old").unwrap();
         assert!(copy_skill_dir(&src, &dst).is_err());
-        assert_eq!(std::fs::read_to_string(dst.join("SKILL.md")).unwrap(), "old");
+        assert_eq!(
+            std::fs::read_to_string(dst.join("SKILL.md")).unwrap(),
+            "old"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn versions_are_read_from_json_or_plain_text() {
-        assert_eq!(parse_version("{\"version\":\"1.0.46\"}"), Some("1.0.46".into()));
-        assert_eq!(parse_version("lark-cli version 1.0.98\n"), Some("1.0.98".into()));
+        assert_eq!(
+            parse_version("{\"version\":\"1.0.46\"}"),
+            Some("1.0.46".into())
+        );
+        assert_eq!(
+            parse_version("lark-cli version 1.0.98\n"),
+            Some("1.0.98".into())
+        );
         assert_eq!(parse_version("mail-cli 0.1.0"), Some("0.1.0".into()));
         assert_eq!(
             parse_version("dws version v1.0.46 (bba94c0, 2026-07-01T08:49:22Z)"),
@@ -1375,7 +1418,9 @@ mod skill_fetch_against_the_real_cli {
             std::process::id(),
             crate::protocol::now_ms()
         ));
-        fetch_skill(&shell, v, &cli, &dst).await.expect("装技能失败");
+        fetch_skill(&shell, v, &cli, &dst)
+            .await
+            .expect("装技能失败");
         assert!(dst.join("SKILL.md").is_file());
         // 技能包自带的参考资料也要在 —— 只有 SKILL.md 是装了一半。
         assert!(dst.join("references").is_dir());

@@ -52,7 +52,10 @@ pub struct TeamTool {
 
 impl TeamTool {
     pub fn new(cwd: PathBuf) -> Self {
-        Self { cwd, via: Some("carter") }
+        Self {
+            cwd,
+            via: Some("carter"),
+        }
     }
 
     /// 界面上人自己操作用的。事件不带 `via`。
@@ -118,7 +121,7 @@ impl TeamTool {
     /// 写一条事件并尽量推送。推送失败只提示，不算失败 —— 事件已经在本地链上，
     /// 下一次推送会带上它。（认领例外，见 `task_claim`。）
     fn emit(&self, store: &Store, mut d: Draft) -> Result<String, String> {
-        let roster = members::load_all(&store);
+        let roster = members::load_all(store);
         if d.from.is_none() {
             d.from = member_only(self.me_ref(&roster)?);
         }
@@ -133,12 +136,11 @@ impl TeamTool {
         }
         // 抬头里带上对象的标题。任务文件跟着分支走，收件人还没同步那个分支时只有
         // 事件、没有任务文件 —— 只写 id 的话他看到的是「指派 t-mw0j411z」，看不懂。
-        if d.subject.trim().is_empty() {
-            if let Some(t) = d.target.as_deref() {
-                if let Some(title) = super::inbox::task_titles(store).get(t) {
-                    d.subject = format!("carter/{} {t} 「{title}」", d.kind);
-                }
-            }
+        if d.subject.trim().is_empty()
+            && let Some(t) = d.target.as_deref()
+            && let Some(title) = super::inbox::task_titles(store).get(t)
+        {
+            d.subject = format!("carter/{} {t} 「{title}」", d.kind);
         }
         let root = store.project_root();
         let (sha, eid) = events::append(root, &d)?;
@@ -226,7 +228,12 @@ fn member_only(r: String) -> Option<String> {
 ///
 /// 我还没认领过（认领前的预检）时，就看链上最近的一条：是别人的认领就说明已经被占了。
 /// 顺序取链上的（[`events::chain`]），不按提交时间 —— 各人的本机时钟不可信。
-fn claimed_by_other(root: &std::path::Path, task_id: &str, me: &str, roster: &Roster) -> Option<String> {
+fn claimed_by_other(
+    root: &std::path::Path,
+    task_id: &str,
+    me: &str,
+    roster: &Roster,
+) -> Option<String> {
     let evs: Vec<_> = events::chain(root, 500)
         .into_iter()
         .filter(|e| e.target.as_deref() == Some(task_id))
@@ -252,7 +259,11 @@ fn claimed_by_other(root: &std::path::Path, task_id: &str, me: &str, roster: &Ro
             return None;
         }
         if e.kind.is(EventKind::CLAIM) {
-            return if is_mine(e) { None } else { Some(roster.display(&from_of(e))) };
+            return if is_mine(e) {
+                None
+            } else {
+                Some(roster.display(&from_of(e)))
+            };
         }
     }
     None
@@ -422,14 +433,21 @@ impl TeamTool {
                 let store = self.store()?;
                 let me = self.me()?;
                 let roster = members::load_all(&store);
-                let me_key = roster.me(&me).map(|m| m.id.clone()).unwrap_or_else(|| me.as_key());
+                let me_key = roster
+                    .me(&me)
+                    .map(|m| m.id.clone())
+                    .unwrap_or_else(|| me.as_key());
                 let mut out = Vec::new();
                 for goal in store.goals().items {
                     if !goal.status.is_live() {
                         continue;
                     }
                     for t in store.tasks(&goal.id).items {
-                        if t.assignee.as_deref().is_some_and(|a| roster.same(a, &me_key)) && t.status.is_open() {
+                        if t.assignee
+                            .as_deref()
+                            .is_some_and(|a| roster.same(a, &me_key))
+                            && t.status.is_open()
+                        {
                             out.push(format!(
                                 "- [{}] {}  ({})  目标：{}",
                                 t.status.label(),
@@ -507,7 +525,12 @@ impl TeamTool {
                 self.check_goal(&store, &goal)?;
                 store.save_goal(&goal)?;
                 self.stage(&store);
-                Ok(format!("目标「{}」已更新（{} / {}）。", goal.title, goal.status.label(), goal.priority.as_str()))
+                Ok(format!(
+                    "目标「{}」已更新（{} / {}）。",
+                    goal.title,
+                    goal.status.label(),
+                    goal.priority.as_str()
+                ))
             }
 
             "task_new" => {
@@ -545,7 +568,11 @@ impl TeamTool {
                         .collect();
                 }
                 let roster = members::load_all(&store);
-                if let Some(a) = args.get("assignee").and_then(Value::as_str).filter(|a| !a.trim().is_empty()) {
+                if let Some(a) = args
+                    .get("assignee")
+                    .and_then(Value::as_str)
+                    .filter(|a| !a.trim().is_empty())
+                {
                     task.assignee = Some(self.person(&roster, a)?);
                 }
                 if let Some(h) = args.get("estimate_hours").and_then(Value::as_f64) {
@@ -657,10 +684,10 @@ impl TeamTool {
                 store.save_task(&task)?;
                 self.stage(&store);
                 let mut msg = format!("任务「{}」已更新。", task.title);
-                if task.assignee != before {
-                    if let Some(a) = task.assignee.clone() {
-                        msg.push_str(&self.notify_assign(&store, &roster, &task, &a));
-                    }
+                if task.assignee != before
+                    && let Some(a) = task.assignee.clone()
+                {
+                    msg.push_str(&self.notify_assign(&store, &roster, &task, &a));
                 }
                 Ok(msg)
             }
@@ -669,8 +696,9 @@ impl TeamTool {
                 let store = self.store()?;
                 let me = self.me()?;
                 let s = s.ok_or("task_status 需要 status")?;
-                let new = TaskStatus::parse(s)
-                    .ok_or(format!("状态只能是 todo / doing / blocked / done / dropped，收到 `{s}`"))?;
+                let new = TaskStatus::parse(s).ok_or(format!(
+                    "状态只能是 todo / doing / blocked / done / dropped，收到 `{s}`"
+                ))?;
                 let (_, mut task) = self.locate_task(&store, args)?;
                 task.status = new;
                 if let Some(r) = args.get("blocked_reason").and_then(Value::as_str) {
@@ -711,16 +739,16 @@ impl TeamTool {
 
                 // 别人认领过就不抢：覆盖别人的认领在 git 里看不出来（那是「最后写入赢」），
                 // 而后果是两个人同时在改同一件事。
-                if claiming {
-                    if let Some(a) = task.assignee.as_deref() {
-                        if !a.trim().is_empty() && !roster.same(a, &me_ref) {
-                            return Err(format!(
-                                "「{}」已经被 {} 认领了。换个任务，或者先问一句（mention）。",
-                                task.title,
-                                roster.display(a)
-                            ));
-                        }
-                    }
+                if claiming
+                    && let Some(a) = task.assignee.as_deref()
+                    && !a.trim().is_empty()
+                    && !roster.same(a, &me_ref)
+                {
+                    return Err(format!(
+                        "「{}」已经被 {} 认领了。换个任务，或者先问一句（mention）。",
+                        task.title,
+                        roster.display(a)
+                    ));
                 }
                 if !git::in_repo(root) {
                     return Err("这个目录不是 git 仓库，认领无处可记".into());
@@ -744,7 +772,11 @@ impl TeamTool {
                 store.save_task(&task)?;
                 self.stage(&store);
 
-                let kind = if claiming { EventKind::CLAIM } else { EventKind::RELEASE };
+                let kind = if claiming {
+                    EventKind::CLAIM
+                } else {
+                    EventKind::RELEASE
+                };
                 events::append(
                     root,
                     &Draft {
@@ -805,7 +837,11 @@ impl TeamTool {
                 let handoff = previous
                     .as_deref()
                     .is_some_and(|p| !p.trim().is_empty() && !roster.same(p, &to));
-                let kind = if handoff { EventKind::HANDOFF } else { EventKind::ASSIGN };
+                let kind = if handoff {
+                    EventKind::HANDOFF
+                } else {
+                    EventKind::ASSIGN
+                };
                 let tail = self.notify(&store, &task, &to, kind, text.unwrap_or("").trim());
                 Ok(format!(
                     "「{}」已{}给 {}。{tail}",
@@ -865,7 +901,13 @@ impl TeamTool {
                 )?;
                 let who = to
                     .iter()
-                    .map(|t| if t == events::EVERYONE { "全员".to_string() } else { roster.display(t) })
+                    .map(|t| {
+                        if t == events::EVERYONE {
+                            "全员".to_string()
+                        } else {
+                            roster.display(t)
+                        }
+                    })
                     .collect::<Vec<_>>()
                     .join("、");
                 Ok(if who.is_empty() {
@@ -886,7 +928,11 @@ impl TeamTool {
                     .members
                     .iter()
                     .map(|m| {
-                        let mark = if Some(&m.id) == me_id.as_ref() { "（我）" } else { "" };
+                        let mark = if Some(&m.id) == me_id.as_ref() {
+                            "（我）"
+                        } else {
+                            ""
+                        };
                         let role = if m.role.trim().is_empty() {
                             String::new()
                         } else {
@@ -939,10 +985,7 @@ impl TeamTool {
                 let root = store.project_root();
                 let _ = events::fetch(root);
                 let roster = members::load_all(&store);
-                let limit = args
-                    .get("limit")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(30) as usize;
+                let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(30) as usize;
                 let evs = events::read(root, limit);
                 if evs.is_empty() {
                     return Ok("还没有任何团队事件。".into());
@@ -960,7 +1003,11 @@ impl TeamTool {
                         format!(
                             " → {}",
                             e.to.iter()
-                                .map(|t| if t == events::EVERYONE { "全员".into() } else { roster.display(t) })
+                                .map(|t| if t == events::EVERYONE {
+                                    "全员".into()
+                                } else {
+                                    roster.display(t)
+                                })
                                 .collect::<Vec<_>>()
                                 .join("、")
                         )
@@ -988,7 +1035,11 @@ impl TeamTool {
                     .items
                     .iter()
                     .map(|b| {
-                        let goal = b.goal_id.as_deref().map(|g| format!(" · 关联 {g}")).unwrap_or_default();
+                        let goal = b
+                            .goal_id
+                            .as_deref()
+                            .map(|g| format!(" · 关联 {g}"))
+                            .unwrap_or_default();
                         format!("- {}  ({}){goal}  boards/{}.html", b.title, b.id, b.id)
                     })
                     .collect();
@@ -1003,10 +1054,14 @@ impl TeamTool {
 
             "board_new" => {
                 let store = self.store()?;
-                let title = title.map(str::trim).filter(|t| !t.is_empty()).ok_or("board_new 需要 title")?;
-                let body = html.map(str::trim).filter(|h| !h.is_empty()).ok_or(
-                    "board_new 需要 html：整页内容由你来写（格式见 carter-board 技能）",
-                )?;
+                let title = title
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                    .ok_or("board_new 需要 title")?;
+                let body = html
+                    .map(str::trim)
+                    .filter(|h| !h.is_empty())
+                    .ok_or("board_new 需要 html：整页内容由你来写（格式见 carter-board 技能）")?;
                 let goal = goal_id.map(str::trim).filter(|g| !g.is_empty());
                 if let Some(g) = goal {
                     store.goal(g)?;
@@ -1014,7 +1069,9 @@ impl TeamTool {
                 let id = new_id(Kind::Board);
                 store.save_board(&id, &stamp_board(body, Some(title), goal))?;
                 self.stage(&store);
-                Ok(format!("已新建看板「{title}」。\nid = {id}\n文件：.carter/boards/{id}.html"))
+                Ok(format!(
+                    "已新建看板「{title}」。\nid = {id}\n文件：.carter/boards/{id}.html"
+                ))
             }
 
             "board_update" => {
@@ -1037,14 +1094,18 @@ impl TeamTool {
                 // 换了整页却漏写 <title> / 关联：沿用旧的，免得看板名字退化成 id、关联悄悄丢掉。
                 // 新页面自己写了的，以新页面为准。
                 let replaced = html.is_some();
-                let keep_title = (replaced && html_title(&body).is_none()).then_some(old.title.as_str());
+                let keep_title =
+                    (replaced && html_title(&body).is_none()).then_some(old.title.as_str());
                 let keep_goal = (replaced && html_meta(&body, "carter-goal").is_none())
                     .then_some(old.goal_id.as_deref())
                     .flatten();
                 let goal = goal.or(keep_goal);
                 store.save_board(&old.id, &stamp_board(&body, new_title.or(keep_title), goal))?;
                 self.stage(&store);
-                Ok(format!("看板「{}」已更新。", new_title.unwrap_or(&old.title)))
+                Ok(format!(
+                    "看板「{}」已更新。",
+                    new_title.unwrap_or(&old.title)
+                ))
             }
 
             other => Err(format!(
@@ -1068,10 +1129,10 @@ impl TeamTool {
         if id.is_empty() {
             return Err("task_id 不能为空".into());
         }
-        if let Some(g) = args.get("goal_id").and_then(Value::as_str) {
-            if let Ok(t) = store.task(g.trim(), id) {
-                return Ok((t.goal_id.clone(), t));
-            }
+        if let Some(g) = args.get("goal_id").and_then(Value::as_str)
+            && let Ok(t) = store.task(g.trim(), id)
+        {
+            return Ok((t.goal_id.clone(), t));
         }
         for goal in store.goals().items {
             if let Ok(t) = store.task(&goal.id, id) {
@@ -1127,12 +1188,15 @@ impl TeamTool {
     /// 输出是**给模型读的**，比 JSON 省掉大量 token，也比 JSON 好判断「下一步该做什么」。
     fn overview(&self, store: &Store) -> String {
         let goals = store.goals();
-        let roster = members::load_all(&store);
+        let roster = members::load_all(store);
         let mut out = Vec::new();
         if goals.items.is_empty() {
             let mut s = "还没有任何目标。用 goal_new 建一个，再用 task_new 往下拆。".to_string();
             if !goals.issues.is_empty() {
-                s.push_str(&format!("\n（有 {} 个目标文件读不出来）", goals.issues.len()));
+                s.push_str(&format!(
+                    "\n（有 {} 个目标文件读不出来）",
+                    goals.issues.len()
+                ));
             }
             return s;
         }
@@ -1252,7 +1316,8 @@ mod tests {
 
     fn project(tag: &str) -> PathBuf {
         let n = N.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("carter-ttool-{tag}-{}-{n}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("carter-ttool-{tag}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         for args in [
@@ -1291,12 +1356,21 @@ mod tests {
         let dir = project("flow");
         let t = TeamTool::new(dir.clone());
 
-        let out = call(&t, json!({"action": "goal_new", "title": "第一阶段", "description": "把数据层做完"}));
+        let out = call(
+            &t,
+            json!({"action": "goal_new", "title": "第一阶段", "description": "把数据层做完"}),
+        );
         let gid = id_of(&out);
 
-        let out = call(&t, json!({"action": "task_new", "goal_id": gid, "title": "写模型"}));
+        let out = call(
+            &t,
+            json!({"action": "task_new", "goal_id": gid, "title": "写模型"}),
+        );
         let tid = id_of(&out);
-        call(&t, json!({"action": "task_new", "goal_id": gid, "title": "写存储", "depends_on": [tid]}));
+        call(
+            &t,
+            json!({"action": "task_new", "goal_id": gid, "title": "写存储", "depends_on": [tid]}),
+        );
 
         let overview = call(&t, json!({"action": "overview"}));
         assert!(overview.contains("第一阶段"));
@@ -1304,9 +1378,15 @@ mod tests {
         assert!(overview.contains("等："), "依赖要显示出来：{overview}");
 
         // 完成前置之后，后面的任务应该变成「可以开工」。
-        call(&t, json!({"action": "task_status", "task_id": tid, "status": "done"}));
+        call(
+            &t,
+            json!({"action": "task_status", "task_id": tid, "status": "done"}),
+        );
         let overview = call(&t, json!({"action": "overview"}));
-        assert!(overview.contains("▶ "), "前置完成后要标出可开工：{overview}");
+        assert!(
+            overview.contains("▶ "),
+            "前置完成后要标出可开工：{overview}"
+        );
     }
 
     #[test]
@@ -1315,7 +1395,10 @@ mod tests {
         let t = TeamTool::new(dir);
         let out = call(&t, json!({"action": "goal_new", "title": "g"}));
         let gid = id_of(&out);
-        let out = call(&t, json!({"action": "task_new", "goal_id": gid, "title": "t"}));
+        let out = call(
+            &t,
+            json!({"action": "task_new", "goal_id": gid, "title": "t"}),
+        );
         let tid = id_of(&out);
 
         let err = t
@@ -1330,7 +1413,10 @@ mod tests {
         let t = TeamTool::new(dir.clone());
         let out = call(&t, json!({"action": "goal_new", "title": "g"}));
         let gid = id_of(&out);
-        let out = call(&t, json!({"action": "task_new", "goal_id": gid, "title": "t"}));
+        let out = call(
+            &t,
+            json!({"action": "task_new", "goal_id": gid, "title": "t"}),
+        );
         let tid = id_of(&out);
 
         call(&t, json!({"action": "task_claim", "task_id": tid}));
@@ -1341,7 +1427,8 @@ mod tests {
         // 事件流里应该有一条 claim。
         let evs = events::read(&dir, 10);
         assert!(
-            evs.iter().any(|e| e.kind.is(EventKind::CLAIM) && e.target.as_deref() == Some(&tid)),
+            evs.iter()
+                .any(|e| e.kind.is(EventKind::CLAIM) && e.target.as_deref() == Some(&tid)),
             "{evs:?}"
         );
 
@@ -1356,7 +1443,10 @@ mod tests {
         let t = TeamTool::new(dir.clone());
         let out = call(&t, json!({"action": "goal_new", "title": "g"}));
         let gid = id_of(&out);
-        let out = call(&t, json!({"action": "task_new", "goal_id": gid, "title": "t"}));
+        let out = call(
+            &t,
+            json!({"action": "task_new", "goal_id": gid, "title": "t"}),
+        );
         let tid = id_of(&out);
 
         // 手工造一个「别人已经认领」的状态。
@@ -1378,9 +1468,15 @@ mod tests {
         let out = call(&t, json!({"action": "goal_new", "title": "g"}));
         let gid = id_of(&out);
 
-        call(&t, json!({"action": "comment", "goal_id": gid, "text": "第一阶段先不做界面"}));
+        call(
+            &t,
+            json!({"action": "comment", "goal_id": gid, "text": "第一阶段先不做界面"}),
+        );
         let evs = events::read(&dir, 5);
-        let c = evs.iter().find(|e| e.kind.is(EventKind::COMMENT)).expect("要有一条评论");
+        let c = evs
+            .iter()
+            .find(|e| e.kind.is(EventKind::COMMENT))
+            .expect("要有一条评论");
         assert_eq!(c.body, "第一阶段先不做界面");
         assert_eq!(c.author.as_ref().unwrap().email, "t@example.com");
     }
@@ -1406,21 +1502,34 @@ mod tests {
         assert!(board.html.contains("<h1>做得好的</h1>"));
 
         // 整页替换时漏写了 <title>：沿用旧标题与关联，不能退化成 id。
-        call(&t, json!({"action": "board_update", "board_id": bid, "html": "<p>改过了</p>"}));
+        call(
+            &t,
+            json!({"action": "board_update", "board_id": bid, "html": "<p>改过了</p>"}),
+        );
         let board = store.board(&bid).unwrap();
         assert_eq!(board.title, "十月回顾");
         assert_eq!(board.goal_id.as_deref(), Some(gid.as_str()));
         assert!(board.html.contains("改过了"));
 
         // 只改名不动正文。
-        call(&t, json!({"action": "board_update", "board_id": bid, "title": "十月复盘"}));
+        call(
+            &t,
+            json!({"action": "board_update", "board_id": bid, "title": "十月复盘"}),
+        );
         let board = store.board(&bid).unwrap();
         assert_eq!(board.title, "十月复盘");
         assert!(board.html.contains("改过了"));
 
         assert!(call(&t, json!({"action": "board_list"})).contains("十月复盘"));
-        assert!(t.run(&json!({"action": "board_new", "title": "空"})).is_err(), "没有 html 要拒绝");
-        assert!(t.run(&json!({"action": "board_update", "board_id": "../x", "html": "x"})).is_err());
+        assert!(
+            t.run(&json!({"action": "board_new", "title": "空"}))
+                .is_err(),
+            "没有 html 要拒绝"
+        );
+        assert!(
+            t.run(&json!({"action": "board_update", "board_id": "../x", "html": "x"}))
+                .is_err()
+        );
     }
 
     /// 拼错参数名时整次调用不执行，并列出合法参数 —— 否则「改优先级」会静默成功、
@@ -1436,11 +1545,21 @@ mod tests {
         assert!(err.contains("prioirty"), "{err}");
         assert!(err.contains("priority"), "要列出合法的参数名：{err}");
         let store = Store::discover(&dir).unwrap();
-        assert_eq!(store.goal(&gid).unwrap().priority, Priority::P2, "被拒的调用不能有副作用");
+        assert_eq!(
+            store.goal(&gid).unwrap().priority,
+            Priority::P2,
+            "被拒的调用不能有副作用"
+        );
 
         // 单个依赖照样能写（脚本时代的那个 bug 不该在工具里出现）。
-        let a = id_of(&call(&t, json!({"action": "task_new", "goal_id": gid, "title": "a"})));
-        let b = id_of(&call(&t, json!({"action": "task_new", "goal_id": gid, "title": "b", "depends_on": [a]})));
+        let a = id_of(&call(
+            &t,
+            json!({"action": "task_new", "goal_id": gid, "title": "a"}),
+        ));
+        let b = id_of(&call(
+            &t,
+            json!({"action": "task_new", "goal_id": gid, "title": "b", "depends_on": [a]}),
+        ));
         assert_eq!(store.task(&gid, &b).unwrap().depends_on, vec![a]);
     }
 
@@ -1449,10 +1568,19 @@ mod tests {
         let dir = project("owner");
         let t = TeamTool::new(dir.clone());
         let gid = id_of(&call(&t, json!({"action": "goal_new", "title": "g"})));
-        call(&t, json!({"action": "goal_update", "goal_id": gid, "assignee": "张三 <z@example.com>"}));
+        call(
+            &t,
+            json!({"action": "goal_update", "goal_id": gid, "assignee": "张三 <z@example.com>"}),
+        );
         let store = Store::discover(&dir).unwrap();
-        assert_eq!(store.goal(&gid).unwrap().owner.as_deref(), Some("张三 <z@example.com>"));
-        call(&t, json!({"action": "goal_update", "goal_id": gid, "assignee": ""}));
+        assert_eq!(
+            store.goal(&gid).unwrap().owner.as_deref(),
+            Some("张三 <z@example.com>")
+        );
+        call(
+            &t,
+            json!({"action": "goal_update", "goal_id": gid, "assignee": ""}),
+        );
         assert_eq!(store.goal(&gid).unwrap().owner, None);
     }
 
@@ -1513,7 +1641,10 @@ mod e2e {
         std::fs::write(seed.join("README.md"), "demo\n").unwrap();
         git_in(&seed, &["add", "-A"]);
         git_in(&seed, &["commit", "-qm", "init"]);
-        git_in(&seed, &["remote", "add", "origin", remote.to_str().unwrap()]);
+        git_in(
+            &seed,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
         git_in(&seed, &["push", "-q", "-u", "origin", "main"]);
 
         super::super::init::initialize(&seed, Some("联调团队")).unwrap();
@@ -1552,7 +1683,11 @@ mod e2e {
     fn two_members_share_goals_through_the_remote() {
         let w = world("share");
         let alice = TeamTool::new(w.alice.clone());
-        let gid = id_of(&alice.run(&json!({"action": "goal_new", "title": "第一阶段"})).unwrap());
+        let gid = id_of(
+            &alice
+                .run(&json!({"action": "goal_new", "title": "第一阶段"}))
+                .unwrap(),
+        );
         let tid = id_of(
             &alice
                 .run(&json!({"action": "task_new", "goal_id": gid, "title": "写数据层"}))
@@ -1615,7 +1750,9 @@ mod e2e {
             "被拒之后本地不能留下「我认领了」"
         );
         assert!(
-            git::status_porcelain(store_b.project_root()).trim().is_empty(),
+            git::status_porcelain(store_b.project_root())
+                .trim()
+                .is_empty(),
             "工作区应该干净：{}",
             git::status_porcelain(store_b.project_root())
         );
@@ -1633,7 +1770,9 @@ mod e2e {
 
         // 张三的认领先上了远端链。
         let alice = TeamTool::new(w.alice.clone());
-        alice.run(&json!({"action": "task_claim", "task_id": tid})).unwrap();
+        alice
+            .run(&json!({"action": "task_claim", "task_id": tid}))
+            .unwrap();
 
         // 李四在拉到之前就写下了自己的认领（模拟两边同时点）。
         events::append(
@@ -1673,14 +1812,18 @@ mod e2e {
         let zs = members::join(
             &w.alice.join(".carter"),
             &git::local_identity(&w.alice).unwrap(),
-            members::Join::New { name: "张三".into() },
+            members::Join::New {
+                name: "张三".into(),
+            },
         )
         .unwrap()
         .0;
         let ls = members::join(
             &w.alice.join(".carter"),
             &Identity::parse("李四 <li@example.com>").unwrap(),
-            members::Join::New { name: "李四".into() },
+            members::Join::New {
+                name: "李四".into(),
+            },
         )
         .unwrap()
         .0;
@@ -1692,7 +1835,9 @@ mod e2e {
 
         let alice = TeamTool::new(w.alice.clone());
         alice
-            .run(&json!({"action": "mention", "to": ["李四"], "task_id": tid, "text": "接口定好了"}))
+            .run(
+                &json!({"action": "mention", "to": ["李四"], "task_id": tid, "text": "接口定好了"}),
+            )
             .unwrap();
         let out = alice
             .run(&json!({"action": "assign", "task_id": tid, "assignee": "李四"}))
@@ -1718,7 +1863,11 @@ mod e2e {
     /// 张三建一个目标 + 任务，提交并推上去，李四同步下来。返回 `(goal_id, task_id)`。
     fn shared_task(w: &World, title: &str) -> (String, String) {
         let alice = TeamTool::new(w.alice.clone());
-        let gid = id_of(&alice.run(&json!({"action": "goal_new", "title": "g"})).unwrap());
+        let gid = id_of(
+            &alice
+                .run(&json!({"action": "goal_new", "title": "g"}))
+                .unwrap(),
+        );
         let tid = id_of(
             &alice
                 .run(&json!({"action": "task_new", "goal_id": gid, "title": title}))
@@ -1733,6 +1882,8 @@ mod e2e {
     }
 
     fn shared_goal(w: &World) -> String {
-        Store::discover(&w.alice).unwrap().goals().items[0].id.clone()
+        Store::discover(&w.alice).unwrap().goals().items[0]
+            .id
+            .clone()
     }
 }

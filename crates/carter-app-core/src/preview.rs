@@ -55,11 +55,18 @@ pub enum FilePreview {
         bytes: u64,
         mtime: Option<u64>,
     },
-    Dir { path: String },
+    Dir {
+        path: String,
+    },
     /// 不在了：本轮被删掉，或之后被移走。
-    Missing { path: String },
+    Missing {
+        path: String,
+    },
     /// 读失败（权限等）。路径成立，只是打不开。
-    Error { path: String, message: String },
+    Error {
+        path: String,
+        message: String,
+    },
 }
 
 /// 把工具里写的那个路径解析成绝对路径：相对路径按会话 cwd，`~` 展开。
@@ -105,13 +112,13 @@ pub fn preview(cwd: &Path, raw: &str) -> FilePreview {
     let meta = match std::fs::metadata(&path) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return FilePreview::Missing { path: shown }
+            return FilePreview::Missing { path: shown };
         }
         Err(e) => {
             return FilePreview::Error {
                 path: shown,
                 message: e.to_string(),
-            }
+            };
         }
     };
     if meta.is_dir() {
@@ -129,7 +136,11 @@ pub fn preview(cwd: &Path, raw: &str) -> FilePreview {
     // 图片先处理：它们按扩展名走，内容不需要按文本判定。
     if let Some(mime) = image_mime(&ext) {
         if bytes > MAX_IMAGE {
-            return FilePreview::Binary { path: shown, bytes, mtime };
+            return FilePreview::Binary {
+                path: shown,
+                bytes,
+                mtime,
+            };
         }
         return match std::fs::read(&path) {
             Ok(raw) => {
@@ -155,7 +166,7 @@ pub fn preview(cwd: &Path, raw: &str) -> FilePreview {
             return FilePreview::Error {
                 path: shown,
                 message: e.to_string(),
-            }
+            };
         }
     };
     let mut buf = Vec::new();
@@ -173,7 +184,11 @@ pub fn preview(cwd: &Path, raw: &str) -> FilePreview {
     // NUL 是二进制最可靠的信号；UTF-8 解不开的（GBK 文本等）按有损显示，
     // 总比一句「二进制文件」强 —— 用户至少能看出它是什么。
     if buf[..buf.len().min(SNIFF)].contains(&0) {
-        return FilePreview::Binary { path: shown, bytes, mtime };
+        return FilePreview::Binary {
+            path: shown,
+            bytes,
+            mtime,
+        };
     }
     FilePreview::Text {
         path: shown,
@@ -241,7 +256,10 @@ mod tests {
     #[test]
     fn missing_and_directory_are_reported_not_errors() {
         let dir = tmp_dir("missing");
-        assert!(matches!(preview(&dir, "nope.txt"), FilePreview::Missing { .. }));
+        assert!(matches!(
+            preview(&dir, "nope.txt"),
+            FilePreview::Missing { .. }
+        ));
         assert!(matches!(preview(&dir, "."), FilePreview::Dir { .. }));
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -287,7 +305,11 @@ mod tests {
             other => panic!("应当是图片：{other:?}"),
         }
         // SVG 也按图片走（模型画的图不少是 SVG，把它当文本显示等于只给源码）。
-        std::fs::write(dir.join("b.svg"), "<svg xmlns=\"http://www.w3.org/2000/svg\"/>").unwrap();
+        std::fs::write(
+            dir.join("b.svg"),
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
+        )
+        .unwrap();
         match preview(&dir, "b.svg") {
             FilePreview::Image { data_url, .. } => {
                 assert!(data_url.starts_with("data:image/svg+xml;base64,"));

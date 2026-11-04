@@ -21,7 +21,6 @@
 // 结果正文从 `exit_code=0` 这类脚手架里**解出真正的内容**再显示：那是回灌给
 // 模型的格式，不是给人看的格式。
 
-import { useState } from "react";
 import {
   ArrowDownToLine,
   Check,
@@ -41,12 +40,13 @@ import {
   Wrench,
   X,
 } from "lucide-react";
+import { useState } from "react";
 
 import { sendCommand } from "../../lib/api";
 import { toastError } from "../../lib/toast";
-import { HtmlFilePreview, StoredImage, imageTokenIn, looksLikeHtml } from "../Media";
-import { Collapse } from "../ui/Panel";
 import type { Item } from "../../store";
+import { HtmlFilePreview, imageTokenIn, looksLikeHtml, StoredImage } from "../Media";
+import { Collapse } from "../ui/Panel";
 
 export type ToolItem = Extract<Item, { kind: "tool" }>;
 
@@ -63,13 +63,7 @@ const GLYPH = {
   pink: "bg-tone-pink-soft text-tone-pink",
 } as const;
 
-export function Glyph({
-  tone,
-  children,
-}: {
-  tone: keyof typeof GLYPH;
-  children: React.ReactNode;
-}) {
+export function Glyph({ tone, children }: { tone: keyof typeof GLYPH; children: React.ReactNode }) {
   return (
     <span className={`flex size-5 shrink-0 items-center justify-center rounded ${GLYPH[tone]}`}>
       {children}
@@ -147,9 +141,7 @@ function Card({
       ) : (
         <div className="flex items-center gap-2 px-3 py-2">{head}</div>
       )}
-      {preview != null && (
-        <div className="border-t border-edge bg-base px-3 py-2">{preview}</div>
-      )}
+      {preview != null && <div className="border-t border-edge bg-base px-3 py-2">{preview}</div>}
       {/* 用 Collapse 而不是条件挂载：流里工具卡片挨得密，展开一次跳几百像素、
           滚动位置会跟着乱跳；而且收起再展开时输出的滚动位置该还在原处。 */}
       {hasBody && (
@@ -369,11 +361,7 @@ function TodoCard({ item, isLast = true }: { item: ToolItem; isLast?: boolean })
               ) : (
                 <span className="icon-optical inline-block size-3 shrink-0 rounded-full border border-edge" />
               )}
-              <span
-                className={
-                  t.status === "completed" ? "text-dim line-through" : "text-ink"
-                }
-              >
+              <span className={t.status === "completed" ? "text-dim line-through" : "text-ink"}>
                 {t.status === "in_progress" && t.active_form ? t.active_form : t.content}
               </span>
             </li>
@@ -528,11 +516,7 @@ function SearchCard({
       defaultOpen={false}
       forceOpen={r ? !r.ok : false}
     >
-      {empty ? (
-        <div className="text-[11px] text-dim">没有命中。</div>
-      ) : (
-        <Output text={body} />
-      )}
+      {empty ? <div className="text-[11px] text-dim">没有命中。</div> : <Output text={body} />}
     </Card>
   );
 }
@@ -721,9 +705,7 @@ const DISPATCH: Record<string, (p: CardProps) => React.ReactElement> = {
     <FileCard {...p} tone="pink" icon={<FileText size={11} />} title="save_memory" />
   ),
   task: TaskCard,
-  skill: (p) => (
-    <FileCard {...p} tone="violet" icon={<Wrench size={11} />} title="skill" />
-  ),
+  skill: (p) => <FileCard {...p} tone="violet" icon={<Wrench size={11} />} title="skill" />,
 };
 
 export function ToolCard({ item, isLast, cwd }: CardProps) {
@@ -732,11 +714,7 @@ export function ToolCard({ item, isLast, cwd }: CardProps) {
 }
 
 /** 服务端工具活动（web_search 等）。本地没执行过，长得必须和本地工具不一样。 */
-export function ServerCard({
-  item,
-}: {
-  item: Extract<Item, { kind: "server" }>;
-}) {
+export function ServerCard({ item }: { item: Extract<Item, { kind: "server" }> }) {
   return (
     <div className="rounded-lg border border-dashed border-edge bg-ink/[0.03] px-3 py-2">
       <div className="flex items-center gap-2">
@@ -744,9 +722,7 @@ export function ServerCard({
           <Globe size={11} />
         </Glyph>
         <span className="mono text-xs text-ink">{item.rawType}</span>
-        <span className="rounded bg-bubble px-1.5 py-0.5 text-[10px] text-dim">
-          服务端活动
-        </span>
+        <span className="rounded bg-bubble px-1.5 py-0.5 text-[10px] text-dim">服务端活动</span>
       </div>
       {item.summary && (
         <div className="mt-1 truncate text-xs text-dim" title={item.summary}>

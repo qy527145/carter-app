@@ -19,8 +19,10 @@ function reducedMotion(): boolean {
 function dismiss(f: Flight) {
   window.clearTimeout(f.timer);
   if (active === f) active = null;
-  f.outer.animate({ opacity: [1, 0] }, { duration: 120, easing: "ease-out", fill: "forwards" }).onfinish =
-    () => f.outer.remove();
+  f.outer.animate(
+    { opacity: [1, 0] },
+    { duration: 120, easing: "ease-out", fill: "forwards" },
+  ).onfinish = () => f.outer.remove();
 }
 
 /** 从 `from` 的位置升起一枚卡片，悬停等 `landFlight`。 */
@@ -30,7 +32,7 @@ export function launchFlight(from: Element | null, label: string): void {
     window.clearTimeout(active.timer);
     active = null;
   }
-  if (!from || !from.isConnected || reducedMotion()) return;
+  if (!from?.isConnected || reducedMotion()) return;
 
   const outer = document.createElement("div");
   outer.className = "pointer-events-none fixed left-0 top-0 z-[70] will-change-transform";
@@ -95,7 +97,10 @@ export function landFlight(target: Element | null): void {
   if (!absorbed) target.style.opacity = "0";
 
   f.outer.animate(
-    [{ transform: `translate(${f.x}px, ${f.y}px)` }, { transform: `translate(${endX}px, ${f.y}px)` }],
+    [
+      { transform: `translate(${f.x}px, ${f.y}px)` },
+      { transform: `translate(${endX}px, ${f.y}px)` },
+    ],
     { duration: FLIGHT_MS, easing: "cubic-bezier(0.32, 0.72, 0, 1)", fill: "forwards" },
   );
   const fly = f.inner.animate(

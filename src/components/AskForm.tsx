@@ -11,10 +11,10 @@
 // 提交后前端**立即**收起表单（响应要快），但发送失败时要把表单放回去 ——
 // 否则用户刚填的东西没了，还得重新点一遍。所以答案在提交时先留一份。
 
-import { useState } from "react";
 import { Check, ChevronDown, Info, LoaderCircle } from "lucide-react";
+import { useState } from "react";
 
-import { sendCommand, type AskQuestion } from "../lib/api";
+import { type AskQuestion, sendCommand } from "../lib/api";
 import { useStore } from "../store";
 
 export function AskForm() {
@@ -42,11 +42,7 @@ export function AskForm() {
     <div className="px-4 pb-2">
       <div className="mx-auto max-w-3xl rounded-xl bg-elevated p-3 shadow-soft">
         <div className="mb-2.5 flex items-center gap-2 text-xs text-dim">
-          {submitting ? (
-            <LoaderCircle size={13} className="animate-spin" />
-          ) : (
-            <Info size={13} />
-          )}
+          {submitting ? <LoaderCircle size={13} className="animate-spin" /> : <Info size={13} />}
           模型在等你回答
           {form.questions.length > 1 && (
             <span className="text-dim/70">（{form.questions.length} 个问题，可一次答完）</span>
@@ -107,9 +103,7 @@ function QuestionSet({
                 </span>
               )}
               <span className="text-sm text-ink">{q.question}</span>
-              {q.multi_select && (
-                <span className="shrink-0 text-[10px] text-dim">可多选</span>
-              )}
+              {q.multi_select && <span className="shrink-0 text-[10px] text-dim">可多选</span>}
             </div>
 
             {q.options.length > 0 && (

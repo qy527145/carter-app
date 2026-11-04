@@ -117,7 +117,10 @@ fn cap(content: &str) -> String {
     while end > 0 && !content.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{}\n…（结果过长，界面只显示前 {MAX_RESULT} 字节）", &content[..end])
+    format!(
+        "{}\n…（结果过长，界面只显示前 {MAX_RESULT} 字节）",
+        &content[..end]
+    )
 }
 
 #[async_trait::async_trait]
@@ -233,12 +236,21 @@ mod tests {
         let _ = t.execute(args.clone()).await;
 
         match rx.recv().await.unwrap() {
-            ToolEvent::Started { call_id, name, args: a } => {
+            ToolEvent::Started {
+                call_id,
+                name,
+                args: a,
+            } => {
                 assert_eq!(name, "grep");
                 assert_eq!(a, args, "参数必须是完整的 JSON，不是预览字符串");
                 // 记下 id 用于核对下一条。
                 match rx.recv().await.unwrap() {
-                    ToolEvent::Finished { call_id: id2, ok, content, .. } => {
+                    ToolEvent::Finished {
+                        call_id: id2,
+                        ok,
+                        content,
+                        ..
+                    } => {
                         assert_eq!(id2, call_id, "两条事件的 id 必须配对");
                         assert!(ok);
                         assert!(content.contains("fn main"), "{content}");

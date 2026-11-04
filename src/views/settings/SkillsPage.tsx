@@ -28,31 +28,30 @@
 // 扫描路径存在 `~/.carter-app/settings.json`，**只对本应用生效** ——
 // carter 命令行读不到它，也不会受它影响。
 
-import { useEffect, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { FolderPlus, Pencil, Plus, Sparkles, Trash, X } from "lucide-react";
-
+import { useEffect, useState } from "react";
+import { Button, IconButton } from "../../components/ui/Button";
+import { Field, Input, Segmented, Switch, Textarea } from "../../components/ui/Input";
+import { Badge, Banner, Card, ConfirmDialog, Modal } from "../../components/ui/Panel";
 import {
+  type AppSettings,
   addSkillRoot,
   deleteSkill,
   listSkills,
   readSkill,
   removeSkillRoot,
-  saveSkill,
-  setSkillsEnabled,
-  toggleSkill,
-  type AppSettings,
   type SkillListing,
   type SkillRoot,
   type SkillRootKind,
   type SkillRow,
+  saveSkill,
+  setSkillsEnabled,
+  toggleSkill,
 } from "../../lib/api";
 import { toastError, toastOk } from "../../lib/toast";
 import { useAsync } from "../../lib/useAsync";
 import { useStore } from "../../store";
-import { Button, IconButton } from "../../components/ui/Button";
-import { Field, Input, Segmented, Switch, Textarea } from "../../components/ui/Input";
-import { Badge, Banner, Card, ConfirmDialog, Modal } from "../../components/ui/Panel";
 import { AsyncBody, PageIntro } from "./AsyncBody";
 
 /** 技能编辑弹窗：frontmatter 的三个键 + 正文。只服务可写的根（项目 / 用户）。 */
@@ -190,15 +189,7 @@ function SkillEditor({
 }
 
 /** 一条扫描路径：路径 + 「扫到多少、为什么没全生效」的计数 + 移除。 */
-function RootRow({
-  r,
-  busy,
-  onRemove,
-}: {
-  r: SkillRoot;
-  busy: boolean;
-  onRemove: () => void;
-}) {
+function RootRow({ r, busy, onRemove }: { r: SkillRoot; busy: boolean; onRemove: () => void }) {
   // 项目根是自动发现的，删不掉；用户目录恒在；只有外部根能移除。
   const removable = r.source === "external";
   return (
@@ -209,13 +200,9 @@ function RootRow({
             {r.path}
           </span>
           {r.source === "project" && (
-            <Badge title="当前项目的 .carter/skills：跟着会话走，自动发现">
-              项目
-            </Badge>
+            <Badge title="当前项目的 .carter/skills：跟着会话走，自动发现">项目</Badge>
           )}
-          {r.source === "local" && (
-            <Badge title="本应用自己的技能目录，恒在扫描范围里">自有</Badge>
-          )}
+          {r.source === "local" && <Badge title="本应用自己的技能目录，恒在扫描范围里">自有</Badge>}
         </div>
         <div className="mt-0.5 text-[10px] text-dim">
           {!r.exists
@@ -226,9 +213,8 @@ function RootRow({
         </div>
         {r.exists && r.subdirs > 0 && r.found === 0 && (
           <div className="mt-1 text-[10px] text-dim/80">
-            有子目录但没有 <span className="mono">SKILL.md</span> ——
-            技能可能在更下一层。Codex 的 <span className="mono">.system/</span> 就是这种情况，
-            所以它的预设会一次加两条路径。
+            有子目录但没有 <span className="mono">SKILL.md</span> —— 技能可能在更下一层。Codex 的{" "}
+            <span className="mono">.system/</span> 就是这种情况， 所以它的预设会一次加两条路径。
           </div>
         )}
       </div>
@@ -462,6 +448,7 @@ export function SkillsPage() {
   const setSettings = useStore((s) => s.setSettings);
 
   /** 写操作统一走这里：期间冻结路径区块，成功后就地重拉列表。 */
+  // biome-ignore lint/suspicious/noConfusingVoidType: 有的写操作只返回 Promise<void>，这里要同时接住两种
   async function run(fn: () => Promise<AppSettings | void>) {
     setBusy(true);
     try {
@@ -490,26 +477,20 @@ export function SkillsPage() {
     <>
       <div className="mb-4 flex items-center gap-2">
         <h1 className="text-[16px] font-semibold">技能</h1>
-        <Button
-          variant="primary"
-          size="sm"
-          className="ml-auto"
-          onClick={() => setEditing(null)}
-        >
+        <Button variant="primary" size="sm" className="ml-auto" onClick={() => setEditing(null)}>
           <Plus size={13} />
           新建技能
         </Button>
       </div>
 
       <PageIntro>
-        技能从当前项目的{" "}
-        <span className="mono">&lt;工作目录&gt;/.carter/skills/</span>、
+        技能从当前项目的 <span className="mono">&lt;工作目录&gt;/.carter/skills/</span>、
         <span className="mono">~/.carter/skills/</span> 与下面这些扫描路径里
         <strong className="font-medium">取并集</strong>发现：
         <strong className="font-medium">项目优先</strong>，然后是用户目录，再往后是外部路径；
         同名按名字去重、先出现者胜。frontmatter 里的 <span className="mono">name</span> /{" "}
-        <span className="mono">description</span> /{" "}
-        <span className="mono">allowed-tools</span> 三个键会被读取。
+        <span className="mono">description</span> / <span className="mono">allowed-tools</span>{" "}
+        三个键会被读取。
       </PageIntro>
 
       <AsyncBody
@@ -523,8 +504,7 @@ export function SkillsPage() {
         }
       >
         {(listing: SkillListing) => {
-          const rootsOf = (kind: SkillRootKind) =>
-            listing.roots.filter((r) => r.source === kind);
+          const rootsOf = (kind: SkillRootKind) => listing.roots.filter((r) => r.source === kind);
           const externalRoots = rootsOf("external");
           // 分组顺序 = 优先级：项目 → 用户 → 外部。它是**读出来**的，不是这里另排的。
           const groups = [
@@ -538,9 +518,7 @@ export function SkillsPage() {
             },
             ...externalRoots.map((r) => ({
               title: r.path,
-              items: listing.skills.filter(
-                (s) => s.scope === "external" && s.source === r.path,
-              ),
+              items: listing.skills.filter((s) => s.scope === "external" && s.source === r.path),
             })),
           ].filter((g) => g.items.length > 0);
 
@@ -558,9 +536,7 @@ export function SkillsPage() {
                   <Switch
                     checked={listing.globally_enabled}
                     label="全局启用技能"
-                    onChange={(v) =>
-                      void run(() => setSkillsEnabled(v).then(() => void 0))
-                    }
+                    onChange={(v) => void run(() => setSkillsEnabled(v).then(() => void 0))}
                   />
                 </Card>
                 {!listing.globally_enabled && (
@@ -597,8 +573,7 @@ export function SkillsPage() {
               </div>
 
               <div className="mb-2 text-[11px] leading-relaxed text-dim">
-                项目 / 用户技能的启停是把目录在{" "}
-                <span className="mono">skills/</span> 与{" "}
+                项目 / 用户技能的启停是把目录在 <span className="mono">skills/</span> 与{" "}
                 <span className="mono">skills.disabled/</span> 之间搬；
                 外部路径里的技能搬不得（那是别的工具的目录），所以开关记的是「按名字忽略」。
               </div>

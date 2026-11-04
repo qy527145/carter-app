@@ -79,6 +79,7 @@ pub struct ModelRow {
     pub error: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_one(
     config: &Config,
     cache: &Result<String, String>,
@@ -93,7 +94,9 @@ fn resolve_one(
     protocol: &str,
 ) -> ModelRow {
     let reference = format!("{provider}/{name}");
-    let reasoning_raw = reasoning.get(&(provider.to_string(), name.to_string())).cloned();
+    let reasoning_raw = reasoning
+        .get(&(provider.to_string(), name.to_string()))
+        .cloned();
     let mut row = ModelRow {
         reference: reference.clone(),
         provider: provider.to_string(),
@@ -128,10 +131,10 @@ fn resolve_one(
 
     // 展示名在缓存里查得到就先填上 —— 解析失败的那一行也需要它（界面上那个
     // 标签不能因为缓存里少了一条就退回成 `ws/sonnet` 这种内部写法）。
-    if let (Some(root), Some((pid, mid))) = (root, row.meta.split_once('/')) {
-        if let Some((pid, mid)) = canonical_key(root, pid, mid) {
-            row.label = model_label(root, &pid, &mid);
-        }
+    if let (Some(root), Some((pid, mid))) = (root, row.meta.split_once('/'))
+        && let Some((pid, mid)) = canonical_key(root, pid, mid)
+    {
+        row.label = model_label(root, &pid, &mid);
     }
 
     let cache = match cache {
@@ -148,7 +151,11 @@ fn resolve_one(
     let mini;
     let cache = match (root, row.meta.split_once('/')) {
         (Some(root), Some((pid, mid))) => {
-            match root.get(pid).and_then(|p| p.get("models")).and_then(|m| m.get(mid)) {
+            match root
+                .get(pid)
+                .and_then(|p| p.get("models"))
+                .and_then(|m| m.get(mid))
+            {
                 Some(node) => {
                     mini = serde_json::json!({ pid: { "models": { mid: node } } }).to_string();
                     mini.as_str()
@@ -285,13 +292,20 @@ fn entries_of(root: &serde_json::Value, provider_id: &str) -> Vec<CatalogEntry> 
         .iter()
         .map(|(id, m)| {
             let s = |k: &str| m.get(k).and_then(|v| v.as_str()).map(str::to_string);
-            let limit = |k: &str| m.get("limit").and_then(|l| l.get(k)).and_then(|v| v.as_u64());
+            let limit = |k: &str| {
+                m.get("limit")
+                    .and_then(|l| l.get(k))
+                    .and_then(|v| v.as_u64())
+            };
             CatalogEntry {
                 id: id.clone(),
                 name: s("name").unwrap_or_else(|| id.clone()),
                 context_window: limit("context"),
                 max_output_tokens: limit("output"),
-                reasoning: m.get("reasoning").and_then(|v| v.as_bool()).unwrap_or(false),
+                reasoning: m
+                    .get("reasoning")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
                 capabilities: catalog_capabilities(m),
                 family: s("family"),
                 deprecated: s("status").as_deref() == Some("deprecated"),
@@ -322,7 +336,9 @@ pub fn provider_models(provider_id: &str) -> Result<Vec<CatalogEntry>, String> {
 pub fn check_meta(root: &serde_json::Value, meta: &str) -> Result<(), String> {
     let meta = meta.trim();
     let Some((pid, mid)) = meta.split_once('/') else {
-        return Err(format!("meta `{meta}` 格式应为 `服务商/模型id`，如 deepseek/deepseek-flash"));
+        return Err(format!(
+            "meta `{meta}` 格式应为 `服务商/模型id`，如 deepseek/deepseek-flash"
+        ));
     };
     let Some(models) = root
         .get(pid)
@@ -1017,7 +1033,9 @@ pub fn detect_provider(base_url: &str) -> Option<String> {
     }
     KNOWN_ENDPOINTS
         .iter()
-        .find(|(_, host)| endpoint_key(&format!("https://{host}")).as_deref() == Some(target.as_str()))
+        .find(|(_, host)| {
+            endpoint_key(&format!("https://{host}")).as_deref() == Some(target.as_str())
+        })
         .map(|(pid, _)| (*pid).to_string())
 }
 
@@ -1383,7 +1401,8 @@ kind = "anthropic"
     }
 
     fn dev_cache() -> serde_json::Value {
-        serde_json::from_str(r#"{"deepseek":{"models":{
+        serde_json::from_str(
+            r#"{"deepseek":{"models":{
             "deepseek-flash":{"id":"deepseek-flash","name":"DeepSeek V4.1 Flash",
               "canonical_model_id":"deepseek/deepseek-v4.1-flash","reasoning":true,
               "tool_call":true,"attachment":true,
@@ -1395,7 +1414,8 @@ kind = "anthropic"
               "status":"deprecated","release_date":"2026-09-10"},
             "deepseek-v4-pro":{"id":"deepseek-v4-pro","name":"DeepSeek V4 Pro",
               "release_date":"2026-08-12"}
-        }}}"#)
+        }}}"#,
+        )
         .unwrap()
     }
 
@@ -1417,8 +1437,14 @@ kind = "anthropic"
 
     #[test]
     fn catalog_puts_live_and_newest_models_first() {
-        let ids: Vec<String> = entries_of(&dev_cache(), "deepseek").into_iter().map(|e| e.id).collect();
-        assert_eq!(ids, ["deepseek-flash", "deepseek-v4-pro", "deepseek-v4-flash"]);
+        let ids: Vec<String> = entries_of(&dev_cache(), "deepseek")
+            .into_iter()
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(
+            ids,
+            ["deepseek-flash", "deepseek-v4-pro", "deepseek-v4-flash"]
+        );
         assert!(entries_of(&dev_cache(), "nobody").is_empty());
     }
 
@@ -1431,11 +1457,25 @@ kind = "anthropic"
         assert_eq!(info.label, "DeepSeek V4.1 Flash");
         assert_eq!(info.context_window, Some(1_000_000));
         assert_eq!(info.max_output_tokens, Some(393_216));
-        for cap in ["tools", "vision", "thinking", "pdf", "streaming", "prompt_cache"] {
-            assert!(info.capabilities.contains(&cap), "缺 {cap}：{:?}", info.capabilities);
+        for cap in [
+            "tools",
+            "vision",
+            "thinking",
+            "pdf",
+            "streaming",
+            "prompt_cache",
+        ] {
+            assert!(
+                info.capabilities.contains(&cap),
+                "缺 {cap}：{:?}",
+                info.capabilities
+            );
         }
         assert_eq!(info.pricing.as_ref().map(|p| p.input), Some(0.28));
-        assert_eq!(info.pricing.as_ref().and_then(|p| p.cache_read), Some(0.028));
+        assert_eq!(
+            info.pricing.as_ref().and_then(|p| p.cache_read),
+            Some(0.028)
+        );
     }
 
     /// 没有 `cost` / 模态 / 能力字段的条目（本地模型、精简条目）不能炸，也不能

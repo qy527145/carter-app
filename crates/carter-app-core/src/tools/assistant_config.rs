@@ -179,7 +179,9 @@ impl Tool for AssistantConfigTool {
                     return ToolResult::err("assistant_source_delete: 缺少 name");
                 };
                 let Some(s) = find_source(&self.store, &name) else {
-                    return ToolResult::err(format!("assistant_source_delete: 没有叫「{name}」的观察源"));
+                    return ToolResult::err(format!(
+                        "assistant_source_delete: 没有叫「{name}」的观察源"
+                    ));
                 };
                 match self.store.with(|st| st.sources.retain(|x| x.id != s.id)) {
                     Ok(()) => ToolResult::ok(format!("已删除观察源「{}」。", s.name)),
@@ -195,31 +197,39 @@ impl Tool for AssistantConfigTool {
                 let enabled = args.get("enabled").and_then(Value::as_bool).unwrap_or(true);
                 let existing = find_rule(&self.store, &name);
                 let clash = self.store.read(|s| {
-                    s.settings
-                        .rules
-                        .iter()
-                        .any(|r| r.name.trim() == name && existing.as_ref().is_none_or(|e| e.id != r.id))
+                    s.settings.rules.iter().any(|r| {
+                        r.name.trim() == name && existing.as_ref().is_none_or(|e| e.id != r.id)
+                    })
                 });
                 if clash {
-                    return ToolResult::err(format!("assistant_rule_save: 已经有叫「{name}」的规则了"));
+                    return ToolResult::err(format!(
+                        "assistant_rule_save: 已经有叫「{name}」的规则了"
+                    ));
                 }
                 let rule = Rule {
-                    id: existing.as_ref().map(|r| r.id.clone()).unwrap_or_else(|| new_id("rule", now_ms())),
+                    id: existing
+                        .as_ref()
+                        .map(|r| r.id.clone())
+                        .unwrap_or_else(|| new_id("rule", now_ms())),
                     name: name.clone(),
                     instruction,
                     enabled,
                 };
                 let id = rule.id.clone();
-                let res = self.store.with(|s| {
-                    match s.settings.rules.iter_mut().find(|r| r.id == id) {
-                        Some(slot) => *slot = rule.clone(),
-                        None => s.settings.rules.push(rule.clone()),
-                    }
-                });
+                let res =
+                    self.store
+                        .with(|s| match s.settings.rules.iter_mut().find(|r| r.id == id) {
+                            Some(slot) => *slot = rule.clone(),
+                            None => s.settings.rules.push(rule.clone()),
+                        });
                 match res {
                     Ok(()) => ToolResult::ok(format!(
                         "已{}接单规则「{}」：{}",
-                        if existing.is_some() { "更新" } else { "新建" },
+                        if existing.is_some() {
+                            "更新"
+                        } else {
+                            "新建"
+                        },
                         rule.name,
                         rule.instruction
                     )),
@@ -231,13 +241,12 @@ impl Tool for AssistantConfigTool {
                     return ToolResult::err("assistant_rule_delete: 缺少 name");
                 };
                 let Some(r) = find_rule(&self.store, &name) else {
-                    return ToolResult::err(format!("assistant_rule_delete: 没有叫「{name}」的规则"));
+                    return ToolResult::err(format!(
+                        "assistant_rule_delete: 没有叫「{name}」的规则"
+                    ));
                 };
                 let id = r.id.clone();
-                match self
-                    .store
-                    .with(|s| s.settings.rules.retain(|x| x.id != id))
-                {
+                match self.store.with(|s| s.settings.rules.retain(|x| x.id != id)) {
                     Ok(()) => ToolResult::ok(format!("已删除接单规则「{}」。", r.name)),
                     Err(e) => ToolResult::err(format!("assistant_rule_delete: 写盘失败：{e}")),
                 }
@@ -316,7 +325,10 @@ impl AssistantConfigTool {
             cwd,
             every_minutes: every,
             enabled,
-            state: existing.as_ref().map(|s| s.state.clone()).unwrap_or_default(),
+            state: existing
+                .as_ref()
+                .map(|s| s.state.clone())
+                .unwrap_or_default(),
         };
         if let Err(e) = src.validate() {
             return ToolResult::err(format!("assistant_source_save: {e}"));
@@ -364,7 +376,6 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         AssistantStore::open(dir.join("assistant.json"))
     }
-
 
     #[tokio::test]
     async fn a_rule_can_be_created_updated_and_deleted_by_name() {

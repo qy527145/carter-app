@@ -10,8 +10,8 @@
 // 没有引第三方 JSON 查看器：这类库维护状况普遍不好，需要的能力就这么多，
 // 而配色要跟着本仓库的 token 走。
 
-import { useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
+import { useState } from "react";
 
 import { fmtNumber } from "../../lib/format";
 
@@ -89,13 +89,12 @@ function Node({
   const keys = container ? Object.keys(value as object) : [];
   const [open, setOpen] = useState(depth < defaultDepth);
 
-  const label =
-    name !== undefined && (
-      <>
-        <span className="text-tone-blue">"{name}"</span>
-        <span className="text-dim">: </span>
-      </>
-    );
+  const label = name !== undefined && (
+    <>
+      <span className="text-tone-blue">"{name}"</span>
+      <span className="text-dim">: </span>
+    </>
+  );
 
   if (!container) {
     return (

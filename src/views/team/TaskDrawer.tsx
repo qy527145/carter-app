@@ -10,15 +10,10 @@
 // 协议规定收件人只看 `to=`，不从正文里猜（昵称会改、会重名）。所以这里在发送时把
 // 正文里的 `@昵称` 解析成成员 id 填进 `to`。用户看到的是 `@小张`，发出去的是 id。
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AtSign, Send, Sparkles, UserRound, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import {
-  teamAct,
-  type TeamEvent,
-  type TeamGoal,
-  type TeamTask,
-} from "../../lib/api";
+import { type TeamEvent, type TeamGoal, type TeamTask, teamAct } from "../../lib/api";
 import {
   eventSender,
   eventVerb,
@@ -26,11 +21,12 @@ import {
   personName,
   priorityTone,
   since,
-  statusTone, taskHandoff,
+  statusTone,
+  taskHandoff,
 } from "../../lib/teamUi";
 import { toastError, toastOk } from "../../lib/toast";
-import { usePeople } from "./people";
 import { HandoffButton } from "./HandoffButton";
+import { usePeople } from "./people";
 import { PersonAvatar, PersonPicker } from "./peopleUi";
 
 export function TaskDrawer({
@@ -89,7 +85,11 @@ export function TaskDrawer({
   }, [onClose, handoff, closed]);
 
   const thread = useMemo(
-    () => events.filter((e) => e.target === task.id).slice().reverse(),
+    () =>
+      events
+        .filter((e) => e.target === task.id)
+        .slice()
+        .reverse(),
     [events, task.id],
   );
 
@@ -116,7 +116,10 @@ export function TaskDrawer({
         <header className="flex items-start gap-2 border-b border-edge px-4 py-3">
           <div className="min-w-0 flex-1">
             <div className="mb-1 flex flex-wrap items-center gap-1.5 text-[10px]">
-              <span className="rounded px-1.5 py-[1px] font-medium" style={{ background: tone.bg, color: tone.fg }}>
+              <span
+                className="rounded px-1.5 py-[1px] font-medium"
+                style={{ background: tone.bg, color: tone.fg }}
+              >
                 {task.status_label}
               </span>
               <span style={{ color: priorityTone(task.priority).fg }}>{task.priority}</span>
@@ -138,13 +141,17 @@ export function TaskDrawer({
         <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
           {/* 负责人：这一页最常改的东西，放在最上面。 */}
           <section className="mb-4">
-            <div className="mb-1.5 text-[10px] font-medium uppercase tracking-wider text-dim">负责人</div>
+            <div className="mb-1.5 text-[10px] font-medium uppercase tracking-wider text-dim">
+              负责人
+            </div>
             <div className="flex items-center gap-2">
               {task.assignee ? (
                 <span className="flex items-center gap-1.5 text-xs">
                   <PersonAvatar person={task.assignee} size={20} />
                   {personName(people, task.assignee)}
-                  {people?.me && task.assignee === people.me && <span className="text-[10px] text-dim">（我）</span>}
+                  {people?.me && task.assignee === people.me && (
+                    <span className="text-[10px] text-dim">（我）</span>
+                  )}
                 </span>
               ) : (
                 <span className="text-xs text-dim">还没人负责</span>
@@ -190,17 +197,14 @@ export function TaskDrawer({
           )}
 
           {task.waiting_on.length > 0 && (
-            <section className="mb-4 text-[11px] text-dim">还在等 {task.waiting_on.length} 个前置任务完成。</section>
+            <section className="mb-4 text-[11px] text-dim">
+              还在等 {task.waiting_on.length} 个前置任务完成。
+            </section>
           )}
 
           {/* 抽屉里最主要的动作。原来是一块灰底灰字的通栏 —— 看上去像禁用态。 */}
           {!closed && (
-            <HandoffButton
-              variant="full"
-              shortcut="⌘↵"
-              className="mb-4"
-              onClick={handoff}
-            />
+            <HandoffButton variant="full" shortcut="⌘↵" className="mb-4" onClick={handoff} />
           )}
 
           <section>
@@ -233,9 +237,15 @@ export function TaskDrawer({
             }
             // 负责人不是我的话，评论默认也通知他 —— 在他的任务上说话，他该知道。
             const recipients = new Set(to);
-            if (task.assignee?.startsWith("m-") && task.assignee !== people.me) recipients.add(task.assignee);
+            if (task.assignee?.startsWith("m-") && task.assignee !== people.me)
+              recipients.add(task.assignee);
             try {
-              await teamAct(cwd, { action: "comment", task_id: task.id, text, to: [...recipients] });
+              await teamAct(cwd, {
+                action: "comment",
+                task_id: task.id,
+                text,
+                to: [...recipients],
+              });
               onChanged();
               return true;
             } catch (e) {
@@ -337,7 +347,9 @@ export function Composer({
   const matches = useMemo(() => {
     if (query === null || !people) return [];
     const q = query.toLowerCase();
-    return people.members.filter((m) => m.id !== people.me && m.name.toLowerCase().includes(q)).slice(0, 6);
+    return people.members
+      .filter((m) => m.id !== people.me && m.name.toLowerCase().includes(q))
+      .slice(0, 6);
   }, [people, query]);
 
   // 光标前面是 `@xxx`（中间没有空白）时进入补全。

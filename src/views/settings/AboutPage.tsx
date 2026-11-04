@@ -5,9 +5,8 @@
 
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { ExternalLink, FolderOpen } from "lucide-react";
-
-import { useStore } from "../../store";
 import { Card, Section } from "../../components/ui/Panel";
+import { useStore } from "../../store";
 
 function PathRow({ label, value }: { label: string; value: string }) {
   return (
@@ -57,9 +56,7 @@ export function AboutPage() {
             <div className="flex items-center gap-2">
               <span className="text-dim">models.dev 缓存</span>
               <span className={appInfo?.models_cache_exists ? "text-ink" : "text-tone-orange"}>
-                {appInfo?.models_cache_exists
-                  ? "已存在"
-                  : "还没有 —— 去「模型」页点「刷新元数据」"}
+                {appInfo?.models_cache_exists ? "已存在" : "还没有 —— 去「模型」页点「刷新元数据」"}
               </span>
             </div>
             <div className="flex items-center gap-2">
@@ -81,13 +78,12 @@ export function AboutPage() {
               但拦截点已经在底座预留。
             </li>
             <li>
-              <span className="text-ink">API Key 进系统凭据库</span> ——
-              目前和命令行一样存在 config.toml 里（或写成{" "}
-              <span className="mono">{"${环境变量}"}</span> 由环境提供）。
+              <span className="text-ink">API Key 进系统凭据库</span> —— 目前和命令行一样存在
+              config.toml 里（或写成 <span className="mono">{"${环境变量}"}</span> 由环境提供）。
             </li>
             <li>
-              <span className="text-ink">单个 MCP 工具的开关</span> ——
-              MCP 工具名要连上 server 才知道，所以只能在 server 一级启停。
+              <span className="text-ink">单个 MCP 工具的开关</span> —— MCP 工具名要连上 server
+              才知道，所以只能在 server 一级启停。
             </li>
           </ul>
         </Card>

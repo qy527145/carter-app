@@ -250,8 +250,7 @@ impl BackgroundShells {
         let id = format!("sh{}", self.seq.fetch_add(1, Ordering::Relaxed) + 1);
         let log = self.log_path(session_id, &id);
         if let Some(dir) = log.parent() {
-            std::fs::create_dir_all(dir)
-                .map_err(|e| format!("建后台命令的日志目录失败：{e}"))?;
+            std::fs::create_dir_all(dir).map_err(|e| format!("建后台命令的日志目录失败：{e}"))?;
         }
         let mut file = std::fs::OpenOptions::new()
             .create(true)
@@ -342,7 +341,11 @@ impl BackgroundShells {
             while !all.is_char_boundary(cut) {
                 cut += 1;
             }
-            format!("（前面还有 {} 字节，完整输出见日志）\n…{}", cut, &all[cut..])
+            format!(
+                "（前面还有 {} 字节，完整输出见日志）\n…{}",
+                cut,
+                &all[cut..]
+            )
         } else if all.is_empty() {
             "（没有新输出）".to_string()
         } else {
@@ -617,7 +620,12 @@ mod tests {
         let shells = shells();
         let mut rx = shells.subscribe();
         let (id, _) = shells
-            .spawn("echo done-out; exit 3", &std::env::temp_dir(), &sh(), "test-session")
+            .spawn(
+                "echo done-out; exit 3",
+                &std::env::temp_dir(),
+                &sh(),
+                "test-session",
+            )
             .unwrap();
         let got = tokio::time::timeout(Duration::from_secs(5), rx.recv())
             .await

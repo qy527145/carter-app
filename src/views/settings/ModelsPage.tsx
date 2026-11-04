@@ -4,28 +4,27 @@
 // 它们各自是什么规格、默认用哪个」。同一个模型定义在两处都能看到，但只有这里
 // 会把 models.dev 的元数据解出来 —— 上下文窗口、能力、定价。
 
-import { useState } from "react";
 import { CircleAlert, Download, Pencil, Plus, Star, Zap } from "lucide-react";
-
+import { useState } from "react";
+import { Button, IconButton } from "../../components/ui/Button";
+import { Segmented, Switch } from "../../components/ui/Input";
+import { Badge } from "../../components/ui/Panel";
 import {
+  type CompactionSettings,
   getCompaction,
   listModels,
-  setCompaction,
+  type ModelRow,
   refreshModelCatalog,
   sendCommand,
+  setCompaction,
   setDefaultModel,
   setFastModel,
-  type CompactionSettings,
-  type ModelRow,
 } from "../../lib/api";
 import { capabilityLabel, fmtPrice, fmtTokens } from "../../lib/format";
 import { reasoningDisplay } from "../../lib/protocols";
 import { toastError, toastOk } from "../../lib/toast";
-import { useStore } from "../../store";
 import { useAsync } from "../../lib/useAsync";
-import { Button, IconButton } from "../../components/ui/Button";
-import { Segmented, Switch } from "../../components/ui/Input";
-import { Badge } from "../../components/ui/Panel";
+import { useStore } from "../../store";
 import { AsyncBody, PageIntro } from "./AsyncBody";
 import { ModelEditor } from "./ModelEditor";
 
@@ -215,12 +214,7 @@ export function ModelsPage() {
     <>
       <div className="mb-4 flex items-center gap-2">
         <h1 className="text-[16px] font-semibold">模型</h1>
-        <Button
-          variant="primary"
-          size="sm"
-          className="ml-auto"
-          onClick={() => setEditing(null)}
-        >
+        <Button variant="primary" size="sm" className="ml-auto" onClick={() => setEditing(null)}>
           <Plus size={13} />
           添加模型
         </Button>
@@ -268,7 +262,9 @@ export function ModelsPage() {
                         // 否则「切了模型」对正在聊的这条不生效。
                         const sid = useStore.getState().sessionId;
                         if (sid) {
-                          sendCommand(sid, { type: "set_model", model: m.reference }).catch(toastError);
+                          sendCommand(sid, { type: "set_model", model: m.reference }).catch(
+                            toastError,
+                          );
                         }
                         state.reload();
                       })

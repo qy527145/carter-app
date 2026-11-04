@@ -11,8 +11,11 @@
 // 判断「组件是否已经处理过」用的是 `defaultPrevented`：React 的事件挂在 #root 上，
 // 冒泡到 window 时组件的 handler 已经跑完了。
 
+import { Check } from "lucide-react";
 import {
   createContext,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
   useCallback,
   useContext,
   useEffect,
@@ -20,11 +23,8 @@ import {
   useMemo,
   useRef,
   useState,
-  type KeyboardEvent as ReactKeyboardEvent,
-  type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
-import { Check } from "lucide-react";
 
 import { openDevtools } from "../../lib/api";
 
@@ -221,7 +221,7 @@ function Menu({
       // 挂上 focus-visible 的描边，看起来像被「选中」了。
       const prev = prevFocus.current;
       const lost = !document.activeElement || document.activeElement === document.body;
-      if (byKeyboard && prev && prev.isConnected && lost) prev.focus({ preventScroll: true });
+      if (byKeyboard && prev?.isConnected && lost) prev.focus({ preventScroll: true });
     };
   }, [onClose]);
 
@@ -256,7 +256,8 @@ function Menu({
     const cur = buttons.indexOf(document.activeElement as HTMLButtonElement);
     let next: number | null = null;
     if (e.key === "ArrowDown") next = cur < 0 ? 0 : (cur + 1) % buttons.length;
-    else if (e.key === "ArrowUp") next = cur < 0 ? buttons.length - 1 : (cur - 1 + buttons.length) % buttons.length;
+    else if (e.key === "ArrowUp")
+      next = cur < 0 ? buttons.length - 1 : (cur - 1 + buttons.length) % buttons.length;
     else if (e.key === "Home") next = 0;
     else if (e.key === "End") next = buttons.length - 1;
     else if (e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey) {
@@ -367,7 +368,9 @@ function Menu({
                   }`}
                 >
                   {entry.checked !== undefined ? (
-                    entry.checked ? <Check size={12} className="text-ink" /> : null
+                    entry.checked ? (
+                      <Check size={12} className="text-ink" />
+                    ) : null
                   ) : (
                     entry.icon
                   )}

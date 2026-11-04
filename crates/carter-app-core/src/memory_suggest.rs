@@ -45,11 +45,44 @@ pub struct MemoryCandidate {
 /// 只收「表达长期意愿」的说法。「不对」「错了」这类单次纠正不在里面：它们大多只是
 /// 针对这一次的结果，真要变成规矩，用户通常会接着说「以后」「每次」。
 const SIGNALS: &[&str] = &[
-    "以后", "今后", "下次", "往后", "别再", "不要再", "每次", "总是", "一律", "永远",
-    "始终", "一直用", "记住", "记一下", "记得", "我习惯", "我喜欢", "我偏好", "我更喜欢",
-    "我不喜欢", "我讨厌", "我们团队", "我们项目", "我们这边", "约定", "规范是",
-    "统一用", "优先用", "默认用", "不要用", "别用", "改用",
-    "from now on", "always", "never", "remember", "i prefer", "don't ever",
+    "以后",
+    "今后",
+    "下次",
+    "往后",
+    "别再",
+    "不要再",
+    "每次",
+    "总是",
+    "一律",
+    "永远",
+    "始终",
+    "一直用",
+    "记住",
+    "记一下",
+    "记得",
+    "我习惯",
+    "我喜欢",
+    "我偏好",
+    "我更喜欢",
+    "我不喜欢",
+    "我讨厌",
+    "我们团队",
+    "我们项目",
+    "我们这边",
+    "约定",
+    "规范是",
+    "统一用",
+    "优先用",
+    "默认用",
+    "不要用",
+    "别用",
+    "改用",
+    "from now on",
+    "always",
+    "never",
+    "remember",
+    "i prefer",
+    "don't ever",
 ];
 
 /// 候选最多几条。一轮话里能提炼出的长期规矩不会多，多了基本是噪音。
@@ -159,11 +192,15 @@ pub fn parse(text: &str) -> Result<Vec<MemoryCandidate>, String> {
     if end < start {
         return Err("回答里的 JSON 不完整".into());
     }
-    let raw: Raw =
-        serde_json::from_str(&text[start..=end]).map_err(|e| format!("回答不是合法的 JSON：{e}"))?;
+    let raw: Raw = serde_json::from_str(&text[start..=end])
+        .map_err(|e| format!("回答不是合法的 JSON：{e}"))?;
     let mut out: Vec<MemoryCandidate> = Vec::new();
     for item in raw.memories {
-        let content = item.content.split_whitespace().collect::<Vec<_>>().join(" ");
+        let content = item
+            .content
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         if content.is_empty() || out.iter().any(|c| c.content == content) {
             continue;
         }
@@ -270,8 +307,14 @@ mod tests {
         let out = parse(text).unwrap();
         assert_eq!(out.len(), 3, "去重后再截到 3 条：{out:?}");
         assert_eq!(out[0].scope, "user");
-        assert_eq!((out[1].kind.as_str(), out[1].scope.as_str()), ("profile", "user"));
-        assert_eq!((out[2].kind.as_str(), out[2].scope.as_str()), ("facts", "project"));
+        assert_eq!(
+            (out[1].kind.as_str(), out[1].scope.as_str()),
+            ("profile", "user")
+        );
+        assert_eq!(
+            (out[2].kind.as_str(), out[2].scope.as_str()),
+            ("facts", "project")
+        );
     }
 
     #[test]
@@ -282,7 +325,8 @@ mod tests {
 
     #[test]
     fn accept_writes_project_memory_into_cwd() {
-        let dir = std::env::temp_dir().join(format!("carter-app-memsug-{}", crate::protocol::now_ms()));
+        let dir =
+            std::env::temp_dir().join(format!("carter-app-memsug-{}", crate::protocol::now_ms()));
         std::fs::create_dir_all(&dir).unwrap();
         let c = MemoryCandidate {
             content: "这个项目用 bun 不用 npm".into(),

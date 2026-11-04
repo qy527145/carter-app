@@ -36,8 +36,8 @@ pub mod connectors;
 pub mod goal;
 pub mod history;
 pub mod images;
-pub mod inspect;
 pub mod input;
+pub mod inspect;
 pub mod memory_suggest;
 pub mod paths;
 pub mod peers;
@@ -70,12 +70,12 @@ pub use input::{CommandRow, FileKind};
 pub use preview::FilePreview;
 pub use protocol::{AppEvent, Command, GoalView, SessionEvent, TodoView, UsageView};
 pub use schedules::{Schedule, ScheduleKind, ScheduleStore};
-pub use session::{start_session, SessionOptions, StartedSession};
+pub use session::{SessionOptions, StartedSession, start_session};
 pub use sessions::{SearchHit, SessionRow};
-pub use team::{InitOutcome, Store, TeamMeta};
 pub use shell::{AppShell, SessionHandle};
-pub use side::{start_side_session, StartedSide};
+pub use side::{StartedSide, start_side_session};
 pub use skills::SkillRow;
+pub use team::{InitOutcome, Store, TeamMeta};
 pub use view::{BlockView, MessageView};
 
 /// 该渠道声明不出去的服务端工具（协议没有对应物，或名字不认识）。

@@ -73,6 +73,7 @@ pub struct AgentTool {
 }
 
 impl AgentTool {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         provider: Arc<dyn LlmProvider>,
         model: ModelInfo,
@@ -201,7 +202,11 @@ impl Tool for AgentTool {
             .get("tools")
             .and_then(Value::as_array)
             .filter(|a| !a.is_empty())
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect());
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            });
         let tools: Vec<Arc<dyn Tool>> = match &whitelist {
             Some(wl) => self
                 .tools
@@ -304,15 +309,17 @@ impl Tool for AgentTool {
                     last_emit: Instant::now() - PROGRESS_GAP,
                     activity,
                 };
-                let out = run_one(
-                    task, system, provider, model, cfg, tools, cancel, &mut sink,
-                )
-                .await;
+                let out =
+                    run_one(task, system, provider, model, cfg, tools, cancel, &mut sink).await;
                 // 收尾状态写回表里 —— 失败与中断的也要能看出来，而不是一直转圈。
                 let (status, text) = match &out {
                     Ok((t, _)) => ("done", ProgressSink::tail_static(t)),
                     Err(e) => (
-                        if e.contains("中断") { "cancelled" } else { "failed" },
+                        if e.contains("中断") {
+                            "cancelled"
+                        } else {
+                            "failed"
+                        },
                         ProgressSink::tail_static(e),
                     ),
                 };
@@ -453,20 +460,20 @@ impl ProgressSink {
 
     /// 改一行，立刻推（工具切换、收尾这类关键节点不值得省）。
     fn set(&mut self, f: impl FnOnce(&mut AgentRun)) {
-        if let Ok(mut v) = self.runs.lock() {
-            if let Some(run) = v.get_mut(self.index) {
-                f(run);
-            }
+        if let Ok(mut v) = self.runs.lock()
+            && let Some(run) = v.get_mut(self.index)
+        {
+            f(run);
         }
         self.publish();
     }
 
     /// 改一行，但最多每 [`PROGRESS_GAP`] 推一次（文本增量走这里）。
     fn maybe(&mut self, f: impl FnOnce(&mut AgentRun)) {
-        if let Ok(mut v) = self.runs.lock() {
-            if let Some(run) = v.get_mut(self.index) {
-                f(run);
-            }
+        if let Ok(mut v) = self.runs.lock()
+            && let Some(run) = v.get_mut(self.index)
+        {
+            f(run);
         }
         if self.last_emit.elapsed() >= PROGRESS_GAP {
             self.last_emit = Instant::now();
@@ -496,12 +503,10 @@ impl UiSink for ProgressSink {
                     run.text = tail;
                 });
             }
-            UiEvent::AssistantTextEnd => {
-                if !self.buf.is_empty() {
-                    self.last = std::mem::take(&mut self.buf);
-                    let tail = Self::tail_static(&self.last);
-                    self.set(|run| run.text = tail);
-                }
+            UiEvent::AssistantTextEnd if !self.buf.is_empty() => {
+                self.last = std::mem::take(&mut self.buf);
+                let tail = Self::tail_static(&self.last);
+                self.set(|run| run.text = tail);
             }
             UiEvent::ToolCallStarted { name, .. } => {
                 self.steps += 1;
@@ -573,7 +578,9 @@ mod tests {
         }
     }
 
-    fn tool(provider: Arc<dyn LlmProvider>) -> (AgentTool, tokio::sync::mpsc::UnboundedReceiver<ToolEvent>) {
+    fn tool(
+        provider: Arc<dyn LlmProvider>,
+    ) -> (AgentTool, tokio::sync::mpsc::UnboundedReceiver<ToolEvent>) {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let model = carter::registry::ModelInfo {
             key: "k".into(),

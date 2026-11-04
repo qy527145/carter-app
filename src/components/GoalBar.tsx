@@ -5,12 +5,11 @@
 //
 // 只在有目标时出现 —— 没目标还常年占一行，是最容易让人学会「忽略这一行」的做法。
 
-import { useEffect, useState } from "react";
 import { CircleCheck, CircleDashed, CirclePause, CircleSlash, Pencil, Play, X } from "lucide-react";
-
+import { useEffect, useState } from "react";
+import type { GoalView } from "../lib/api";
 import * as ops from "../lib/sessionOps";
 import { useStore } from "../store";
-import type { GoalView } from "../lib/api";
 import { IconButton } from "./ui/Button";
 
 type Tone = { icon: typeof CircleCheck; cls: string; bg: string };
@@ -52,9 +51,7 @@ export function GoalBar() {
 
   return (
     <div className="shrink-0 px-4 pt-2">
-      <div
-        className={`mx-auto flex max-w-3xl items-start gap-2 rounded-xl px-3 py-2 ${t.bg}`}
-      >
+      <div className={`mx-auto flex max-w-3xl items-start gap-2 rounded-xl px-3 py-2 ${t.bg}`}>
         <Icon size={14} className={`icon-optical shrink-0 ${t.cls}`} />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 text-[11px] text-dim">
@@ -98,7 +95,10 @@ export function GoalBar() {
 
         <div className="flex shrink-0 items-center gap-0.5">
           {goal.status === "active" ? (
-            <IconButton title="暂停：不再自动继续" onClick={() => ops.goal(sessionId, { type: "pause" })}>
+            <IconButton
+              title="暂停：不再自动继续"
+              onClick={() => ops.goal(sessionId, { type: "pause" })}
+            >
               <CirclePause size={13} />
             </IconButton>
           ) : (
@@ -116,10 +116,7 @@ export function GoalBar() {
             <Pencil size={12} />
           </IconButton>
           {goal.status !== "completed" && (
-            <IconButton
-              title="标记完成"
-              onClick={() => ops.goal(sessionId, { type: "complete" })}
-            >
+            <IconButton title="标记完成" onClick={() => ops.goal(sessionId, { type: "complete" })}>
               <CircleCheck size={13} />
             </IconButton>
           )}

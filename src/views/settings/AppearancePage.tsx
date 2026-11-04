@@ -1,13 +1,12 @@
 // 外观：主题与对话密度。
 
 import { useState } from "react";
-
-import { setAppSettings, type ThemePref } from "../../lib/api";
 import { ModePill } from "../../components/ModePill";
-import { toastError } from "../../lib/toast";
-import { useStore } from "../../store";
 import { Segmented } from "../../components/ui/Input";
 import { Card, Section } from "../../components/ui/Panel";
+import { setAppSettings, type ThemePref } from "../../lib/api";
+import { toastError } from "../../lib/toast";
+import { useStore } from "../../store";
 import { PageIntro } from "./AsyncBody";
 
 const THEMES: { id: ThemePref; label: string }[] = [
@@ -51,8 +50,8 @@ export function AppearancePage() {
         <Card>
           <Segmented value={settings.theme} options={THEMES} onChange={pick} />
           <div className="mt-3 text-[11px] leading-relaxed text-dim">
-            「跟随系统」会跟着系统的浅色/深色设置走，切换即时生效。
-            代码块固定用深色配色，不随主题变 —— 正文是给人读的，代码是给眼睛扫的。
+            「跟随系统」会跟着系统的浅色/深色设置走，切换即时生效。 代码块固定用深色配色，不随主题变
+            —— 正文是给人读的，代码是给眼睛扫的。
           </div>
         </Card>
       </Section>
@@ -88,8 +87,12 @@ export function AppearancePage() {
                 setWidth(w);
                 setSettings({ ...settings, sidebar_width: w });
               }}
-              onPointerUp={() => setAppSettings({ ...settings, sidebar_width: width }).catch(toastError)}
-              onKeyUp={() => setAppSettings({ ...settings, sidebar_width: width }).catch(toastError)}
+              onPointerUp={() =>
+                setAppSettings({ ...settings, sidebar_width: width }).catch(toastError)
+              }
+              onKeyUp={() =>
+                setAppSettings({ ...settings, sidebar_width: width }).catch(toastError)
+              }
               className="h-1 flex-1 cursor-pointer accent-[var(--accent)]"
             />
             <span className="w-12 text-right text-xs tabular-nums text-dim">{width}px</span>
@@ -124,9 +127,8 @@ export function AppearancePage() {
       </Section>
 
       <PageIntro>
-        这些设置存在 <span className="mono">~/.carter-app/settings.json</span>，
-        与 carter 命令行共用的 <span className="mono">~/.carter/</span> 分开
-        —— 那边不认这些选项。
+        这些设置存在 <span className="mono">~/.carter-app/settings.json</span>， 与 carter
+        命令行共用的 <span className="mono">~/.carter/</span> 分开 —— 那边不认这些选项。
       </PageIntro>
     </>
   );

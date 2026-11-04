@@ -744,10 +744,7 @@ export function getProviderDetail(name: string): Promise<ProviderDetail> {
  * 直接问底座而不是在前端维护一张协议 → 工具名的表：那张表会和实现悄悄漂移，
  * 而这里给出的答案永远是真的。
  */
-export function checkServerTools(
-  kind: string,
-  tools: string[],
-): Promise<[string[], string[]]> {
+export function checkServerTools(kind: string, tools: string[]): Promise<[string[], string[]]> {
   return invoke<[string[], string[]]>("check_server_tools", { kind, tools });
 }
 
@@ -1323,10 +1320,7 @@ export function readSkill(
 }
 
 /** 保存技能，返回实际写入的根目录。 */
-export function saveSkill(
-  draft: SkillDraft,
-  cwd?: string | null,
-): Promise<string> {
+export function saveSkill(draft: SkillDraft, cwd?: string | null): Promise<string> {
   return invoke<string>("save_skill", { draft, cwd: cwd ?? null });
 }
 
@@ -1440,11 +1434,7 @@ export function listCommands(cwd?: string | null): Promise<CommandRow[]> {
 }
 
 /** `@` 菜单的文件列表：相对工作目录的路径。 */
-export function listFiles(
-  cwd: string | null,
-  query: string,
-  limit = 50,
-): Promise<string[]> {
+export function listFiles(cwd: string | null, query: string, limit = 50): Promise<string[]> {
   return invoke<string[]>("list_files", { cwd, query, limit });
 }
 
@@ -1659,10 +1649,7 @@ export function inspectExchange(
   return invoke<InspectedExchange | null>("inspect_exchange", { sessionId, exchangeId });
 }
 
-export function getExchange(
-  sessionId: string,
-  exchangeId: string,
-): Promise<ExchangeRecord | null> {
+export function getExchange(sessionId: string, exchangeId: string): Promise<ExchangeRecord | null> {
   return invoke<ExchangeRecord | null>("get_exchange", { sessionId, exchangeId });
 }
 

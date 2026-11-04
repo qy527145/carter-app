@@ -10,8 +10,8 @@
 // 3. **z-30，比报文抽屉（z-40）低。** 两个都在右边，同时开会叠在一起；报文是
 //    「看一眼就关」的临时视图，盖在上面更符合直觉。
 
-import { useEffect, useRef, useState } from "react";
 import { ChevronRight, Globe, Send, Square, X } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 
 import { displayName, modelTitle, useModelCatalog } from "../lib/modelLabel";
 import * as ops from "../lib/sessionOps";
@@ -70,7 +70,11 @@ export function SidePanel() {
           </span>{" "}
           · 关掉即丢
         </span>
-        <IconButton className="ml-auto" title="关闭（这条对话不会留下）" onClick={ops.closeSideChat}>
+        <IconButton
+          className="ml-auto"
+          title="关闭（这条对话不会留下）"
+          onClick={ops.closeSideChat}
+        >
           <X size={14} />
         </IconButton>
       </div>

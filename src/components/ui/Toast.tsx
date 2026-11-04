@@ -1,9 +1,9 @@
 // toast 渲染层。挂在 App 根部，全应用共用一条通道。
 
-import type { ReactNode } from "react";
 import { CircleAlert, CircleCheck, TriangleAlert, X } from "lucide-react";
+import type { ReactNode } from "react";
 
-import { useToastStore, type ToastKind } from "../../lib/toast";
+import { type ToastKind, useToastStore } from "../../lib/toast";
 
 const KIND_CLASS: Record<ToastKind, string> = {
   // info 不是「没有状态」，它是底色上浮起来的一层：给底色而不是描边，

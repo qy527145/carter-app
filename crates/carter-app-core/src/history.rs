@@ -121,7 +121,11 @@ pub fn repair_dangling_tool_uses(thread: &mut Thread) -> Vec<RepairedCall> {
                 if let Some(real) = known.remove(&id) {
                     return real;
                 }
-                repaired.push(RepairedCall { id: id.clone(), name, input });
+                repaired.push(RepairedCall {
+                    id: id.clone(),
+                    name,
+                    input,
+                });
                 Block::ToolResult {
                     tool_use_id: id,
                     content: ToolResultContent::text(INTERRUPTED_RESULT),
@@ -138,11 +142,20 @@ pub fn repair_dangling_tool_uses(thread: &mut Thread) -> Vec<RepairedCall> {
             Role::Assistant => {
                 // 又一条助手消息 → 上一条里没配对的调用等不到结果了。
                 if !pending.is_empty() {
-                    flush(&mut out, &mut pending, &mut repaired, &mut known, &mut answered);
+                    flush(
+                        &mut out,
+                        &mut pending,
+                        &mut repaired,
+                        &mut known,
+                        &mut answered,
+                    );
                     changed = true;
                 }
                 for b in &msg.content {
-                    if let Block::ToolUse { id, name, input, .. } = b {
+                    if let Block::ToolUse {
+                        id, name, input, ..
+                    } = b
+                    {
                         pending.push((id.clone(), name.clone(), input.clone()));
                     }
                 }
@@ -156,7 +169,13 @@ pub fn repair_dangling_tool_uses(thread: &mut Thread) -> Vec<RepairedCall> {
                 // 带正文的用户消息 = 新的一轮。断口必须压在它前面 —— 否则结果会被
                 // 编到新那一轮的话后面去，而它回答的是上一轮的调用。
                 if has_text && !pending.is_empty() {
-                    flush(&mut out, &mut pending, &mut repaired, &mut known, &mut answered);
+                    flush(
+                        &mut out,
+                        &mut pending,
+                        &mut repaired,
+                        &mut known,
+                        &mut answered,
+                    );
                     changed = true;
                 }
 
@@ -196,7 +215,13 @@ pub fn repair_dangling_tool_uses(thread: &mut Thread) -> Vec<RepairedCall> {
             }
             Role::System => {
                 if !pending.is_empty() {
-                    flush(&mut out, &mut pending, &mut repaired, &mut known, &mut answered);
+                    flush(
+                        &mut out,
+                        &mut pending,
+                        &mut repaired,
+                        &mut known,
+                        &mut answered,
+                    );
                     changed = true;
                 }
                 out.push(msg.clone());
@@ -207,7 +232,13 @@ pub fn repair_dangling_tool_uses(thread: &mut Thread) -> Vec<RepairedCall> {
     // 末尾还有没配对的：这是中断最常见的形态。走 append，真正写进会话文件。
     if !pending.is_empty() {
         let before = out.len();
-        flush(&mut out, &mut pending, &mut repaired, &mut known, &mut answered);
+        flush(
+            &mut out,
+            &mut pending,
+            &mut repaired,
+            &mut known,
+            &mut answered,
+        );
         // 只有当整条历史逐条不变、只是尾部多了一条合成结果时，才能安全 append。
         if !changed && out.len() == before + 1 {
             if let Some(tail) = out.last() {
@@ -650,13 +681,18 @@ mod tests {
         assert_eq!(t.messages[1].role, Role::Assistant);
         assert_eq!(t.messages[2].role, Role::User);
         match &t.messages[2].content[0] {
-            Block::ToolResult { content, is_error, .. } => {
+            Block::ToolResult {
+                content, is_error, ..
+            } => {
                 assert!(content.as_text().contains("真结果"), "搬上来的必须是真结果");
                 assert!(!*is_error, "真结果不是错误");
             }
             other => panic!("调用后面必须紧跟结果，得到 {other:?}"),
         }
-        assert_eq!(t.messages[3].concat_text(), "【新事件】来源「钉钉」有新消息");
+        assert_eq!(
+            t.messages[3].concat_text(),
+            "【新事件】来源「钉钉」有新消息"
+        );
     }
 
     /// 一条用户消息里既有正文又有结果：拆成两条，结果必须在正文**前面**。

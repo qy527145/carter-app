@@ -4,21 +4,20 @@
 // stdio 与 http 两种 transport 的字段是互斥的：后端只写当前 transport 用得上的键，
 // 另一个的键会被删掉（留着一个用不上的 url 会让人以为它生效）。
 
-import { useState } from "react";
 import { Pencil, Plus, Server, Trash, X } from "lucide-react";
-
-import {
-  deleteMcpServer,
-  listMcpServers,
-  saveMcpServer,
-  type McpDraft,
-  type McpServerRow,
-} from "../../lib/api";
-import { toastError, toastOk } from "../../lib/toast";
-import { useAsync } from "../../lib/useAsync";
+import { useState } from "react";
 import { Button, IconButton } from "../../components/ui/Button";
 import { Field, Input, Segmented } from "../../components/ui/Input";
 import { Badge, Banner, Card, ConfirmDialog, Modal } from "../../components/ui/Panel";
+import {
+  deleteMcpServer,
+  listMcpServers,
+  type McpDraft,
+  type McpServerRow,
+  saveMcpServer,
+} from "../../lib/api";
+import { toastError, toastOk } from "../../lib/toast";
+import { useAsync } from "../../lib/useAsync";
 import { AsyncBody, PageIntro } from "./AsyncBody";
 
 type Pair = [string, string];
@@ -51,10 +50,7 @@ function PairEditor({
             placeholder="值"
             className="flex-1 py-1.5 text-xs"
           />
-          <IconButton
-            title="移除这一行"
-            onClick={() => onChange(pairs.filter((_, j) => j !== i))}
-          >
+          <IconButton title="移除这一行" onClick={() => onChange(pairs.filter((_, j) => j !== i))}>
             <X size={12} />
           </IconButton>
         </div>
@@ -85,8 +81,7 @@ function McpEditor({
   const [saving, setSaving] = useState(false);
 
   const isStdio = transport === "stdio";
-  const valid =
-    name.trim() !== "" && (isStdio ? command.trim() !== "" : url.trim() !== "");
+  const valid = name.trim() !== "" && (isStdio ? command.trim() !== "" : url.trim() !== "");
 
   async function submit() {
     setSaving(true);
@@ -97,7 +92,12 @@ function McpEditor({
         transport,
         command: isStdio ? command.trim() : null,
         // 一行一个参数。空行去掉 —— 它们多半是编辑时的残留。
-        args: isStdio ? args.split("\n").map((a) => a.trim()).filter(Boolean) : [],
+        args: isStdio
+          ? args
+              .split("\n")
+              .map((a) => a.trim())
+              .filter(Boolean)
+          : [],
         env: isStdio ? env.filter(([k]) => k.trim()) : [],
         url: isStdio ? null : url.trim(),
         headers: isStdio ? [] : headers.filter(([k]) => k.trim()),
@@ -214,12 +214,7 @@ export function McpPage() {
     <>
       <div className="mb-4 flex items-center gap-2">
         <h1 className="text-[16px] font-semibold">MCP</h1>
-        <Button
-          variant="primary"
-          size="sm"
-          className="ml-auto"
-          onClick={() => setEditing(null)}
-        >
+        <Button variant="primary" size="sm" className="ml-auto" onClick={() => setEditing(null)}>
           <Plus size={13} />
           添加 server
         </Button>
