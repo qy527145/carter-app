@@ -186,9 +186,15 @@ export function BoardView({
           <section
             key={col.status}
             onDragOver={(e) => {
-              if (!drag) return;
+              // 不靠 `drag` 这个 state 判断：它要等 React 下一次渲染才更新，
+              // 而 `dragstart` 之后的第一批 `dragover` 可能赶在那之前。看
+              // `dataTransfer` 里有没有我们放进去的 id 才准 —— 也从外面拖进来的
+              // 文字 / 文件不该被当成一张卡片。两个条件取「或」：Safari 在某些
+              // 版本上 dragover 阶段拿不到 types，那时退回 state 兜底。
+              if (!drag && !e.dataTransfer.types.includes("text/plain")) return;
               // 必须 preventDefault，否则浏览器不认这里是可以放的地方。
               e.preventDefault();
+              e.dataTransfer.dropEffect = "move";
               setOver(col.status);
             }}
             onDragLeave={(e) => {
@@ -199,7 +205,8 @@ export function BoardView({
             }}
             onDrop={(e) => {
               e.preventDefault();
-              const id = drag ?? e.dataTransfer.getData("text/plain");
+              // 拖拽中的那一张以 dataTransfer 为准：`drag` state 只用来做视觉反馈。
+              const id = e.dataTransfer.getData("text/plain") || drag;
               if (id) void drop(id, col.status);
             }}
             className={`flex w-[17rem] shrink-0 flex-col rounded-xl p-2 transition-colors duration-150 ${
@@ -277,14 +284,21 @@ function BoardCard({
 }) {
   const { people } = usePeople();
   return (
-    // 与图层节点同样的结构：卡片本身不是按钮，「打开」由一层铺满的透明按钮承担，
+    // 与图层节点同样的结构：卡片本身不是按钮，「打开」由一层透明按钮承担，
     // 「交给卡特」压在它上面。外层挂 role="button" 再嵌 `<button>` 是嵌套交互元素，
     // 读屏会念两遍，←/→ 也说不清该归谁。
+    //
+    // 但这一种卡片**可以拖**，而 HTML5 拖拽只认「按下时所在的那个元素」是否
+    // `draggable`。所以下面那层透明按钮必须是 `pointer-events-none`：它一旦接住
+    // 指针，按下就落在按钮上（按钮不可拖），`dragstart` 永远冒不到这张卡 ——
+    // 表现就是「拖不动，但点得开」。鼠标点击交给外层的 onClick，键盘走它自己的
+    // Enter / ←/→，两条路都还在。
     <div
       draggable={!busy}
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
-      title="拖到别的列可以改状态"
+      onClick={onOpen}
+      title="拖到别的列可以改状态；聚焦后按 ←/→ 也行"
       className={`group relative cursor-grab rounded-lg bg-elevated p-2 shadow-soft transition-[opacity,box-shadow] hover:shadow-lift active:cursor-grabbing ${
         dragging ? "opacity-40" : ""
       } ${busy ? "animate-pulse" : ""}`}
@@ -296,7 +310,7 @@ function BoardCard({
         type="button"
         onClick={onOpen}
         aria-label={`打开任务：${task.title}`}
-        className="absolute inset-0 z-0 cursor-pointer rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-edge-strong"
+        className="pointer-events-none absolute inset-0 z-0 rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-edge-strong"
         onKeyDown={(e) => {
           // ←/→ 换列：拖拽之外的备用通道，键盘用户也改得动状态。
           if (e.key === "ArrowLeft") {
