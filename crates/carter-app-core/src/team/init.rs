@@ -315,6 +315,50 @@ pub fn create_inbox_source(
     crate::assistant::runtime::save_source(shell, source)
 }
 
+/// 旧版本留下的观察源：把命令换掉、把节奏调过来。应用启动时跑一次。
+///
+/// 为什么需要它：`create_sync_source` 只在「初始化」和「配远端」时被调用，而这两件
+/// 事老用户多半已经做过了 —— 不迁移的话，他们的同步源永远停在裸 `git pull --ff-only`，
+/// 只有拉没有推，「后台静默自动同步」对他们不成立。
+///
+/// 认的是**命令**而不是源的 id 或名字：名字里带团队标签，用户也可能改过；命令是
+/// 这个应用自己写进去的，旧值是 `git pull --ff-only` 这一串确切文本。
+///
+/// 只改这两条内置命令的源，用户自己写的观察源一概不碰。
+pub fn migrate_sources(shell: &std::sync::Arc<crate::shell::AppShell>) {
+    let legacy_sync = "git pull --ff-only";
+    let inbox = crate::assistant::source::TEAM_INBOX;
+    let sync = crate::assistant::source::TEAM_SYNC;
+
+    let updates: Vec<crate::assistant::Source> = shell
+        .assistant
+        .snapshot()
+        .sources
+        .into_iter()
+        .filter_map(|mut s| {
+            let cmd = s.command.trim();
+            if cmd == legacy_sync {
+                s.command = sync.to_string();
+                s.every_minutes = 5;
+                return Some(s);
+            }
+            // 消息源的老节奏是 3 分钟；更慢的也一并拉回来（那多半就是旧的默认值）。
+            if cmd == inbox && s.every_minutes > 1 {
+                s.every_minutes = 1;
+                return Some(s);
+            }
+            None
+        })
+        .collect();
+
+    for source in updates {
+        // 迁移失败只记日志：一条源没改成不该拦着应用启动。
+        if let Err(e) = crate::assistant::runtime::save_source(shell, source.clone()) {
+            tracing::warn!("团队观察源 {} 没迁移成：{e}", source.name);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

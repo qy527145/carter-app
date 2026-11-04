@@ -1724,6 +1724,10 @@ pub fn run() {
 
             // 常驻助理：轮询观察源、评估、开工。同样和窗口无关。
             tauri::async_runtime::spawn(assistant::run(shell.clone()));
+
+            // 旧版本建出来的团队观察源要在开跑之前换掉：它们的命令是裸
+            // `git pull --ff-only`（只拉不推），节奏也还是旧的。
+            carter_app_core::team::init::migrate_sources(&shell);
             if let Err(e) = setup_tray(app) {
                 eprintln!("托盘建不起来：{e}");
             }
