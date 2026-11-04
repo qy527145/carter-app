@@ -87,6 +87,11 @@ pub fn report_text(t: &Ticket) -> String {
     s
 }
 
+/// 用户直接（面板、汇报卡片上）结束了一张工单 —— 记进助理对话的那段话。
+pub fn closed_text(label: &str) -> String {
+    format!("{REPORT_MARK}已结束 · {label}\n用户看过了，结束了这张工单，不用再跟进。")
+}
+
 /// 用户直接（面板、汇报卡片上）回答了一张工单 —— 记进助理对话的那段话。
 pub fn answered_text(label: &str, text: &str) -> String {
     format!("{REPORT_MARK}已答复 · {label}\n用户直接回复了这张工单（已送进去，不用再转达）：{text}")
@@ -180,6 +185,7 @@ mod tests {
         assert_eq!(first, format!("{REPORT_MARK}等你拍板 · #1 修登录"));
         assert!(text.ends_with("\n候选：A：改接口 / B：加适配层"), "{text}");
         assert!(answered_text("#1 修登录", "用 A").starts_with(&format!("{REPORT_MARK}已答复 · #1 修登录\n")));
+        assert!(closed_text("#1 修登录").starts_with(&format!("{REPORT_MARK}已结束 · #1 修登录\n")));
     }
 
     #[test]

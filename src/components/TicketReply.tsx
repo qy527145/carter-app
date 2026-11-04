@@ -1,4 +1,4 @@
-// 回答一张等人处理的工单：候选按钮 + 自己写一句。
+// 回答一张等人处理的工单：候选按钮 + 自己写一句 + 看过了就结束。
 //
 // 助理面板的工单卡片与助理对话里的汇报卡片共用这一个 —— 两处答的都直接走
 // `assistant_ticket_action` 的 reply，原话送进工单，不经过助理模型转述；后端顺手在
@@ -7,10 +7,15 @@
 import { useState } from "react";
 import { assistantTicketAction, type AssistantTicket } from "../lib/api";
 import { toastError, toastOk } from "../lib/toast";
+import { Check } from "lucide-react";
 import { Button } from "./ui/Button";
 import { Input } from "./ui/Input";
 
-export function TicketReply({ t }: { t: AssistantTicket }) {
+/**
+ * `withDone`：带上「看过了，结束」。面板卡片顶栏已经有这个按钮，不重复；
+ * 助理对话的汇报卡片上没有别的入口，要带。
+ */
+export function TicketReply({ t, withDone = false }: { t: AssistantTicket; withDone?: boolean }) {
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -22,6 +27,15 @@ export function TicketReply({ t }: { t: AssistantTicket }) {
         toastOk("已送进工单");
         setText("");
       })
+      .catch(toastError)
+      .finally(() => setBusy(false));
+  };
+
+  const done = () => {
+    if (busy) return;
+    setBusy(true);
+    assistantTicketAction(t.id, { type: "done" })
+      .then(() => toastOk("已结束"))
       .catch(toastError)
       .finally(() => setBusy(false));
   };
@@ -58,6 +72,12 @@ export function TicketReply({ t }: { t: AssistantTicket }) {
         <Button size="sm" disabled={busy || !text.trim()} onClick={() => send(text)}>
           发送
         </Button>
+        {withDone && (
+          <Button size="sm" variant="ghost" disabled={busy} onClick={done} title="看过了，不用再做什么，结束这张工单">
+            <Check size={12} />
+            结束
+          </Button>
+        )}
       </div>
     </div>
   );

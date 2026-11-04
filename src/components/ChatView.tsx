@@ -1166,7 +1166,7 @@ function ReportTurn({ mark, text, latest }: { mark: string; text: string; latest
       {body && <div className="mt-1 whitespace-pre-wrap break-words text-sm text-ink">{body}</div>}
       {answerable && (
         <div className="mt-2">
-          <TicketReply t={ticket} />
+          <TicketReply t={ticket} withDone />
         </div>
       )}
     </div>
@@ -1176,9 +1176,9 @@ function ReportTurn({ mark, text, latest }: { mark: string; text: string; latest
 /** 等人回答的工单状态（与面板「等你处理」里能回话的那几种一致）。 */
 const TICKET_WAITING = ["ready", "needs_user", "blocked", "failed", "unreported"];
 
-/** 汇报标题里的工单编号：`等你拍板 · #3 标题` → 3。提议、已答复这类不算。 */
+/** 汇报标题里的工单编号：`等你拍板 · #3 标题` → 3。提议、已答复、已结束这类不算。 */
 function reportTicket(title: string): number | null {
-  if (title.startsWith("已答复") || title.startsWith("本来会接")) return null;
+  if (["已答复", "已结束", "本来会接"].some((p) => title.startsWith(p))) return null;
   const m = / · #(\d+) /.exec(title);
   return m ? Number(m[1]) : null;
 }

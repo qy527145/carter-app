@@ -333,16 +333,18 @@ pub async fn ticket_action(
             }
         }
         TicketAction::Done => {
-            shell.assistant.with(|s| {
-                if let Some(t) = s.ticket_mut(ticket_id)
-                    && t.status != TicketStatus::Working
-                {
-                    t.status = TicketStatus::Done;
-                    t.question = None;
+            let closed = shell.assistant.with(|s| {
+                let t = s.ticket_mut(ticket_id).filter(|t| t.status != TicketStatus::Working)?;
+                t.status = TicketStatus::Done;
+                t.question = None;
                 t.options.clear();
-                    t.updated_at = now_ms();
-                }
+                t.updated_at = now_ms();
+                Some(t.label())
             })?;
+            // 与回复同理：在面板或汇报卡片上结束的，助理对话里也记一笔，免得它还当这张没处理。
+            if let Some(label) = closed {
+                super::chat::record(shell, super::chat::closed_text(&label));
+            }
         }
         TicketAction::Stop => {
             let sid = shell.assistant.with(|s| {
