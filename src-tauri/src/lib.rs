@@ -345,8 +345,12 @@ fn accept_memory(
 }
 
 /// 列举会话。`all = false` 只看 `cwd`（不给就是默认目录），`true` 跨所有项目。
+///
+/// `async` 不是为了 await：它要把每个会话文件读一遍折叠出元信息，会话一多就是几十上百
+/// 毫秒。同步命令跑在主线程上，这段时间里界面上的动画全停（换会话时正好有一段飞入
+/// 动效在走，表现就是「点下去卡一下」）。
 #[tauri::command]
-fn list_sessions(all: bool, cwd: Option<String>) -> Vec<SessionRow> {
+async fn list_sessions(all: bool, cwd: Option<String>) -> Vec<SessionRow> {
     let cwd = cwd.map(PathBuf::from).unwrap_or_else(default_cwd);
     sessions::list(&cwd, all)
 }
@@ -404,9 +408,9 @@ async fn delete_project(shell: State<'_, Arc<AppShell>>, cwd: String) -> Result<
     Ok(ids.len())
 }
 
-/// 全文搜索所有会话。
+/// 全文搜索所有会话。`async` 理由同 `list_sessions`：要读遍全部会话文件。
 #[tauri::command]
-fn search_sessions(query: String) -> Vec<carter_app_core::SearchHit> {
+async fn search_sessions(query: String) -> Vec<carter_app_core::SearchHit> {
     sessions::search(&query)
 }
 

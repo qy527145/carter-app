@@ -90,7 +90,9 @@ async function replaceSession(args: {
       useStore.getState().setNotice("该会话已不存在，已新建会话");
     }
     useStore.getState().beginSession(created);
-    await refreshSessions();
+    // 侧栏列表不用等：它要把全部会话文件读一遍，而调用方（交给卡特的飞入卡片、分叉
+    // 的草稿）都在等这里返回才往下走 —— 等着它，卡片就悬在半空停一下。
+    void refreshSessions();
   } catch (e) {
     toastError(e);
   }
