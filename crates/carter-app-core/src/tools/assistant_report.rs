@@ -27,7 +27,17 @@ impl AssistantReportTool {
     }
 }
 
-fn parse(args: &Value) -> Result<(TicketStatus, String, Option<String>), String> {
+/// 候选答案最多几个。再多就不是「拍板」了，是让用户读一份方案对比。
+const MAX_OPTIONS: usize = 4;
+
+struct Report {
+    status: TicketStatus,
+    summary: String,
+    question: Option<String>,
+    options: Vec<String>,
+}
+
+fn parse(args: &Value) -> Result<Report, String> {
     let status = args
         .get("status")
         .and_then(Value::as_str)
@@ -62,7 +72,22 @@ fn parse(args: &Value) -> Result<(TicketStatus, String, Option<String>), String>
     if status == TicketStatus::NeedsUser && question.is_none() {
         return Err("status = needs_user 时必须用 question 问一个具体问题".into());
     }
-    Ok((status, summary, question))
+    let mut options: Vec<String> = Vec::new();
+    for o in args.get("options").and_then(Value::as_array).into_iter().flatten() {
+        let Some(o) = o.as_str().map(str::trim).filter(|o| !o.is_empty()) else {
+            continue;
+        };
+        if !options.iter().any(|x| x == o) {
+            options.push(o.to_string());
+        }
+    }
+    if !options.is_empty() && status != TicketStatus::NeedsUser {
+        return Err("options 只在 status = needs_user 时给".into());
+    }
+    if options.len() == 1 || options.len() > MAX_OPTIONS {
+        return Err(format!("options 给 2 到 {MAX_OPTIONS} 个，或者不给"));
+    }
+    Ok(Report { status, summary, question, options })
 }
 
 #[async_trait::async_trait]
@@ -74,7 +99,7 @@ impl Tool for AssistantReportTool {
     fn description(&self) -> &str {
         "向常驻助理汇报这张工单的结局。这一轮结束前必须调用一次。\n\
          * ready —— 有结果可看了（改好并验证过、查清楚了、草稿写好了）；\n\
-         * needs_user —— 必须用户决定才能往下走，用 question 问**一个**具体问题；\n\
+         * needs_user —— 必须用户决定才能往下走，用 question 问**一个**具体问题；有几种明确走法时用 options 列出来，用户点一下就能答；\n\
          * blocked —— 缺权限、缺依赖、外部系统不通，做不下去；\n\
          * failed —— 试过了，做不成；\n\
          * dropped —— 核实后发现不需要做（复现不了、已经有人做了、不是问题）。\n\
@@ -97,6 +122,11 @@ impl Tool for AssistantReportTool {
                 "question": {
                     "type": "string",
                     "description": "needs_user 时必填：要用户回答的那一个问题"
+                },
+                "options": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "needs_user 时可选：2 到 4 个候选答案，每个一句话、自成一体（如「用 A：改接口，兼容旧调用」）。用户点哪个就原样送回给你；用户也可以不选、自己写"
                 }
             },
             "required": ["status", "summary"]
@@ -104,7 +134,7 @@ impl Tool for AssistantReportTool {
     }
 
     async fn execute(&self, args: Value) -> ToolResult {
-        let (status, summary, question) = match parse(&args) {
+        let Report { status, summary, question, options } = match parse(&args) {
             Ok(v) => v,
             Err(e) => return ToolResult::err(format!("assistant_report: {e}")),
         };
@@ -119,6 +149,7 @@ impl Tool for AssistantReportTool {
             t.status = status;
             t.summary = Some(summary.clone());
             t.question = question.clone();
+            t.options = options.clone();
             t.updated_at = now_ms();
             Ok(t.label())
         });
@@ -140,19 +171,30 @@ mod tests {
     #[test]
     fn needs_user_requires_a_question() {
         assert!(parse(&json!({"status": "needs_user", "summary": "x"})).is_err());
-        let (s, _, q) =
-            parse(&json!({"status": "needs_user", "summary": "x", "question": "用 A 还是 B？"}))
-                .unwrap();
-        assert_eq!(s, TicketStatus::NeedsUser);
-        assert_eq!(q.as_deref(), Some("用 A 还是 B？"));
+        let r = parse(&json!({"status": "needs_user", "summary": "x", "question": "用 A 还是 B？"})).unwrap();
+        assert_eq!(r.status, TicketStatus::NeedsUser);
+        assert_eq!(r.question.as_deref(), Some("用 A 还是 B？"));
+        assert!(r.options.is_empty());
+    }
+
+    #[test]
+    fn options_are_two_to_four_and_only_with_needs_user() {
+        let ask = |opts: Value| {
+            parse(&json!({"status": "needs_user", "summary": "x", "question": "q", "options": opts}))
+        };
+        let r = ask(json!(["用 A", " 用 B ", "用 A", ""])).unwrap();
+        assert_eq!(r.options, vec!["用 A", "用 B"], "去空白、去重、丢空的");
+        assert!(ask(json!(["只有一个"])).is_err());
+        assert!(ask(json!(["1", "2", "3", "4", "5"])).is_err());
+        assert!(parse(&json!({"status": "ready", "summary": "x", "options": ["a", "b"]})).is_err());
     }
 
     #[test]
     fn a_summary_is_required_and_unknown_statuses_are_refused() {
-        assert!(parse(&json!({"status": "ready"})).unwrap_err().contains("summary"));
-        assert!(parse(&json!({"status": "done", "summary": "x"})).unwrap_err().contains("done"));
+        assert!(parse(&json!({"status": "ready"})).err().unwrap().contains("summary"));
+        assert!(parse(&json!({"status": "done", "summary": "x"})).err().unwrap().contains("done"));
         assert_eq!(
-            parse(&json!({"status": "DROPPED", "summary": "x"})).unwrap().0,
+            parse(&json!({"status": "DROPPED", "summary": "x"})).unwrap().status,
             TicketStatus::Dropped
         );
     }

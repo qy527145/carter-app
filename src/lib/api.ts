@@ -932,6 +932,8 @@ export type AssistantTicket = {
   session_id: string | null;
   summary: string | null;
   question: string | null;
+  /** `question` 的候选答案。没有就不给。 */
+  options?: string[];
   pending: string[];
   runs: number;
 };

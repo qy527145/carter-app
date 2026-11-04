@@ -79,7 +79,17 @@ pub fn report_text(t: &Ticket) -> String {
         .clone()
         .or_else(|| t.summary.clone())
         .unwrap_or_default();
-    format!("{REPORT_MARK}{} · {}\n{}", t.status.label(), t.label(), body.trim())
+    let mut s = format!("{REPORT_MARK}{} · {}\n{}", t.status.label(), t.label(), body.trim());
+    if !t.options.is_empty() {
+        s.push_str("\n候选：");
+        s.push_str(&t.options.join(" / "));
+    }
+    s
+}
+
+/// 用户直接（面板、汇报卡片上）回答了一张工单 —— 记进助理对话的那段话。
+pub fn answered_text(label: &str, text: &str) -> String {
+    format!("{REPORT_MARK}已答复 · {label}\n用户直接回复了这张工单（已送进去，不用再转达）：{text}")
 }
 
 /// 观察模式下「本来会接」的那件事，推进对话时的那段话：请用户拍板。
@@ -153,6 +163,23 @@ mod tests {
         assert!(text.starts_with(REPORT_MARK));
         assert!(text.contains("要推送吗？"));
         assert!(!text.contains("改好了"));
+    }
+
+    /// 界面（`ChatView.tsx` 的 `reportTicket`）靠标题里的 ` · #编号 ` 找到工单、画回答框，
+    /// 靠末行 `候选：` 去掉重复；已答复的标题以「已答复」开头，不给回答框。
+    #[test]
+    fn report_titles_carry_the_ticket_number_and_options_go_last() {
+        let mut s = super::super::State::default();
+        let id = s.assign_ticket("/tmp", "修登录", "x");
+        let t = s.ticket_mut(&id).unwrap();
+        t.status = super::super::TicketStatus::NeedsUser;
+        t.question = Some("用哪个方案？".into());
+        t.options = vec!["A：改接口".into(), "B：加适配层".into()];
+        let text = report_text(&t.clone());
+        let first = text.lines().next().unwrap();
+        assert_eq!(first, format!("{REPORT_MARK}等你拍板 · #1 修登录"));
+        assert!(text.ends_with("\n候选：A：改接口 / B：加适配层"), "{text}");
+        assert!(answered_text("#1 修登录", "用 A").starts_with(&format!("{REPORT_MARK}已答复 · #1 修登录\n")));
     }
 
     #[test]

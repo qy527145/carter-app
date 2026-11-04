@@ -58,6 +58,7 @@ import { useModelCatalog } from "../../lib/modelLabel";
 import { openAssistantChat, openSession, refreshAssistant } from "../../lib/sessionOps";
 import { toastError, toastOk } from "../../lib/toast";
 import { useStore } from "../../store";
+import { TicketReply } from "../../components/TicketReply";
 import { Button, IconButton } from "../../components/ui/Button";
 import { Field, Input, Segmented, Switch, Textarea } from "../../components/ui/Input";
 import { Select } from "../../components/ui/Select";
@@ -291,7 +292,6 @@ function FirstRun({ hasSources, hasRules }: { hasSources: boolean; hasRules: boo
 // ---------------------------------------------------------------------------
 
 function TicketCard({ t }: { t: AssistantTicket }) {
-  const [reply, setReply] = useState("");
   const [busy, setBusy] = useState(false);
   const [confirmStop, setConfirmStop] = useState(false);
 
@@ -300,7 +300,6 @@ function TicketCard({ t }: { t: AssistantTicket }) {
     assistantTicketAction(t.id, action)
       .then(() => {
         if (ok) toastOk(ok);
-        setReply("");
       })
       .catch(toastError)
       .finally(() => setBusy(false));
@@ -362,28 +361,7 @@ function TicketCard({ t }: { t: AssistantTicket }) {
         <span className="mono truncate">{t.cwd}</span>
       </div>
 
-      {waiting && (
-        <div className="flex gap-2">
-          <Input
-            value={reply}
-            onChange={(e) => setReply(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.nativeEvent.isComposing && reply.trim()) {
-                act({ type: "reply", text: reply }, "已送进工单");
-              }
-            }}
-            placeholder={t.status === "needs_user" ? "回答它的问题，它会接着干" : "补充要求，让它接着干"}
-            className="text-xs"
-          />
-          <Button
-            size="sm"
-            disabled={busy || !reply.trim()}
-            onClick={() => act({ type: "reply", text: reply }, "已送进工单")}
-          >
-            发送
-          </Button>
-        </div>
-      )}
+      {waiting && <TicketReply t={t} />}
 
       <Disclosure title="任务与事件">
         <div className="space-y-2 pt-1 text-[11px] leading-relaxed text-dim">

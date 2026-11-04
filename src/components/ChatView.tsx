@@ -60,6 +60,7 @@ import { MarkdownImage, MarkdownLink, MarkdownPre, transformMarkdownUrl } from "
 import { AskForm } from "./AskForm";
 import { Composer, MessageImages } from "./Composer";
 import { TeamTodoDock } from "./TeamTodoDock";
+import { TicketReply } from "./TicketReply";
 import { GoalBar } from "./GoalBar";
 import { MemorySuggestBar } from "./MemorySuggestBar";
 import { ModePill } from "./ModePill";
@@ -1138,11 +1139,20 @@ const EVENT_MARK = "【新事件】";
  * 助理送进来的一条消息：汇报（进助理对话）或观察源的新事件（进工单会话）。
  * 第一行是标题，后面是正文。靠左 —— 不是用户在说话。
  */
-function ReportTurn({ mark, text }: { mark: string; text: string }) {
+function ReportTurn({ mark, text, latest }: { mark: string; text: string; latest?: boolean }) {
   const rest = text.slice(mark.length);
   const cut = rest.indexOf("\n");
   const title = cut < 0 ? rest : rest.slice(0, cut);
-  const body = cut < 0 ? "" : rest.slice(cut + 1).trim();
+  let body = cut < 0 ? "" : rest.slice(cut + 1).trim();
+  // 汇报里的工单：只在这是它最近一条汇报、而且它还等着人时给回答框 —— 旧汇报上的
+  // 按钮点了会回答一个早就不是这个问题的工单。
+  const number = mark === REPORT_MARK ? reportTicket(title) : null;
+  const ticket = useStore((s) =>
+    number === null || !latest ? undefined : s.assistant?.tickets.find((t) => t.number === number),
+  );
+  const answerable = ticket && TICKET_WAITING.includes(ticket.status);
+  // 候选已经画成按钮了，正文里那行给模型看的「候选：」不再重复。
+  if (answerable && ticket.options?.length) body = body.replace(/\n?候选：.*$/, "").trim();
   return (
     <div className="rounded-xl border border-edge bg-card px-3.5 py-2.5">
       <div className="flex items-center gap-1.5 text-xs font-medium text-tone-blue">
@@ -1154,8 +1164,39 @@ function ReportTurn({ mark, text }: { mark: string; text: string }) {
         <span className="truncate">{title}</span>
       </div>
       {body && <div className="mt-1 whitespace-pre-wrap break-words text-sm text-ink">{body}</div>}
+      {answerable && (
+        <div className="mt-2">
+          <TicketReply t={ticket} />
+        </div>
+      )}
     </div>
   );
+}
+
+/** 等人回答的工单状态（与面板「等你处理」里能回话的那几种一致）。 */
+const TICKET_WAITING = ["ready", "needs_user", "blocked", "failed", "unreported"];
+
+/** 汇报标题里的工单编号：`等你拍板 · #3 标题` → 3。提议、已答复这类不算。 */
+function reportTicket(title: string): number | null {
+  if (title.startsWith("已答复") || title.startsWith("本来会接")) return null;
+  const m = / · #(\d+) /.exec(title);
+  return m ? Number(m[1]) : null;
+}
+
+/** 每张工单最近一条汇报在第几轮 —— 只有那一条给回答框。 */
+function latestReports(turns: Turn[]): Set<number> {
+  const seen = new Set<number>();
+  const out = new Set<number>();
+  for (let i = turns.length - 1; i >= 0; i--) {
+    const t = turns[i];
+    if (t.role !== "user" || !t.text.startsWith(REPORT_MARK)) continue;
+    const rest = t.text.slice(REPORT_MARK.length);
+    const n = reportTicket(rest.split("\n", 1)[0]);
+    if (n === null || seen.has(n)) continue;
+    seen.add(n);
+    out.add(i);
+  }
+  return out;
 }
 
 /** 与后端 `tools::background::DONE_MARK` 逐字对应。 */
@@ -1245,6 +1286,7 @@ function TurnView({
   onRetry,
   retryAsks,
   onFork,
+  latestReport,
 }: {
   turn: Turn;
   time?: TurnTime;
@@ -1256,10 +1298,13 @@ function TurnView({
   onRetry?: () => void;
   retryAsks?: boolean;
   onFork?: () => void;
+  /** 这是某张工单最近的一条汇报（只有它给回答框）。 */
+  latestReport?: boolean;
 }) {
   if (turn.role === "user") {
     // 助理自己送进来的汇报：不是用户说的话，不画成用户气泡，也不给重试 / 分叉。
-    if (turn.text.startsWith(REPORT_MARK)) return <ReportTurn mark={REPORT_MARK} text={turn.text} />;
+    if (turn.text.startsWith(REPORT_MARK))
+      return <ReportTurn mark={REPORT_MARK} text={turn.text} latest={latestReport} />;
     if (turn.text.startsWith(EVENT_MARK)) return <ReportTurn mark={EVENT_MARK} text={turn.text} />;
     if (turn.text.startsWith(DONE_MARK)) return <BackgroundDoneTurn text={turn.text} />;
     if (turn.text.startsWith(PEER_MARK)) return <PeerTurn text={turn.text} />;
@@ -1327,6 +1372,7 @@ export function TurnList({
   // 与排队里的消息会跟着没掉 —— 按钮看着只是「分一条出去」，不该有这个副作用。
   const live = !streaming;
   const slots = onRetry && live ? assistantActionSlots(turns) : [];
+  const reports = useMemo(() => latestReports(turns), [turns]);
 
   return (
     <div className="flex flex-col gap-6">
@@ -1352,6 +1398,7 @@ export function TurnList({
             // 提问上的重试：这句之后还有回答以外的对话（下一句提问）才要先问一句。
             retryAsks={t.role === "user" ? turns.slice(i + 1).some((x) => x.role === "user") : asks}
             onFork={forkTarget(t, onFork, live)}
+            latestReport={reports.has(i)}
           />
         );
       })}

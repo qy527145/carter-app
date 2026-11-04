@@ -331,6 +331,9 @@ pub struct Ticket {
     /// `needs_user` 时要用户回答的那个问题。
     #[serde(default)]
     pub question: Option<String>,
+    /// 那个问题的候选答案（执行会话给的，可以没有）。界面画成按钮，点了原样送回。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
     /// 等着送进执行会话的话（排队时到的跟进事件、重试说明、重启恢复说明）。
     #[serde(default)]
     pub pending: Vec<String>,
@@ -454,6 +457,7 @@ impl State {
             session_id: None,
             summary: None,
             question: None,
+            options: Vec::new(),
             pending: Vec::new(),
             runs: 0,
         });
