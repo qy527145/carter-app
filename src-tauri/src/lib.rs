@@ -16,7 +16,7 @@ use carter_app_core::config_edit::{self, McpDraft, ProviderDraft};
 use carter_app_core::sessions::{self, ExportFormat};
 use carter_app_core::skills::{self, Scan, SkillDraft};
 use carter_app_core::{
-    AppEvent, AppShell, Command, MessageView, ProviderDetail, SessionRow, SessionOptions,
+    AppEvent, AppShell, Command, MessageView, ProviderDetail, SessionOptions, SessionRow,
 };
 
 /// 前端订阅的事件名。
@@ -169,8 +169,15 @@ struct CreatedSession {
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum LiveView {
-    Text { text: String },
-    Tool { call_id: String, name: String, args: String, result: Option<String> },
+    Text {
+        text: String,
+    },
+    Tool {
+        call_id: String,
+        name: String,
+        args: String,
+        result: Option<String>,
+    },
 }
 
 impl CreatedSession {
@@ -194,9 +201,17 @@ impl CreatedSession {
                 .into_iter()
                 .map(|x| match x {
                     LiveItem::Text(text) => LiveView::Text { text },
-                    LiveItem::Tool { call_id, name, args, result } => {
-                        LiveView::Tool { call_id, name, args, result }
-                    }
+                    LiveItem::Tool {
+                        call_id,
+                        name,
+                        args,
+                        result,
+                    } => LiveView::Tool {
+                        call_id,
+                        name,
+                        args,
+                        result,
+                    },
                 })
                 .collect(),
             pending_ask: started.pending_ask,
@@ -235,9 +250,12 @@ async fn create_session(
         resume_id,
         new_id: None,
     };
-    let started = carter_app_core::start_session(shell.inner().clone(), opts)
-        .map_err(|e| e.to_string())?;
-    started.handle.attached.store(true, std::sync::atomic::Ordering::SeqCst);
+    let started =
+        carter_app_core::start_session(shell.inner().clone(), opts).map_err(|e| e.to_string())?;
+    started
+        .handle
+        .attached
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     Ok(CreatedSession::from_started(started))
 }
 
@@ -271,8 +289,7 @@ async fn create_side_session(
     shell: State<'_, Arc<AppShell>>,
     parent_session_id: String,
 ) -> Result<CreatedSide, String> {
-    let started =
-        carter_app_core::start_side_session(shell.inner().clone(), &parent_session_id)?;
+    let started = carter_app_core::start_side_session(shell.inner().clone(), &parent_session_id)?;
     Ok(CreatedSide {
         session_id: started.handle.id.clone(),
         model: started.model,
@@ -514,15 +531,17 @@ fn save_model(
                 .clone()
                 .map(serde_json::Value::String);
         }
-        None => detail.models.push(carter_app_core::config_edit::ModelDetail {
-            name: model.name.clone(),
-            meta: model.meta.clone(),
-            api_name: model.api_name.clone(),
-            default_reasoning: model
-                .default_reasoning
-                .clone()
-                .map(serde_json::Value::String),
-        }),
+        None => detail
+            .models
+            .push(carter_app_core::config_edit::ModelDetail {
+                name: model.name.clone(),
+                meta: model.meta.clone(),
+                api_name: model.api_name.clone(),
+                default_reasoning: model
+                    .default_reasoning
+                    .clone()
+                    .map(serde_json::Value::String),
+            }),
     }
     save_provider_from_detail(shell.inner(), &detail)
 }
@@ -870,9 +889,7 @@ fn on_assistant_event(app: &tauri::AppHandle, shell: &AppShell, ev: &AppEvent) {
 
 /// models.dev 里某个服务商下的模型（给渠道编辑框的「从目录选」下拉用）。
 #[tauri::command]
-fn list_catalog_models(
-    provider_id: String,
-) -> Result<Vec<carter_app_core::CatalogEntry>, String> {
+fn list_catalog_models(provider_id: String) -> Result<Vec<carter_app_core::CatalogEntry>, String> {
     catalog::provider_models(&provider_id)
 }
 
@@ -996,7 +1013,7 @@ fn list_tools(shell: State<'_, Arc<AppShell>>, cwd: Option<String>) -> Vec<ToolR
     let cwd = cwd
         .filter(|s| !s.is_empty())
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| carter::config::paths::carter_home());
+        .unwrap_or_else(carter::config::paths::carter_home);
     let mut rows: Vec<ToolRow> = Vec::new();
     for t in registry.tools() {
         let t = carter_app_core::tools::substitute(t.clone(), &settings, &cwd);
@@ -1012,11 +1029,10 @@ fn list_tools(shell: State<'_, Arc<AppShell>>, cwd: Option<String>) -> Vec<ToolR
                     n => format!(" 与 {n} 条附加扫描路径"),
                 };
                 Some(match &scan.project_enabled {
-                    Some(p) => format!(
-                        "扫 ~/.carter/skills、{} 里的项目技能{extra}",
-                        p.display()
+                    Some(p) => format!("扫 ~/.carter/skills、{} 里的项目技能{extra}", p.display()),
+                    None => format!(
+                        "扫 ~/.carter/skills{extra}（当前会话的项目里若有 .carter/skills 也会扫）"
                     ),
-                    None => format!("扫 ~/.carter/skills{extra}（当前会话的项目里若有 .carter/skills 也会扫）"),
                 })
             }
             _ => None,
@@ -1082,7 +1098,10 @@ fn list_tools(shell: State<'_, Arc<AppShell>>, cwd: Option<String>) -> Vec<ToolR
         use carter_app_core::tools::peer::{Kind, PeerTool};
         for (kind, note) in [
             (Kind::List, "列出本机可以发信的其他对话"),
-            (Kind::Send, "给另一条对话发一段话，对方空闲时立刻处理、忙时在下次工具返回时读到"),
+            (
+                Kind::Send,
+                "给另一条对话发一段话，对方空闲时立刻处理、忙时在下次工具返回时读到",
+            ),
             (Kind::Read, "旁观另一条对话最近说了什么，不打扰它"),
         ] {
             let t = PeerTool::new(shell.inner().clone(), String::new(), kind);
@@ -1119,10 +1138,9 @@ fn list_tools(shell: State<'_, Arc<AppShell>>, cwd: Option<String>) -> Vec<ToolR
     // 子 agent 的能力开关该是独立的一项，而不是混在「工具开关」里顺手关掉。
     rows.push(ToolRow {
         name: "agent".into(),
-        description:
-            "一次派生多个隔离子 agent 并行干活。每个子 agent 有独立上下文与工具池\
+        description: "一次派生多个隔离子 agent 并行干活。每个子 agent 有独立上下文与工具池\
              （不含 agent 自身，不会再往下派生），并遵守同一份工具开关。"
-                .into(),
+            .into(),
         parameters: serde_json::Value::Null,
         enabled: true,
         toggleable: false,
@@ -1158,9 +1176,7 @@ struct SkillListing {
 /// 技能页拿的是**当前会话**的 cwd（见 `SkillsPage`）。没有会话时传 `None`，
 /// 那就只有用户级与外部根 —— 与从前一致。
 fn skill_scan(settings: &AppSettings, cwd: Option<&str>) -> Scan {
-    let cwd = cwd
-        .filter(|s| !s.is_empty())
-        .map(std::path::PathBuf::from);
+    let cwd = cwd.filter(|s| !s.is_empty()).map(std::path::PathBuf::from);
     Scan::from_settings_at(settings, cwd.as_deref())
 }
 
@@ -1178,11 +1194,7 @@ fn list_skills(shell: State<'_, Arc<AppShell>>, cwd: Option<String>) -> SkillLis
 }
 
 #[tauri::command]
-fn read_skill(
-    name: String,
-    cwd: Option<String>,
-    source: Option<String>,
-) -> Result<String, String> {
+fn read_skill(name: String, cwd: Option<String>, source: Option<String>) -> Result<String, String> {
     let scan = skill_scan(&AppSettings::load(), cwd.as_deref());
     skills::read(&scan, &name, source.as_deref())
 }
@@ -1316,10 +1328,7 @@ fn cancel_connector_login(vendor: String) {
 }
 
 #[tauri::command]
-async fn logout_connector(
-    shell: State<'_, Arc<AppShell>>,
-    vendor: String,
-) -> Result<(), String> {
+async fn logout_connector(shell: State<'_, Arc<AppShell>>, vendor: String) -> Result<(), String> {
     carter_app_core::connectors::logout(shell.inner(), &vendor).await
 }
 
@@ -1527,12 +1536,7 @@ async fn file_diff(
 ) -> carter_app_core::FileDiff {
     let fallback = path.clone();
     tokio::task::spawn_blocking(move || {
-        carter_app_core::changes::diff_for(
-            &session_id,
-            since,
-            std::path::Path::new(&cwd),
-            &path,
-        )
+        carter_app_core::changes::diff_for(&session_id, since, std::path::Path::new(&cwd), &path)
     })
     .await
     .unwrap_or_else(|_| carter_app_core::FileDiff::Unavailable {
@@ -1656,7 +1660,39 @@ fn inspect_exchange(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    // 从当前目录向上找 `.env`：`tauri dev` / `cargo run` 都能找到仓库根那份。
+    // 发给用户的安装包不读它，所以里面的每个变量都必须在代码里有默认值。
+    #[cfg(debug_assertions)]
+    let _ = dotenvy::dotenv();
+
+    #[allow(unused_mut)]
+    let mut builder = tauri::Builder::default();
+
+    #[cfg(desktop)]
+    {
+        use tauri_plugin_window_state::StateFlags;
+        // 单实例必须最先注册：重复启动时唤起已有窗口（它可能正藏在托盘里），
+        // 而不是再起一个进程 —— 两个助理同时盯观察源会重复接单。
+        //
+        // 只在 release 里开：它按 identifier 判重，开着的话装好的 Carter 一在跑，
+        // `bun run dev` 起来的调试版就会去唤起它然后自己退出。
+        #[cfg(not(debug_assertions))]
+        {
+            builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+                show_main(app);
+            }));
+        }
+        builder = builder
+            // 记住位置、尺寸、最大化。**不记可见性**：关窗只是藏进托盘，
+            // 记住了的话从托盘退出后下次启动窗口就是隐藏的。
+            .plugin(
+                tauri_plugin_window_state::Builder::new()
+                    .with_state_flags(StateFlags::all() - StateFlags::VISIBLE)
+                    .build(),
+            );
+    }
+
+    builder
         .plugin(tauri_plugin_opener::init())
         // 选工作目录 / 选文件用。原生选择器比自己拿 list_files 拼一个强得多。
         .plugin(tauri_plugin_dialog::init())
@@ -1719,11 +1755,11 @@ pub fn run() {
         })
         // 关窗 = 收到托盘里，不退出：助理要接着盯观察源。真要退出走托盘菜单的「退出」。
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                if window.label() == "main" {
-                    api.prevent_close();
-                    let _ = window.hide();
-                }
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event
+                && window.label() == "main"
+            {
+                api.prevent_close();
+                let _ = window.hide();
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -1897,7 +1933,8 @@ fn team_initialize(
     match carter_app_core::team::init::create_sync_source(
         shell.inner(),
         Path::new(&project_root),
-        &outcome.project_root
+        outcome
+            .project_root
             .rsplit(['/', '\\'])
             .next()
             .unwrap_or("项目"),
@@ -1905,9 +1942,9 @@ fn team_initialize(
         Ok(created) => {
             outcome.sync_source = created;
             if !created {
-                outcome
-                    .warnings
-                    .push("没有远端，暂不自动同步。配好 origin 之后再点一次初始化即可补上。".into());
+                outcome.warnings.push(
+                    "没有远端，暂不自动同步。配好 origin 之后再点一次初始化即可补上。".into(),
+                );
             }
         }
         Err(e) => outcome.warnings.push(format!("同步观察源没建成：{e}")),
@@ -2097,7 +2134,11 @@ fn team_my_tasks(cwd: String) -> Vec<TeamTodo> {
             continue;
         };
         for t in view.tasks {
-            if !t.task.assignee.as_deref().is_some_and(|a| roster.same(a, &key))
+            if !t
+                .task
+                .assignee
+                .as_deref()
+                .is_some_and(|a| roster.same(a, &key))
                 || !t.task.status.is_open()
             {
                 continue;
@@ -2168,7 +2209,9 @@ fn team_sync(cwd: String) -> Result<String, String> {
     // 「没有远端」不是错误，是一个还没配好的状态。用红色报错去说这件事，
     // 会让人觉得同步坏了；实际是团队仓库本来就只在本地。
     if !carter_app_core::team::git::has_remote(root) {
-        return Ok("还没有配远端，团队仓库目前只在本地。点右上角「配远端」填一个仓库地址即可。".into());
+        return Ok(
+            "还没有配远端，团队仓库目前只在本地。点右上角「配远端」填一个仓库地址即可。".into(),
+        );
     }
     carter_app_core::team::git::sync(root)
 }
@@ -2190,7 +2233,8 @@ fn team_rel_of(store: &carter_app_core::team::Store) -> String {
 }
 
 fn team_store(cwd: &str) -> Result<carter_app_core::team::Store, String> {
-    carter_app_core::team::Store::discover(Path::new(cwd)).ok_or("这个项目还没有初始化团队目录".into())
+    carter_app_core::team::Store::discover(Path::new(cwd))
+        .ok_or("这个项目还没有初始化团队目录".into())
 }
 
 /// 团队里有谁、本机是谁、还有谁提交过代码却没加入。
@@ -2264,10 +2308,16 @@ fn team_join(
                 .unwrap_or_else(|| "项目".into())
         });
     // 收不到提醒不该让加入失败：团队页里照样能看到消息。把原因交给界面说一句。
-    let inbox_source =
-        carter_app_core::team::init::create_inbox_source(shell.inner(), store.project_root(), &label)
-            .err();
-    Ok(TeamJoined { member: m, inbox_source })
+    let inbox_source = carter_app_core::team::init::create_inbox_source(
+        shell.inner(),
+        store.project_root(),
+        &label,
+    )
+    .err();
+    Ok(TeamJoined {
+        member: m,
+        inbox_source,
+    })
 }
 
 #[derive(Serialize)]
@@ -2279,7 +2329,10 @@ struct TeamJoined {
 
 /// 改自己在这个团队里的称呼。只改本地文件，随下一次提交走。
 #[tauri::command]
-fn team_rename_me(cwd: String, name: String) -> Result<carter_app_core::team::members::Member, String> {
+fn team_rename_me(
+    cwd: String,
+    name: String,
+) -> Result<carter_app_core::team::members::Member, String> {
     use carter_app_core::team::{git, members};
     let store = team_store(&cwd)?;
     let me = git::local_identity(store.project_root())?;
@@ -2328,7 +2381,10 @@ fn team_act(cwd: String, args: serde_json::Value) -> Result<String, String> {
 
 /// 跟本机有关的消息。`fetch = true` 时先拉一次远端事件。
 #[tauri::command]
-async fn team_inbox(cwd: String, fetch: bool) -> Result<Vec<carter_app_core::team::inbox::InboxItem>, String> {
+async fn team_inbox(
+    cwd: String,
+    fetch: bool,
+) -> Result<Vec<carter_app_core::team::inbox::InboxItem>, String> {
     // git 调用是阻塞的；拉远端可能要好几秒，别占着 Tauri 的命令线程。
     tauri::async_runtime::spawn_blocking(move || {
         use carter_app_core::team::{events, git, inbox};

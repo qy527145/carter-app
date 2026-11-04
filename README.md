@@ -61,9 +61,42 @@ React ──▶ src-tauri ──▶ carter-app-core ──▶ carter ──▶ l
 ## 跑起来
 
 ```bash
-bun install
-bun tauri dev
+bun run init          # 检查工具链 + 安装依赖 + 准备 .env（幂等）
+bun run dev           # 打开桌面窗口：前端 HMR，Rust 改动自动重编重启
 ```
+
+前置依赖见 [Tauri Prerequisites](https://v2.tauri.app/start/prerequisites/)。
+
+### 常用脚本
+
+| 命令                         | 作用                                                                         |
+| ---------------------------- | ---------------------------------------------------------------------------- |
+| `bun run dev`                | `tauri dev`                                                                  |
+| `bun run dev:sandbox`        | 同上，但 `CARTER_HOME` / `CARTER_APP_HOME` 指向 `.sandbox/`，不碰真实数据；`--fresh` 清空重来，`--empty` 模拟全新用户 |
+| `bun run build`              | 打包当前平台安装程序 → `target/release/bundle/`                              |
+| `bun run build:debug`        | 带 devtools 与 sourcemap 的调试包                                            |
+| `bun run check`              | `lint` + `typecheck` + `fmt:check` + `clippy`（`-D warnings`），提交前跑     |
+| `bun run fix`                | biome 自动修 + `cargo fmt` + `clippy --fix`                                  |
+| `bun run fmt`                | 只格式化（biome + cargo fmt）                                                |
+| `bun run lint` / `typecheck` / `clippy` | 单独跑某一项检查                                                  |
+| `bun run test`               | `test:web`（bun test）+ `test:rs`（整个 workspace 的 cargo test）            |
+| `bun run test:core`          | 只测 `carter-app-core`，最常用                                               |
+| `bun run logs [-f] [-n N]`   | 看 `~/.carter-app/app.log`；`--sandbox` 看沙箱的，`--path` 只打印路径        |
+| `bun run bump <patch\|minor\|major\|x.y.z>` | 同步改 `package.json`、`Cargo.toml`、`tauri.conf.json` 三处版本号 |
+| `bun run clean [--web\|--all]` | 清 `dist/` 与 `cargo clean`；`--all` 连 `node_modules/`、`.sandbox/` 一起  |
+| `bun run icon <png>`         | 由一张 1024×1024 PNG 生成全部平台图标                                         |
+
+`web:dev` / `web:build` 只给 `tauri.conf.json` 的 `beforeDevCommand` / `beforeBuildCommand` 用。
+
+### 本地配置
+
+`.env` 只在 debug 构建里加载，发布的安装包使用代码里的默认值。密钥放 `.env.local`（不会被提交）。
+
+| 变量              | 默认                                         | 说明                         |
+| ----------------- | -------------------------------------------- | ---------------------------- |
+| `CARTER_LOG`      | `info,carter_app_core=info,carter=warn`      | 日志过滤（tracing EnvFilter） |
+| `CARTER_HOME`     | `~/.carter`                                  | 与 CLI 共享的数据目录        |
+| `CARTER_APP_HOME` | `~/.carter-app`                              | 本应用独有的数据目录         |
 
 第一次跑需要至少一个渠道。可以直接在**设置 → 渠道**里新建（界面会写回
 `~/.carter/config.toml`），也可以先在文件里配好：

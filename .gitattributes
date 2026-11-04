@@ -1,0 +1,7 @@
+# 统一 LF：模板会被 cargo-generate 克隆到各平台，换行符需要稳定。
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.ico binary
+*.exe binary

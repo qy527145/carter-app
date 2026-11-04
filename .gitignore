@@ -1,28 +1,32 @@
-# Logs
-logs
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-lerna-debug.log*
+# Rust / Tauri（工作区级 target 在仓库根）
+/target/
+/src-tauri/target/
+/src-tauri/gen/schemas/
 
-node_modules
-dist
-dist-ssr
+# Node / Bun
+node_modules/
+*.tsbuildinfo
+
+# Frontend build output（tauri build 时由 beforeBuildCommand 生成）
+/dist/
+dist-ssr/
+
+# dev:sandbox 的隔离数据目录
+/.sandbox/
+
+# Local overrides & secrets
+.env.local
+.env.*.local
 *.local
 
-# Editor directories and files
+# Editor
 .vscode/*
 !.vscode/extensions.json
-.idea
-.DS_Store
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
+!.vscode/settings.json
+.idea/
 *.sw?
 
-# Rust / Tauri
-/target
-target/
+# Misc
+*.log
+logs/
+.DS_Store

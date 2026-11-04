@@ -4,14 +4,15 @@
   "version": "0.1.0",
   "identifier": "com.wmymz.carter-app",
   "build": {
-    "beforeDevCommand": "bun run dev",
+    "beforeDevCommand": "bun run web:dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "bun run build",
+    "beforeBuildCommand": "bun run web:build",
     "frontendDist": "../dist"
   },
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "Carter",
         "width": 1180,
         "height": 780,
