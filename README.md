@@ -73,7 +73,10 @@ bun run dev           # 打开桌面窗口：前端 HMR，Rust 改动自动重�
 | ---------------------------- | ---------------------------------------------------------------------------- |
 | `bun run dev`                | `tauri dev`                                                                  |
 | `bun run dev:sandbox`        | 同上，但 `CARTER_HOME` / `CARTER_APP_HOME` 指向 `.sandbox/`，不碰真实数据；`--fresh` 清空重来，`--empty` 模拟全新用户 |
-| `bun run build`              | 打包当前平台安装程序 → `target/release/bundle/`                              |
+| `bun run build`              | 按当前操作系统自动选平台打安装包 → `target/release/bundle/`；额外参数转给 `tauri build` |
+| `bun run build:win`          | Windows：NSIS + MSI。非 Windows 上走 `cargo-xwin` 交叉编译，只出 NSIS（需 `cargo install cargo-xwin`、`rustup target add x86_64-pc-windows-msvc`、nsis 与 llvm） |
+| `bun run build:mac`          | macOS：`.app` + `.dmg`，只能在 macOS 上打                                     |
+| `bun run build:linux`        | Linux：deb + rpm + AppImage，只能在 Linux 上打                                |
 | `bun run build:debug`        | 带 devtools 与 sourcemap 的调试包                                            |
 | `bun run check`              | `lint` + `typecheck` + `fmt:check` + `clippy`（`-D warnings`），提交前跑     |
 | `bun run fix`                | biome 自动修 + `cargo fmt` + `clippy --fix`                                  |

@@ -11,7 +11,7 @@
 | `src/`                      | React 19 + Vite 8 + Tailwind v4 前端                                 |
 | `src/lib/api.ts`            | **唯一**调用 `invoke` 的地方：类型化命令与事件名                     |
 | `src-tauri/capabilities/`   | 前端可调用的权限清单                                                 |
-| `scripts/`                  | `bun run` 背后的辅助脚本（init / sandbox / logs / bump / clean）     |
+| `scripts/`                  | `bun run` 背后的辅助脚本（init / sandbox / build / logs / bump / clean） |
 
 Cargo 是根目录的 workspace，产物在根 `target/`（不是 `src-tauri/target/`）。
 
