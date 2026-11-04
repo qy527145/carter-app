@@ -67,8 +67,17 @@ import { BoardFrame } from "./BoardFrame";
 import { LogTab, MineTab, markSeen, readSeen, useInbox } from "./MineAndLog";
 import { PeopleProvider, usePeople } from "./people";
 import { IdentityChip, JoinDialog, PersonAvatar } from "./peopleUi";
+import { BoardView, GRAPH_VIEWS, ListView, TimelineView, useGraphView } from "./GraphViews";
 import { TaskDrawer } from "./TaskDrawer";
-import { layerize, personName, priorityTone, statusTone, taskHandoff } from "../../lib/teamUi";
+import {
+  layerize,
+  newBoardHandoff,
+  newGoalHandoff,
+  personName,
+  priorityTone,
+  statusTone,
+  taskHandoff,
+} from "../../lib/teamUi";
 
 type Tab = "mine" | "graph" | "board" | "log";
 
@@ -446,7 +455,15 @@ function TeamPageBody({ onReloaded }: { onReloaded: () => void }) {
             <MineTab data={data} inbox={inbox} seen={seen} onOpenTask={openTask} onJoin={() => setJoining(true)} />
           )}
           {tab === "graph" && (
-            <GraphTab data={data} goal={activeGoal} onPick={setPicked} onAsk={askCarter} onOpenTask={openTask} />
+            <GraphTab
+              cwd={cwd}
+              data={data}
+              goal={activeGoal}
+              onPick={setPicked}
+              onAsk={askCarter}
+              onOpenTask={openTask}
+              onChanged={() => void load()}
+            />
           )}
           {tab === "board" && (
             <BoardTab cwd={cwd} boards={data.boards} version={data} onAsk={askCarter} />
@@ -722,17 +739,21 @@ function InitPanel({
 // ---------------------------------------------------------------------------
 
 function GraphTab({
+  cwd,
   data,
   goal,
   onPick,
   onAsk,
   onOpenTask,
+  onChanged,
 }: {
+  cwd: string;
   data: TeamOverview;
   goal: TeamGoal | null;
   onPick: (id: string) => void;
   onAsk: (draft?: string) => void;
   onOpenTask: (goal: TeamGoal, task: TeamTask) => void;
+  onChanged: () => void;
 }) {
   if (data.goals.length === 0) {
     return (
@@ -741,7 +762,7 @@ function GraphTab({
         title="还没有目标"
         hint="目标由卡特在对话里帮你建：说清要做成什么，它会拆成任务、理好先后。"
         action="让卡特建一个目标"
-        onAction={() => onAsk("帮我在团队目录里建一个目标：")}
+        onAction={() => onAsk(newGoalHandoff())}
       />
     );
   }
@@ -767,7 +788,15 @@ function GraphTab({
 
       {/* 图 */}
       <div className="min-w-0 flex-1 p-5">
-        {goal ? <GoalGraph goal={goal} onAsk={onAsk} onOpenTask={onOpenTask} /> : null}
+        {goal ? (
+          <GoalGraph
+            cwd={cwd}
+            goal={goal}
+            onAsk={onAsk}
+            onOpenTask={onOpenTask}
+            onChanged={onChanged}
+          />
+        ) : null}
       </div>
     </div>
   );
@@ -812,18 +841,25 @@ function GoalCard({
 }
 
 function GoalGraph({
+  cwd,
   goal,
   onAsk,
   onOpenTask,
+  onChanged,
 }: {
+  cwd: string;
   goal: TeamGoal;
   onAsk: (draft?: string) => void;
   onOpenTask: (goal: TeamGoal, task: TeamTask) => void;
+  /** 在图上直接改了状态之后让团队页重读（看板拖拽、清单勾选）。 */
+  onChanged: () => void;
 }) {
   const { people } = usePeople();
-  // 按人筛：只看某个人的任务（其余的淡出而不是藏起来 —— 依赖关系还要看得见）。
+  // 按人筛：只看某个人的任务（其余的在依赖图上淡出而不是藏起来 —— 依赖关系还要
+  // 看得见；另外三种视图里直接藏起来，因为它们本来就是一列一列过一遍用的）。
   // `null` = 全部，`""` = 没人负责的。
   const [who, setWho] = useState<string | null>(null);
+  const [view, setView] = useGraphView();
   const assignees = useMemo(() => {
     const seen = new Map<string, number>();
     for (const t of goal.tasks) if (t.assignee) seen.set(t.assignee, (seen.get(t.assignee) ?? 0) + 1);
@@ -888,6 +924,33 @@ function GoalGraph({
         </div>
       </div>
 
+      {/* 视图切换。四种排法回答四个不同的问题（见 GraphViews.tsx 开头），
+          放在按人筛上面一行：先定「怎么看」，再定「看谁」。 */}
+      {goal.tasks.length > 0 && (
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <div className="flex items-center gap-0.5 rounded-lg bg-card p-0.5" role="tablist" aria-label="任务图视图">
+            {GRAPH_VIEWS.map((v) => {
+              const Icon = v.icon;
+              const active = view === v.id;
+              return (
+                <button
+                  key={v.id}
+                  role="tab"
+                  aria-selected={active}
+                  onClick={() => setView(v.id)}
+                  className={`carter-press flex items-center gap-1 rounded-md px-2 py-1 text-[11px] transition-colors ${
+                    active ? "bg-elevated font-medium text-ink shadow-soft" : "text-dim hover:text-ink"
+                  }`}
+                >
+                  <Icon size={11} />
+                  {v.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {assignees.length > 0 && (
         <div className="mb-3 flex flex-wrap items-center gap-1 text-[11px]">
           <span className="mr-1 text-[10px] text-dim">按人看</span>
@@ -911,7 +974,7 @@ function GoalGraph({
         <div className="rounded-xl bg-card p-6 text-center text-xs text-dim">
           这个目标还没有任务。点右上角「让卡特拆解」，它会开一条新对话拆好。
         </div>
-      ) : (
+      ) : view === "lanes" ? (
         <div className="relative flex gap-4 overflow-x-auto pb-2">
           {lanes.map((lane, i) => (
             <div key={i} className="flex w-[16.5rem] shrink-0 flex-col gap-2">
@@ -937,11 +1000,37 @@ function GoalGraph({
             </div>
           ))}
         </div>
+      ) : view === "board" ? (
+        <BoardView
+          cwd={cwd}
+          goal={goal}
+          who={who}
+          onOpen={(t) => onOpenTask(goal, t)}
+          onChanged={onChanged}
+          onAsk={onAsk}
+        />
+      ) : view === "list" ? (
+        <ListView
+          cwd={cwd}
+          goal={goal}
+          who={who}
+          onOpen={(t) => onOpenTask(goal, t)}
+          onAsk={onAsk}
+          onChanged={onChanged}
+        />
+      ) : (
+        <TimelineView
+          goal={goal}
+          who={who}
+          onOpen={(t) => onOpenTask(goal, t)}
+          onAsk={onAsk}
+        />
       )}
 
       {/* 依赖关系单独列一块：图上画箭头在横向溢出时会被裁掉，而「谁在等谁」
-          是这块最重要的信息，不能只在悬浮里给。 */}
-      {goal.tasks.some((t) => t.depends_on.length > 0) && (
+          是这块最重要的信息，不能只在悬浮里给。只在依赖视图里给 —— 另外三种
+          视图各自的重点是别的（状态、过一遍、到期），再挂一块依赖表会喧宾夺主。 */}
+      {view === "lanes" && goal.tasks.some((t) => t.depends_on.length > 0) && (
         <div className="mt-4 rounded-xl bg-card p-3">
           <div className="mb-1.5 text-[10px] uppercase tracking-wider text-dim">依赖</div>
           <div className="space-y-1">
@@ -1131,7 +1220,7 @@ function BoardTab({
         title="还没有看板"
         hint="看板是一整页由卡特排版的页面：回顾、阶段小结、风险盘点、方案对比都行。"
         action="让卡特建一块看板"
-        onAction={() => onAsk("帮我建一块回顾看板：")}
+        onAction={() => onAsk(newBoardHandoff(boards))}
       />
     );
   }
@@ -1167,7 +1256,7 @@ function BoardTab({
           让卡特改这块看板
         </button>
         <button
-          onClick={() => onAsk("帮我建一块看板：")}
+          onClick={() => onAsk(newBoardHandoff(boards))}
           className="flex w-full items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[11px] text-dim transition-colors hover:bg-ink/[0.04] hover:text-ink"
         >
           <Plus size={12} />

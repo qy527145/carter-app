@@ -1,4 +1,7 @@
 // 预制上下文的卡片：输入框里和用户气泡里是同一枚，点开能看完整内容。
+//
+// 一次可以摆好几枚（「我的任务」里勾选几件事一起交给卡特）。多枚时排成一列而不是
+// 挤成一行：标题要被读完整才有意义，截断成一排「任务 · 修复…」等于什么都没说。
 
 import { useState } from "react";
 import { ChevronDown, Kanban, ListChecks, Target, X } from "lucide-react";
@@ -62,6 +65,37 @@ export function ContextChip({
           {context.body}
         </div>
       </Collapse>
+    </div>
+  );
+}
+
+/**
+ * 一列卡片。
+ *
+ * 只有一枚时保持行内（它跟在一句话后面也读得通）；多枚时每枚独占一行，并在这一组
+ * 左侧压一条竖线 —— 竖线是「它们是一伙的」，比给每枚卡片描边轻得多。
+ */
+export function ContextChips({
+  contexts,
+  onRemove,
+  className = "",
+}: {
+  contexts: PromptContext[];
+  /** 给了才显示移除按钮：发出去的那一叠不能再改。 */
+  onRemove?: (index: number) => void;
+  className?: string;
+}) {
+  if (contexts.length === 0) return null;
+  if (contexts.length === 1) {
+    return (
+      <ContextChip context={contexts[0]} onRemove={onRemove ? () => onRemove(0) : undefined} />
+    );
+  }
+  return (
+    <div className={`flex flex-col gap-1 border-l-2 border-edge-strong/40 pl-2 ${className}`}>
+      {contexts.map((c, i) => (
+        <ContextChip key={`${c.kind}:${c.title}:${i}`} context={c} onRemove={onRemove ? () => onRemove(i) : undefined} />
+      ))}
     </div>
   );
 }

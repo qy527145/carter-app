@@ -47,7 +47,7 @@ import type {
   TurnTime,
   UsageView,
 } from "./lib/api";
-import type { PromptContext } from "./lib/promptContext";
+import { contextKey, type PromptContext } from "./lib/promptContext";
 
 /** 助手轮里的一个片段。 */
 export type Item =
@@ -236,8 +236,13 @@ type Store = Conv & {
    * 输入框取走后清回 `null`。
    */
   composerDraft: string | null;
-  /** 要摆进输入框的上下文卡片：只换卡片，不动用户已经打的字（点「我的任务」）。 */
-  composerCard: PromptContext | null;
+  /**
+   * 要塞进输入框的上下文卡片：只换卡片，不动用户已经打的字（点「我的任务」）。
+   *
+   * 是一组而不是一张 —— 一次挑几件事一起交给卡特是常态（见 `lib/promptContext`）。
+   * 输入框取走后清回空数组。
+   */
+  composerCards: PromptContext[];
 
   setAppInfo: (i: AppInfo) => void;
   setSettings: (s: AppSettings) => void;
@@ -273,7 +278,8 @@ type Store = Conv & {
   assistant: AssistantView | null;
   setAssistant: (a: AssistantView) => void;
   setComposerDraft: (text: string | null) => void;
-  setComposerCard: (card: PromptContext | null) => void;
+  /** 追加要摆进输入框的卡片（同一条重复点不会摆两张）。 */
+  addComposerCards: (cards: PromptContext[]) => void;
   // 侧边聊天
   beginSide: (c: CreatedSide) => void;
   closeSide: () => void;
@@ -859,7 +865,7 @@ export const useStore = create<Store>((set) => ({
   queued: [],
   sessionsNonce: 0,
   composerDraft: null,
-  composerCard: null,
+  composerCards: [],
 
   // 应用信息里带着设置，一起落地 —— 分开拉会让主题在首帧闪一下。
   setAppInfo: (i) => set({ appInfo: i, settings: i.settings }),
@@ -942,7 +948,15 @@ export const useStore = create<Store>((set) => ({
   setTeamCwd: (teamCwd) => set({ teamCwd: rememberTeamCwd(teamCwd) }),
   setAssistant: (assistant) => set({ assistant }),
   setComposerDraft: (composerDraft) => set({ composerDraft }),
-  setComposerCard: (composerCard) => set({ composerCard }),
+  addComposerCards: (cards) =>
+    set((s) => {
+      if (cards.length === 0) return {};
+      const seen = new Set(s.composerCards.map(contextKey));
+      const add = cards.filter((c) => !seen.has(contextKey(c)));
+      // 返回空对象而不是 `s` 本身：zustand 会把 `s` 当成一次完整的状态写入，
+      // 订阅者仍然会收到通知；`{}` 是一条真正的空更新，什么都没变时不留痕迹。
+      return add.length === 0 ? {} : { composerCards: [...s.composerCards, ...add] };
+    }),
 
   applyEvent: (e) =>
     set((s) => {

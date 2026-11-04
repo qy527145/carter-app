@@ -59,8 +59,8 @@ import { FilePreviewModal } from "./FilePreview";
 import { MarkdownImage, MarkdownLink, MarkdownPre, transformMarkdownUrl } from "./Media";
 import { AskForm } from "./AskForm";
 import { Composer, MessageImages } from "./Composer";
-import { ContextChip } from "./ContextChip";
-import { parseContext, stripContextTags } from "../lib/promptContext";
+import { ContextChips } from "./ContextChip";
+import { parseContexts, stripContextTags } from "../lib/promptContext";
 import { TeamTodoDock } from "./TeamTodoDock";
 import { TicketReply } from "./TicketReply";
 import { GoalBar } from "./GoalBar";
@@ -1029,7 +1029,7 @@ function UserTurn({
   onFork?: () => void;
 }) {
   const menu = useContextMenu();
-  const { context, rest } = useMemo(() => parseContext(turn.text), [turn.text]);
+  const { contexts, rest } = useMemo(() => parseContexts(turn.text), [turn.text]);
   // 与回答那边同一套反馈：就地变对勾，2.5 秒后复位。
   const [copied, setCopied] = useState(false);
   const [confirmingRetry, setConfirmingRetry] = useState(false);
@@ -1075,9 +1075,9 @@ function UserTurn({
       {/* 粘贴的图片在会话里存的是 `[img:...]` 引用 token，回看时要渲染回图。
           纯文本消息走 MessageImages 的文本分支，行为与直接输出一致。 */}
       <div className="max-w-[75%] break-words rounded-2xl bg-bubble px-3.5 py-2 text-sm leading-relaxed text-ink">
-        {context && (
+        {contexts.length > 0 && (
           <div className={rest ? "mb-1.5" : ""}>
-            <ContextChip context={context} />
+            <ContextChips contexts={contexts} />
           </div>
         )}
         <MessageImages text={rest} />

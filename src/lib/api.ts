@@ -2039,6 +2039,18 @@ export type TeamAction =
   | { action: "assign"; task_id: string; assignee: string; text?: string }
   | { action: "task_claim" | "task_release"; task_id: string }
   | { action: "task_update"; task_id: string; assignee: string }
+  /**
+   * 推进任务状态。看板上拖一下就走这条 —— 原来只有模型能改状态，人要在界面上
+   * 把一件事标成完成，只能开一条对话让卡特去做。
+   *
+   * `blocked` 必须带 `blocked_reason`（后端会拒），其余状态带了也会写进去。
+   */
+  | {
+      action: "task_status";
+      task_id: string;
+      status: "todo" | "doing" | "blocked" | "done" | "dropped";
+      blocked_reason?: string;
+    }
   | { action: "comment"; task_id?: string; goal_id?: string; text: string; to?: string[] }
   | { action: "mention"; to: string[]; text: string; task_id?: string; goal_id?: string }
   | { action: "request"; to: string[]; text: string; task_id?: string; due_at?: number }

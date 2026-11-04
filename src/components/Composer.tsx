@@ -48,13 +48,19 @@ import {
   type ModelRow,
 } from "../lib/api";
 import { landFlight } from "../lib/flight";
-import { contextSummary, formatContext, parseContext, type PromptContext } from "../lib/promptContext";
+import {
+  contextKey,
+  contextSummary,
+  formatContext,
+  parseContexts,
+  type PromptContext,
+} from "../lib/promptContext";
 import { toastError } from "../lib/toast";
 import { fmtTokens, shortenPath } from "../lib/format";
 import { displayName, modelTitle, useModelCatalog } from "../lib/modelLabel";
 import * as ops from "../lib/sessionOps";
 import { useStore, type QueuedPrompt } from "../store";
-import { ContextChip } from "./ContextChip";
+import { ContextChips } from "./ContextChip";
 import { Glyph } from "./toolcards/ToolCard";
 
 // ---------------------------------------------------------------------------
@@ -343,7 +349,8 @@ export function Composer() {
   // 选定的斜杠命令（不带 `/`）。它是一枚整体的标签，不在 `text` 里：
   // 否则退格一下就成了残缺的命令名，还会把菜单重新弹出来。
   const [command, setCommand] = useState<string | null>(null);
-  const [context, setContext] = useState<PromptContext | null>(null);
+  /** 摆在输入框上方的上下文卡片。可以有多枚（见 lib/promptContext）。 */
+  const [contexts, setContexts] = useState<PromptContext[]>([]);
   const [attachments, setAttachments] = useState<string[]>([]);
   const [pasting, setPasting] = useState(false);
 
@@ -404,9 +411,9 @@ export function Composer() {
   useEffect(() => {
     if (composerDraft === null || !connected) return;
     useStore.getState().setComposerDraft(null);
-    const { context: ctx, rest } = parseContext(composerDraft);
+    const { contexts: ctxs, rest } = parseContexts(composerDraft);
     const split = splitCommand(rest, commandsRef.current);
-    setContext(ctx);
+    setContexts(ctxs);
     setCommand(split?.name ?? null);
     const body = split ? split.rest : rest;
     setText(body);
@@ -415,15 +422,20 @@ export function Composer() {
     focusEnd(taRef.current, body.length);
   }, [composerDraft, connected]);
 
-  // 点「我的任务」摆上来的卡片。与上面的草稿不同：这是在同一条对话里追加任务，
-  // 用户可能已经打了半句话，所以只换卡片，不动输入框里的字。
-  const composerCard = useStore((s) => s.composerCard);
+  // 点「我的任务」摆上来的卡片。与上面的草稿不同：这是在同一条对话里**追加**任务，
+  // 用户可能已经打了半句话，所以只换卡片，不动输入框里的字；也不覆盖已有的卡片 ——
+  // 勾选几件事一起交给卡特是常态，后到的往上叠。
+  const composerCards = useStore((s) => s.composerCards);
   useEffect(() => {
-    if (composerCard === null || !connected) return;
-    useStore.getState().setComposerCard(null);
-    setContext(composerCard);
+    if (composerCards.length === 0 || !connected) return;
+    useStore.setState({ composerCards: [] });
+    // 已经摆在框里的同一条不再叠一张。
+    setContexts((prev) => {
+      const seen = new Set(prev.map(contextKey));
+      return [...prev, ...composerCards.filter((c) => !seen.has(contextKey(c)))];
+    });
     focusEnd(taRef.current, taRef.current?.value.length ?? 0);
-  }, [composerCard, connected]);
+  }, [composerCards, connected]);
 
   // 命令列表按 cwd 取一次。自定义命令来自磁盘，cwd 变了要重取。
   useEffect(() => {
@@ -643,10 +655,10 @@ export function Composer() {
         return;
       }
     }
-    if ((!t && !context && attachments.length === 0) || !sessionId || disabled) return;
+    if ((!t && contexts.length === 0 && attachments.length === 0) || !sessionId || disabled) return;
     // 图片引用拼在文本末尾：carter 在消息文本里认 `[img:...]` 这个形态。
     // 上下文排在用户的话后面：`/命令` 必须打头，后端才认得出来。
-    const block = context ? formatContext(context) : "";
+    const block = contexts.map(formatContext).join("\n");
     const payload = [t, block, ...attachments].filter(Boolean).join("\n");
     const id = nextPromptId();
     // 挂进「排队中」：模型写这一轮时用户还能接着说，后端的队列保证顺序。
@@ -656,7 +668,7 @@ export function Composer() {
     enqueuePrompt({ id, text: payload, direct });
     setText("");
     setCommand(null);
-    setContext(null);
+    setContexts([]);
     setAttachments([]);
     setFileQuery(null);
     ops.send(sessionId, payload, { id, interject }).catch((e) => setNotice(String(e)));
@@ -721,7 +733,7 @@ export function Composer() {
   };
 
   const canSend =
-    (text.trim() !== "" || command !== null || context !== null || attachments.length > 0) && !disabled;
+    (text.trim() !== "" || command !== null || contexts.length > 0 || attachments.length > 0) && !disabled;
   const commandRow = command ? commands.find((c) => c.name === command) : undefined;
 
   return (
@@ -745,12 +757,12 @@ export function Composer() {
 
           <QueueStrip queued={queued} sessionId={sessionId} />
 
-          {context && (
+          {contexts.length > 0 && (
             <div ref={contextRef} className="px-3.5 pt-3">
-              <ContextChip
-                context={context}
-                onRemove={() => {
-                  setContext(null);
+              <ContextChips
+                contexts={contexts}
+                onRemove={(i) => {
+                  setContexts((prev) => prev.filter((_, n) => n !== i));
                   taRef.current?.focus();
                 }}
               />
@@ -786,7 +798,7 @@ export function Composer() {
                   ? "请先回答上面的问题"
                   : command
                     ? commandRow?.argument_hint || "接着写，Enter 执行"
-                  : context
+                  : contexts.length > 0
                     ? "想补充点什么？也可以直接按 Enter 交给卡特"
                   : busy
                     ? "可以接着说：Enter 排队，⌘/Ctrl+Enter 插队"

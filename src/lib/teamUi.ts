@@ -23,6 +23,39 @@ export function taskHandoff(goal: TeamGoal, task: TeamTask): string {
   });
 }
 
+/**
+ * 「让卡特建一块看板」。
+ *
+ * 走上下文卡片而不是裸一句话：卡片那头带着「要建的是看板」这个类型，输入框里是
+ * 一枚能一眼认出形状的标签，模型收到的也是一段结构化的说明。以前这里传的是普通
+ * 字符串，于是同一个入口在空状态和侧栏里长得不一样 —— 一处是卡片，一处是裸文本。
+ */
+export function newBoardHandoff(boards: { title: string }[]): string {
+  return formatContext({
+    kind: "board",
+    title: "新建看板",
+    body:
+      `帮我建一块看板。\n\n` +
+      (boards.length > 0
+        ? `目前已经有 ${boards.length} 块：${boards.slice(0, 5).map((b) => `「${b.title}」`).join("、")}${boards.length > 5 ? " 等" : ""}，新建的要和它们不重复。\n`
+        : "") +
+      `\n先用 board_list 看一眼现有的，再想清楚这一块要回答什么问题，然后 board_new 建出来。` +
+      `\n内容我在这条消息里补：要回顾哪一段、想看清什么。`,
+  });
+}
+
+/** 「让卡特建一个目标」。与看板同理：走卡片，不走裸文本。 */
+export function newGoalHandoff(): string {
+  return formatContext({
+    kind: "goal",
+    title: "新建目标",
+    body:
+      `帮我在团队目录里建一个目标。\n\n` +
+      `先把要做成什么说清楚（我在这条消息里补），再拆成任务、理好依赖。` +
+      `\n任务要具体到「谁做完算完」，验收标准写进 acceptance。`,
+  });
+}
+
 /** 任务 / 目标状态 → 语义色。用 body 上的 CSS 变量，两套主题各自成立。 */
 export function statusTone(status: string): {
   fg: string;
