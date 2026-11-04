@@ -16,14 +16,15 @@ export type PromptContext = {
   title: string;
   body: string;
   /**
-   * 稳定标识（如 `task:t-abc`）。**只在本机内存里用**，不写进标签、不发给模型。
+   * 稳定标识（任务 id）。
    *
    * 有了它，「这张卡片在不在输入框里」就能按 id 判断，而不是按正文比较 ——
    * 待办的正文里带着「当前状态」这类随时会变的东西，任务一被标成进行中，
    * 按正文算的勾选就悄悄对不上了：卡片还在输入框里，勾却掉了。
    *
-   * 从文本解析回来的卡片没有这个字段（那时也不需要它：解析出来的是已经发出去的
-   * 消息，没有「勾选状态」这回事）。
+   * 它要写进标签：卡片有不少路径是先变成文本、再解析回来的（看板上的「交给卡特」、
+   * 分叉带回来的原话）。只留在内存里的话，这些路径上的卡片就没了身份，
+   * 待办条认不出它，再勾一下就摆进第二张一样的。
    */
   ref?: string;
 };
@@ -48,7 +49,7 @@ export const CONTEXT_LABEL: Record<PromptContextKind, string> = {
  *
  * 有 `ref` 就用它 —— 任务正文里的状态、受阻原因都会变，按正文算身份的话，
  * 任务一推进，输入框里那张卡就和列表里的这条对不上了。没有 `ref` 的
- * （从历史消息解析回来的）才退回按内容比。
+ * （目标、看板，以及旧版本写下的消息）才退回按内容比。
  */
 export function contextKey(c: PromptContext): string {
   if (c.ref) return `${c.kind}\u0000${c.ref}`;
@@ -73,7 +74,8 @@ function unescapeAttr(s: string): string {
 }
 
 export function formatContext(c: PromptContext): string {
-  return `<carter-context kind="${c.kind}" title="${escapeAttr(c.title)}">\n${c.body}\n</carter-context>`;
+  const ref = c.ref ? ` ref="${escapeAttr(c.ref)}"` : "";
+  return `<carter-context kind="${c.kind}"${ref} title="${escapeAttr(c.title)}">\n${c.body}\n</carter-context>`;
 }
 
 /**
@@ -89,7 +91,13 @@ export function parseContexts(text: string): { contexts: PromptContext[]; rest: 
   for (const m of text.matchAll(BLOCKS)) {
     const kind = ATTR(m[1], "kind");
     if (kind !== "task" && kind !== "goal" && kind !== "board") continue;
-    contexts.push({ kind, title: ATTR(m[1], "title") ?? "", body: m[2].trim() });
+    const ref = ATTR(m[1], "ref");
+    contexts.push({
+      kind,
+      title: ATTR(m[1], "title") ?? "",
+      body: m[2].trim(),
+      ...(ref ? { ref } : {}),
+    });
     // 按**位置**切掉，而不是 `replace(原文, "")`：后者遇到两张一模一样的卡片时
     // 只会删掉第一处，剩下那张留在正文里，屏幕上就多了一段谁也读不懂的标签。
     rest += text.slice(cursor, m.index);

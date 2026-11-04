@@ -28,8 +28,7 @@ import { Check, ChevronRight, CircleAlert, ListChecks } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { type TeamTodo, teamMyTasks } from "../lib/api";
-import type { PromptContext } from "../lib/promptContext";
-import { priorityTone } from "../lib/teamUi";
+import { priorityTone, taskCard } from "../lib/teamUi";
 import { useStore } from "../store";
 
 /** 收起状态存在 localStorage：这是一个「我不看这个」的偏好，不该每次启动重问。 */
@@ -97,7 +96,6 @@ export function TeamTodoDock() {
   const open = todos.filter((t) => t.status !== "blocked").length;
   const blocked = todos.length - open;
   const isPicked = (t: TeamTodo) => pickedIds.has(t.id);
-  const chosen = todos.filter(isPicked);
 
   return (
     <div className="shrink-0 px-4 pt-2">
@@ -119,9 +117,10 @@ export function TeamTodoDock() {
               {blocked} 受阻
             </span>
           )}
-          {chosen.length > 0 ? (
-            // 摆在框里几条，这里就说几条 —— 它和输入框上方那叠卡片是同一个数。
-            <span className="text-ink">已放进输入框 {chosen.length} 条</span>
+          {contexts.length > 0 ? (
+            // 摆在框里几条，这里就说几条 —— 直接数输入框上方那叠卡片。只数列表里勾中的话，
+            // 从看板交过来的别人的任务、目标卡片都不算，这个数就和眼前对不上了。
+            <span className="text-ink">已放进输入框 {contexts.length} 条</span>
           ) : (
             collapsed && (
               <span className="ml-auto min-w-0 truncate text-ink/80">
@@ -138,7 +137,7 @@ export function TeamTodoDock() {
                 key={t.id}
                 todo={t}
                 picked={isPicked(t)}
-                onToggle={() => toggleContext(todoCard(t))}
+                onToggle={() => toggleContext(taskCard(t))}
               />
             ))}
           </div>
@@ -146,25 +145,6 @@ export function TeamTodoDock() {
       </div>
     </div>
   );
-}
-
-/** 一条待办 → 一枚上下文卡片。勾选几条就按这个形状摆几条。 */
-function todoCard(todo: TeamTodo): PromptContext {
-  return {
-    kind: "task",
-    // 身份用任务 id，不用正文：正文里有「当前状态」，任务一推进就会变。
-    ref: todo.id,
-    title: todo.title,
-    body:
-      `接着做我名下的这个任务：\n\n` +
-      `- 任务：${todo.title}\n` +
-      `- 任务 id：${todo.id}\n` +
-      `- 所属目标：${todo.goal_title}（${todo.goal_id}）\n` +
-      `- 当前状态：${todo.status_label}\n` +
-      (todo.blocked_reason ? `- 受阻原因：${todo.blocked_reason}\n` : "") +
-      (todo.waiting_on > 0 ? `- 还有 ${todo.waiting_on} 个前置没完成\n` : "") +
-      `\n先看一眼任务的具体要求（acceptance 里写了验收标准），再动手。`,
-  };
 }
 
 function TodoRow({

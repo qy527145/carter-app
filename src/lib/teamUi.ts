@@ -4,23 +4,48 @@
 // 待办条、任务详情抽屉）说的是同一套话。状态色散落三处时，最容易出现「同一件事
 // 在列表里是橙色、在抽屉里是蓝色」—— 那不叫设计，那叫没设计。
 
-import type { TeamEvent, TeamGoal, TeamMember, TeamPeople, TeamTask } from "./api";
-import { formatContext } from "./promptContext";
+import type { TeamEvent, TeamGoal, TeamMember, TeamPeople, TeamTask, TeamTodo } from "./api";
+import { formatContext, type PromptContext } from "./promptContext";
+
+/**
+ * 一个任务 → 一枚上下文卡片。
+ *
+ * 待办条上的勾选和看板上的「交给卡特」都走这里：它们摆进输入框的是同一件事，
+ * 身份（`ref`）和模型收到的内容都该一样，否则同一个任务能在框里摆出两张。
+ */
+export function taskCard(
+  t: Pick<
+    TeamTodo,
+    "id" | "title" | "status_label" | "blocked_reason" | "waiting_on" | "goal_id" | "goal_title"
+  >,
+): PromptContext {
+  return {
+    kind: "task",
+    // 身份用任务 id，不用正文：正文里有「当前状态」，任务一推进就会变。
+    ref: t.id,
+    title: t.title,
+    body:
+      `接着做这个任务：\n\n` +
+      `- 任务：${t.title}\n` +
+      `- 任务 id：${t.id}\n` +
+      `- 所属目标：${t.goal_title}（${t.goal_id}）\n` +
+      `- 当前状态：${t.status_label}\n` +
+      (t.blocked_reason ? `- 受阻原因：${t.blocked_reason}\n` : "") +
+      (t.waiting_on > 0 ? `- 还有 ${t.waiting_on} 个前置没完成\n` : "") +
+      `\n先看一眼任务的具体要求（acceptance 里写了验收标准），再动手。`,
+  };
+}
 
 /** 「把这个任务交给卡特」带上的上下文。 */
 export function taskHandoff(goal: TeamGoal, task: TeamTask): string {
-  return formatContext({
-    kind: "task",
-    title: task.title,
-    body:
-      `接着做这个任务：\n\n` +
-      `- 任务：${task.title}\n` +
-      `- 任务 id：${task.id}\n` +
-      `- 所属目标：${goal.title}（${goal.id}）\n` +
-      `- 当前状态：${task.status_label}\n` +
-      (task.blocked_reason ? `- 受阻原因：${task.blocked_reason}\n` : "") +
-      `\n先看一眼任务的具体要求（acceptance 里写了验收标准），再动手。`,
-  });
+  return formatContext(
+    taskCard({
+      ...task,
+      waiting_on: task.waiting_on.length,
+      goal_id: goal.id,
+      goal_title: goal.title,
+    }),
+  );
 }
 
 /**
