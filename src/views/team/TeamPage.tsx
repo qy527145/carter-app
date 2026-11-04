@@ -788,8 +788,20 @@ function GraphTab({
     <div className="flex min-h-0 flex-col lg:flex-row">
       {/* 目标列 */}
       <div className="w-full shrink-0 border-b border-edge p-3 lg:w-[15rem] lg:border-b-0 lg:border-r">
-        <div className="mb-2 px-1 text-[10px] font-medium uppercase tracking-wider text-dim">
-          目标 · {data.goals.length}
+        <div className="mb-2 flex items-center justify-between px-1">
+          <span className="text-[10px] font-medium uppercase tracking-wider text-dim">
+            目标 · {data.goals.length}
+          </span>
+          {/* 有目标之后也得能再加 —— 先开一条对话把「要做成什么」说清楚，让卡特建。 */}
+          <button
+            onClick={() => onAsk(newGoalHandoff())}
+            title="让卡特新建目标"
+            aria-label="让卡特新建目标"
+            className="flex items-center gap-0.5 rounded-md px-1 py-0.5 text-[10px] text-dim transition-colors hover:bg-ink/5 hover:text-ink"
+          >
+            <Plus size={11} />
+            新建
+          </button>
         </div>
         <div className="flex gap-1.5 overflow-x-auto lg:block lg:space-y-1.5 lg:overflow-visible">
           {data.goals.map((g) => (
