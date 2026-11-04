@@ -468,6 +468,8 @@ export type CreatedSession = {
   running?: boolean;
   /** 正在跑的那一轮已经产出的正文与工具调用。 */
   live?: LiveView[];
+  /** 这一轮正在等用户回答的问题。`ask_form` 事件不回放，错过了靠它把表单补出来。 */
+  pending_ask?: { id: number; questions: AskQuestion[] } | null;
 };
 
 export type LiveView =

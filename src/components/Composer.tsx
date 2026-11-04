@@ -415,6 +415,16 @@ export function Composer() {
     focusEnd(taRef.current, body.length);
   }, [composerDraft, connected]);
 
+  // 点「我的任务」摆上来的卡片。与上面的草稿不同：这是在同一条对话里追加任务，
+  // 用户可能已经打了半句话，所以只换卡片，不动输入框里的字。
+  const composerCard = useStore((s) => s.composerCard);
+  useEffect(() => {
+    if (composerCard === null || !connected) return;
+    useStore.getState().setComposerCard(null);
+    setContext(composerCard);
+    focusEnd(taRef.current, taRef.current?.value.length ?? 0);
+  }, [composerCard, connected]);
+
   // 命令列表按 cwd 取一次。自定义命令来自磁盘，cwd 变了要重取。
   useEffect(() => {
     listCommands(cwd || null)

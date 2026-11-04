@@ -3,8 +3,9 @@
 // ## 为什么要放在输入框下面
 //
 // 它要回答的问题是「接下来让 agent 做什么」。这个问题和输入框是同一件事 ——
-// 摆在输入框上方就成了「背景信息」，摆在下方才是「下一步」。点一条把它注入成
-// 对话上下文，等于「把这件事交给它」，不需要用户再手打一遍任务 id 与目标。
+// 摆在输入框上方就成了「背景信息」，摆在下方才是「下一步」。点一条把它摆进输入框
+// 成为一张上下文卡片，不需要用户再手打一遍任务 id 与目标；要不要补一句、什么时候
+// 发，仍由用户决定。
 //
 // ## 什么时候不显示
 //
@@ -12,11 +13,9 @@
 // 常驻一条「暂无待办」是纯噪音：它不提供任何可行动的东西，却每天占用一行高度。
 
 import { useCallback, useEffect, useState } from "react";
-import { ChevronRight, CircleAlert, ListChecks, LoaderCircle } from "lucide-react";
+import { ChevronRight, CircleAlert, ListChecks } from "lucide-react";
 
 import { teamMyTasks, type TeamTodo } from "../lib/api";
-import { formatContext } from "../lib/promptContext";
-import * as ops from "../lib/sessionOps";
 import { priorityTone } from "../lib/teamUi";
 import { useStore } from "../store";
 
@@ -117,37 +116,25 @@ export function TeamTodoDock() {
 
 function TodoRow({ todo }: { todo: TeamTodo }) {
   const sessionId = useStore((s) => s.sessionId);
-  const [busy, setBusy] = useState(false);
+  const setCard = useStore((s) => s.setComposerCard);
 
-  async function pick() {
+  function pick() {
     if (!sessionId) return;
-    setBusy(true);
-    try {
-      // 注入成对话上下文，而不是「替你点按钮」：真正要做的事仍然由模型读任务、
-      // 认领、推进。这里只负责把「做哪件事」说清楚，省掉用户重复描述。
-      const text = formatContext({
-        kind: "task",
-        title: todo.title,
-        body:
-          `接着做我名下的这个任务：\n\n` +
-          `- 任务：${todo.title}\n` +
-          `- 任务 id：${todo.id}\n` +
-          `- 所属目标：${todo.goal_title}（${todo.goal_id}）\n` +
-          `- 当前状态：${todo.status_label}\n` +
-          (todo.blocked_reason ? `- 受阻原因：${todo.blocked_reason}\n` : "") +
-          (todo.waiting_on > 0 ? `- 还有 ${todo.waiting_on} 个前置没完成\n` : "") +
-          `\n先看一眼任务的具体要求（acceptance 里写了验收标准），再动手。`,
-      });
-      // 走 `sessionOps.send` 而不是直接 invoke：它带着「会话已结束就重建」的恢复路径，
-      // 与输入框走同一条通道 —— 两个入口在会话被打断时表现不一致是最难查的那类 bug。
-      //
-      // 不进「排队中」：(a) 这条是界面上点出来的，用户看不到自己打出去的字，
-      // 挂一条排队靠的是「我发了什么」的记忆；(b) 它可能比正文长得多，摆在
-      // 排队条里会把那一行撑满。模型那边照常按顺序跑。
-      await ops.send(sessionId, text);
-    } finally {
-      setBusy(false);
-    }
+    // 只摆进输入框，不发送：用户可能还想补一句，发送走输入框那条路。
+    // 真正要做的事仍然由模型读任务、认领、推进，这里只把「做哪件事」说清楚。
+    setCard({
+      kind: "task",
+      title: todo.title,
+      body:
+        `接着做我名下的这个任务：\n\n` +
+        `- 任务：${todo.title}\n` +
+        `- 任务 id：${todo.id}\n` +
+        `- 所属目标：${todo.goal_title}（${todo.goal_id}）\n` +
+        `- 当前状态：${todo.status_label}\n` +
+        (todo.blocked_reason ? `- 受阻原因：${todo.blocked_reason}\n` : "") +
+        (todo.waiting_on > 0 ? `- 还有 ${todo.waiting_on} 个前置没完成\n` : "") +
+        `\n先看一眼任务的具体要求（acceptance 里写了验收标准），再动手。`,
+    });
   }
 
   return (
@@ -166,21 +153,19 @@ function TodoRow({ todo }: { todo: TeamTodo }) {
         {todo.priority}
       </span>
       <button
-        onClick={() => void pick()}
-        disabled={busy}
+        onClick={pick}
         title={`${todo.goal_title} · ${todo.id}`}
-        className="min-w-0 flex-1 truncate text-left text-xs text-ink/90 transition-colors hover:text-ink disabled:opacity-50"
+        className="min-w-0 flex-1 truncate text-left text-xs text-ink/90 transition-colors hover:text-ink"
       >
         {todo.title}
       </button>
-      {busy && <LoaderCircle size={11} className="shrink-0 animate-spin text-dim" />}
-      {!busy && todo.status === "doing" && (
+      {todo.status === "doing" && (
         <span className="shrink-0 text-[10px] text-tone-blue">进行中</span>
       )}
-      {!busy && todo.waiting_on > 0 && (
+      {todo.waiting_on > 0 && (
         <span className="shrink-0 text-[10px] text-dim">等 {todo.waiting_on} 个</span>
       )}
-      {!busy && todo.status === "blocked" && todo.blocked_reason && (
+      {todo.status === "blocked" && todo.blocked_reason && (
         <span
           className="max-w-[14rem] shrink-0 truncate text-[10px]"
           style={{ color: "var(--tone-orange)" }}

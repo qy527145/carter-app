@@ -161,6 +161,8 @@ struct CreatedSession {
     running: bool,
     /// 正在跑的那一轮已经产出的正文与工具调用，界面先把它们画出来。
     live: Vec<LiveView>,
+    /// 这一轮正在等用户回答的问题：错过了 `ask_form` 事件时靠它把表单补出来。
+    pending_ask: Option<carter_app_core::protocol::PendingAsk>,
 }
 
 /// 进行中那一轮的一条记录（`LiveItem` 的界面形态）。
@@ -197,6 +199,7 @@ impl CreatedSession {
                     }
                 })
                 .collect(),
+            pending_ask: started.pending_ask,
         }
     }
 }

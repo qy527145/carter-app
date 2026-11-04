@@ -97,6 +97,9 @@ pub struct StartedSession {
     /// 正在跑的那一轮已经产出的东西（正文、工具调用）。界面接上时据此把这一轮画出来，
     /// 之后的增量照常从事件流来。不在跑时为空。
     pub live: Vec<crate::shell::LiveItem>,
+    /// 这一轮正卡在等用户回答的问题。`ask_form` 事件不回放，界面不在这条会话上时
+    /// 就错过了；不随接回一起带上，表单出不来，这一轮只能永远等下去。
+    pub pending_ask: Option<crate::protocol::PendingAsk>,
 }
 
 /// 接上一条正在后台跑的会话（不关掉重开），返回界面要的那份状态。
@@ -116,6 +119,7 @@ pub fn attach_session(shell: &AppShell, id: &str) -> Option<StartedSession> {
         times: crate::timeline::load(id),
         running: handle.busy.load(Ordering::SeqCst),
         live: handle.live.snapshot(),
+        pending_ask: handle.asks.current(),
         handle,
     })
 }
@@ -326,6 +330,7 @@ pub fn start_session(shell: Arc<AppShell>, opts: SessionOptions) -> carter::Resu
         times,
         running: false,
         live: Vec::new(),
+        pending_ask: None,
     })
 }
 
@@ -2379,7 +2384,7 @@ async fn forward_events(
             req = ask_rx.recv(), if ask_open => match req {
                 Some(AskRequest::Questions { id, questions, reply }) => {
                     // 发送端存住：前端要跨一次进程边界才回得来，而 oneshot 只能发一次。
-                    asks.insert(id, reply);
+                    asks.insert(id, questions.clone(), reply);
                     send(&shell, SessionEvent::AskForm { id, questions });
                 }
                 None => ask_open = false,

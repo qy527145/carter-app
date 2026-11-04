@@ -16,31 +16,64 @@ use carter::config::Config;
 use carter::provider::WireMessage;
 use carter::registry::ModelInfo;
 
-use crate::protocol::{AppEvent, Command, SessionEvent};
+use crate::protocol::{AppEvent, AskQuestion, Command, PendingAsk, SessionEvent};
+
+/// 一个等着作答的问题：回答的出口 + 问题本身（界面接回会话时要重新画表单）。
+struct PendingEntry {
+    /// 答案形状与问题一一对应：外层是问题，内层是这一问选中的标签。
+    reply: oneshot::Sender<Vec<Vec<String>>>,
+    questions: Vec<AskQuestion>,
+}
 
 /// 模型通过 `ask_user_question` 提的问题，等前端作答。
 ///
 /// 工具那一侧正 await 在一个 oneshot 上。所以这里必须把发送端**存住** ——
 /// 走的通道是「工具 → 会话任务 → 前端 → 会话任务 → 工具」，中间要跨过事件广播，
 /// 而 oneshot 只能发一次，不能随着广播被克隆出去。
+///
+/// 问题本身也要存住：`ask_form` 事件不回放，界面此刻看着别的会话时它就被丢掉了。
+/// 接回这条会话时只能从这里补（见 [`AskRegistry::current`]），否则这一轮再也答不上。
 #[derive(Default)]
 pub struct AskRegistry {
-    /// 答案形状与问题一一对应：外层是问题，内层是这一问选中的标签。
-    pending: Mutex<HashMap<u64, oneshot::Sender<Vec<Vec<String>>>>>,
+    pending: Mutex<HashMap<u64, PendingEntry>>,
 }
 
 impl AskRegistry {
-    pub fn insert(&self, id: u64, tx: oneshot::Sender<Vec<Vec<String>>>) {
-        self.pending.lock().unwrap().insert(id, tx);
+    pub fn insert(
+        &self,
+        id: u64,
+        questions: Vec<AskQuestion>,
+        reply: oneshot::Sender<Vec<Vec<String>>>,
+    ) {
+        self.pending
+            .lock()
+            .unwrap()
+            .insert(id, PendingEntry { reply, questions });
     }
 
     /// 作答。返回 `false` 表示该问题已失效（会话结束、或被重复作答）——
     /// 这不是错误，前端不必处理。
     pub fn answer(&self, id: u64, answers: Vec<Vec<String>>) -> bool {
         match self.pending.lock().unwrap().remove(&id) {
-            Some(tx) => tx.send(answers).is_ok(),
+            Some(entry) => entry.reply.send(answers).is_ok(),
             None => false,
         }
+    }
+
+    /// 此刻还在等回答的那个问题（有多个时取最早的）。
+    ///
+    /// 工具被中断后不会回来摘自己那一条，但它的接收端已经放掉了 —— 据此顺手清掉，
+    /// 不把一个已经没人等的问题重新摆给用户。
+    pub fn current(&self) -> Option<PendingAsk> {
+        let mut pending = self.pending.lock().unwrap();
+        pending.retain(|_, entry| !entry.reply.is_closed());
+        pending
+            .iter()
+            .min_by_key(|(id, _)| **id)
+            .map(|(id, entry)| PendingAsk {
+                id: *id,
+                questions: entry.questions.clone(),
+            })
     }
 
     /// 会话结束时把没答的问题全部丢弃，让工具那一侧立刻拿到 Err 返回，
@@ -465,7 +498,7 @@ mod tests {
     async fn ask_registry_routes_the_answer_to_the_question_asker() {
         let asks = AskRegistry::default();
         let (tx, rx) = oneshot::channel();
-        asks.insert(7, tx);
+        asks.insert(7, Vec::new(), tx);
         // 两个问题，第一个多选。
         let answers = vec![vec!["a".to_string(), "b".to_string()], vec!["c".to_string()]];
         assert!(asks.answer(7, answers.clone()));
@@ -480,10 +513,51 @@ mod tests {
     async fn clearing_pending_questions_drops_the_senders() {
         let asks = AskRegistry::default();
         let (tx, rx) = oneshot::channel();
-        asks.insert(1, tx);
+        asks.insert(1, Vec::new(), tx);
         asks.clear();
         assert!(rx.await.is_err(), "发送端被丢弃时接收端应立刻得到 Err");
         assert!(!asks.answer(1, vec![vec!["太晚了".into()]]));
+    }
+
+    fn question(text: &str) -> AskQuestion {
+        AskQuestion {
+            question: text.into(),
+            header: None,
+            multi_select: false,
+            options: Vec::new(),
+        }
+    }
+
+    /// 界面看着别的会话时 `ask_form` 事件被丢掉了：接回来要能取到那个问题，
+    /// 而且取一次不能把它消费掉 —— 用户可能再切走一次，答完才算完。
+    #[tokio::test]
+    async fn a_waiting_question_can_be_read_back_until_it_is_answered() {
+        let asks = AskRegistry::default();
+        assert!(asks.current().is_none());
+
+        let (late_tx, _late_rx) = oneshot::channel();
+        let (early_tx, early_rx) = oneshot::channel();
+        asks.insert(9, vec![question("后问的")], late_tx);
+        asks.insert(3, vec![question("先问的")], early_tx);
+
+        assert_eq!(asks.current().unwrap().id, 3, "多个问题时先摆最早的");
+        let again = asks.current().unwrap();
+        assert_eq!(again.id, 3);
+        assert_eq!(again.questions[0].question, "先问的");
+
+        assert!(asks.answer(3, vec![vec!["好".into()]]));
+        assert_eq!(early_rx.await.unwrap(), vec![vec!["好".to_string()]]);
+        assert_eq!(asks.current().unwrap().id, 9, "答完轮到下一个");
+    }
+
+    /// 工具被中断后接收端没了：这个问题不该再摆出来，答了也送不到。
+    #[tokio::test]
+    async fn a_question_nobody_waits_for_is_not_shown_again() {
+        let asks = AskRegistry::default();
+        let (tx, rx) = oneshot::channel();
+        asks.insert(1, vec![question("被中断的")], tx);
+        drop(rx);
+        assert!(asks.current().is_none());
     }
 
     #[tokio::test]

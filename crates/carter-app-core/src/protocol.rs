@@ -51,6 +51,13 @@ pub struct AskQuestion {
     pub options: Vec<AskOption>,
 }
 
+/// 一个还在等回答的提问。界面接回正在跑的会话时用它补画表单。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingAsk {
+    pub id: u64,
+    pub questions: Vec<AskQuestion>,
+}
+
 // ---------------------------------------------------------------------------
 // 前端 → 后端
 // ---------------------------------------------------------------------------

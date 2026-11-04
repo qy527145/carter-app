@@ -47,6 +47,7 @@ import type {
   TurnTime,
   UsageView,
 } from "./lib/api";
+import type { PromptContext } from "./lib/promptContext";
 
 /** 助手轮里的一个片段。 */
 export type Item =
@@ -235,6 +236,8 @@ type Store = Conv & {
    * 输入框取走后清回 `null`。
    */
   composerDraft: string | null;
+  /** 要摆进输入框的上下文卡片：只换卡片，不动用户已经打的字（点「我的任务」）。 */
+  composerCard: PromptContext | null;
 
   setAppInfo: (i: AppInfo) => void;
   setSettings: (s: AppSettings) => void;
@@ -270,6 +273,7 @@ type Store = Conv & {
   assistant: AssistantView | null;
   setAssistant: (a: AssistantView) => void;
   setComposerDraft: (text: string | null) => void;
+  setComposerCard: (card: PromptContext | null) => void;
   // 侧边聊天
   beginSide: (c: CreatedSide) => void;
   closeSide: () => void;
@@ -855,6 +859,7 @@ export const useStore = create<Store>((set) => ({
   queued: [],
   sessionsNonce: 0,
   composerDraft: null,
+  composerCard: null,
 
   // 应用信息里带着设置，一起落地 —— 分开拉会让主题在首帧闪一下。
   setAppInfo: (i) => set({ appInfo: i, settings: i.settings }),
@@ -892,6 +897,8 @@ export const useStore = create<Store>((set) => ({
       turns: withLive(historyToTurns(c.history, c.prompts), c.live ?? []),
       // 接上的是正在跑的会话：错过的 `turn_started` 补不回来，按后端说的来。
       streaming: c.running ?? false,
+      // 同理：切走时错过的提问也补不回来。不摆出表单，那一轮就永远等着。
+      pendingForm: c.pending_ask ?? null,
       changed: changedRecord(c.changes),
       changesSince: c.changes_since ?? 0,
       times: timesRecord(c.times),
@@ -935,6 +942,7 @@ export const useStore = create<Store>((set) => ({
   setTeamCwd: (teamCwd) => set({ teamCwd: rememberTeamCwd(teamCwd) }),
   setAssistant: (assistant) => set({ assistant }),
   setComposerDraft: (composerDraft) => set({ composerDraft }),
+  setComposerCard: (composerCard) => set({ composerCard }),
 
   applyEvent: (e) =>
     set((s) => {
