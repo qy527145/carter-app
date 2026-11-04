@@ -192,6 +192,7 @@ export function BoardFrame({ html, title }: { html: string; title: string }) {
       { carterTheme: 1, css: themeCss(themeNow.current) },
       "*",
     );
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 正文经 ref 读最新主题，theme 只是「主题变了」的信号
   useEffect(pushTheme, [theme]);
 
   useEffect(() => {

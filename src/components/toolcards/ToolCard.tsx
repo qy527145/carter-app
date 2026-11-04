@@ -350,6 +350,7 @@ function TodoCard({ item, isLast = true }: { item: ToolItem; isLast?: boolean })
       ) : (
         <ul className="space-y-1">
           {todos.map((t, i) => (
+            // biome-ignore lint/suspicious/noArrayIndexKey: 模型每轮重写整份清单，内容本身可能重复，位置才是身份
             <li key={i} className="flex items-start gap-2 text-[12px] leading-relaxed">
               {t.status === "completed" ? (
                 <CircleCheck size={13} className="icon-optical shrink-0 text-[var(--ok)]" />
@@ -611,6 +612,7 @@ function AgentCard({ item }: { item: ToolItem }) {
       {agents.length > 0 && (
         <ul className="mb-2 space-y-1.5">
           {agents.map((a, i) => (
+            // biome-ignore lint/suspicious/noArrayIndexKey: 子 agent 只有描述没有 id，描述还可能重名
             <li key={i} className="rounded-md bg-ink/[0.03] px-2 py-1.5">
               <div className="flex items-center gap-1.5">
                 <AgentDot status={a.status} />

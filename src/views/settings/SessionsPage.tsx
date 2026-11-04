@@ -31,6 +31,7 @@ function Marked({ text, query }: { text: string; query: string }) {
     <>
       {parts.map((p, i) =>
         i % 2 === 1 ? (
+          // biome-ignore lint/suspicious/noArrayIndexKey: split 出来的片段靠奇偶交替区分正文与命中词，位置就是身份
           <mark key={i} className="rounded-[3px] bg-tone-orange-soft px-px text-ink">
             {p}
           </mark>

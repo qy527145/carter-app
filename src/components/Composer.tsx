@@ -112,6 +112,7 @@ function Popup({
 }) {
   const ref = useRef<HTMLDivElement>(null);
   // 键盘上下移动时把选中项滚进视野，否则超过一屏就看不见自己在选什么。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: active 是「选中项变了」的触发信号，正文靠 DOM 查询
   useEffect(() => {
     ref.current?.querySelector<HTMLElement>('[data-active="true"]')?.scrollIntoView({
       block: "nearest",
@@ -129,6 +130,7 @@ function Popup({
       </div>
       {items.map((it, i) => (
         <button
+          // biome-ignore lint/suspicious/noArrayIndexKey: 菜单项由输入内容实时生成，插入文本可能重复
           key={`${it.insert}-${i}`}
           data-active={i === active}
           // 用 pointerdown 而不是 click：click 之前输入框会先失焦，
@@ -235,10 +237,15 @@ export function MessageImages({ text }: { text: string }) {
     <>
       {parts.map((p, i) =>
         p.kind === "text" ? (
-          <span key={i} className="whitespace-pre-wrap break-words">
+          <span
+            // biome-ignore lint/suspicious/noArrayIndexKey: split 结果按位置交替，同一段文字可以重复出现
+            key={i}
+            className="whitespace-pre-wrap break-words"
+          >
             {p.value}
           </span>
         ) : (
+          // biome-ignore lint/suspicious/noArrayIndexKey: 同上，图片 token 可能重复
           <InlineImage key={i} token={p.value} />
         ),
       )}
@@ -393,6 +400,7 @@ export function Composer() {
 
   // 内容变了就把框撑到合适高度。挂在这里而不是 `onChange` 里，是因为文本还会从
   // 别的路径进来（分叉的草稿、菜单插入的 `@目录/`、清空），逐处调用总会漏一处。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: text / indent 是「内容或缩进变了」的触发信号，正文只量高度
   useEffect(() => {
     growComposer(taRef.current);
   }, [text, indent]);
@@ -428,7 +436,7 @@ export function Composer() {
     setFileQuery(null);
     setLandTick((n) => n + 1);
     focusEnd(taRef.current, body.length);
-  }, [composerDraft, connected, opening]);
+  }, [composerDraft, connected, opening, setContexts]);
 
   // 命令列表按 cwd 取一次。自定义命令来自磁盘，cwd 变了要重取。
   useEffect(() => {
@@ -500,6 +508,8 @@ export function Composer() {
   const menu = fileQuery !== null ? "file" : slashItems.length > 0 ? "slash" : null;
   const items = menu === "file" ? fileItems : slashItems;
 
+  // 换菜单 / 换了候选集就回到第一项，否则高亮会停在越界的位置上。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: menu 与 items.length 是「候选变了」的触发信号，正文只 setActive
   useEffect(() => setActive(0), [menu, items.length]);
 
   /** 文本变化时顺便重新判断光标前是不是 `@`。 */

@@ -28,6 +28,7 @@ export function useCatalog(providerId: string): Catalog {
   const [refreshing, setRefreshing] = useState(false);
   const [nonce, setNonce] = useState(0);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: nonce 是「手动重拉」的触发器，正文不读它
   useEffect(() => {
     setEntries(null);
     setError(null);

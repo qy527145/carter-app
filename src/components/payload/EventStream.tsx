@@ -64,6 +64,7 @@ export function EventStream({ raw, live }: { raw: string; live: boolean }) {
   const current = selected === null ? null : (events[selected] ?? null);
 
   // 切过滤条件后列表变短，滚动位置可能落在空白处 —— 回到顶部更符合预期。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 三个筛选值是「回到顶部」的触发信号，正文不读它们
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: 0 });
   }, [kind, query, onlyContent]);

@@ -93,6 +93,8 @@ export function Segmented<T extends string>({
   const [box, setBox] = useState<{ x: number; w: number } | null>(null);
   const first = useRef(true);
 
+  // 选项增减后滑块位置要重算：长度变了但值没变时也该量一次。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: options.length 是「布局变了」的触发信号，正文只查 DOM
   useLayoutEffect(() => {
     const el = wrap.current?.querySelector<HTMLElement>(`[data-seg="${value}"]`);
     if (el) setBox({ x: el.offsetLeft, w: el.offsetWidth });

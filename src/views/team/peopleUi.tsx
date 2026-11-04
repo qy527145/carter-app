@@ -177,7 +177,7 @@ export function PersonPicker({
       )}
       {(people?.pending.length ?? 0) > 0 && (
         <div className="mt-1 border-t border-edge px-3 py-1.5 text-[10px] leading-relaxed text-dim">
-          提交过代码、还没加入：{people!.pending.slice(0, 4).join("、")}
+          提交过代码、还没加入：{people?.pending.slice(0, 4).join("、")}
         </div>
       )}
       {footer && <div className="border-t border-edge px-2 py-1.5">{footer}</div>}

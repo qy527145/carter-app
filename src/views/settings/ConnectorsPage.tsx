@@ -338,6 +338,7 @@ function ProgressDialog({
   const url = p.url;
 
   // 一直在滚到底：安装 / 登录都可能刷几百行，不跟着滚的话用户看到的永远是开头。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 行数只是「日志又长了」的信号，正文不读它
   useEffect(() => {
     const el = log.current;
     if (!el) return;

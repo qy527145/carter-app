@@ -95,6 +95,7 @@ function QuestionSet({
     <>
       <div className="space-y-3">
         {questions.map((q, qi) => (
+          // biome-ignore lint/suspicious/noArrayIndexKey: 问题列表在一次提问里固定不变，序号就是身份
           <div key={qi}>
             <div className="mb-1.5 flex items-baseline gap-2">
               {q.header && (

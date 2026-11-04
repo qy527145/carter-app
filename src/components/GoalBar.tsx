@@ -35,6 +35,7 @@ export function GoalBar() {
   const [draft, setDraft] = useState("");
 
   // 换目标（或被清掉）之后不该还停在编辑态 —— 那会让人以为改动没生效。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 目标变了才退出编辑态，正文只 setEditing
   useEffect(() => {
     setEditing(false);
   }, [goal?.objective, goal === null]);

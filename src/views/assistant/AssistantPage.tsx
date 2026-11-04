@@ -325,7 +325,10 @@ function TicketCard({ t }: { t: AssistantTicket }) {
         )}
         <span className="ml-auto flex shrink-0 items-center gap-1">
           {t.session_id && (
-            <IconButton title="打开执行对话" onClick={() => openSession(t.session_id!)}>
+            <IconButton
+              title="打开执行对话"
+              onClick={() => t.session_id && openSession(t.session_id)}
+            >
               <MessageSquare size={12} />
             </IconButton>
           )}
@@ -378,6 +381,7 @@ function TicketCard({ t }: { t: AssistantTicket }) {
           <div className="whitespace-pre-wrap text-ink/80">{t.task}</div>
           <ul className="mono space-y-0.5">
             {t.events.map((e, i) => (
+              // biome-ignore lint/suspicious/noArrayIndexKey: 事件日志只追加，同一句话可以重复出现
               <li key={i} className="break-all">
                 {e}
               </li>
@@ -1110,6 +1114,7 @@ function EpisodeRow({ e }: { e: AssistantEpisode }) {
             <div className="text-dim">这一期的存档读不出来。</div>
           ) : (
             lines.map((l, i) => (
+              // biome-ignore lint/suspicious/noArrayIndexKey: 存档是只读的一串对话，按位置区分
               <div key={i} className="whitespace-pre-wrap break-words">
                 <span className="text-dim">{l.who}：</span>
                 <span className="text-ink/80">{l.text}</span>

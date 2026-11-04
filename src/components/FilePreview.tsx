@@ -98,7 +98,11 @@ function DiffCode({ text }: { text: string }) {
                     ? "text-tone-blue"
                     : "text-dim";
           return (
-            <span key={i} className={`block px-3 ${cls}`}>
+            <span
+              // biome-ignore lint/suspicious/noArrayIndexKey: 按行渲染的纯文本，行号就是身份，不会重排
+              key={i}
+              className={`block px-3 ${cls}`}
+            >
               {line || " "}
             </span>
           );

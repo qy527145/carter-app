@@ -350,6 +350,7 @@ export function Inspector() {
   // 换筛选 / 换会话就清掉选中项：选中的是**上一条**会话里的报文，带着这个 id
   // 去新会话里查一定查不到，然后那句「该报文已不存在」就冒出来了 ——
   // 而用户不过是换了个对话。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: turn / sessionId 是「该清了」的信号，正文只 setSelected
   useEffect(() => {
     setSelected(null);
   }, [turn, sessionId]);
@@ -358,6 +359,7 @@ export function Inspector() {
   // 那次请求 —— 这一轮最后一次主对话请求（前面几次是工具往返，后面可能还有起标题、
   // 压缩）。只自动选一次：之后用户点别的条目不该被拽回来。
   const autoPick = useRef(false);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: sessionId 变了要重置自动选中标记，正文只写 ref
   useEffect(() => {
     autoPick.current = open && turn !== null;
   }, [open, turn, sessionId]);
@@ -427,6 +429,7 @@ export function Inspector() {
     record == null
       ? ""
       : `${record.stream_frames.length}:${record.response_body.length}:${record.total_ms}`;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: recordVersion 就是「记录长到哪了」的信号，正文按它决定要不要重解
   useEffect(() => {
     if (!selected || !sessionId || view !== "visual") {
       setInspected(null);
@@ -453,6 +456,7 @@ export function Inspector() {
 
   // 换一条请求、或换看另一半时，详情回到顶部：上一条的行位置毫无意义，
   // 在请求里滚到一半再切响应，落在响应中间也叫人摸不着头。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: selected / side 是「换了一条」的信号，正文只滚容器
   useEffect(() => {
     detailRef.current?.scrollTo({ top: 0 });
   }, [selected, side]);
@@ -577,6 +581,7 @@ export function Inspector() {
               </div>
             )}
             {groups.map((g, gi) => (
+              // biome-ignore lint/suspicious/noArrayIndexKey: 分组按轮次顺序生成，轮次可能为 null（未标注），序号最稳
               <div key={gi}>
                 <div className="sticky top-0 z-10 bg-sidebar px-3 py-1 text-[11px] font-medium text-dim">
                   {g.turn === null ? "未标注轮次" : `第 ${g.turn} 轮`}

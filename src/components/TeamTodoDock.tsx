@@ -70,6 +70,7 @@ export function TeamTodoDock() {
   }, [cwd]);
 
   // 换目录立刻重拉；一轮结束再拉一次 —— 模型可能刚把某个任务标成了完成。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: idle 只是「一轮刚结束」的触发器，refresh 自己已经绑了 cwd
   useEffect(() => {
     void refresh();
   }, [refresh, idle]);

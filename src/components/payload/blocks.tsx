@@ -114,6 +114,7 @@ export function BlockList({ blocks }: { blocks: BlockView[] }) {
   return (
     <div className="space-y-2">
       {blocks.map((b, i) => (
+        // biome-ignore lint/suspicious/noArrayIndexKey: 内容块只追加不重排，同一份块也没有别的标识
         <BlockRenderer key={i} block={b} />
       ))}
     </div>

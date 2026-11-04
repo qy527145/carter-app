@@ -618,6 +618,7 @@ function StreamingArtifact({ lang, src }: { lang: string; src: string }) {
   const lines = useMemo(() => src.split("\n").length, [src]);
 
   // 展开着的时候跟着长：新来的字留在视野里，不用手动往下拖。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: src 是「内容长了」的触发信号，正文只滚容器
   useEffect(() => {
     if (!open) return;
     const el = box.current;
@@ -805,7 +806,7 @@ function HtmlFileModal({ path, cwd, onClose }: { path: string; cwd: string; onCl
         <>
           {state.abs && (
             <button
-              onClick={() => openPath(state.abs!).catch(toastError)}
+              onClick={() => state.abs && openPath(state.abs).catch(toastError)}
               className="inline-flex items-center gap-1 rounded-md bg-ink/5 px-2 py-1 text-xs text-dim transition-colors hover:bg-ink/10 hover:text-ink"
             >
               <ExternalLink size={12} />

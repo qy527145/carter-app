@@ -61,6 +61,7 @@ export function markSeen(cwd: string, at: number) {
 /** 收件箱：随全景一起刷新。`nonce` 变了就重拉。 */
 export function useInbox(cwd: string, nonce: number, fetch: boolean) {
   const [items, setItems] = useState<TeamInboxItem[]>([]);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: nonce 是「团队页重读全景」的触发器，正文不读它
   useEffect(() => {
     let alive = true;
     if (!cwd) return;

@@ -166,7 +166,7 @@ function ScheduleEditor({
         ? { kind: "once", at_ms: atMs }
         : d.mode === "interval"
           ? { kind: "interval", every_minutes: everyMinutes }
-          : { kind: "daily", hour: Number(daily![1]), minute: Number(daily![2]) };
+          : { kind: "daily", hour: Number(daily?.[1] ?? 0), minute: Number(daily?.[2] ?? 0) };
 
     const next: Schedule = {
       id: d.id,
@@ -412,7 +412,7 @@ export function SchedulesPage() {
                       {s.last_session_id && (
                         <button
                           className="text-tone-blue hover:underline"
-                          onClick={() => openSession(s.last_session_id!)}
+                          onClick={() => s.last_session_id && openSession(s.last_session_id)}
                         >
                           打开上次那条对话
                         </button>

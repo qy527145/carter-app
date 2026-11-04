@@ -465,7 +465,11 @@ async fn auth_state(v: &Vendor, cli: &Path) -> AuthState {
 
 /// 跑一条只读命令并把输出当 JSON 解析。成功信封在 stdout、错误信封在 stderr（lark-cli），
 /// 两边都试；失败时直接给出可展示的 [`AuthState`]。
-async fn run_json(cli: &Path, args: &[&str], secs: u64) -> Result<serde_json::Value, AuthState> {
+async fn run_json(
+    cli: &Path,
+    args: &[&str],
+    secs: u64,
+) -> Result<serde_json::Value, Box<AuthState>> {
     let mut cmd = tokio::process::Command::new(cli);
     cmd.args(args)
         .env("PATH", child_path(Some(cli)))
@@ -478,17 +482,17 @@ async fn run_json(cli: &Path, args: &[&str], secs: u64) -> Result<serde_json::Va
     platform::hide_console_async(&mut cmd);
     let out = match tokio::time::timeout(Duration::from_secs(secs), cmd.output()).await {
         Err(_) => {
-            return Err(AuthState {
+            return Err(Box::new(AuthState {
                 message: Some("检查登录态超时".into()),
                 hint: Some("网络不通，或服务端暂时没有响应，稍后再试。".into()),
                 ..Default::default()
-            });
+            }));
         }
         Ok(Err(e)) => {
-            return Err(AuthState {
+            return Err(Box::new(AuthState {
                 message: Some(format!("跑不起来：{e}")),
                 ..Default::default()
-            });
+            }));
         }
         Ok(Ok(o)) => o,
     };
@@ -496,10 +500,12 @@ async fn run_json(cli: &Path, args: &[&str], secs: u64) -> Result<serde_json::Va
     let stderr = String::from_utf8_lossy(&out.stderr);
     serde_json::from_str(&stdout)
         .or_else(|_| serde_json::from_str(&stderr))
-        .map_err(|_| AuthState {
-            message: Some("看不懂命令的输出".into()),
-            hint: first_line(&stderr).or_else(|| first_line(&stdout)),
-            ..Default::default()
+        .map_err(|_| {
+            Box::new(AuthState {
+                message: Some("看不懂命令的输出".into()),
+                hint: first_line(&stderr).or_else(|| first_line(&stdout)),
+                ..Default::default()
+            })
         })
 }
 
@@ -509,7 +515,7 @@ async fn run_json(cli: &Path, args: &[&str], secs: u64) -> Result<serde_json::Va
 async fn lark_auth_state(cli: &Path) -> AuthState {
     let j = match run_json(cli, &["auth", "status"], 25).await {
         Ok(j) => j,
-        Err(s) => return s,
+        Err(s) => return *s,
     };
     if j.get("ok").and_then(|x| x.as_bool()) == Some(false) {
         let sub = j
@@ -576,7 +582,7 @@ async fn lark_auth_state(cli: &Path) -> AuthState {
 async fn mail_auth_state(cli: &Path) -> AuthState {
     let j = match run_json(cli, &["account", "list", "--json"], 10).await {
         Ok(j) => j,
-        Err(s) => return s,
+        Err(s) => return *s,
     };
     let accounts = j
         .get("accounts")

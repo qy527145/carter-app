@@ -233,6 +233,7 @@ export function UpstreamFetchDialog({
   const [onlyChat, setOnlyChat] = useState(true);
   const [nonce, setNonce] = useState(0);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: nonce 是「手动重拉」的触发器，正文不读它
   useEffect(() => {
     let cancelled = false;
     setLoading(true);

@@ -95,6 +95,7 @@ export function ContextChips({
     <div className={`flex flex-col gap-1 border-l-2 border-edge-strong/40 pl-2 ${className}`}>
       {contexts.map((c, i) => (
         <ContextChip
+          // biome-ignore lint/suspicious/noArrayIndexKey: 同一份上下文可能同名同类型，序号才是区分它们的那一位
           key={`${c.kind}:${c.title}:${i}`}
           context={c}
           onRemove={onRemove ? () => onRemove(i) : undefined}

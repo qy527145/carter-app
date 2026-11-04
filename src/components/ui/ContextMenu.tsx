@@ -207,6 +207,7 @@ function Menu({
   useEffect(() => {
     if (visible) ref.current?.focus({ preventScroll: true });
   }, [visible]);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: byKeyboard 在意唤起时就定死了，进依赖只是让菜单挂载时多跑一遍
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape" && !ref.current?.contains(document.activeElement)) {
@@ -321,9 +322,15 @@ function Menu({
       >
         {entries.map((entry, i) =>
           entry === "separator" ? (
-            <div key={i} role="separator" className="mx-1.5 my-1 h-px bg-edge" />
+            <div
+              // biome-ignore lint/suspicious/noArrayIndexKey: 菜单项由调用方每次重建、顺序固定，条目本身也没有 id
+              key={i}
+              role="separator"
+              className="mx-1.5 my-1 h-px bg-edge"
+            />
           ) : "heading" in entry ? (
             <div
+              // biome-ignore lint/suspicious/noArrayIndexKey: 同上，标题允许重复
               key={i}
               className="px-2 pb-0.5 pt-1.5 text-[10px] font-medium text-dim/80 select-none"
             >
@@ -331,6 +338,7 @@ function Menu({
             </div>
           ) : (
             <button
+              // biome-ignore lint/suspicious/noArrayIndexKey: 同上，标签可能重复
               key={i}
               type="button"
               role={entry.checked === undefined ? "menuitem" : "menuitemcheckbox"}

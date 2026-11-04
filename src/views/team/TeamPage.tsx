@@ -990,6 +990,7 @@ function GoalGraph({
       ) : view === "lanes" ? (
         <div className="relative flex gap-4 overflow-x-auto pb-2">
           {lanes.map((lane, i) => (
+            // biome-ignore lint/suspicious/noArrayIndexKey: 泳道按层级顺序生成，层级序号就是身份
             <div key={i} className="flex w-[16.5rem] shrink-0 flex-col gap-2">
               <div className="mb-0.5 px-1 text-[10px] uppercase tracking-wider text-dim">
                 {i === 0 ? "起点" : `第 ${i} 层`}
@@ -1201,6 +1202,8 @@ function BoardTab({
   const [page, setPage] = useState<{ id: string; html: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // version：团队数据每次重读全景时 +1，看板内容可能刚被别人改过。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: version 是重读的触发器，正文只认 active.id
   useEffect(() => {
     if (!active) return;
     let live = true;

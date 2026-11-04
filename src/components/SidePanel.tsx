@@ -30,12 +30,14 @@ export function SidePanel() {
   const taRef = useRef<HTMLTextAreaElement>(null);
 
   // 贴底跟随，规则与主对话一致：用户往上翻时不要把他拽回来。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 只在轮次/流式状态变化时贴底，正文不直接读它们
   useEffect(() => {
     const el = scrollRef.current;
     if (el && stick.current) el.scrollTop = el.scrollHeight;
   }, [side?.turns, side?.streaming]);
 
   // 打开时把焦点放进输入框 —— 抽屉刚开还要再点一下才能打字，很别扭。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 只在意「换了哪条会话」，正文只读 side 是否存在
   useEffect(() => {
     if (side) taRef.current?.focus();
   }, [side?.sessionId]);

@@ -261,6 +261,7 @@ export function HeadersTable({ headers }: { headers: [string, string][] }) {
         <table className="w-full border-collapse text-xs">
           <tbody>
             {headers.map(([k, v], i) => (
+              // biome-ignore lint/suspicious/noArrayIndexKey: 同名请求头可以重复出现，序号补上唯一性
               <tr key={`${k}-${i}`} className={i % 2 ? "bg-base" : ""}>
                 <td className="w-40 border-r border-edge px-2 py-1 align-top mono text-dim">{k}</td>
                 <td className="break-all px-2 py-1 mono text-ink">{v}</td>

@@ -34,11 +34,13 @@ export function ChangesPage() {
   const dirty = value !== saved;
 
   async function save() {
+    // 闭包里拿不到组件体上那次 `if (!settings)` 的收窄，这里再挡一次。
+    if (!settings) return;
     const patterns = value
       .split("\n")
       .map((s) => s.trim())
       .filter((s) => s !== "" && !s.startsWith("#"));
-    const next: AppSettings = { ...settings!, changes_ignore: patterns };
+    const next: AppSettings = { ...settings, changes_ignore: patterns };
     setSettings(next);
     setSaving(true);
     try {
@@ -46,7 +48,7 @@ export function ChangesPage() {
       setDraft(null);
     } catch (e) {
       // 存不下就回滚，否则用户以为规则生效了，重启又回来。
-      setSettings(settings!);
+      setSettings(settings);
       toastError(e);
     } finally {
       setSaving(false);

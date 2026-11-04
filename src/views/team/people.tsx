@@ -33,10 +33,13 @@ export function PeopleProvider({
       setPeople(null);
     }
   }, [cwd]);
+  // 换目录时先把旧名单清掉，别让人看到上一条目录的成员。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: cwd 是「该清了」的触发信号，正文只 setPeople
   useEffect(() => {
     setPeople(null);
   }, [cwd]);
-  // `nonce`：团队页每次重读全景时 +1，名单跟着刷新（别人的加入随 git 同步过来）。
+  // 名单跟着 cwd 变；nonce 是团队页重读全景时的触发器，正文不读它。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: nonce 是触发器，reload 自己已经绑了 cwd
   useEffect(() => {
     void reload();
   }, [reload, nonce]);

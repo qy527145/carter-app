@@ -282,6 +282,7 @@ function ProcessGroup({ items, cwd }: { items: Item[]; cwd: string }) {
       <Collapse open={open}>
         <div className="space-y-2 border-t border-edge px-3 py-2">
           {items.map((it, i) => (
+            // biome-ignore lint/suspicious/noArrayIndexKey: 工具调用条目只追加不重排，内容重复时序号最稳
             <ItemView key={i} item={it} cwd={cwd} writing={false} isLast={i === items.length - 1} />
           ))}
         </div>
@@ -904,10 +905,16 @@ function AssistantTurn({
       {segs
         ? segs.map((seg, i) => {
             const last = i === segs.length - 1;
-            if (seg.kind === "process") return <ProcessGroup key={i} items={seg.items} cwd={cwd} />;
+            if (seg.kind === "process") {
+              return (
+                // biome-ignore lint/suspicious/noArrayIndexKey: 分段按事件流顺序生成，没有独立 id
+                <ProcessGroup key={i} items={seg.items} cwd={cwd} />
+              );
+            }
             // 「正在写」只算正在生成的那一段正文，与详细模式的判断口径一致。
             return (
               <ItemView
+                // biome-ignore lint/suspicious/noArrayIndexKey: 同上，正文段可能文字完全相同
                 key={i}
                 item={seg.item}
                 cwd={cwd}
@@ -918,6 +925,7 @@ function AssistantTurn({
           })
         : items.map((item, i) => (
             <ItemView
+              // biome-ignore lint/suspicious/noArrayIndexKey: 条目按事件流顺序生成，没有独立 id
               key={i}
               item={item}
               cwd={cwd}
@@ -1262,6 +1270,7 @@ function PeerTurn({ text }: { text: string }) {
         <span className="truncate">跨会话 · {title}</span>
       </div>
       {letters.map((l, i) => (
+        // biome-ignore lint/suspicious/noArrayIndexKey: 跨会话来信按出现位置排列，同一封信可能重复
         <div key={i} className="mt-1.5">
           {letters.length > 1 && <div className="text-xs text-dim">{l.from}</div>}
           <div
@@ -1390,6 +1399,7 @@ export function TurnList({
         const turn = t.turn;
         return (
           <TurnView
+            // biome-ignore lint/suspicious/noArrayIndexKey: 轮次按对话顺序只追加，序号就是轮次的身份
             key={i}
             turn={t}
             time={turn !== undefined ? times?.[turn] : undefined}
@@ -1450,6 +1460,7 @@ function MessageList() {
   // 刚进一条会话后的「落定期」：内容还在陆续变高，要一路贴着底部。
   const settleUntil = useRef(0);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 贴底跟随只看 turns / streaming 这两下变化，正文不直接读它们
   useEffect(() => {
     const el = scrollRef.current;
     if (el && stick.current) el.scrollTop = el.scrollHeight;
@@ -1589,6 +1600,7 @@ function PastEpisodes({ onGrow }: { onGrow: () => void }) {
   const missing = visible.filter((e) => !(e.number in loaded)).map((e) => e.number);
   const key = missing.join(",");
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 只在「缺哪几期」变化时拉一次；missing 每次渲染都是新数组，进依赖会反复重拉
   useEffect(() => {
     if (!key) return;
     let alive = true;
@@ -1832,6 +1844,7 @@ function TodoPanel() {
           {/* 清单很长时限高滚动，别把对话区挤没了。 */}
           <div className="max-h-48 space-y-1 overflow-y-auto pb-1 pl-5 pt-1">
             {todos.map((t, i) => (
+              // biome-ignore lint/suspicious/noArrayIndexKey: 清单内容可能重复，位置才是身份
               <div key={i} className="flex items-center gap-2 text-xs">
                 {t.status === "completed" ? (
                   <CircleCheck size={13} className="carter-pop shrink-0 text-[var(--ok)]" />

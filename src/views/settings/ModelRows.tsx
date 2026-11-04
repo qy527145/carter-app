@@ -198,6 +198,7 @@ export function ModelList({
         <div className="space-y-2">
           {models.map((m, i) => (
             <ModelRow
+              // biome-ignore lint/suspicious/noArrayIndexKey: 行按位置增删改，模型名还是空的/重复的，不能当 key
               key={i}
               m={m}
               info={m.meta.trim() ? metaMap[m.meta.trim()] : undefined}

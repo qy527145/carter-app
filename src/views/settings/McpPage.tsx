@@ -35,6 +35,7 @@ function PairEditor({
   return (
     <div className="space-y-1.5">
       {pairs.map((p, i) => (
+        // biome-ignore lint/suspicious/noArrayIndexKey: 键值对没有 id，键名还在编辑中（可能为空、可能重复）
         <div key={i} className="flex gap-2">
           <Input
             mono

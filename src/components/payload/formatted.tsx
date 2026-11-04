@@ -190,6 +190,7 @@ export function RawView({ rec, side }: { rec: ExchangeRecord; side: Side }) {
           >
             <div className="space-y-1">
               {rec.stream_frames.map((f, i) => (
+                // biome-ignore lint/suspicious/noArrayIndexKey: 字节块只按到达顺序追加，块号就是它的身份
                 <div key={i} className="flex items-start gap-2">
                   <span className="w-8 shrink-0 pt-1 text-right tabular-nums text-[10px] text-dim">
                     #{i + 1}

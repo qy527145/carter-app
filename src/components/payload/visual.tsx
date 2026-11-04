@@ -74,6 +74,7 @@ function RequestBlocks({ req }: { req: InspectedRequest }) {
       >
         <div className="space-y-1.5">
           {req.messages.map((m, i) => (
+            // biome-ignore lint/suspicious/noArrayIndexKey: 上下文消息按位置区分（同一段文字可以出现两次），位置就是身份
             <MessageCard key={i} msg={m} index={i} />
           ))}
         </div>

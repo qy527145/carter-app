@@ -214,11 +214,10 @@ export function ProviderEditor({
       setModels([blankModel()]);
       return;
     }
+    const catalog = t.catalog;
     try {
-      const entries = await recommendedCatalogModels(t.catalog);
-      setModels(
-        entries.length > 0 ? entries.map((e) => rowFromEntry(t.catalog!, e)) : [blankModel()],
-      );
+      const entries = await recommendedCatalogModels(catalog);
+      setModels(entries.length > 0 ? entries.map((e) => rowFromEntry(catalog, e)) : [blankModel()]);
     } catch {
       // 目录还没拉过、或者缓存坏了：留一行空的，用户可以用「从上游拉取」问上游。
       setModels([blankModel()]);

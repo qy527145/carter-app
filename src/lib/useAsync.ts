@@ -23,6 +23,7 @@ export function useAsync<T>(load: () => Promise<T>, deps: unknown[] = []): Async
   const [nonce, setNonce] = useState(0);
   const configNonce = useStore((s) => s.configNonce);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: load 刻意不进依赖 —— 调用方用 deps 声明「什么时候重拉」，把函数放进来会每次渲染都重跑
   useEffect(() => {
     let cancelled = false;
     setLoading(true);

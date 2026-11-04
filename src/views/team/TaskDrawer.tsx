@@ -310,10 +310,15 @@ export function Mentions({ text }: { text: string }) {
     <>
       {text.split(re).map((part, i) =>
         re.test(part) && part.startsWith("@") ? (
-          <span key={i} className="rounded bg-tone-blue-soft px-0.5 text-tone-blue">
+          <span
+            // biome-ignore lint/suspicious/noArrayIndexKey: split 结果按位置交替，文本本身就会重复出现
+            key={i}
+            className="rounded bg-tone-blue-soft px-0.5 text-tone-blue"
+          >
             {part}
           </span>
         ) : (
+          // biome-ignore lint/suspicious/noArrayIndexKey: 同上，普通片段没有可用于区分的标识
           <span key={i}>{part}</span>
         ),
       )}
