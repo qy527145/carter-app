@@ -7,20 +7,25 @@
 // 成为一枚上下文卡片，不需要用户再手打一遍任务 id 与目标；要不要补一句、什么时候
 // 发，仍由用户决定。
 //
-// ## 为什么可以多选
+// ## 勾选即加入
 //
-// 手上有几件事要一起交代是常态（同一目标下拆出来的、一次重构牵动的几个文件）。
-// 单选不是取舍，是早期实现只装得下一张卡片留下的形状 —— 见 `lib/promptContext`。
-// 勾选与「摆进输入框」分成两步：连点几下不该让输入框抖三下，也不该让用户每勾一条
-// 就去看一眼卡片有没有摆对。
+// 手上有几件事要一起交代是常态（同一目标下拆出来的、一次重构牵动的几个文件），
+// 所以可以连点几条、一起摆在输入框里。但「勾选」本身就是那个动作 —— 勾上就是
+// 摆进输入框了，再点一下撤掉；没有单独的确认按钮。
+//
+// 早先版本把两件事拆成两步（先勾、再点「摆进输入框」），理由是「连点几下不该让
+// 输入框抖三下」。那个顾虑是假的：输入框上方的卡片本来就是随着操作变长的，
+// 抖的是人自己的动作，而中间多出来的那一次点击是纯负担。勾选状态也不另存一份 ——
+// 它直接就是输入框里那份卡片列表（见 store 的 `composerContexts`），
+// 两处各记一份必然要夹一个同步步骤，而那个步骤就是那个按钮。
 //
 // ## 什么时候不显示
 //
 // 没有待办、项目没有团队目录、或者用户手动收起了 —— 这三种情况下它都该让位。
 // 常驻一条「暂无待办」是纯噪音：它不提供任何可行动的东西，却每天占用一行高度。
 
-import { useCallback, useEffect, useState } from "react";
-import { Check, ChevronRight, CircleAlert, ListChecks, Send } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Check, ChevronRight, CircleAlert, ListChecks } from "lucide-react";
 
 import { teamMyTasks, type TeamTodo } from "../lib/api";
 import type { PromptContext } from "../lib/promptContext";
@@ -34,10 +39,15 @@ export function TeamTodoDock() {
   const cwd = useStore((s) => s.cwd);
   const idle = useStore((s) => !s.streaming);
   const [todos, setTodos] = useState<TeamTodo[]>([]);
-  /** 勾中的任务 id。拉数据时按 id 保留，任务消失了自然就不在选中里了。 */
-  const [picked, setPicked] = useState<Set<string>>(() => new Set());
-  const sessionId = useStore((s) => s.sessionId);
-  const addComposerCards = useStore((s) => s.addComposerCards);
+  // 勾选状态不另存一份：它就是输入框里那叠卡片。两处各记一份的话，中间必然
+  // 需要一次同步 —— 那个同步就是原来那个多余的「摆进输入框」按钮。
+  const contexts = useStore((s) => s.composerContexts);
+  const toggleContext = useStore((s) => s.toggleComposerContext);
+  // 只认任务类卡片，并且按 id 比 —— 不拼正文，正文里有「当前状态」这类随时会变的东西。
+  const pickedIds = useMemo(
+    () => new Set(contexts.filter((c) => c.kind === "task" && c.ref).map((c) => c.ref as string)),
+    [contexts],
+  );
   const [collapsed, setCollapsed] = useState(() => {
     try {
       return localStorage.getItem(COLLAPSE_KEY) === "1";
@@ -86,16 +96,8 @@ export function TeamTodoDock() {
 
   const open = todos.filter((t) => t.status !== "blocked").length;
   const blocked = todos.length - open;
-  const chosen = todos.filter((t) => picked.has(t.id));
-
-  function togglePick(id: string) {
-    setPicked((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }
+  const isPicked = (t: TeamTodo) => pickedIds.has(t.id);
+  const chosen = todos.filter(isPicked);
 
   return (
     <div className="shrink-0 px-4 pt-2">
@@ -118,7 +120,8 @@ export function TeamTodoDock() {
             </span>
           )}
           {chosen.length > 0 ? (
-            <span className="text-ink">已勾选 {chosen.length} 项</span>
+            // 摆在框里几条，这里就说几条 —— 它和输入框上方那叠卡片是同一个数。
+            <span className="text-ink">已放进输入框 {chosen.length} 条</span>
           ) : (
             collapsed && (
               <span className="ml-auto min-w-0 truncate text-ink/80">
@@ -134,37 +137,10 @@ export function TeamTodoDock() {
               <TodoRow
                 key={t.id}
                 todo={t}
-                picked={picked.has(t.id)}
-                onToggle={() => togglePick(t.id)}
+                picked={isPicked(t)}
+                onToggle={() => toggleContext(todoCard(t))}
               />
             ))}
-          </div>
-        )}
-
-        {/* 勾了才出现：常态下这一条不存在，不占一行高度。 */}
-        {chosen.length > 0 && (
-          <div className="carter-enter mb-1 flex items-center gap-1.5 border-t border-edge/70 px-1 pt-1.5">
-            <span className="text-[10px] text-dim">
-              选中的 {chosen.length} 件事一起交给卡特
-            </span>
-            <button
-              onClick={() => setPicked(new Set())}
-              className="ml-auto rounded px-1.5 py-0.5 text-[10px] text-dim transition-colors hover:bg-ink/5 hover:text-ink"
-            >
-              取消
-            </button>
-            <button
-              onClick={() => {
-                addComposerCards(chosen.map(todoCard));
-                setPicked(new Set());
-              }}
-              disabled={!sessionId}
-              title={sessionId ? "摆进输入框，等你补一句再发" : "先开一条对话"}
-              className="carter-press flex items-center gap-1 rounded-md bg-ink px-2 py-1 text-[10px] font-medium text-[var(--accent-contrast)] transition-opacity hover:opacity-90 disabled:opacity-40"
-            >
-              <Send size={10} />
-              摆进输入框
-            </button>
           </div>
         )}
       </div>
@@ -176,6 +152,8 @@ export function TeamTodoDock() {
 function todoCard(todo: TeamTodo): PromptContext {
   return {
     kind: "task",
+    // 身份用任务 id，不用正文：正文里有「当前状态」，任务一推进就会变。
+    ref: todo.id,
     title: todo.title,
     body:
       `接着做我名下的这个任务：\n\n` +

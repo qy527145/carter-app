@@ -15,6 +15,17 @@ export type PromptContext = {
   kind: PromptContextKind;
   title: string;
   body: string;
+  /**
+   * 稳定标识（如 `task:t-abc`）。**只在本机内存里用**，不写进标签、不发给模型。
+   *
+   * 有了它，「这张卡片在不在输入框里」就能按 id 判断，而不是按正文比较 ——
+   * 待办的正文里带着「当前状态」这类随时会变的东西，任务一被标成进行中，
+   * 按正文算的勾选就悄悄对不上了：卡片还在输入框里，勾却掉了。
+   *
+   * 从文本解析回来的卡片没有这个字段（那时也不需要它：解析出来的是已经发出去的
+   * 消息，没有「勾选状态」这回事）。
+   */
+  ref?: string;
 };
 
 /** 标签体。属性顺序不固定（模型或旧版本可能写反），逐个取而不是一条正则吃掉。 */
@@ -32,8 +43,15 @@ export const CONTEXT_LABEL: Record<PromptContextKind, string> = {
   board: "看板",
 };
 
-/** 同一张卡片再来一次就不再重复摆 —— 用户点两下同一条待办不该出现两张一样的卡。 */
+/**
+ * 同一张卡片的身份。
+ *
+ * 有 `ref` 就用它 —— 任务正文里的状态、受阻原因都会变，按正文算身份的话，
+ * 任务一推进，输入框里那张卡就和列表里的这条对不上了。没有 `ref` 的
+ * （从历史消息解析回来的）才退回按内容比。
+ */
 export function contextKey(c: PromptContext): string {
+  if (c.ref) return `${c.kind}\u0000${c.ref}`;
   return `${c.kind}\u0000${c.title}\u0000${c.body}`;
 }
 

@@ -48,13 +48,7 @@ import {
   type ModelRow,
 } from "../lib/api";
 import { landFlight } from "../lib/flight";
-import {
-  contextKey,
-  contextSummary,
-  formatContext,
-  parseContexts,
-  type PromptContext,
-} from "../lib/promptContext";
+import { contextSummary, formatContext, parseContexts } from "../lib/promptContext";
 import { toastError } from "../lib/toast";
 import { fmtTokens, shortenPath } from "../lib/format";
 import { displayName, modelTitle, useModelCatalog } from "../lib/modelLabel";
@@ -349,8 +343,15 @@ export function Composer() {
   // 选定的斜杠命令（不带 `/`）。它是一枚整体的标签，不在 `text` 里：
   // 否则退格一下就成了残缺的命令名，还会把菜单重新弹出来。
   const [command, setCommand] = useState<string | null>(null);
-  /** 摆在输入框上方的上下文卡片。可以有多枚（见 lib/promptContext）。 */
-  const [contexts, setContexts] = useState<PromptContext[]>([]);
+  /**
+   * 摆在输入框上方的上下文卡片。可以有多枚（见 lib/promptContext）。
+   *
+   * 状态放在 store 里而不是这里：待办条上的勾选就认这份列表 —— 勾了就是摆进
+   * 输入框了，再点一下撤掉。两处各记一份的话，中间必然要夹一个「确认摆放」
+   * 的按钮，而那一下是纯粹多出来的。
+   */
+  const contexts = useStore((s) => s.composerContexts);
+  const setContexts = useStore((s) => s.setComposerContexts);
   const [attachments, setAttachments] = useState<string[]>([]);
   const [pasting, setPasting] = useState(false);
 
@@ -421,21 +422,6 @@ export function Composer() {
     setLandTick((n) => n + 1);
     focusEnd(taRef.current, body.length);
   }, [composerDraft, connected]);
-
-  // 点「我的任务」摆上来的卡片。与上面的草稿不同：这是在同一条对话里**追加**任务，
-  // 用户可能已经打了半句话，所以只换卡片，不动输入框里的字；也不覆盖已有的卡片 ——
-  // 勾选几件事一起交给卡特是常态，后到的往上叠。
-  const composerCards = useStore((s) => s.composerCards);
-  useEffect(() => {
-    if (composerCards.length === 0 || !connected) return;
-    useStore.setState({ composerCards: [] });
-    // 已经摆在框里的同一条不再叠一张。
-    setContexts((prev) => {
-      const seen = new Set(prev.map(contextKey));
-      return [...prev, ...composerCards.filter((c) => !seen.has(contextKey(c)))];
-    });
-    focusEnd(taRef.current, taRef.current?.value.length ?? 0);
-  }, [composerCards, connected]);
 
   // 命令列表按 cwd 取一次。自定义命令来自磁盘，cwd 变了要重取。
   useEffect(() => {
@@ -762,7 +748,7 @@ export function Composer() {
               <ContextChips
                 contexts={contexts}
                 onRemove={(i) => {
-                  setContexts((prev) => prev.filter((_, n) => n !== i));
+                  setContexts(contexts.filter((_, n) => n !== i));
                   taRef.current?.focus();
                 }}
               />

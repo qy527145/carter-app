@@ -237,12 +237,14 @@ type Store = Conv & {
    */
   composerDraft: string | null;
   /**
-   * 要塞进输入框的上下文卡片：只换卡片，不动用户已经打的字（点「我的任务」）。
+   * 输入框里正摆着的上下文卡片。
    *
-   * 是一组而不是一张 —— 一次挑几件事一起交给卡特是常态（见 `lib/promptContext`）。
-   * 输入框取走后清回空数组。
+   * 它由输入框**自己**读，而不是「塞一个值进去、再被取走」：待办条上的勾选状态
+   * 就是这份列表本身（见下面的 `toggleComposerContext`）。两份状态各记一遍的话，
+   * 勾选与「真的摆进输入框」之间就隔着一个确认按钮 —— 勾了还要再点一次，
+   * 而人以为勾选本身就是加入。
    */
-  composerCards: PromptContext[];
+  composerContexts: PromptContext[];
 
   setAppInfo: (i: AppInfo) => void;
   setSettings: (s: AppSettings) => void;
@@ -278,8 +280,10 @@ type Store = Conv & {
   assistant: AssistantView | null;
   setAssistant: (a: AssistantView) => void;
   setComposerDraft: (text: string | null) => void;
-  /** 追加要摆进输入框的卡片（同一条重复点不会摆两张）。 */
-  addComposerCards: (cards: PromptContext[]) => void;
+  /** 整体替换输入框里的卡片（分叉草稿带进来的、发送后清空）。 */
+  setComposerContexts: (contexts: PromptContext[]) => void;
+  /** 有就撤掉、没有就摆上 —— 待办条的勾选直接走这一条。 */
+  toggleComposerContext: (card: PromptContext) => void;
   // 侧边聊天
   beginSide: (c: CreatedSide) => void;
   closeSide: () => void;
@@ -865,7 +869,7 @@ export const useStore = create<Store>((set) => ({
   queued: [],
   sessionsNonce: 0,
   composerDraft: null,
-  composerCards: [],
+  composerContexts: [],
 
   // 应用信息里带着设置，一起落地 —— 分开拉会让主题在首帧闪一下。
   setAppInfo: (i) => set({ appInfo: i, settings: i.settings }),
@@ -899,6 +903,9 @@ export const useStore = create<Store>((set) => ({
       // 换/重建会话时排队清空：那些消息属于原来那条会话任务，
       // 留着它们会让界面显示一批永远不会开始跑的「排队中」。
       queued: [],
+      // 输入框里的上下文卡片同样要清：它们指向**上一个**项目 / 团队目录里的任务，
+      // 带到新对话里就是一句「接着做 t-abc」，而新会话根本不知道那是谁。
+      composerContexts: [],
       goal: c.goal,
       turns: withLive(historyToTurns(c.history, c.prompts), c.live ?? []),
       // 接上的是正在跑的会话：错过的 `turn_started` 补不回来，按后端说的来。
@@ -924,6 +931,7 @@ export const useStore = create<Store>((set) => ({
       sessionId: null,
       ...emptyConversation,
       queued: [],
+      composerContexts: [],
       side: null,
       inspectorOpen: false,
       inspectorTurn: null,
@@ -948,14 +956,18 @@ export const useStore = create<Store>((set) => ({
   setTeamCwd: (teamCwd) => set({ teamCwd: rememberTeamCwd(teamCwd) }),
   setAssistant: (assistant) => set({ assistant }),
   setComposerDraft: (composerDraft) => set({ composerDraft }),
-  addComposerCards: (cards) =>
+  setComposerContexts: (contexts) => set({ composerContexts: contexts }),
+  toggleComposerContext: (card) =>
     set((s) => {
-      if (cards.length === 0) return {};
-      const seen = new Set(s.composerCards.map(contextKey));
-      const add = cards.filter((c) => !seen.has(contextKey(c)));
-      // 返回空对象而不是 `s` 本身：zustand 会把 `s` 当成一次完整的状态写入，
-      // 订阅者仍然会收到通知；`{}` 是一条真正的空更新，什么都没变时不留痕迹。
-      return add.length === 0 ? {} : { composerCards: [...s.composerCards, ...add] };
+      const key = contextKey(card);
+      const hit = s.composerContexts.findIndex((c) => contextKey(c) === key);
+      // 撤掉时保持其余卡片的先后：那个顺序是用户表达的意思。
+      return {
+        composerContexts:
+          hit >= 0
+            ? s.composerContexts.filter((_, i) => i !== hit)
+            : [...s.composerContexts, card],
+      };
     }),
 
   applyEvent: (e) =>
