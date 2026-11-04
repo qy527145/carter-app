@@ -61,7 +61,6 @@ import { baseName } from "../../lib/format";
 import { contextSummary, formatContext } from "../../lib/promptContext";
 import { ASSISTANT_CHAT_ID, openProjectChat, startProjectChat } from "../../lib/sessionOps";
 import {
-  layerize,
   newBoardHandoff,
   newGoalHandoff,
   personName,
@@ -72,8 +71,8 @@ import {
 import { toastError, toastOk } from "../../lib/toast";
 import { useStore } from "../../store";
 import { BoardFrame } from "./BoardFrame";
+import { DependencyGraph } from "./DependencyGraph";
 import { BoardView, GRAPH_VIEWS, ListView, TimelineView, useGraphView } from "./GraphViews";
-import { HandoffButton } from "./HandoffButton";
 import { LogTab, MineTab, markSeen, readSeen, useInbox } from "./MineAndLog";
 import { PeopleProvider, usePeople } from "./people";
 import { IdentityChip, JoinDialog, PersonAvatar } from "./peopleUi";
@@ -876,19 +875,6 @@ function GoalGraph({
       if (t.assignee) seen.set(t.assignee, (seen.get(t.assignee) ?? 0) + 1);
     return [...seen];
   }, [goal.tasks]);
-  const layers = useMemo(() => layerize(goal.tasks), [goal.tasks]);
-
-  // 泳道 = 依赖深度。同一层内按 `order`（后端已经排好）—— 保持稳定，不抖动。
-  const lanes = useMemo(() => {
-    const max = Math.max(0, ...[...layers.values()]);
-    const out: TeamTask[][] = Array.from({ length: max + 1 }, () => []);
-    for (const t of goal.tasks) {
-      out[layers.get(t.id) ?? 0].push(t);
-    }
-    return out;
-  }, [goal.tasks, layers]);
-
-  const byId = useMemo(() => new Map(goal.tasks.map((t) => [t.id, t])), [goal.tasks]);
 
   return (
     <div className="min-w-0">
@@ -988,32 +974,7 @@ function GoalGraph({
           这个目标还没有任务。点右上角「让卡特拆解」，它会开一条新对话拆好。
         </div>
       ) : view === "lanes" ? (
-        <div className="relative flex gap-4 overflow-x-auto pb-2">
-          {lanes.map((lane, i) => (
-            // biome-ignore lint/suspicious/noArrayIndexKey: 泳道按层级顺序生成，层级序号就是身份
-            <div key={i} className="flex w-[16.5rem] shrink-0 flex-col gap-2">
-              <div className="mb-0.5 px-1 text-[10px] uppercase tracking-wider text-dim">
-                {i === 0 ? "起点" : `第 ${i} 层`}
-              </div>
-              {lane.map((t) => (
-                <TaskNode
-                  key={t.id}
-                  task={t}
-                  byId={byId}
-                  goal={goal}
-                  onAsk={onAsk}
-                  onOpen={() => onOpenTask(goal, t)}
-                  dim={who !== null && (who === "" ? !!t.assignee : t.assignee !== who)}
-                />
-              ))}
-              {lane.length === 0 && (
-                <div className="rounded-lg border border-dashed border-edge px-2 py-6 text-center text-[10px] text-dim">
-                  空
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
+        <DependencyGraph goal={goal} who={who} onOpen={(t) => onOpenTask(goal, t)} onAsk={onAsk} />
       ) : view === "board" ? (
         <BoardView
           cwd={cwd}
@@ -1035,143 +996,6 @@ function GoalGraph({
       ) : (
         <TimelineView goal={goal} who={who} onOpen={(t) => onOpenTask(goal, t)} onAsk={onAsk} />
       )}
-
-      {/* 依赖关系单独列一块：图上画箭头在横向溢出时会被裁掉，而「谁在等谁」
-          是这块最重要的信息，不能只在悬浮里给。只在依赖视图里给 —— 另外三种
-          视图各自的重点是别的（状态、过一遍、到期），再挂一块依赖表会喧宾夺主。 */}
-      {view === "lanes" && goal.tasks.some((t) => t.depends_on.length > 0) && (
-        <div className="mt-4 rounded-xl bg-card p-3">
-          <div className="mb-1.5 text-[10px] uppercase tracking-wider text-dim">依赖</div>
-          <div className="space-y-1">
-            {goal.tasks
-              .filter((t) => t.depends_on.length > 0)
-              .map((t) => (
-                <div key={t.id} className="flex flex-wrap items-center gap-1 text-[11px]">
-                  {t.depends_on.map((d) => (
-                    <span key={d} className="flex items-center gap-1">
-                      <span className="rounded bg-bubble px-1.5 py-0.5 text-dim">
-                        {byId.get(d)?.title ?? d}
-                      </span>
-                      <ArrowRight size={10} className="text-dim" />
-                    </span>
-                  ))}
-                  <span className={t.waiting_on.length > 0 ? "text-ink" : "text-dim"}>
-                    {t.title}
-                  </span>
-                  {t.waiting_on.length > 0 && (
-                    <span className="text-[10px] text-dim">（还差 {t.waiting_on.length} 个）</span>
-                  )}
-                </div>
-              ))}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function TaskNode({
-  task,
-  byId,
-  goal,
-  onAsk,
-  onOpen,
-  dim,
-}: {
-  task: TeamTask;
-  byId: Map<string, TeamTask>;
-  goal: TeamGoal;
-  onAsk: (draft?: string) => void;
-  onOpen: () => void;
-  dim: boolean;
-}) {
-  const { people } = usePeople();
-  const closed = task.status === "done" || task.status === "dropped";
-  const tone = statusTone(task.status);
-  const parent = task.parent_id ? byId.get(task.parent_id) : null;
-
-  return (
-    <div
-      // 卡片整块可点靠一层铺满的透明按钮，而不是给外层挂 role="button" ——
-      // 外面再套 role="button"、里面再放一个 `<button>`，是嵌套交互元素，
-      // 读屏会念成两个按钮，Tab 也会在同一个位置上停两次。
-      className={`group relative rounded-xl bg-card p-2.5 shadow-soft transition-[box-shadow,opacity] hover:shadow-lift ${
-        dim ? "opacity-35" : ""
-      }`}
-      style={{
-        // 能开工的左边挂一条彩色竖线 —— 一眼能扫出「现在能做哪几件」。
-        boxShadow: task.ready ? "inset 2px 0 0 0 var(--tone-green), var(--shadow-soft)" : undefined,
-      }}
-    >
-      {/* 整块可点的那一层。`z-0` 铺满卡片；上面的交办按钮抬到 `z-10` 才接得到
-          自己那一小块。按 Enter 打开靠的是它的焦点，不是外层 div 的。 */}
-      <button
-        type="button"
-        onClick={onOpen}
-        aria-label={`打开任务：${task.title}`}
-        title="打开任务：看要求、指派、讨论"
-        className="absolute inset-0 z-0 cursor-pointer rounded-xl outline-none focus-visible:ring-2 focus-visible:ring-edge-strong"
-      />
-
-      <div className="pointer-events-none relative z-[1] mb-1 flex items-center gap-1.5">
-        <span
-          className="rounded px-1.5 py-[1px] text-[10px] font-medium"
-          style={{ background: tone.bg, color: tone.fg }}
-        >
-          {task.status_label}
-        </span>
-        <span className="text-[10px]" style={{ color: priorityTone(task.priority).fg }}>
-          {task.priority}
-        </span>
-        {task.ready && <span className="text-[10px] text-tone-green">可开工</span>}
-        <span className="ml-auto flex items-center gap-1">
-          {task.assignee ? (
-            <span className="flex items-center gap-1 text-[10px] text-dim">
-              {personName(people, task.assignee)}
-              <PersonAvatar person={task.assignee} size={16} />
-            </span>
-          ) : (
-            !closed && (
-              <span className="text-[10px] text-dim opacity-0 group-hover:opacity-100">待指派</span>
-            )
-          )}
-        </span>
-      </div>
-
-      <div className="relative z-[1] text-xs font-medium leading-snug">{task.title}</div>
-
-      {parent && (
-        <div className="mt-0.5 truncate text-[10px] text-dim">↳ 在「{parent.title}」下</div>
-      )}
-
-      {task.blocked_reason && (
-        <div className="mt-1 rounded bg-tone-orange-soft px-1.5 py-1 text-[10px] text-tone-orange">
-          {task.blocked_reason}
-        </div>
-      )}
-
-      {task.children.length > 0 && (
-        <div className="mt-1.5">
-          <div className="mb-1 flex items-center justify-between text-[10px] text-dim">
-            <span>子任务 {task.children.length}</span>
-            <span className="tabular-nums">{task.progress}%</span>
-          </div>
-          <Progress value={task.progress} tone={tone.fg} />
-        </div>
-      )}
-
-      <div className="relative z-[1] mt-1.5 flex items-center gap-1.5 text-[10px] text-dim">
-        <span className="mono truncate">{task.id}</span>
-        {task.estimate_hours ? <span>· {task.estimate_hours}h</span> : null}
-        {/* 常驻在卡片右下角：它是这张卡上最主要的动作，悬停才出现等于不存在。
-            形状与另外三种视图一致，见 HandoffButton.tsx。 */}
-        {!closed && (
-          <HandoffButton
-            className="ml-auto -mr-1 -my-1"
-            onClick={() => onAsk(taskHandoff(goal, task))}
-          />
-        )}
-      </div>
     </div>
   );
 }

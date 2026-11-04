@@ -204,6 +204,129 @@ export function layerize(tasks: TeamTask[]): Map<string, number> {
   return memo;
 }
 
+/**
+ * 依赖图在**某一层内**的排列顺序 —— 让每件事尽量落在它前置的正对面。
+ *
+ * 只按层号分桶是不够的：桶里的顺序还是后端的 `order`，于是一个等着第 0 层那张
+ * 卡的节点可能被排到最下面，读的人要在两列之间来回跳。这里用两个互相补的启发式：
+ *
+ * 1. **重心**（barycenter）从上往下过两三遍 —— 每个节点取前置节点平均名次，
+ *    按它重排。这是 Sugiyama 分层画图的标准做法，几十行就够，不需要布局引擎。
+ * 2. **相邻交换** —— 重心之后同一层里如果交换两个邻居能少几根交叉线，就交换。
+ *    重心是贪心的，会留下局部最优；换一轮能把剩下的顺手抹掉。
+ *
+ * 返回的 id 数组就是最终的纵向次序（层号由 [`layerize`] 单独给）。
+ */
+export function orderByBarycenter(tasks: TeamTask[], layers: Map<string, number>): string[] {
+  const byId = new Map(tasks.map((t) => [t.id, t]));
+  const buckets: (string[] | undefined)[] = [];
+  for (const t of tasks) {
+    const l = layers.get(t.id) ?? 0;
+    buckets[l] ??= [];
+    buckets[l].push(t.id);
+  }
+  // 层号是「最长链」，中间可能出现没有任务的层（比如 A→B→C 里 B 被放弃了）。
+  // 空洞留着会让 `for...of` 和下标访问都出问题，这里压成连续的数组 ——
+  // 每个有任务的层仍然连续排列，只是不再保证下标 === 层号。
+  const layerList = buckets.filter((b): b is string[] => b !== undefined);
+
+  // 入边与出边都建好：往下看前置，回推时看出边，两个方向都要用。
+  const preds = new Map<string, string[]>();
+  const succs = new Map<string, string[]>();
+  for (const t of tasks) {
+    preds.set(
+      t.id,
+      t.depends_on.filter((d) => byId.has(d)),
+    );
+    succs.set(t.id, []);
+  }
+  for (const t of tasks) {
+    for (const d of t.depends_on) {
+      if (!byId.has(d)) continue;
+      succs.get(d)?.push(t.id);
+    }
+  }
+
+  /** 每个节点在它自己那一层里的名次。 */
+  const rank = new Map<string, number>();
+  const reindex = (layer: string[]) => {
+    for (const [i, id] of layer.entries()) rank.set(id, i);
+  };
+  for (const layer of layerList) reindex(layer);
+
+  /** 用一组参考节点（前置或后继）的平均名次重排一层；没有参考的留在原位。 */
+  function sweep(layer: string[], ref: Map<string, string[]>) {
+    const keyed = layer.map((id, i) => {
+      const rs = (ref.get(id) ?? []).map((r) => rank.get(r)).filter((r) => r !== undefined);
+      const k = rs.length > 0 ? rs.reduce((a, b) => a + b, 0) / rs.length : i;
+      return { id, k, i };
+    });
+    // 平均名次相同时按原位置排 —— 加权的稳定排序，避免每次刷新都换一个顺序。
+    keyed.sort((a, b) => a.k - b.k || a.i - b.i);
+    const next = keyed.map((x) => x.id);
+    layer.splice(0, layer.length, ...next);
+    reindex(layer);
+  }
+
+  /**
+   * 这一层里有多少对边交叉。只数**相邻层之间**的边：跨层的边是绕图外侧走的，
+   * 不参与列内排序的取舍。上下两侧都算 —— 只盯着后继，会把回推那一遍的收益
+   * 又换回去。
+   */
+  function crossingsOf(layer: string[]): number {
+    let n = 0;
+    for (const dir of ["down", "up"] as const) {
+      const ref = dir === "down" ? succs : preds;
+      const at = (id: string) => {
+        const base = layers.get(id) ?? 0;
+        return (ref.get(id) ?? []).filter(
+          (x) => layers.get(x) === base + (dir === "down" ? 1 : -1),
+        );
+      };
+      for (let i = 0; i < layer.length; i++) {
+        for (let j = i + 1; j < layer.length; j++) {
+          for (const u of at(layer[i])) {
+            const ru = rank.get(u);
+            if (ru === undefined) continue;
+            for (const v of at(layer[j])) {
+              const rv = rank.get(v);
+              if (rv !== undefined && ru > rv) n++;
+            }
+          }
+        }
+      }
+    }
+    return n;
+  }
+
+  // 两遍下推 + 一遍回推。再多迭代在这类规模（几十个节点）上没有可感知的收益，
+  // 反而会让「同一个项目两次打开顺序不同」的风险变大 —— 这里没有随机性，但少即是稳。
+  for (let round = 0; round < 2; round++) {
+    for (let l = 1; l < layerList.length; l++) sweep(layerList[l], preds);
+  }
+  for (let l = layerList.length - 2; l >= 0; l--) sweep(layerList[l], succs);
+
+  // 相邻交换：只看同层，直到一轮下来一次都换不动为止（上限防死循环）。
+  for (const layer of layerList) {
+    for (let pass = 0; pass < layer.length; pass++) {
+      let swapped = false;
+      for (let i = 0; i + 1 < layer.length; i++) {
+        const before = crossingsOf(layer);
+        [layer[i], layer[i + 1]] = [layer[i + 1], layer[i]];
+        if (crossingsOf(layer) < before) {
+          swapped = true;
+        } else {
+          [layer[i], layer[i + 1]] = [layer[i + 1], layer[i]];
+        }
+      }
+      if (!swapped) break;
+    }
+    reindex(layer);
+  }
+
+  return layerList.flat();
+}
+
 // ---------------------------------------------------------------------------
 // 成员
 // ---------------------------------------------------------------------------
