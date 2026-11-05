@@ -40,7 +40,20 @@
     MATRIX_TARGETS: ${{ toJson(matrix.targets) }}
     TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
     TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+    MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+    MINISIGN_KEY_PASSWORD: ${{ secrets.MINISIGN_KEY_PASSWORD }}
   run: |
+    # 签名密钥。Tauri 要的是「整份私钥再套一层 base64」那一长串（或者私钥文件
+    # 路径）；minisign 的原始格式（`untrusted comment:` + 一行密钥）也认。
+    # 两种都接受，谁少一步手工出错就用谁。
+    KEY="${TAURI_SIGNING_PRIVATE_KEY:-${MINISIGN_SECRET_KEY:-}}"
+    if [ -z "$KEY" ]; then
+      echo "::error::没有配置签名私钥：请在仓库 Secrets 里加 TAURI_SIGNING_PRIVATE_KEY（私钥文件内容）或 MINISIGN_SECRET_KEY（私钥去掉注释行后的那一行）"
+      exit 1
+    fi
+    export TAURI_SIGNING_PRIVATE_KEY="$KEY"
+    export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-${MINISIGN_KEY_PASSWORD:-}}"
+
     # 每台构建机只出 native 产物。`updater` 是隐藏的包类型（`tauri bundle -b updater`
     # 也能单独出）：mac 上是 `.app.tar.gz`、Linux 上是 AppImage 复制的 `.tar.gz`、
     # Windows 上是 NSIS 的 `.exe.zip` —— 正是自更新要下载的那个包，必须显式带上，
