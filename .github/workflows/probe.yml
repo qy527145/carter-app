@@ -6,19 +6,24 @@ jobs:
   probe:
     runs-on: ubuntu-22.04
     steps:
-      - name: 建 → 删 release（留 tag）→ 再建
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: 建 → 删 → 重建（同一个 tag）
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          T="probe-del-$GITHUB_RUN_ID"
-          echo hi > a.txt
-          echo "== 1) 首次建 release"
-          gh release create "$T" --target "$GITHUB_SHA" --title "$T" --notes-file a.txt a.txt && echo "FIRST_OK" || echo "FIRST_FAIL"
-          echo "== 2) 删 release，保留 tag"
+          T="probe-recreate-$GITHUB_RUN_ID"
+          git tag "$T"
+          git push origin "refs/tags/$T"
+          echo hi > notes.txt
+          echo "== 1) 首次建"
+          gh release create "$T" --target "$GITHUB_SHA" --title "$T" --notes-file notes.txt notes.txt && echo "FIRST_OK" || echo "FIRST_FAIL"
+          echo "== 2) 删 release、留 tag"
           gh release delete "$T" --yes && echo "DEL_OK" || echo "DEL_FAIL"
-          echo "== 3) 同一个 tag 再建一次"
-          gh release create "$T" --target "$GITHUB_SHA" --title "$T" --notes-file a.txt a.txt && echo "SECOND_OK" || echo "SECOND_FAIL"
+          echo "== 3) 同一 tag 重建"
+          gh release create "$T" --target "$GITHUB_SHA" --title "$T" --notes-file notes.txt notes.txt && echo "SECOND_OK" || echo "SECOND_FAIL"
           echo "== 4) 清理"
-          gh release delete "$T" --yes --cleanup-tag || true
+          gh release delete "$T" --yes || true
           gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$T" || true
           exit 0
