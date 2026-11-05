@@ -49,28 +49,31 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # 手动触发用表单里的 tag；推 tag 触发用 ref_name。
-          input='${{ github.event.inputs.tag }}'
-          if [ -n "$input" ] && [ "$input" != "dry-run" ]; then
-            tag="$input"
-          elif [ "$input" = "dry-run" ]; then
-            tag="${GITHUB_REF_NAME:-v0.0.0-dryrun}"
-          else
-            tag="$GITHUB_REF_NAME"
-          fi
-          version="${tag#v}"
-
-          # tag 的版本号必须与两处版本号一致，否则文件名与包内版本对不上。
           conf=$(node -p "require('./src-tauri/tauri.conf.json').version")
           pkg=$(node -p "require('./package.json').version")
-          echo "tag=$tag version=$version tauri.conf=$conf package.json=$pkg"
-          if [ "$version" != "$conf" ] || [ "$version" != "$pkg" ]; then
+
+          # 手动触发用表单里的 tag；推 tag 触发用 ref_name。
+          input='${{ github.event.inputs.tag }}'
+          if [ "$input" = "dry-run" ]; then
+            # 只构建不发版：tag 无意义，按当前版本号凑一个（不校验也不使用）。
+            tag="v$conf"
+            publish=false
+          elif [ -n "$input" ]; then
+            tag="$input"
+            publish=true
+          else
+            tag="$GITHUB_REF_NAME"
+            publish=true
+          fi
+
+          # 发版时 tag 的版本号必须与两处版本号一致，否则文件名与包内版本对不上。
+          version="${tag#v}"
+          echo "tag=$tag version=$version tauri.conf=$conf package.json=$pkg publish=$publish"
+          if [ "$publish" = "true" ] && { [ "$version" != "$conf" ] || [ "$version" != "$pkg" ]; }; then
             echo "::error::tag $tag 与 src-tauri/tauri.conf.json ($conf) / package.json ($pkg) 版本号不一致，先跑 bun run upgrade"
             exit 1
           fi
 
-          publish=false
-          if [ "$input" != "dry-run" ]; then publish=true; fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "publish=$publish" >> "$GITHUB_OUTPUT"
@@ -192,8 +195,11 @@ jobs:
             gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
               --title "Carter $VERSION" --notes-file "$notes"
           else
+            # 不带 --target：tag 已经由推 tag / bun run upgrade 建好，直接挂上去。
+            # 硬写 --target "$GITHUB_SHA" 会把 Release 指到 main 的提交上，
+            # 与 tag 指向的提交不是同一个（手动触发时尤其明显）。
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
-              --target "$GITHUB_SHA" --title "Carter $VERSION" --notes-file "$notes"
+              --title "Carter $VERSION" --notes-file "$notes"
           fi
 
           gh release upload "$TAG" dist-installers/* --repo "$GITHUB_REPOSITORY" --clobber
