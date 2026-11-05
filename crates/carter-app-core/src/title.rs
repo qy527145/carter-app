@@ -2,10 +2,9 @@
 //!
 //! ## 为什么不用 carter 现成的 `generate_title`
 //!
-//! 提示词与后处理照抄 carter 的 [`carter::agent::generate_title`]（同一套「取首行、
-//! 去引号」，CLI 与 GUI 的名字才长得一样），但请求是自己发的 —— 那边和上下文压缩
-//! 共用 `run_summary`，会给用户消息加一个「【待压缩历史】」前缀，对标题是错的
-//! （见 [`request_title`]）。它的 `max_tokens` 也是 **32**（标题就几个字，够用了）。
+//! 提示词与后处理由 carter 的 [`carter::agent::generate_title`] 提供（同一套
+//! 「取首行、去引号」，CLI 与 GUI 的名字才长得一样），`max_tokens` 是 **32**
+//! （标题就几个字，够用了）。
 //!
 //! 推理模型不是这么算账的 —— 它**先思考、再输出**，两边共用一个 `max_tokens`。
 //! 32 个 token 会被思考整个吃掉，正文一个字都不剩。DeepSeek 上实测：
@@ -201,21 +200,24 @@ pub async fn generate(
     let mut attempts = 1;
     for attempt in 0..MAX_ATTEMPTS {
         attempts = attempt + 1;
-        let retry = match request_title(first_prompt, session_id, &*provider, model).await {
-            Ok(t) if !t.trim().is_empty() => {
-                return Outcome {
-                    title: t,
-                    degraded: false,
-                    attempts,
-                };
-            }
-            // 空标题：多半是思考把 token 吃光了（见模块文档），值得再试一次。
-            Ok(_) => true,
-            // 限流、网络、超时、5xx：值得重试。
-            Err(carter::CarterError::Llm(ref le)) => worth_retrying(le),
-            // 非模型侧的错误（解析配置、IO）重试不会变好。
-            Err(_) => false,
-        };
+        let retry =
+            match carter::agent::generate_title(first_prompt, Some(session_id), &*provider, model)
+                .await
+            {
+                Ok(t) if !t.trim().is_empty() => {
+                    return Outcome {
+                        title: t,
+                        degraded: false,
+                        attempts,
+                    };
+                }
+                // 空标题：多半是思考把 token 吃光了（见模块文档），值得再试一次。
+                Ok(_) => true,
+                // 限流、网络、超时、5xx：值得重试。
+                Err(carter::CarterError::Llm(ref le)) => worth_retrying(le),
+                // 非模型侧的错误（解析配置、IO）重试不会变好。
+                Err(_) => false,
+            };
         if !retry || attempt + 1 == MAX_ATTEMPTS {
             break;
         }
@@ -227,72 +229,6 @@ pub async fn generate(
         degraded: true,
         attempts,
     }
-}
-
-/// 标题请求用的 system 提示。与 carter CLI 那句**一字不差**：同一个模型、同一句
-/// 要求，CLI 与 GUI 起出来的名字才一致。
-const TITLE_SYSTEM: &str = "为下面这条用户消息开启的对话生成一个简洁的 3-6 词中文标题。\
-     只输出标题本身，不要引号、不要标点结尾、不要解释。";
-
-/// 标题最多几个 token。标题就几个字，32 够；思考已被关掉（见模块文档），
-/// 所以这个额度全归正文。
-const TITLE_MAX_TOKENS: u32 = 32;
-
-/// 发一次标题请求，取首行去引号。
-///
-/// 为什么不直接用 [`carter::agent::generate_title`]：它和上下文压缩共用
-/// `run_summary`，而那里面给用户消息**无条件**加了「【待压缩历史】」前缀。
-/// 对压缩这是对的，对标题是错的 —— 模型一边读到「这是要压缩的历史」，一边被
-/// 要求起标题。提示词与后处理照抄那边，只去掉那个前缀。
-async fn request_title(
-    first_prompt: &str,
-    session_id: &str,
-    provider: &dyn LlmProvider,
-    model: &ModelInfo,
-) -> carter::Result<String> {
-    use carter::provider::{
-        Block, RequestMeta, RequestPurpose, StreamChunk, WireMessage, WireRequest,
-    };
-    use futures::StreamExt;
-
-    let mut wire = WireRequest::new(model.api_name.clone());
-    wire.system = vec![Block::text(TITLE_SYSTEM)];
-    // 用户这句话原样作为输入：不加任何前缀，它本来就不是一段待压缩的历史。
-    wire.messages = vec![WireMessage::user_text(first_prompt)];
-    wire.max_tokens = Some(TITLE_MAX_TOKENS);
-    // 起标题的请求也算这条对话的一部分：网关靠它归类。
-    wire.meta = RequestMeta {
-        session_id: Some(session_id.to_string()),
-        purpose: RequestPurpose::Title,
-        ..Default::default()
-    };
-
-    let mut stream = provider
-        .stream(ChatRequest {
-            protocol: None,
-            wire,
-        })
-        .await?;
-    let mut text = String::new();
-    while let Some(ev) = stream.next().await {
-        if let StreamChunk::TextDelta { text: delta, .. } = ev? {
-            text.push_str(&delta);
-        }
-    }
-    // 与 carter 一致：取首行、去引号。
-    let title = text
-        .lines()
-        .next()
-        .unwrap_or("")
-        .trim()
-        .trim_matches('"')
-        .to_string();
-    if title.is_empty() {
-        return Err(carter::CarterError::Provider(
-            "title returned empty text".to_string(),
-        ));
-    }
-    Ok(title)
 }
 
 /// 上游的拒绝是「请求体/参数不被接受」，而不是限流或网络问题。
@@ -461,8 +397,10 @@ mod tests {
         })
     }
 
-    /// 标题请求的形状：用户那句话**原样**发（没有「【待压缩历史】」这类前缀），
-    /// 32 个 token 全留给正文，并且带上会话 id 与「这是起标题」的用途标记。
+    /// 标题请求的形状 —— 这是与 carter 的约定，也是曾经出过的 bug 的回归测试：
+    /// 用户那句话必须**原样**发。carter 0.1.6 里它和压缩共用 `run_summary`，
+    /// 会加「【待压缩历史】」前缀；0.1.7 起改由调用方自己给用户消息。
+    /// 另外 32 个 token 全留给正文，并带上会话 id 与「这是起标题」的用途标记。
     #[tokio::test]
     async fn the_title_request_carries_the_prompt_as_is() {
         let p = Counting::new();
@@ -472,7 +410,7 @@ mod tests {
         let seen = p.last.lock().unwrap().take().expect("请求应到达渠道");
         let text = seen.wire.messages[0].content[0].as_text().unwrap_or("");
         assert_eq!(text, "你好啊", "用户消息不能被加上压缩用的前缀");
-        assert_eq!(seen.wire.max_tokens, Some(TITLE_MAX_TOKENS));
+        assert_eq!(seen.wire.max_tokens, Some(32), "标题只要 32 个 token");
         assert_eq!(seen.wire.meta.session_id.as_deref(), Some("s-1"));
         assert_eq!(
             seen.wire.meta.purpose,
