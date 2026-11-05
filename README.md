@@ -91,6 +91,17 @@ bun run dev           # 打开桌面窗口：前端 HMR，Rust 改动自动重�
 
 `web:dev` / `web:build` 只给 `tauri.conf.json` 的 `beforeDevCommand` / `beforeBuildCommand` 用。
 
+### 发布
+
+`bun run upgrade patch` 会同步改三处版本号、提交并打 tag；把 tag 推到远端即触发
+发布流水线（[.github/workflows/release.yml](.github/workflows/release.yml)，由
+cargo-dist 生成，别手改）。
+
+也可以手动触发：Actions → **Release** → Run workflow，`tag` 填要发布的版本
+（如 `v0.1.1`）。默认值 `dry-run` 只构建、不发 Release，适合验证流水线；tag 推送
+则由 [release-on-tag.yml](.github/workflows/release-on-tag.yml) 转发成一次
+workflow_dispatch —— dist 的 workflow 一次只能挂一种触发器。
+
 ### 本地配置
 
 `.env` 只在 debug 构建里加载，发布的安装包使用代码里的默认值。密钥放 `.env.local`（不会被提交）。

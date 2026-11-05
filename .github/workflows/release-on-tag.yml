@@ -1,0 +1,28 @@
+name: Release on tag
+
+# 把 tag 推送转成一次 workflow_dispatch，交给 dist 生成的 release.yml。
+#
+# 为什么要有这个文件：dist 的 release.yml 只支持一种触发方式 —— 开了
+# dispatch-releases 就换成 workflow_dispatch，tag 推送就不再触发它。而
+# GITHUB_TOKEN 发起的 workflow_dispatch 是 GitHub 的例外，仍然会创建新的运行，
+# 所以用这层转发把两种触发都保住。构建逻辑一行都不在这里，全部由 dist 管理。
+#
+# 手动发版：Actions → Release → Run workflow，tag 填 v0.1.1（填 dry-run 只构建）。
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 触发 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: gh workflow run release.yml --ref "$TAG" -f tag="$TAG" --repo "$GITHUB_REPOSITORY"
