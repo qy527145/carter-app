@@ -71,8 +71,19 @@
       bun x tauri build --bundles "$BUNDLES"
       OUT="target/release/bundle"
     fi
-    # 出包之后 tauri 的产物可以被清掉了（这里只借它的编译结果缓存给 dist 用），
-    # 把 bundle 目录整个搬去 $RUNNER_TEMP，留给后面的「发布」job。
-    mkdir -p "$RUNNER_TEMP/tauri-bundles"
-    cp -R "$OUT" "$RUNNER_TEMP/tauri-bundles/"
-    find "$RUNNER_TEMP/tauri-bundles" -type f | sort
+    # 把 tauri 的安装包传到构建机的 artifacts 里，交给发布之后的
+    # `updater-release.yml` 收尾（它生成 latest.json 并传进 Release）。
+    #
+    # 名字与 dist 的 `artifacts-*` **有意错开**：后者会被 dist 当成自己的产物
+    # 一起传进 Release，而这些带 `.sig` 的文件要等 latest.json 生成后再一起传，
+    # 由那边统一 `--clobber`。
+    echo "BUNDLE_DIR=$OUT" >> "$GITHUB_ENV"
+
+- name: 上传 tauri 安装包（自更新用）
+  uses: actions/upload-artifact@v7
+  with:
+    # 每台构建机一个：`updater-artifacts-<target>`。架构由文件名区分不出来，
+    # `scripts/latest-json.ts` 就是从这层目录名里认平台与架构的。
+    name: updater-artifacts-${{ matrix.targets && matrix.targets[0] || 'native' }}
+    path: ${{ env.BUNDLE_DIR }}/
+    if-no-files-found: error

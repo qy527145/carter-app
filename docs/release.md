@@ -10,9 +10,18 @@ git push origin main --tags
 推 tag 后 `release-on-tag.yml` 转成一次 `workflow_dispatch` 交给 `release.yml`。
 每个平台的构建机上会先跑 `.github/build-setup.yml`：用 `tauri build` 出原生安装包
 （macOS 的 `.app` + dmg、Windows 的 NSIS、Linux 的 AppImage + deb）以及**自更新
-包**（`.app.tar.gz` / `-setup.exe.zip` / `.AppImage.tar.gz`），每个都带一个 `.sig`。
-发布 job 把这些自更新包收齐，用 `scripts/latest-json.ts` 生成 `latest.json`，
-和 dist 的产物一起放进同一个 Release。
+包**（`.app.tar.gz` / `-setup.exe.zip` / `.AppImage.tar.gz`，每个带一个 `.sig`），
+再把它们作为 `updater-artifacts-<target>` 上传。
+
+`release.yml` 最后有一个 dist 调起的 `custom-updater-release` job
+（`.github/workflows/updater-release.yml`）：它收齐各平台的这些产物，用
+`scripts/latest-json.ts` 生成 `latest.json`，一起传进刚发布的 Release。
+
+> **不要手改 `release.yml`。** 那个文件是 `dist generate --mode ci` 生成的，
+> dist 在 CI 里会逐字比对，手改或不重新生成都会让 Release 在 plan 阶段失败
+> （那一步的日志只有仓库管理员看得到）。要加构建步骤就改
+> `.github/build-setup.yml`，要加发布后的动作就加一个 reusable workflow 并写进
+> `dist-workspace.toml` 的 `post-announce-jobs`，然后跑 `dist generate --mode ci`。
 
 ## 签名密钥（只需要做一次，但要保管好）
 

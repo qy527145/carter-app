@@ -57,35 +57,33 @@ const files = (await Promise.all(dirs.map((d) => walk(d).catch(() => [])))).flat
 
 /** 一个包属于哪个平台（认不出就是 `null`，比如 dmg / deb，它们不是自更新包）。 */
 function platformOf(file: string): string | null {
-  const name = file.split("/").pop() ?? "";
+  const name = file.split("/").slice(-1)[0];
   // tauri 的自动更新包名里**不含**架构（`<product>.app.tar.gz`、
-  // `<product>_<版本>_<arch>-setup.exe.zip`），所以架构只能从产物所在的
-  // target 目录取（`target/<target>/release/bundle/…` 或
-  // `updater-artifacts-<target>/…`），文件名只在没带路径时当兜底。
-  const arch =
-    archOf(file) ?? (name.includes("aarch64") || name.includes("arm64") ? "aarch64" : "x86_64");
+  // `<product>_<版本>_x64-setup.exe.zip`），所以架构只能从产物所在的
+  // target 目录取 —— `updater-artifacts-<target>/…`（构建机上传时就是按
+  // `matrix.targets[0]` 命的名）。文件名只在没有目录信息时当兜底。
+  const arch = archOf(file);
   if (name.endsWith(".app.tar.gz")) {
     return `darwin-${arch}`;
   }
   if (name.endsWith("-setup.exe.zip")) {
-    return `windows-${archOf(file) === "aarch64" ? "aarch64" : "x86_64"}`;
+    return `windows-${arch}`;
   }
   if (name.endsWith(".AppImage.tar.gz")) {
-    return `linux-${archOf(file) === "aarch64" ? "aarch64" : "x86_64"}`;
+    return `linux-${arch}`;
   }
   return null;
 }
 
 /**
- * 从路径里认架构。认的是构建 target（`aarch64-apple-darwin`、`x86_64-pc-windows-msvc`…），
- * 不是文件名 —— 同一个文件在两个平台上同名，只有目录能区分。
+ * 从路径里认架构。先认构建 target（`aarch64-apple-darwin`、`x86_64-pc-windows-msvc`…），
+ * 再认 tauri 文件名里的 `x64` / `aarch64`；都没有就按 x86_64。
  */
-function archOf(file: string): "aarch64" | "x86_64" | "armv7" | null {
+function archOf(file: string): "aarch64" | "x86_64" | "armv7" {
   const hit = (re: RegExp) => re.test(file);
-  if (hit(/(^|[/_-])aarch64-/)) return "aarch64";
-  if (hit(/(^|[/_-])x86_64-/)) return "x86_64";
-  if (hit(/(^|[/_-])armv7-/)) return "armv7";
-  return null;
+  if (hit(/(^|[/_-])aarch64[-/]/)) return "aarch64";
+  if (hit(/(^|[/_-])armv7[-/]/)) return "armv7";
+  return "x86_64";
 }
 
 const platforms: Record<string, { signature: string; url: string }> = {};

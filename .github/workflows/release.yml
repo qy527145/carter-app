@@ -69,13 +69,6 @@ jobs:
         # failing. otherwise `sh` won't catch that `curl` returned non-0
         shell: bash
         run: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.sh | sh"
-      - name: DEBUG secrets
-        run: |
-          echo "MINISIGN_SECRET_KEY set: ${MINISIGN_SECRET_KEY:+yes}"
-          echo "TAURI_SIGNING_PRIVATE_KEY set: ${TAURI_SIGNING_PRIVATE_KEY:+yes}"
-        env:
-          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
       - name: Cache dist
         uses: actions/upload-artifact@v7
         with:
@@ -155,11 +148,13 @@ jobs:
         run: "bun run web:build"
       - name: "用 tauri 出安装包（带自更新签名）"
         run: |
-          # 签名密钥：Tauri 的私钥格式（整份文件内容）与 minisign 原始格式
-          # （`untrusted comment:` + 一行密钥）都认。缺了就让下面的 tauri 构建
-          # 自己去报，报文里会写明缺哪个变量。
-          export TAURI_SIGNING_PRIVATE_KEY="${KEY:-${MINISIGN_SECRET_KEY:-}}"
-          export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${KEY_PASSWORD:-${MINISIGN_KEY_PASSWORD:-}}"
+          if [ -z "$KEY" ]; then
+            echo "::error::没有配置更新签名密钥：请在仓库 Secrets 里加 TAURI_SIGNING_PRIVATE_KEY（私钥文件内容）或 MINISIGN_SECRET_KEY（私钥去掉注释行后的那一行）"
+            exit 1
+          fi
+          printf '%s' "$KEY" > "$RUNNER_TEMP/updater.key"
+          echo "TAURI_SIGNING_PRIVATE_KEY=$RUNNER_TEMP/updater.key" >> "$GITHUB_ENV"
+          echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$KEY_PASSWORD" >> "$GITHUB_ENV"
 
           # 每台构建机只出 native 产物。`updater` 是隐藏的包类型（`tauri bundle -b updater`
           # 也能单独出）：mac 上是 `.app.tar.gz`、Linux 上是 AppImage 复制的 `.tar.gz`、
@@ -179,16 +174,24 @@ jobs:
             bun x tauri build --bundles "$BUNDLES"
             OUT="target/release/bundle"
           fi
-          # 出包之后 tauri 的产物可以被清掉了（这里只借它的编译结果缓存给 dist 用），
-          # 把 bundle 目录整个搬去 $RUNNER_TEMP，留给后面的「发布」job。
-          mkdir -p "$RUNNER_TEMP/tauri-bundles"
-          cp -R "$OUT" "$RUNNER_TEMP/tauri-bundles/"
-          find "$RUNNER_TEMP/tauri-bundles" -type f | sort
+          # 把 tauri 的安装包传到构建机的 artifacts 里，交给发布之后的
+          # `updater-release.yml` 收尾（它生成 latest.json 并传进 Release）。
+          #
+          # 名字与 dist 的 `artifacts-*` **有意错开**：后者会被 dist 当成自己的产物
+          # 一起传进 Release，而这些带 `.sig` 的文件要等 latest.json 生成后再一起传，
+          # 由那边统一 `--clobber`。
+          echo "BUNDLE_DIR=$OUT" >> "$GITHUB_ENV"
         shell: "bash"
         env:
           "KEY": "${{ secrets.MINISIGN_SECRET_KEY || secrets.TAURI_SIGNING_PRIVATE_KEY }}"
           "KEY_PASSWORD": "${{ secrets.MINISIGN_KEY_PASSWORD || secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}"
           "MATRIX_TARGETS": "${{ toJson(matrix.targets) }}"
+      - name: "上传 tauri 安装包（自更新用）"
+        uses: "actions/upload-artifact@v7"
+        with:
+          "if-no-files-found": "error"
+          "name": "updater-artifacts-${{ matrix.targets && matrix.targets[0] || 'native' }}"
+          "path": "${{ env.BUNDLE_DIR }}/"
       - name: Install dist
         run: ${{ matrix.install_dist.run }}
       # Get the dist-manifest
@@ -204,9 +207,7 @@ jobs:
       - name: Build artifacts
         run: |
           # Actually do builds and make zips and whatnot
-          # `--pin=always`：不让 dist 重新编一遍 —— 同一个 target 目录里 tauri 刚
-          # 编好了一份（安装包就是它），`--pin=cp` 又会在两个 profile 间来回拷几百 MB。
-          dist build ${{ needs.plan.outputs.tag-flag }} --pin=always --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
+          dist build ${{ needs.plan.outputs.tag-flag }} --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
           echo "dist ran successfully"
       - id: cargo-dist
         name: Post-build
@@ -228,16 +229,6 @@ jobs:
           path: |
             ${{ steps.cargo-dist.outputs.paths }}
             ${{ env.BUILD_MANIFEST_NAME }}
-
-      # 自更新的安装包（tauri 出的、带 .sig）不在 dist 的产物清单里，单独传。
-      # 有意与 `artifacts-*` 错开：后者会被 host job 的 `dist host --steps=upload`
-      # 一并传到 Release，而这些带 .sig 的文件要我们自己收齐、生成 latest.json 再发。
-      - name: "Upload updater artifacts"
-        uses: actions/upload-artifact@v7
-        with:
-          name: updater-artifacts-${{ join(matrix.targets, '_') }}
-          path: ${{ runner.temp }}/tauri-bundles/
-          if-no-files-found: error
 
   # Build and package all the platform-agnostic(ish) things
   build-global-artifacts:
@@ -329,19 +320,6 @@ jobs:
           # Overwrite the previous copy
           name: artifacts-dist-manifest
           path: dist-manifest.json
-      # 自更新：收齐各平台的 tauri 安装包，生成 latest.json，放进一起发布的那批文件。
-      - name: "Download updater artifacts"
-        uses: actions/download-artifact@v8
-        with:
-          pattern: updater-artifacts-*
-          path: updater
-          merge-multiple: true
-      - name: "Generate latest.json"
-        shell: bash
-        run: |
-          TAG="${{ needs.plan.outputs.tag }}"
-          bun run scripts/latest-json.ts "${TAG#v}" "$TAG" updater
-          cp updater/latest.json artifacts/latest.json
       # Create a GitHub Release while uploading all files to it
       - name: "Download GitHub Artifacts"
         uses: actions/download-artifact@v8
@@ -381,3 +359,12 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+
+  custom-updater-release:
+    needs:
+      - plan
+      - announce
+    uses: ./.github/workflows/updater-release.yml
+    with:
+      plan: ${{ needs.plan.outputs.val }}
+    secrets: inherit
