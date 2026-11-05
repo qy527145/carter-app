@@ -49,8 +49,10 @@ use super::control;
 use super::record::ToolEvent;
 use crate::protocol::AgentRun;
 
-/// 子 agent 的轮数上限（与 carter 一致，独立于主 agent，防失控）。
-const SUBAGENT_MAX_TURNS: u32 = 20;
+/// 子 agent 的轮数上限。`u32::MAX` = 不设限：与主对话一样，什么时候停下由它自己
+/// 决定（carter 默认的 20 在「翻一批文件逐个核对」的子任务里很容易撞上，撞上就
+/// 半路收尾、结果不全）。
+const SUBAGENT_MAX_TURNS: u32 = u32::MAX;
 /// 进度事件的最小间隔。文本增量一个 token 一条，全转发会把 IPC 打满。
 const PROGRESS_GAP: Duration = Duration::from_millis(120);
 /// 卡片里显示的「最近输出」长度。
@@ -416,6 +418,10 @@ async fn run_one(
     match out {
         Err(e) => Err(format!("跑子 agent 出错：{e}")),
         Ok((TurnOutcome::Cancelled, _)) => Err("已中断".into()),
+        // 只剩「输出被截断」会走到这里（轮数不设限了）。
+        Ok((TurnOutcome::Limit, _)) => {
+            Err("子 agent 的输出被截断了（到 max_output_tokens）".into())
+        }
         Ok(_) => {
             let text = sink.final_text();
             if text.trim().is_empty() {

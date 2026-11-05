@@ -619,7 +619,7 @@ pub(crate) const GUI_INSTRUCTIONS: &str = "\
 
 /// 一轮跑完之后的账。自动继续的判定全看这几个数（见 `goal.rs::decide_after_turn`）。
 struct TurnResult {
-    /// 这一轮以错误收场（上游报错、或撞上 `max_turns`）。
+    /// 这一轮以错误收场（上游报错、输出被截断）。
     failed: bool,
     /// 这一轮调用过工具。
     used_tools: bool,
@@ -1650,17 +1650,13 @@ impl Runner {
             Vec::new()
         };
 
-        // `thread.turns` 是**整个会话**累计的模型调用次数，而 `max_turns` 拿它当
-        // 上限。每轮开头清零，恢复成它名字上的意思：**一次用户输入**内最多几次模型
-        // 调用（累计口径下，聊得久一点的会话每一轮都会被判成 Limit）。
-        // 「模型调用次数」这个计数在 carter 里与轮次号混用一个字段，我们自己数：
-        // 每轮清零、每次请求加一。
+        // `thread.turns` 在 carter 里兼任「本会话累计的模型调用次数」，这里不用了
+        // （见 `requests_in_turn`），每轮清零只是别让它一直涨。
         self.thread.lock().turns = 0;
         // 上一轮可能残留了取消标记（用户在流结束后、select 收尾前点的停止）。
         // 不清的话，这一轮一进去就立刻被判成取消。
         self.ctx.handle.cancel.reset();
         let mut cancelled = false;
-        let max_turns = self.ctx.config.agent.max_turns;
         let activity_before = self.activity.load(Ordering::Relaxed);
         // 这一轮的用户轮号：carter 的 `run_turn` 一进去就把它加一，抓包 `meta.turn`、
         // 界面上的「第 N 轮」都按加过之后的那个数。这里进来时历史里还没有这一轮
@@ -1678,9 +1674,11 @@ impl Runner {
         // 之前就加一，轮末再把这件事收掉（`settle_history` 之后整体换回去）。
         let mut thread: Thread = thread_copy(&self.thread.lock());
         thread.user_turns = user_turn.saturating_add(1);
-        // 这一轮已经发过几次模型请求（与 carter 的 `max_turns` 同一个口径）。
-        // `thread.turns` 在 carter 里兼任「模型调用次数」，这里自己数、不进历史。
-        let mut requests_in_turn = 0u32;
+        // **不设「一轮里最多调用几次模型」的上限**：什么时候不再要工具，由模型自己
+        // 决定。carter 的 `max_turns`（默认 50）在它自己的 CLI 里是防失控的保险，但
+        // 一张「翻几十个文档、逐个核对」的工单，50 次往往不够 —— 撞上之后剩下的工具
+        // 全不执行，界面上看起来就是「工具没执行 / 被中断」。真想停下，用户随时可以
+        // 点停止（取消会断流、清理命令）。
         let mut round = 0u32;
         let mut outcome: Option<carter::agent::TurnOutcome> = None;
 
@@ -1817,7 +1815,6 @@ impl Runner {
                 self.ctx.handle.live.text("\n");
             }
 
-            requests_in_turn += 1;
             let calls = carter::provider::ToolCall::collect(&blocks);
             if !blocks.is_empty() {
                 // 回灌：**一条** assistant 消息，块顺序原样保留（思考 → 文本 →
@@ -1845,10 +1842,6 @@ impl Runner {
                     carter::provider::FinishReason::Length => carter::agent::TurnOutcome::Limit,
                     _ => carter::agent::TurnOutcome::Assistant,
                 });
-                break;
-            }
-            if requests_in_turn >= max_turns {
-                outcome = Some(carter::agent::TurnOutcome::Limit);
                 break;
             }
 
@@ -1959,9 +1952,8 @@ impl Runner {
         });
 
         let used_tools = self.activity.load(Ordering::Relaxed) > activity_before;
-        // 「失败」的三种来源，对自动继续是同一件事：**别接着推**。
-        // 尤其是 `Limit` —— 模型输出被截断、或这一轮撞上 `max_turns` 时，
-        // 接着推只会再撞一次，而每撞一次都是零成本的，于是变成死循环。
+        // 「失败」的几种来源，对自动继续是同一件事：**别接着推**。
+        // 尤其是 `Limit` —— 模型输出被截断时，接着推只会再撞一次。
         let outcome = outcome.unwrap_or(carter::agent::TurnOutcome::Cancelled);
         let failed = match &outcome {
             carter::agent::TurnOutcome::Error(e) => {
@@ -1971,16 +1963,9 @@ impl Runner {
             // 被中断：用户自己点的停止不算失败（那条规则在 `decide_after_turn` 里
             // 优先级更高）；自己断的（关会话等）算，免得在这儿打转。
             carter::agent::TurnOutcome::Cancelled => !cancelled,
-            carter::agent::TurnOutcome::Limit => {
-                // 撞上「一轮里最多几次模型调用」了。carter 原来只是默默停下，
-                // 界面上看着和「工具没执行」一模一样 —— 说清楚是哪条限、怎么调。
-                self.notice(&format!(
-                    "这一轮里模型已经调了 {max_turns} 次（agent.max_turns 的上限），\
-                     剩下的工具调用**没有执行**，这一轮到此为止。接着做可以：在输入框里\
-                     说一句「继续」，或者把 ~/.carter/config.toml 里 agent.max_turns 调大。"
-                ));
-                true
-            }
+            // 现在只剩「输出被截断」一种来源：一轮里的模型调用次数不再设上限，
+            // 模型不再要工具时自然会收尾。
+            carter::agent::TurnOutcome::Limit => true,
             carter::agent::TurnOutcome::Assistant => false,
         };
         TurnResult {
@@ -3370,5 +3355,24 @@ mod batch_tests {
         let calls = vec![call("1", "bash")];
         assert_eq!(batches(&calls).len(), 1);
         assert_eq!(batches(&calls)[0].len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod no_turn_cap {
+    /// 一轮里能调多少次模型，不该由配置拍脑袋定：翻几十个文档的工单很容易超过
+    /// carter 默认的 50，撞上之后剩下的工具一条都不执行。
+    #[test]
+    fn the_running_loop_has_no_model_call_cap() {
+        let src = include_str!("session.rs");
+        let body = src
+            .split("async fn run_one_turn(")
+            .nth(1)
+            .and_then(|s| s.split("fn finish_one_call(").next())
+            .expect("找得到 run_one_turn");
+        assert!(
+            !body.contains("config.agent.max_turns"),
+            "run_one_turn 里不该再有模型调用次数上限"
+        );
     }
 }

@@ -1413,6 +1413,74 @@ mod live {
         assert!(summary.contains("done"), "报告里没看到命令输出：{summary}");
     }
 
+    /// 一轮里调多少次模型不该被卡：工单做「翻几十个文档逐个核对」这类活，50 次
+    /// （carter 默认的 `max_turns`）根本不够。让模型一口气跑五十来次工具调用，
+    /// 最后必须正常收尾，而不是停在半路。
+    ///
+    /// `cargo test -p carter-app-core live_no_turn_cap -- --ignored --nocapture`
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn live_no_turn_cap_runs_past_fifty_model_calls() {
+        let home = std::env::temp_dir().join(format!("carter-live-nocap-{}", now_ms()));
+        std::fs::create_dir_all(&home).unwrap();
+        let config = carter::config::Config::load().expect("读不到 ~/.carter/config.toml");
+        let shell = AppShell::new(config);
+        let shell = Arc::new(
+            Arc::try_unwrap(shell)
+                .ok()
+                .unwrap()
+                .with_capture(home.join("captures")),
+        );
+        let dir = home.join("work");
+        std::fs::create_dir_all(&dir).unwrap();
+        let started = start_session(
+            shell.clone(),
+            SessionOptions {
+                cwd: dir.clone(),
+                model: None,
+                resume_latest: false,
+                resume_id: None,
+                new_id: Some(format!("live-nocap-{}", now_ms())),
+            },
+        )
+        .unwrap();
+        let id = started.handle.id.clone();
+        let mut rx = shell.subscribe();
+        started.handle.send(Command::SendPrompt {
+            text: "用 bash 工具一条一条地跑 `echo n`，从 1 数到 55：每次只跑一条，\
+                   看到输出再跑下一条，不要一次写循环。数完回一句「数完了」。"
+                .into(),
+            id: None,
+            interject: false,
+        });
+        loop {
+            match tokio::time::timeout(Duration::from_secs(900), rx.recv()).await {
+                Ok(Ok(AppEvent::Session {
+                    event: SessionEvent::Idle,
+                    ..
+                })) => break,
+                Ok(Ok(_)) => {}
+                _ => panic!("这一轮没跑完"),
+            }
+        }
+        let rows = shell.capture.load(&id);
+        println!("{} 次请求", rows.len());
+        assert!(
+            rows.len() > 50,
+            "应该跑过 50 次以上模型调用（实际 {}）",
+            rows.len()
+        );
+        let last = rows.last().and_then(|r| {
+            let body: serde_json::Value = serde_json::from_str(&r.request_body).ok()?;
+            serde_json::to_string(&body["messages"]).ok()
+        });
+        assert!(
+            last.is_some_and(|m| m.contains("数完了")),
+            "最后那次请求里应该已经带上模型的收尾"
+        );
+        let _ = crate::sessions::delete(&id);
+    }
+
     /// 等助理对话跑完一轮，返回这期间模型调过的工具名。
     async fn chat_turn(rx: &mut tokio::sync::broadcast::Receiver<AppEvent>) -> Vec<String> {
         let mut tools = Vec::new();
