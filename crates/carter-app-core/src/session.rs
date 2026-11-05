@@ -9,12 +9,16 @@
 //! ## 事件怎么走到界面
 //!
 //! ```text
-//! run_turn ──UiSink──▶ ui_tx ──▶ 转发任务 ──▶ broadcast ──▶ Tauri emit ──▶ 前端
+//! run_one_turn ──SessionEvent──▶ shell.emit ──▶ broadcast ──▶ Tauri emit ──▶ 前端
 //! ```
 //!
-//! 中间那层转发任务做三件界面关心的事：给工具调用补 id（carter 的 `UiEvent` 不带 id，
-//! 但并行工具调用必须能配对）、把 `ask_user` 的 oneshot 发送端取出来存住、
-//! 把 carter 的事件词汇翻译成 IPC 词汇。
+//! 正文增量（`TextDelta` / `ThinkingDelta` / `TextEnd`）与工具卡片一样，在产生的那
+//! 一刻直接 `emit`：它们必须与工具事件走**同一条同步路径**，否则「先这段字、后这张
+//! 工具卡」的顺序会在异步转发里被打乱。另外还有一条**并行的**记录：`live`（见
+//! `shell.rs` 的 `LiveLog`），给切走再回来的窗口补画面用 —— 它不是界面收字的主路径。
+//!
+//! 转发任务只剩工具与提问两条来源（`forward_events`），负责把工具事件与 `ask_user`
+//! 的 oneshot 发送端接起来。
 //!
 //! ## 长任务目标（`/goal`）住在哪
 //!
@@ -310,7 +314,6 @@ pub fn start_session(shell: Arc<AppShell>, opts: SessionOptions) -> carter::Resu
         thread: std::sync::Arc::new(parking_lot::Mutex::new(thread)),
         meta,
         cmd_rx,
-        ui_tx: None,
         tool_tx: None,
         ask_tx: None,
         mcp_tools: Vec::new(),
@@ -411,7 +414,6 @@ pub(crate) fn start_side(w: SideWiring, id: String, parent_id: String) -> Arc<Se
         ctx,
         thread: std::sync::Arc::new(parking_lot::Mutex::new(w.thread)),
         cmd_rx,
-        ui_tx: None,
         tool_tx: None,
         ask_tx: None,
         mcp_tools: Vec::new(),
@@ -668,9 +670,10 @@ struct Runner {
     thread: std::sync::Arc<parking_lot::Mutex<Thread>>,
     meta: session::SessionMeta,
     cmd_rx: mpsc::UnboundedReceiver<Command>,
-    /// 三条事件通道的发送端。接收端在 `forward_events` 任务手里，所以这里存 `None`
-    /// 就表示「还没建」—— 见 [`Runner::run`]。
-    ui_tx: Option<mpsc::UnboundedSender<UiEvent>>,
+    /// 两条事件通道的发送端（工具卡片、工具发起的提问）。接收端在 `forward_events`
+    /// 任务手里，所以这里存 `None` 就表示「还没建」—— 见 [`Runner::run`]。
+    ///
+    /// 正文增量不走这里：它们直接 `emit`（见模块文档）。
     tool_tx: Option<mpsc::UnboundedSender<ToolEvent>>,
     ask_tx: Option<mpsc::UnboundedSender<AskRequest>>,
     mcp_tools: Vec<Arc<dyn Tool>>,
@@ -724,27 +727,23 @@ impl Runner {
     async fn run(mut self) {
         let session_id = self.ctx.handle.id.clone();
 
-        // 事件有三条来源，最终都汇到 AppEvent 上：
-        // * `ui_tx`   —— carter 的 UiEvent（文本增量、用量、通知…）
+        // 异步的两条事件来源，最终都汇到 AppEvent 上：
         // * `tool_tx` —— 我们自己那层记录包装（**完整**的参数与结果）
         // * `ask_tx`  —— 工具发起的提问，需要等前端作答
         //
-        // 分成三条而不是硬塞进一条：`UiEvent` 是 carter 的封闭枚举，加不了变体；
-        // 而工具记录与提问本来就不是 carter 的概念。
-        let (ui_tx, ui_rx) = mpsc::unbounded_channel::<UiEvent>();
+        // 正文增量不在这里：它们与工具卡片要严格保序，所以在产生的那一刻直接
+        // `emit`（见模块文档）。工具记录与提问本来就不是 carter 的概念，走各自的
+        // 通道由转发任务收口。
         let (tool_tx, tool_rx) = mpsc::unbounded_channel::<ToolEvent>();
         let (ask_tx, ask_rx) = mpsc::unbounded_channel::<AskRequest>();
-        self.ui_tx = Some(ui_tx);
         self.tool_tx = Some(tool_tx);
         self.ask_tx = Some(ask_tx);
         let forwarder = tokio::spawn(forward_events(
             self.ctx.shell.clone(),
             session_id.clone(),
             self.ctx.handle.asks.clone(),
-            ui_rx,
             tool_rx,
             ask_rx,
-            self.ctx.handle.todos.clone(),
         ));
 
         // MCP server 启动是异步的（要连子进程 / 网络）。失败不致命：
@@ -848,7 +847,6 @@ impl Runner {
         }
         self.ctx.handle.asks.clear();
         self.ctx.handle.close.set();
-        drop(self.ui_tx.take());
         drop(self.tool_tx.take());
         drop(self.ask_tx.take());
         let _ = forwarder.await;
@@ -1783,6 +1781,8 @@ impl Runner {
             let mut asm = carter::provider::BlockAssembler::new();
             let mut stop_reason = carter::provider::FinishReason::Stop;
             let mut had_text = false;
+            // 界面那边还有一段没封口的正文（见下面 `BlockStop` 那一支）。
+            let mut text_open = false;
             let mut stream_err: Option<String> = None;
             let mut seen_usage = carter::provider::Usage::default();
             loop {
@@ -1810,16 +1810,29 @@ impl Runner {
                     Ok(ev) => {
                         asm.push(&ev);
                         match &ev {
+                            // 正文增量：一边攒进「进行中」快照（切走再回来时补画面），
+                            // 一边**立刻**发给界面。这条不能只记 live 里 —— 那只是给
+                            // 重新接上来的窗口用的，正在看着的窗口收不到就等于回答空白。
                             carter::provider::StreamChunk::TextDelta { text, .. } => {
                                 self.ctx.handle.live.text(text);
+                                self.emit(SessionEvent::TextDelta { text: text.clone() });
                                 had_text = true;
+                                text_open = true;
                             }
+                            // 思考增量照发，界面按「显示思考」的设置决定画不画。
                             // 签名分片不展示给用户（对模型有用，对人没意义），
                             // 但空的那几片也不算「说过话」。
                             carter::provider::StreamChunk::ThinkingDelta { text, .. }
                                 if !text.is_empty() =>
                             {
+                                self.emit(SessionEvent::ThinkingDelta { text: text.clone() });
                                 had_text = true;
+                            }
+                            // 一段正文收尾：让界面把这一条 text item 封口，后面的增量
+                            // 另起一段（「正文 → 思考 → 正文」才不会粘成一块）。
+                            carter::provider::StreamChunk::BlockStop { .. } if text_open => {
+                                self.emit(SessionEvent::TextEnd);
+                                text_open = false;
                             }
                             carter::provider::StreamChunk::Finish { reason } => {
                                 stop_reason = reason.clone();
@@ -1859,6 +1872,11 @@ impl Runner {
                 }
             }
             drop(stream);
+            // 流断在半段正文上（被取消、或上游没发 `content_block_stop`）：界面那边
+            // 也要把这条封口，否则下一段的字会接着这一条往下写。
+            if text_open {
+                self.emit(SessionEvent::TextEnd);
+            }
             let usage = asm.usage().clone();
             let blocks = asm.into_blocks();
             if let Some(e) = stream_err {
@@ -2686,6 +2704,12 @@ enum Canceled {
 /// 复制一份历史。与自动压缩换进来的那份隔离：两边各算各的，轮末再整体换回去。
 ///
 /// `Thread` 不实现 `Clone`（那儿只有一份），但它的字段都是公开的。
+///
+/// **recorder 必须一起带过来**：这一轮里写进历史的助手消息与工具结果都是往这份
+/// 拷贝上 `append` 的，而落盘就发生在 `append` 里。漏了它，这一轮的模型回复与
+/// 工具结果只活在内存里，轮末整份换回 `self.thread` 之后连原线程的 recorder 也
+/// 跟着没了 —— 第二条消息起连会话文件都不再增长。共用同一个 `Arc<Recorder>` 是
+/// 安全的：它内部有锁（见 `spawn_title` 里手动追加标题那条路）。
 fn thread_copy(t: &Thread) -> Thread {
     let mut out = Thread::default();
     out.session_id = t.session_id.clone();
@@ -2694,6 +2718,9 @@ fn thread_copy(t: &Thread) -> Thread {
     out.turns = t.turns;
     out.user_turns = t.user_turns;
     out.todos = t.todos.clone();
+    if let Some(rec) = t.recorder() {
+        out.set_recorder(rec);
+    }
     out
 }
 
@@ -3059,7 +3086,9 @@ fn emit(shell: &AppShell, session_id: &str, event: SessionEvent) {
     });
 }
 
-/// 把三条来源翻译成统一的 IPC 事件。
+/// 把两条异步来源翻译成统一的 IPC 事件。
+///
+/// 正文增量不经过这里，见模块文档：它们要跟工具卡片严格保序，所以同步 `emit`。
 ///
 /// carter 的 `ToolCallStarted` / `ToolResult` / `AskUser` **刻意丢弃**：
 /// 前两者只带截断的预览（结果只有第一行 120 字符），界面上画不出有意义的卡片；
@@ -3069,12 +3098,9 @@ async fn forward_events(
     shell: Arc<AppShell>,
     session_id: String,
     asks: Arc<AskRegistry>,
-    mut ui_rx: mpsc::UnboundedReceiver<UiEvent>,
     mut tool_rx: mpsc::UnboundedReceiver<ToolEvent>,
     mut ask_rx: mpsc::UnboundedReceiver<AskRequest>,
-    todos: std::sync::Arc<arc_swap::ArcSwap<Vec<carter::tools::TodoItem>>>,
 ) {
-    let mut ui_open = true;
     let mut tool_open = true;
     let mut ask_open = true;
 
@@ -3085,21 +3111,8 @@ async fn forward_events(
         });
     };
 
-    while ui_open || tool_open || ask_open {
+    while tool_open || ask_open {
         tokio::select! {
-            ev = ui_rx.recv(), if ui_open => match ev {
-                Some(ev) => {
-                    // todo 整表先记到句柄上，再往前端送：事件不回放，界面切走再
-                    // 回来（接上后台那条会话）时靠的就是这里存下的那份。
-                    if let UiEvent::TodoUpdated(list) = &ev {
-                        todos.store(Arc::new(list.clone()));
-                    }
-                    if let Some(out) = map_ui(ev) {
-                        send(&shell, out);
-                    }
-                }
-                None => ui_open = false,
-            },
             ev = tool_rx.recv(), if tool_open => match ev {
                 Some(ToolEvent::Started { call_id, name, args }) => {
                     send(&shell, SessionEvent::ToolStarted { call_id, name, args });
@@ -3130,34 +3143,6 @@ async fn forward_events(
             },
         }
     }
-}
-
-/// carter 的事件 → IPC 事件。返回 `None` = 这条不往前端送（见上面的说明）。
-fn map_ui(ev: UiEvent) -> Option<SessionEvent> {
-    Some(match ev {
-        UiEvent::AssistantTextDelta(text) => SessionEvent::TextDelta { text },
-        UiEvent::ThinkingDelta(text) => SessionEvent::ThinkingDelta { text },
-        UiEvent::AssistantTextEnd => SessionEvent::TextEnd,
-        UiEvent::TodoUpdated(todos) => SessionEvent::TodoUpdated {
-            todos: todos.iter().map(todo_view).collect(),
-        },
-        UiEvent::TurnUsage { usage, cost, model } => SessionEvent::TurnUsage {
-            usage: UsageView::from(&usage),
-            cost,
-            model,
-        },
-        UiEvent::Notice(message) => SessionEvent::Notice { message },
-        UiEvent::Idle => SessionEvent::Idle,
-        UiEvent::ModelChanged(model) => SessionEvent::Notice {
-            message: format!("模型：{model}"),
-        },
-        UiEvent::Divider(label) => SessionEvent::Notice { message: label },
-        UiEvent::Title(_) | UiEvent::ReplayHistory(_) => return None,
-        // 见函数文档：这三条由记录包装层或我们自己的实现接管。
-        UiEvent::ToolCallStarted { .. } | UiEvent::ToolResult { .. } | UiEvent::AskUser { .. } => {
-            return None;
-        }
-    })
 }
 
 /// 占用 + 窗口 + 配置 → 界面上那个环要的数。
@@ -3288,6 +3273,34 @@ mod live_close {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 一轮里写进历史的助手消息与工具结果，都是往 `thread_copy` 那份拷贝上 `append`
+    /// 的 —— 落盘发生在 `append` 里。拷贝丢了 recorder，「回答不显示」就有了第二半：
+    /// 界面上看不到，切走再回来也读不到，会话文件里只剩用户那几句话。
+    #[test]
+    fn a_thread_copy_can_still_persist() {
+        let dir = std::env::temp_dir().join(format!(
+            "carter-app-thread-copy-{}-{}",
+            std::process::id(),
+            crate::protocol::now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.jsonl");
+
+        let mut original = Thread::default();
+        original.set_recorder(Arc::new(carter::session::Recorder::open(&path).unwrap()));
+        let mut copy = thread_copy(&original);
+        assert!(copy.recorder().is_some(), "拷贝要带着 recorder");
+
+        copy.append(llm_adapt_core::WireMessage::user_text("写在拷贝上"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("写在拷贝上"),
+            "拷贝上的 append 必须落盘：{text}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     /// 同步上下文里调用 `start_session` 必须拿到一句能读懂的错，而不是 panic。
     ///
