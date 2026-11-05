@@ -14,7 +14,8 @@
       "!src-tauri/gen",
       "!public/**/*.svg",
       "!src-tauri/*.svg",
-      "!**/*.md"
+      "!**/*.md",
+      "!**/.github/workflows/release.yml"
     ]
   },
   "formatter": {

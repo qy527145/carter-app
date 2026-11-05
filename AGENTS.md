@@ -11,7 +11,7 @@
 | `src/`                      | React 19 + Vite 8 + Tailwind v4 前端                                 |
 | `src/lib/api.ts`            | **唯一**调用 `invoke` 的地方：类型化命令与事件名                     |
 | `src-tauri/capabilities/`   | 前端可调用的权限清单                                                 |
-| `scripts/`                  | `bun run` 背后的辅助脚本（init / sandbox / build / logs / bump / clean） |
+| `scripts/`                  | `bun run` 背后的辅助脚本（init / sandbox / build / logs / upgrade / clean） |
 
 Cargo 是根目录的 workspace，产物在根 `target/`（不是 `src-tauri/target/`）。
 
@@ -25,7 +25,7 @@ bun run fix            # 能自动修的都修掉
 bun run test           # bun test + cargo test --workspace
 bun run test:core      # 只测 carter-app-core
 bun run logs -f        # 跟踪 ~/.carter-app/app.log
-bun run bump patch     # 三处版本号一起改
+bun run upgrade patch  # 三处版本号一起改，并提交 + 打 tag
 ```
 
 ## 规则

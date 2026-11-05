@@ -30,7 +30,7 @@
     "test:rs": "cargo test --workspace",
     "test:core": "cargo test -p carter-app-core",
     "logs": "bun run scripts/logs.ts",
-    "bump": "bun run scripts/bump.ts",
+    "upgrade": "bun run scripts/upgrade.ts",
     "clean": "bun run scripts/clean.ts"
   },
   "dependencies": {

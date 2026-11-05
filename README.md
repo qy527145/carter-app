@@ -85,7 +85,7 @@ bun run dev           # 打开桌面窗口：前端 HMR，Rust 改动自动重�
 | `bun run test`               | `test:web`（bun test）+ `test:rs`（整个 workspace 的 cargo test）            |
 | `bun run test:core`          | 只测 `carter-app-core`，最常用                                               |
 | `bun run logs [-f] [-n N]`   | 看 `~/.carter-app/app.log`；`--sandbox` 看沙箱的，`--path` 只打印路径        |
-| `bun run bump <patch\|minor\|major\|x.y.z>` | 同步改 `package.json`、`Cargo.toml`、`tauri.conf.json` 三处版本号 |
+| `bun run upgrade [patch\|minor\|major\|x.y.z]` | 同步改三处版本号，并提交、打 tag；不带参数只打印当前版本 |
 | `bun run clean [--web\|--all]` | 清 `dist/` 与 `cargo clean`；`--all` 连 `node_modules/`、`.sandbox/` 一起  |
 | `bun run icon <png>`         | 由一张 1024×1024 PNG 生成全部平台图标                                         |
 

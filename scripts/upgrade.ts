@@ -2,16 +2,19 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 /**
- * 统一改版本号。版本散在三处，手改总会漏一处：
+ * 一次做完发版：改版本号 → 提交 → 打 tag。
+ *
+ *   bun run upgrade            # 打印当前版本
+ *   bun run upgrade patch      # 0.1.0 → 0.1.1（也可以 minor / major）
+ *   bun run upgrade 0.2.0      # 指定版本
+ *
+ * 版本散在三处，手改总会漏一处：
  *   - package.json                       `version`
  *   - Cargo.toml                         `[workspace.package] version`（两个 crate 都继承它）
  *   - src-tauri/tauri.conf.json          `version`（安装包与「关于」页显示的就是它）
  *
- *   bun run bump            # 打印当前版本
- *   bun run bump patch      # 0.1.0 → 0.1.1（也可以 minor / major）
- *   bun run bump 0.2.0      # 指定版本
- *
- * 只改文件，不提交、不打 tag。改完会提示接下来的 git 命令。
+ * 提交与 tag 一起做掉，省得再记两条 git 命令。刻意不 push —— 推不推由你决定。
+ * tag 形如 v0.1.1 会触发 .github/workflows/release.yml（cargo-dist 生成）。
  */
 
 const root = join(import.meta.dir, "..");
@@ -42,6 +45,28 @@ function next(v: string, kind: string): string {
 }
 
 const target = next(current, arg);
+const tag = `v${target}`;
+
+if (target === current) {
+  console.error(`已经是 ${current}，没有要改的版本号`);
+  process.exit(1);
+}
+
+/** 同步执行 git，输出直通终端；返回退出码。 */
+function git(args: string[], opts: { quiet?: boolean } = {}): number {
+  const proc = Bun.spawnSync({
+    cmd: ["git", ...args],
+    cwd: root,
+    stdio: opts.quiet ? ["ignore", "ignore", "ignore"] : ["inherit", "inherit", "inherit"],
+  });
+  return proc.exitCode;
+}
+
+// tag 已存在时先停：等文件改完、提交完再发现，回滚更麻烦。
+if (git(["rev-parse", "--verify", "--quiet", `refs/tags/${tag}`], { quiet: true }) === 0) {
+  console.error(`tag ${tag} 已存在；换个版本号，或先 git tag -d ${tag}`);
+  process.exit(1);
+}
 
 /** 只替换第一处匹配，替换不到就报错 —— 静默跳过正是「漏改一处」的来源。 */
 async function replaceIn(file: string, pattern: RegExp, label: string) {
@@ -64,8 +89,20 @@ await replaceIn(files.tauri, /("version":\s*")[^"]+"/, "tauri.conf.json");
 // 让 Cargo.lock 跟上新版本号，免得下一次构建再改出一份 diff。
 Bun.spawnSync({ cmd: ["cargo", "update", "--workspace", "--offline"], cwd: root });
 
-console.log(`${current} → ${target}
+if (git(["commit", "-am", `chore: 发布 ${tag}`]) !== 0) {
+  console.error(`\n提交失败：版本号已改成 ${target}，但没有提交，也没有打 tag。`);
+  process.exit(1);
+}
 
-接下来：
-  git commit -am "chore: 发布 v${target}"
-  git tag v${target}`);
+if (git(["tag", tag]) !== 0) {
+  console.error(`\n打 tag 失败：版本号已提交，但 ${tag} 没打上。`);
+  process.exit(1);
+}
+
+console.log(`
+${current} → ${target}
+已提交：chore: 发布 ${tag}
+已打 tag：${tag}
+
+推送后触发发布流水线：
+  git push origin main --tags`);
