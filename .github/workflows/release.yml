@@ -69,6 +69,13 @@ jobs:
         # failing. otherwise `sh` won't catch that `curl` returned non-0
         shell: bash
         run: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.sh | sh"
+      - name: DEBUG secrets
+        run: |
+          echo "MINISIGN_SECRET_KEY set: ${MINISIGN_SECRET_KEY:+yes}"
+          echo "TAURI_SIGNING_PRIVATE_KEY set: ${TAURI_SIGNING_PRIVATE_KEY:+yes}"
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
       - name: Cache dist
         uses: actions/upload-artifact@v7
         with:
