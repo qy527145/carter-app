@@ -40,17 +40,17 @@
     MATRIX_TARGETS: ${{ toJson(matrix.targets) }}
     # 签名密钥直接用 tauri 认识的那个变量名注入（`TAURI_SIGNING_PRIVATE_KEY`）。
     #
-    # 早先这里绕了一圈：把值先写进 `$RUNNER_TEMP/updater.key`，再在 `run:` 里
-    # 通过 `$GITHUB_ENV` 导给后续步骤 —— 但**同一步**里的 `tauri build` 根本看不到
-    # 刚刚写进 GITHUB_ENV 的变量（那要等下一步才生效），于是 tauri 报
-    # 「有公钥没私钥」，而 GITHUB_ENV 里的路径还指着一个根本不存在的密钥文件。
-    # 现在：值必须是 tauri 要的格式（私钥文件内容再套一层 base64），
-    # 由 step 级 env 直接给，`tauri build` 当场就能读到。
-    TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY || secrets.MINISIGN_SECRET_KEY }}
+    # 两个坑都踩过：
+    #   1. 先写进 `$RUNNER_TEMP/updater.key`、再在**同一步**里 `>> $GITHUB_ENV`
+    #      导出 —— GITHUB_ENV 要下一步才生效，`tauri build` 当场看不到；
+    #   2. 值必须是**私钥文件的原文**（`untrusted comment: …` + 一行），
+    #      tauri 自己会做那层 base64 解码。再套一层 base64 会报
+    #      「Missing encoded key in secret key」。
+    TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.MINISIGN_SECRET_KEY || secrets.TAURI_SIGNING_PRIVATE_KEY }}
     TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || secrets.MINISIGN_KEY_PASSWORD }}
   run: |
     if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
-      echo "::error::没有配置更新签名密钥：请在仓库 Secrets 里加 TAURI_SIGNING_PRIVATE_KEY（私钥文件再套一层 base64）"
+      echo "::error::没有配置更新签名密钥：请在仓库 Secrets 里加 TAURI_SIGNING_PRIVATE_KEY 或 MINISIGN_SECRET_KEY（值 = 私钥文件的整份内容）"
       exit 1
     fi
 

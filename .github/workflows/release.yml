@@ -149,7 +149,7 @@ jobs:
       - name: "用 tauri 出安装包（带自更新签名）"
         run: |
           if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
-            echo "::error::没有配置更新签名密钥：请在仓库 Secrets 里加 TAURI_SIGNING_PRIVATE_KEY（私钥文件再套一层 base64）"
+            echo "::error::没有配置更新签名密钥：请在仓库 Secrets 里加 TAURI_SIGNING_PRIVATE_KEY 或 MINISIGN_SECRET_KEY（值 = 私钥文件的整份内容）"
             exit 1
           fi
 
@@ -181,7 +181,7 @@ jobs:
         shell: "bash"
         env:
           "MATRIX_TARGETS": "${{ toJson(matrix.targets) }}"
-          "TAURI_SIGNING_PRIVATE_KEY": "${{ secrets.TAURI_SIGNING_PRIVATE_KEY || secrets.MINISIGN_SECRET_KEY }}"
+          "TAURI_SIGNING_PRIVATE_KEY": "${{ secrets.MINISIGN_SECRET_KEY || secrets.TAURI_SIGNING_PRIVATE_KEY }}"
           "TAURI_SIGNING_PRIVATE_KEY_PASSWORD": "${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || secrets.MINISIGN_KEY_PASSWORD }}"
       - name: "上传 tauri 安装包（自更新用）"
         uses: "actions/upload-artifact@v7"
