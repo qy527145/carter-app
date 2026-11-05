@@ -25,4 +25,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
-        run: gh workflow run release.yml --ref "$TAG" -f tag="$TAG" --repo "$GITHUB_REPOSITORY"
+          SIGNING_KEY: ${{ secrets.MINISIGN_SECRET_KEY || secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          # Release 的 plan 阶段就要求签名私钥（updater 产物要签名）。没有的话
+          # 先在这里说一句，省得去翻 release.yml 里那个看不到日志的失败。
+          if [ -z "$SIGNING_KEY" ]; then
+            echo "::warning::没有配置更新签名密钥（Secrets 里的 TAURI_SIGNING_PRIVATE_KEY 或 MINISIGN_SECRET_KEY）：Release 会在 plan 阶段失败。"
+          fi
+          gh workflow run release.yml --ref "$TAG" -f tag="$TAG" --repo "$GITHUB_REPOSITORY"
