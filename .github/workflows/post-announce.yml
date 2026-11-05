@@ -3,15 +3,23 @@ name: Post-announce
 # 由 dist-workspace.toml 的 `post-announce-jobs` 引用：dist 在创建完 GitHub
 # Release 之后调它（见 .github/workflows/release.yml 里的 custom-post-announce）。
 #
-# Release 里只要安装包：Windows 的 NSIS `.exe`、macOS arm64 的 `.dmg`、
-# Linux 的 `.deb`。dist 自己发的 tar.xz / zip / `.sha256` / dist-manifest.json /
-# source.tar.gz 全部删掉。
+# **一个 job 就是一步**（见文件末尾「为什么整个流程挤在一个 step 里」）。
+# 这一步把 Release 整理成「只有三份安装包」：
+#   1. 把各构建机传上来的 `installers-*` 挂到 Release 上；
+#   2. 删掉 dist 的归档包（tar.xz / zip / sha256 / dist-manifest.json / source.tar.gz）；
+#   3. 确认三份安装包都在，少一份直接失败。
 #
-# 为什么发完再删，而不是让 dist 别产：
+# 为什么发完再整理，而不是让 dist 别产：
 #   - `installers = []` 只能保证「不发 dist 自己的安装器」，归档包照发；
 #   - 往 `artifacts/` 目录里删文件那条路在 dist 的 host job 内部，外部
 #     extend 不了；`--artifacts` 也只管编不管传。
-# 而 `gh release delete-asset` 不受这些限制，语义也最直白。
+#
+# 为什么整个流程挤在一个 step 里、还要 `--repo "$GITHUB_REPOSITORY"`：
+#   v0.1.1 第一次发版时 `actions/download-artifact` 步骤根本没出现在日志里
+#   （job 直接从 run 脚本开始），而 `gh release delete-asset` 不带 `--repo` 时
+#   会去当前目录找 git 仓库 —— 这里没有 checkout，只能显式给。
+#   改成全部走 `gh`：下载走 `gh api`（workflow token 对 Actions API 有权限），
+#   不用任何没有验证过的 action。
 
 on:
   workflow_call:
@@ -21,8 +29,10 @@ on:
         type: string
 
 permissions:
-  # 删 Release 里的附件要用。
+  # 删 / 上传 Release 附件。
   contents: write
+  # 下载本次运行的 `installers-*` artifact。
+  actions: read
 
 jobs:
   trim:
@@ -34,13 +44,50 @@ jobs:
           TAG: ${{ fromJson(inputs.plan).announcement_tag }}
         shell: bash
         run: |
+          set -euo pipefail
           if [ -z "$TAG" ]; then
-            echo "::notice::这次只构建、不发版（dry-run），没有 Release 要清理"
+            echo "::notice::这次只构建、不发版（dry-run），没有 Release 要整理"
             exit 0
           fi
 
-          # 三种安装包缺一不可：宁可发版失败，也别让用户下到一个没有安装包的版本。
+          # 1. 取本次运行的安装包。按 artifact 名精确找，别用 pattern ——
+          #    `download-artifact` 的 pattern 会顺带匹配上别的运行里同名的那几份。
+          stage="$RUNNER_TEMP/installers"
+          mkdir -p "$stage"
+          ids="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts" \
+            --paginate --jq '.artifacts[] | select(.name | startswith("installers-")) | .id')"
+          if [ -z "$ids" ]; then
+            echo "::error::本次运行没有任何 installers-* 产物，没法整理 Release"
+            exit 1
+          fi
+          for id in $ids; do
+            name="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$id" --jq .name)"
+            echo "取回 $name"
+            gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$id/zip" > "$RUNNER_TEMP/$name.zip"
+            unzip -q -o "$RUNNER_TEMP/$name.zip" -d "$stage"
+          done
+          echo "拿到的文件："
+          ls -l "$stage"
+
+          # 2. 挂到 Release 上。`--clobber`：重跑同一个 tag 时覆盖旧的同名附件
+          #    （release.yml 重跑会重新创建 Release，但手动补传时用得上）。
+          #    传之前先过一遍类型白名单 —— 别把 `.part` 之类的临时文件推上去。
+          find "$stage" -maxdepth 1 -type f \
+            \( -name '*.exe' -o -name '*.dmg' -o -name '*.deb' \) \
+            -print0 | xargs -0 -r gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber
+
+          # 3. 删掉所有不是安装包的东西：tar.xz / zip，连着 dist 为它们生成的
+          #    `<name>.sha256` / `sha256.sum`，以及 dist-manifest.json / source.tar.gz。
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets \
+            --jq '.assets[].name' | grep -Ev '\.(exe|dmg|deb)$' | while read -r name; do
+            if [ -z "$name" ]; then continue; fi
+            gh release delete-asset "$TAG" "$name" --repo "$GITHUB_REPOSITORY" --yes
+            echo "删除：$name"
+          done
+
+          # 4. 三种安装包缺一不可：宁可发版失败，也别让用户下到一个没有安装包的版本。
           names="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+          echo "剩余附件："
           echo "$names"
           for ext in exe dmg deb; do
             if ! grep -q "\.$ext$" <<<"$names"; then
@@ -48,16 +95,3 @@ jobs:
               exit 1
             fi
           done
-
-          # 删掉所有不是安装包的东西：tar.xz / zip，连着 dist 为它们生成的
-          # `<name>.sha256` / `sha256.sum`，以及 dist-manifest.json / source.tar.gz。
-          # 不按清单精确删（`upload_files` 在构建清单里，plan 阶段还是空的），
-          # 扩展名白名单已经足够窄，漏删的会是明显的「压缩包又回来了」。
-          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets \
-            --jq '.assets[].name' | grep -Ev '\.(exe|dmg|deb)$' | while read -r name; do
-            gh release delete-asset "$TAG" "$name" --repo "$GITHUB_REPOSITORY" --yes \
-              && echo "删除：$name"
-          done
-
-          echo "剩余附件："
-          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name'
