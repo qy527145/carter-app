@@ -94,21 +94,21 @@ bun run dev           # 打开桌面窗口：前端 HMR，Rust 改动自动重�
 ### 发布
 
 `bun run upgrade patch` 会同步改三处版本号、提交并打 tag；把 tag 推到远端即触发
-发布流水线（[.github/workflows/release.yml](.github/workflows/release.yml)，由
-cargo-dist 生成，别手改）。
+发布流水线（[.github/workflows/release.yml](.github/workflows/release.yml)）。
+也可以手动触发：Actions → **Release** → Run workflow，`tag` 填要发布的版本
+（如 `v0.1.2`）；默认值 `dry-run` 只构建、不发 Release，适合先验证流水线。
 
 Release 里**只放三份安装包**，没有压缩包：
 
 | 平台 | 文件 | 装法 |
 | ---- | ---- | ---- |
-| Windows | `Carter_<版本>_x64-setup.exe`（NSIS） | 双击 |
-| macOS（Apple Silicon） | `Carter_<版本>_aarch64.dmg` | 打开镜像，把 Carter 拖进 Applications |
+| Windows | `carter-app_<版本>_x64-setup.exe`（NSIS） | 双击 |
+| macOS（Apple Silicon） | `carter-app_<版本>_aarch64.dmg` | 打开镜像，把 Carter 拖进 Applications |
 | Linux（x86_64） | `carter-app_<版本>_amd64.deb` | `sudo dpkg -i …` |
 
-安装包由各平台构建机上的 `tauri build` 产出（见
-[.github/build-setup.yml](.github/build-setup.yml)）；dist 照常编一遍、打压缩包、
-发 Release，然后 [`post-announce.yml`](.github/workflows/post-announce.yml)
-把 Release 里除 `.exe` / `.dmg` / `.deb` 之外的东西删干净，少一份安装包就判流水线失败。
+流水线（[.github/workflows/release.yml](.github/workflows/release.yml)）就是三台
+构建机各跑一次 `tauri build`，产物直接传进 Release —— 不经过 cargo-dist，
+所以不产生 tar.xz / zip 这类归档。发版步骤见 [docs/release.md](docs/release.md)。
 
 ### 应用内更新
 
