@@ -6,20 +6,24 @@ jobs:
   probe:
     runs-on: ubuntu-22.04
     steps:
-      - name: 探测
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: 原样复刻 release.yml 的建 release 命令
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "== 1) 建 tag（同样要 contents:write）"
-          gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" \
-            -f ref="refs/tags/probe-$GITHUB_RUN_ID" -f sha="$GITHUB_SHA" && echo "TAG_OK" || echo "TAG_FAIL"
-          echo "== 2) 建 draft release"
-          gh api -X POST "repos/$GITHUB_REPOSITORY/releases" \
-            -f tag_name="probe-$GITHUB_RUN_ID" -f name=probe -f body=probe -F draft=true \
-            && echo "RELEASE_OK" || echo "RELEASE_FAIL"
-          echo "== 3) 带 -i 看响应头"
-          gh api -i "repos/$GITHUB_REPOSITORY" 2>&1 | grep -iE "x-oauth-scopes|x-accepted|http/" | head -5
-          echo "== 4) 清理"
-          gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/tags/probe-$GITHUB_RUN_ID" && echo "DEL_OK" || true
-          gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/probe-$GITHUB_RUN_ID" && echo "DELTAG_OK" || true
+          T="probe-gh-$GITHUB_RUN_ID"
+          git tag "$T"
+          git push origin "refs/tags/$T" || echo "push tag failed"
+          echo "== A) gh release create 带 --target + 一个附件"
+          echo hi > a.txt
+          gh release create "$T" --target "$GITHUB_SHA" --title "$T" --notes-file a.txt a.txt \
+            && echo "CREATE_OK" || echo "CREATE_FAIL"
+          echo "== B) 干净环境再试一次（不带 --target）"
+          T2="probe2-$GITHUB_RUN_ID"; git tag "$T2"; git push origin "refs/tags/$T2"
+          gh release create "$T2" --title "$T2" --notes-file a.txt \
+            && echo "CREATE2_OK" || echo "CREATE2_FAIL"
+          gh release delete "$T" --yes --cleanup-tag || true
+          gh release delete "$T2" --yes --cleanup-tag || true
           exit 0
