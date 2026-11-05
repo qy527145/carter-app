@@ -26,10 +26,6 @@
     }
   },
   "plugins": {
-    "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDM5MDExODBBQzhEQjIzOTkKUldTWkk5dklDaGdCT1ZVOHM2amdCRWphVy9PUTF3OXhDcnFOZmpnald2VVZIdjNxMFBXdmQ3RXoK",
-      "endpoints": []
-    },
     "opener": {
       "requireLiteralLeadingDot": false
     }
@@ -37,7 +33,6 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

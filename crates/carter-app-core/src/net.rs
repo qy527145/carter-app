@@ -469,84 +469,6 @@ pub fn rewrite_github_urls(command: &str, github: Option<&str>) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// 更新包的验签
-// ---------------------------------------------------------------------------
-
-/// 更新包的发布公钥（minisign）。私钥只在发版机器 / CI secrets 里，见 `docs/release.md`。
-///
-/// 换密钥时旧版本就再也验不过任何新包 —— 所以除非私钥泄露，别动它。
-pub const UPDATE_PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDM5MDExODBBQzhEQjIzOTkKUldTWkk5dklDaGdCT1ZVOHM2amdCRWphVy9PUTF3OXhDcnFOZmpnald2VVZIdjNxMFBXdmQ3RXoK";
-
-/// 验更新包的 minisign 签名，并核对签名里绑定的版本号与清单说的一致。
-///
-/// 为什么要在 `src-tauri` 之外再验一遍：Tauri 的 updater 插件也能验，但那套
-/// 只有桌面端能用；这里用 `minisign-verify` 自己验，`carter-app-core` 的测试就能
-/// 拿一份真包跑（见 `tests/update_signature.rs`），不依赖 webview。
-///
-/// 两道都验：
-///
-/// 1. 包内容与签名对得上（`public_key.verify`，含签名自身的全局签名）；
-/// 2. 签名里带的版本号 == 清单里宣布的版本号（`expected_version`，可带/不带 `v`）。
-///
-/// 没有第 2 道的话，一份合法签名**旧包**配一份被篡改的**新版本号**清单，就能让
-/// 用户「升级」回旧版本 —— 签名本身完全合法。
-pub fn verify_update(
-    pubkey: &str,
-    bytes: &[u8],
-    signature: &str,
-    expected_version: &str,
-) -> Result<(), String> {
-    let key_text = decode_b64_string(pubkey).ok_or("更新公钥不是合法的 base64")?;
-    let pk = minisign_verify::PublicKey::decode(&key_text)
-        .map_err(|e| format!("更新公钥解不开：{e}"))?;
-    let sig_text = decode_b64_string(signature).ok_or("更新签名不是合法的 base64")?;
-    let sig = minisign_verify::Signature::decode(&sig_text)
-        .map_err(|e| format!("更新签名解不开：{e}"))?;
-    pk.verify(bytes, &sig, true)
-        .map_err(|e| format!("签名校验失败：{e}"))?;
-
-    // 签名已验证，里面那段 trusted comment 才能信。
-    let want = expected_version.trim().trim_start_matches('v');
-    // Tauri CLI 写进 trusted comment 的是一条制表符分隔的记录：
-    // `timestamp:…\tfile:…\tversion:0.2.0`。字段顺序不保证，整段按分隔符切开找。
-    let comment = sig.trusted_comment();
-    let signed = comment
-        .split(['\t', '\n', ' '])
-        .filter_map(|f| f.trim().strip_prefix("version:"))
-        .next()
-        .map(str::trim)
-        .ok_or("签名里没有版本号（这份包不是用它应该用的版本签的）")?;
-    if signed.trim_start_matches('v') != want {
-        return Err(format!(
-            "签名里的版本是 {signed}，清单说 {expected_version}"
-        ));
-    }
-    Ok(())
-}
-
-/// Tauri 的签名（`.sig` 文件 / `latest.json` 里的 `signature`）与 `tauri.conf.json`
-/// 里的 `pubkey` 都是**整份 minisign 文本再套一层 base64**。
-///
-/// 原文也认（minisign 自己的格式），这样测试夹具、手工排查都能直接用文本。
-/// 解密顺序：先去 pem 壳、再去外层 base64；结果不是 minisign 文本就当作已经是
-/// 原文（解出来的"原文"不含 `comment` 字样时，说明那本来就是原文）。
-fn decode_b64_string(s: &str) -> Option<String> {
-    use base64::Engine;
-    let engine = base64::engine::general_purpose::STANDARD;
-    let body: String = s
-        .lines()
-        .filter(|l| !l.trim_start().starts_with("-----"))
-        .collect::<Vec<_>>()
-        .join("");
-    let trimmed = body.trim();
-    if trimmed.contains("untrusted comment") {
-        return Some(trimmed.to_string());
-    }
-    let decoded = engine.decode(trimmed).ok()?;
-    String::from_utf8(decoded).ok()
-}
-
-// ---------------------------------------------------------------------------
 // 一次检查的汇总（给界面看的）
 // ---------------------------------------------------------------------------
 
@@ -579,17 +501,16 @@ mod tests {
     #[test]
     fn github_urls_expand_to_official_then_accels() {
         let prefs = NetPrefs::default();
-        let out =
-            prefs.candidates(&["https://github.com/o/r/releases/latest/download/latest.json"]);
+        let out = prefs.candidates(&["https://github.com/o/r/releases/download/tool.tar.gz"]);
         assert_eq!(
             out[0],
-            "https://github.com/o/r/releases/latest/download/latest.json"
+            "https://github.com/o/r/releases/download/tool.tar.gz"
         );
         // jsDelivr 不是「前缀拼接」形态，不能出现在 GitHub 地址的候选里。
         assert!(out.iter().all(|u| !u.contains("jsdelivr")));
         assert_eq!(
             out[1],
-            "https://gh-proxy.com/https://github.com/o/r/releases/latest/download/latest.json"
+            "https://gh-proxy.com/https://github.com/o/r/releases/download/tool.tar.gz"
         );
         assert_eq!(out.len(), GITHUB_ACCELS.len() - 1);
     }

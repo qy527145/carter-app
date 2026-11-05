@@ -103,36 +103,13 @@ export function AppearancePage() {
         </Card>
       </Section>
 
-      <Section title="更新">
-        <Card>
-          <div className="flex items-center gap-3">
-            <div className="flex-1">
-              <div className="text-sm text-ink">自动检查新版本</div>
-              <div className="mt-0.5 text-[11px] leading-relaxed text-dim">
-                打开时每 6 小时在后台查一次，新版本静默下载好，侧栏出现「重启更新」再点一下。
-                关掉之后只会在「关于」页手动检查时更新。
-              </div>
-            </div>
-            <Switch
-              label="自动检查新版本"
-              checked={settings.auto_update}
-              onChange={(v) => {
-                const next = { ...settings, auto_update: v };
-                setSettings(next);
-                setAppSettings(next).catch(toastError);
-              }}
-            />
-          </div>
-        </Card>
-      </Section>
-
       <Section title="网络">
         <Card>
           <div className="flex items-start gap-3">
             <div className="flex-1">
               <div className="text-sm text-ink">GitHub 加速站</div>
               <div className="mt-0.5 text-[11px] leading-relaxed text-dim">
-                连不上 GitHub 的网络里，连接器安装 / 团队同步 / 更新会被重定向到国内的加速站
+                连不上 GitHub 的网络里，连接器安装 / 团队同步会被重定向到国内的加速站
                 （gh-proxy.com、ghproxy.net、ghfast.top，按顺序试）。下载包都带签名校验，
                 加速站只能延迟，改不了内容。能直连的机器开着也不亏：官方地址总是第一个试。
               </div>

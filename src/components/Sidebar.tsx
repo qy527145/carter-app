@@ -43,7 +43,6 @@ import {
 import { toastError } from "../lib/toast";
 import { useStore } from "../store";
 import { groupByProject, SessionList } from "./SessionList";
-import { UpdateNotice } from "./UpdateNotice";
 import { Button, IconButton } from "./ui/Button";
 import { type MenuEntry, useContextMenu } from "./ui/ContextMenu";
 import { Input } from "./ui/Input";
@@ -638,11 +637,9 @@ export function Sidebar() {
             <ProjectGroups sessions={shown} activeId={sessionId} currentCwd={cwd} query={q} />
           </div>
 
-          {/* 底部：更新提示 + 设置 + 主题。设置放在这里而不是顶部导航里 ——
-            它是「偶尔去一次」的地方，占着顶部第一屏的位置不值当；而左下角是
-            这类入口的常规位置。更新提示同理：它只在「已就绪 / 下载中」时出现。 */}
+          {/* 底部：设置 + 主题。设置放在这里而不是顶部导航里 —— 它是「偶尔去一次」
+            的地方，占着顶部第一屏的位置不值当；而左下角是这类入口的常规位置。 */}
           <div className="space-y-1.5 border-t border-edge p-2">
-            <UpdateNotice />
             <button
               onClick={() => setView("settings")}
               title={`设置（${MOD},）`}

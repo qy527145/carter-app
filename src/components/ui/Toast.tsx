@@ -45,18 +45,6 @@ export function ToastContainer() {
           <span className="min-w-0 flex-1 break-words">
             {t.message}
             {t.count > 1 && <span className="ml-1.5 text-dim">×{t.count}</span>}
-            {t.action && (
-              <button
-                onClick={() => {
-                  const run = t.action?.run;
-                  dismiss(t.id);
-                  run?.();
-                }}
-                className="carter-press mt-1.5 block rounded-md bg-ink px-2 py-0.5 text-[11px] font-medium text-base outline-none hover:opacity-85"
-              >
-                {t.action.label}
-              </button>
-            )}
           </span>
           <button
             onClick={() => dismiss(t.id)}

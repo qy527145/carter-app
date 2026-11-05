@@ -64,8 +64,6 @@ pub struct AppSettings {
     /// git 的 `user.name` 进的是每一条提交，很多人那里写的是拼音或工号，不一定是
     /// 想在团队里被叫的名字。
     pub nickname: String,
-    /// 打开时自动检查新版本（后台下载，不自动重启）。
-    pub auto_update: bool,
     /// 从 GitHub 下载时允许走加速站（`gh-proxy.com` 等）。默认开 —— 关掉的话
     /// 连接器安装、团队同步、更新在连不上 GitHub 的网络里都会失败。
     pub github_accel: bool,
@@ -88,7 +86,6 @@ impl Default for AppSettings {
             ignored_skills: Vec::new(),
             changes_ignore: Vec::new(),
             nickname: String::new(),
-            auto_update: true,
             github_accel: true,
             http_proxy: String::new(),
             model_sources: String::new(),
@@ -280,7 +277,6 @@ mod tests {
             ignored_skills: vec!["pdf".into()],
             changes_ignore: vec!["*.snap".into()],
             nickname: "徐侨".into(),
-            auto_update: false,
             github_accel: false,
             http_proxy: "http://127.0.0.1:7897".into(),
             model_sources: "https://mirror.example/models.json\n\n  \nhttps://models.dev/api.json"
@@ -297,7 +293,6 @@ mod tests {
         assert!(back.skill_ignored("pdf"));
         assert_eq!(back.changes_ignore, vec!["*.snap".to_string()]);
         assert_eq!(back.nickname, "徐侨");
-        assert!(!back.auto_update);
         assert!(!back.github_accel);
         assert_eq!(back.http_proxy, "http://127.0.0.1:7897");
         // 同一行重复的内置源不该出现两次；空行忽略。
@@ -322,7 +317,7 @@ mod tests {
     #[test]
     fn network_defaults_are_on_and_direct() {
         let s: AppSettings = serde_json::from_str("{}").unwrap();
-        assert!(s.auto_update && s.github_accel);
+        assert!(s.github_accel);
         assert!(s.http_proxy.is_empty());
         let prefs = s.net_prefs();
         assert!(prefs.accel && prefs.proxy.is_empty());

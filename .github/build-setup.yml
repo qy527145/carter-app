@@ -4,13 +4,8 @@
 #
 # 放在 .github/ 而不是 .github/workflows/，免得 GitHub 把它当成独立 workflow。
 #
-# ## 为什么这里要自己跑一遍 tauri build
-#
-# 自更新要的是 tauri 自己签过名的安装包：mac 的 `.app`、Windows 的 NSIS、Linux
-# 的 AppImage —— 外加一个 `.sig`。签名私钥只在 CI secrets 里，dist 不认识它。
-# 所以出包这一步交给 tauri；dist 接着照常跑它的 release 构建，负责把二进制打成
-# tgz / zip、算 sha256、拼 release notes、上传。两边产物互不影响（tauri 的输出
-# 被挪到 `$RUNNER_TEMP`，dist 清 `target/` 也碰不到）。
+# 只管「构建前需要准备什么」：装系统依赖、装 Bun、装前端依赖、构建前端。出包、
+# 打包、上传 Release 全交给 dist。
 
 # dist 的 [dist.dependencies.apt] 解析不了 libwebkit2gtk-4.1-dev 这个名字
 # （会把 -4.1-dev 当成版本号，生成出不存在的 libwebkit2gtk-4），只能显式装。
@@ -18,9 +13,7 @@
   if: runner.os == 'Linux'
   run: |
     sudo apt-get update
-    # dist 的 [dist.dependencies.apt] 会装 appindicator / rsvg / patchelf 等，
-    # 但它在 build-setup **之后**才跑；tauri bundle 现在就把它用到的补齐。
-    sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+    sudo apt-get install -y libwebkit2gtk-4.1-dev
 
 - name: 安装 Bun
   uses: oven-sh/setup-bun@v2
@@ -33,58 +26,3 @@
 - name: 构建前端
   # tauri::generate_context! 在编译期就把 ../dist 嵌进二进制，这里必须先产出。
   run: bun run web:build
-
-- name: 用 tauri 出安装包（带自更新签名）
-  shell: bash
-  env:
-    MATRIX_TARGETS: ${{ toJson(matrix.targets) }}
-    # 签名密钥直接用 tauri 认识的那个变量名注入（`TAURI_SIGNING_PRIVATE_KEY`）。
-    #
-    # 两个坑都踩过：
-    #   1. 先写进 `$RUNNER_TEMP/updater.key`、再在**同一步**里 `>> $GITHUB_ENV`
-    #      导出 —— GITHUB_ENV 要下一步才生效，`tauri build` 当场看不到；
-    #   2. 值必须是**私钥文件的原文**（`untrusted comment: …` + 一行），
-    #      tauri 自己会做那层 base64 解码。再套一层 base64 会报
-    #      「Missing encoded key in secret key」。
-    TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.MINISIGN_SECRET_KEY || secrets.TAURI_SIGNING_PRIVATE_KEY }}
-    TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || secrets.MINISIGN_KEY_PASSWORD }}
-  run: |
-    if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
-      echo "::error::没有配置更新签名密钥：请在仓库 Secrets 里加 TAURI_SIGNING_PRIVATE_KEY 或 MINISIGN_SECRET_KEY（值 = 私钥文件的整份内容）"
-      exit 1
-    fi
-
-    # 每台构建机只出 native 产物。`updater` 是隐藏的包类型（`tauri bundle -b updater`
-    # 也能单独出）：mac 上是 `.app.tar.gz`、Linux 上是 AppImage 复制的 `.tar.gz`、
-    # Windows 上是 NSIS 的 `.exe.zip` —— 正是自更新要下载的那个包，必须显式带上，
-    # 只列 app / nsis 不会生成它。Windows 选 NSIS 而不是 MSI：只有 NSIS 支持
-    # 静默 `/UPDATE` 并在装完后自己把应用拉起来。
-    case "$RUNNER_OS" in
-      macOS)   BUNDLES="app,dmg,updater" ;;
-      Windows) BUNDLES="nsis,updater" ;;
-      *)       BUNDLES="appimage,deb,updater" ;;
-    esac
-    TARGET="$(node -e 'console.log(JSON.parse(process.env.MATRIX_TARGETS || "[]")[0] || "")')"
-    if [ -n "$TARGET" ]; then
-      bun x tauri build --target "$TARGET" --bundles "$BUNDLES"
-      OUT="target/$TARGET/release/bundle"
-    else
-      bun x tauri build --bundles "$BUNDLES"
-      OUT="target/release/bundle"
-    fi
-    # 把 tauri 的安装包传到构建机的 artifacts 里，交给发布之后的
-    # `updater-release.yml` 收尾（它生成 latest.json 并传进 Release）。
-    #
-    # 名字与 dist 的 `artifacts-*` **有意错开**：后者会被 dist 当成自己的产物
-    # 一起传进 Release，而这些带 `.sig` 的文件要等 latest.json 生成后再一起传，
-    # 由那边统一 `--clobber`。
-    echo "BUNDLE_DIR=$OUT" >> "$GITHUB_ENV"
-
-- name: 上传 tauri 安装包（自更新用）
-  uses: actions/upload-artifact@v7
-  with:
-    # 每台构建机一个：`updater-artifacts-<target>`。架构由文件名区分不出来，
-    # `scripts/latest-json.ts` 就是从这层目录名里认平台与架构的。
-    name: updater-artifacts-${{ matrix.targets && matrix.targets[0] || 'native' }}
-    path: ${{ env.BUNDLE_DIR }}/
-    if-no-files-found: error

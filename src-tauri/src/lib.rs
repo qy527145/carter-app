@@ -10,8 +10,6 @@ use std::sync::Arc;
 use serde::Serialize;
 use tauri::{Emitter, Manager, State};
 
-mod updater;
-
 use carter_app_core::app_settings::AppSettings;
 use carter_app_core::catalog;
 use carter_app_core::config_edit::{self, McpDraft, ProviderDraft};
@@ -82,8 +80,6 @@ struct AppInfo {
     models_cache_exists: bool,
     /// 界面设置随应用信息一起返回，省掉启动时的一次往返（否则主题会闪一下）。
     settings: AppSettings,
-    /// 更新状态（启动时「已就绪」的那份也能直接在侧栏显示）。
-    update: updater::Status,
     /// models.dev 缓存是哪次、从哪拉的；从没记录过时是 `None`。
     models_meta: Option<catalog::CacheMeta>,
     /// 编进安装包的目录快照是哪天的。
@@ -91,7 +87,7 @@ struct AppInfo {
 }
 
 #[tauri::command]
-fn app_info(shell: State<'_, Arc<AppShell>>, updater: State<'_, Arc<updater::Updater>>) -> AppInfo {
+fn app_info(shell: State<'_, Arc<AppShell>>) -> AppInfo {
     let config = shell.config.load();
     let meta = catalog::cache_meta();
     let config_path = config_edit::config_path();
@@ -104,73 +100,9 @@ fn app_info(shell: State<'_, Arc<AppShell>>, updater: State<'_, Arc<updater::Upd
         config_exists: config_path.exists(),
         models_cache_exists: carter::config::paths::models_cache_path().exists(),
         settings: AppSettings::load(),
-        update: updater.status(),
         models_meta: meta,
         models_snapshot_date: catalog::builtin_snapshot_date(),
     }
-}
-
-// ---------------------------------------------------------------------------
-// 自更新
-// ---------------------------------------------------------------------------
-
-/// 调试用：让外壳的调试构建在启动后主动检查一次更新。
-///
-/// `CARTER_DEBUG_CHECK_UPDATE=1 bun run dev` 时用 —— 正常启动的第一次检查要等
-/// 30 秒，本机验证「下载 → 验签 → 重启」这条链路时不想干等。正式构建里这个命令
-/// 什么都不做：`debug_assertions` 是编译期常量。
-#[tauri::command]
-fn debug_check_update(app: tauri::AppHandle, updater: State<'_, Arc<updater::Updater>>) -> bool {
-    if !cfg!(debug_assertions) || std::env::var("CARTER_DEBUG_CHECK_UPDATE").as_deref() != Ok("1") {
-        return false;
-    }
-    updater.manual_check(app);
-    true
-}
-
-/// 当前更新状态（启动时后台检查也会推事件，这个只给「刚打开界面」用）。
-#[tauri::command]
-fn update_status(updater: State<'_, Arc<updater::Updater>>) -> updater::Status {
-    updater.status()
-}
-
-/// 手动检查一次（绕过「自动更新」开关；同样在后台下载）。
-#[tauri::command]
-fn check_update(
-    app: tauri::AppHandle,
-    updater: State<'_, Arc<updater::Updater>>,
-) -> Result<(), String> {
-    updater.manual_check(app);
-    Ok(())
-}
-
-/// 安装开始 / 结束：`installing = true` 时允许进程退出（窗口的「收到托盘」
-/// 与托盘的关闭行为都会放开），失败时由前端再传一次 `false` 恢复。
-#[tauri::command]
-fn set_update_installing(app: tauri::AppHandle, installing: bool) {
-    if let Some(state) = app.try_state::<UpdateInstalling>() {
-        state
-            .0
-            .store(installing, std::sync::atomic::Ordering::SeqCst);
-    }
-}
-
-/// 「重启更新」：装已经验过签的包，然后重启。
-#[tauri::command]
-async fn install_update(
-    app: tauri::AppHandle,
-    updater: State<'_, Arc<updater::Updater>>,
-) -> Result<(), String> {
-    updater.inner().install(app).await
-}
-
-/// 当前给外部命令 / 下载用的网络线路（「直连官方」「走 gh-proxy.com」「走代理 …」）。
-#[tauri::command]
-async fn network_route() -> String {
-    let prefs = AppSettings::load().net_prefs();
-    carter_app_core::net::probe_child_env(&prefs)
-        .await
-        .describe()
 }
 
 /// 开发用：打开 WebView 的开发者工具。
@@ -893,26 +825,15 @@ async fn reassess_assistant_decision(
 /// 托盘是它还活着的唯一证据，也是把窗口叫回来的入口。
 const TRAY_ID: &str = "carter-tray";
 
-/// 托盘菜单里那一项「重启更新」的句柄（见 `sync_tray_update`）。
-struct UpdaterMenuItem(tauri::menu::MenuItem<tauri::Wry>);
-
-/// 是否正在安装更新。安装要替换正在运行的二进制，这段时间里不能再把窗口
-/// 「收进托盘」—— 进程必须能真的退出（见 `run` 的 `CloseRequested`）。
-struct UpdateInstalling(std::sync::atomic::AtomicBool);
-
 fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
     use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
     let open = MenuItem::with_id(app, "open", "打开 Carter", true, None::<&str>)?;
     let panel = MenuItem::with_id(app, "assistant", "助理面板", true, None::<&str>)?;
-    // 有新版本备好时显示，菜单名里带版本号；平时隐藏。
-    let update = MenuItem::with_id(app, "update", "重启更新", false, None::<&str>)?;
-    // 托盘本身不暴露「取菜单」的接口，菜单项句柄在创建时就存起来。
-    let _ = app.manage(UpdaterMenuItem(update.clone()));
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
     let sep = PredefinedMenuItem::separator(app)?;
-    let menu = Menu::with_items(app, &[&open, &panel, &update, &sep, &quit])?;
+    let menu = Menu::with_items(app, &[&open, &panel, &sep, &quit])?;
 
     let mut tray = TrayIconBuilder::with_id(TRAY_ID)
         .tooltip("Carter")
@@ -925,18 +846,6 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
                 if let Some(shell) = app.try_state::<Arc<AppShell>>() {
                     shell.emit(AppEvent::AssistantOpen);
                 }
-            }
-            "update" => {
-                show_main(app);
-                let handle = app.clone();
-                tauri::async_runtime::spawn(async move {
-                    let Some(updater) = handle.try_state::<Arc<updater::Updater>>() else {
-                        return;
-                    };
-                    if let Err(e) = updater.inner().clone().install(handle.clone()).await {
-                        let _ = handle.emit("carter://event", &AppEvent::Error { message: e });
-                    }
-                });
             }
             "quit" => app.exit(0),
             _ => {}
@@ -956,28 +865,6 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     }
     tray.build(app)?;
     Ok(())
-}
-
-/// 更新状态 → 托盘菜单项（「重启更新 v0.2.0」）、tooltip。
-///
-/// 「已就绪」是最需要被看见的状态：窗口可能藏在托盘里，用户不看界面也就不知道
-/// 可以换新版本了。
-fn sync_tray_update(app: &tauri::AppHandle, status: &updater::Status) {
-    let Some(tray) = app.tray_by_id(TRAY_ID) else {
-        return;
-    };
-    let (ready, label) = match status {
-        updater::Status::Ready { version, .. } => (true, format!("重启更新 v{version}")),
-        updater::Status::Installing { version } => (true, format!("正在安装 v{version}…")),
-        _ => (false, "重启更新".to_string()),
-    };
-    if let Some(item) = app.try_state::<UpdaterMenuItem>() {
-        let _ = item.0.set_text(label);
-        let _ = item.0.set_enabled(ready);
-    }
-    if ready && let updater::Status::Ready { version, .. } = status {
-        let _ = tray.set_tooltip(Some(format!("Carter · v{version} 已就绪")));
-    }
 }
 
 fn show_main(app: &tauri::AppHandle) {
@@ -1829,14 +1716,6 @@ pub fn run() {
             let shell = AppShell::new(config);
             app.manage(shell.clone());
 
-            // 自更新：插件只作库用（验签 / 装包），检查与下载由 `updater.rs` 自己走加速源。
-            app.handle()
-                .plugin(tauri_plugin_updater::Builder::new().build())?;
-            let updater = updater::Updater::load();
-            app.manage(updater.clone());
-            app.manage(UpdateInstalling(std::sync::atomic::AtomicBool::new(false)));
-            updater.spawn_scheduler(app.handle().clone());
-
             // GUI 进程拿不到 shell 启动文件里写的 PATH（见 `platform::ensure_user_paths` 的
             // 说明）。官方 CLI 的安装脚本把二进制放进 `~/.local/bin`，不补这一步的话
             // 「终端里能用、应用里说没装」。
@@ -1869,12 +1748,6 @@ pub fn run() {
                     match rx.recv().await {
                         Ok(ev) => {
                             on_assistant_event(&handle, &bus_shell, &ev);
-                            if let AppEvent::UpdateChanged { status } = &ev
-                                && let Some(u) = handle.try_state::<Arc<updater::Updater>>()
-                            {
-                                let _ = status;
-                                sync_tray_update(&handle, &u.status());
-                            }
                             let _ = handle.emit(CARTER_EVENT, &ev);
                         }
                         // 慢订阅者被追上时广播会报 Lagged —— 丢的是历史事件，
@@ -1899,9 +1772,6 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event
                 && window.label() == "main"
-                && !window
-                    .try_state::<UpdateInstalling>()
-                    .is_some_and(|s| s.0.load(std::sync::atomic::Ordering::SeqCst))
             {
                 api.prevent_close();
                 let _ = window.hide();
@@ -1910,13 +1780,6 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             // 应用信息与设置
             app_info,
-            // 自更新
-            update_status,
-            debug_check_update,
-            check_update,
-            install_update,
-            set_update_installing,
-            network_route,
             open_devtools,
             set_app_settings,
             // 会话

@@ -32,8 +32,7 @@
     "logs": "bun run scripts/logs.ts",
     "upgrade": "bun run scripts/upgrade.ts",
     "clean": "bun run scripts/clean.ts",
-    "models:snapshot": "bun run scripts/models-snapshot.ts",
-    "latest-json": "bun run scripts/latest-json.ts"
+    "models:snapshot": "bun run scripts/models-snapshot.ts"
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.14.19",

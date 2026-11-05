@@ -135,9 +135,7 @@ jobs:
         if: "runner.os == 'Linux'"
         run: |
           sudo apt-get update
-          # dist 的 [dist.dependencies.apt] 会装 appindicator / rsvg / patchelf 等，
-          # 但它在 build-setup **之后**才跑；tauri bundle 现在就把它用到的补齐。
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y libwebkit2gtk-4.1-dev
       - name: "安装 Bun"
         uses: "oven-sh/setup-bun@v2"
         with:
@@ -146,49 +144,6 @@ jobs:
         run: "bun install --frozen-lockfile"
       - name: "构建前端"
         run: "bun run web:build"
-      - name: "用 tauri 出安装包（带自更新签名）"
-        run: |
-          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
-            echo "::error::没有配置更新签名密钥：请在仓库 Secrets 里加 TAURI_SIGNING_PRIVATE_KEY 或 MINISIGN_SECRET_KEY（值 = 私钥文件的整份内容）"
-            exit 1
-          fi
-
-          # 每台构建机只出 native 产物。`updater` 是隐藏的包类型（`tauri bundle -b updater`
-          # 也能单独出）：mac 上是 `.app.tar.gz`、Linux 上是 AppImage 复制的 `.tar.gz`、
-          # Windows 上是 NSIS 的 `.exe.zip` —— 正是自更新要下载的那个包，必须显式带上，
-          # 只列 app / nsis 不会生成它。Windows 选 NSIS 而不是 MSI：只有 NSIS 支持
-          # 静默 `/UPDATE` 并在装完后自己把应用拉起来。
-          case "$RUNNER_OS" in
-            macOS)   BUNDLES="app,dmg,updater" ;;
-            Windows) BUNDLES="nsis,updater" ;;
-            *)       BUNDLES="appimage,deb,updater" ;;
-          esac
-          TARGET="$(node -e 'console.log(JSON.parse(process.env.MATRIX_TARGETS || "[]")[0] || "")')"
-          if [ -n "$TARGET" ]; then
-            bun x tauri build --target "$TARGET" --bundles "$BUNDLES"
-            OUT="target/$TARGET/release/bundle"
-          else
-            bun x tauri build --bundles "$BUNDLES"
-            OUT="target/release/bundle"
-          fi
-          # 把 tauri 的安装包传到构建机的 artifacts 里，交给发布之后的
-          # `updater-release.yml` 收尾（它生成 latest.json 并传进 Release）。
-          #
-          # 名字与 dist 的 `artifacts-*` **有意错开**：后者会被 dist 当成自己的产物
-          # 一起传进 Release，而这些带 `.sig` 的文件要等 latest.json 生成后再一起传，
-          # 由那边统一 `--clobber`。
-          echo "BUNDLE_DIR=$OUT" >> "$GITHUB_ENV"
-        shell: "bash"
-        env:
-          "MATRIX_TARGETS": "${{ toJson(matrix.targets) }}"
-          "TAURI_SIGNING_PRIVATE_KEY": "${{ secrets.MINISIGN_SECRET_KEY || secrets.TAURI_SIGNING_PRIVATE_KEY }}"
-          "TAURI_SIGNING_PRIVATE_KEY_PASSWORD": "${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || secrets.MINISIGN_KEY_PASSWORD }}"
-      - name: "上传 tauri 安装包（自更新用）"
-        uses: "actions/upload-artifact@v7"
-        with:
-          "if-no-files-found": "error"
-          "name": "updater-artifacts-${{ matrix.targets && matrix.targets[0] || 'native' }}"
-          "path": "${{ env.BUNDLE_DIR }}/"
       - name: Install dist
         run: ${{ matrix.install_dist.run }}
       # Get the dist-manifest
@@ -356,12 +311,3 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
-
-  custom-updater-release:
-    needs:
-      - plan
-      - announce
-    uses: ./.github/workflows/updater-release.yml
-    with:
-      plan: ${{ needs.plan.outputs.val }}
-    secrets: inherit

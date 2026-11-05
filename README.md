@@ -102,17 +102,12 @@ cargo-dist 生成，别手改）。
 则由 [release-on-tag.yml](.github/workflows/release-on-tag.yml) 转发成一次
 workflow_dispatch —— dist 的 workflow 一次只能挂一种触发器。
 
-### 自更新与网络
+### 网络
 
-应用启动 30 秒后（之后每 6 小时）在后台检查新版本，经加速站把安装包静默下好、
-验过签名，侧栏底部与托盘菜单出现「重启更新」，点了才重启生效。安装包用 minisign
-签名，**加速站最多让下载卡住，改不了内容**；签名私钥的生成、CI Secrets 的配置与
-发版清单见 [docs/release.md](docs/release.md)。
-
-GitHub 连不上时（连接器安装、团队同步、更新）会自动改走 `gh-proxy.com` /
-`ghproxy.net` / `ghfast.top`。models.dev 目录按「官方接口 → 内置镜像 → 打包快照」
-的顺序回退，所以离线首装也能直接配模型。这两项都可以在**设置 → 外观 → 网络**里
-调整，也可以填自己的代理。
+GitHub 连不上时（连接器安装、团队同步）会自动改走 `gh-proxy.com` / `ghproxy.net` /
+`ghfast.top`。models.dev 目录按「官方接口 → 内置镜像 → 打包快照」的顺序回退，所以
+离线首装也能直接配模型。这两项都可以在**设置 → 外观 → 网络**里调整，也可以填自己的
+代理。
 
 ### 本地配置
 
