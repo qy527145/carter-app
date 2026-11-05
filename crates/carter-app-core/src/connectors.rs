@@ -716,12 +716,19 @@ pub fn install_command(v: &Vendor) -> String {
 }
 
 /// 跑官方安装脚本。输出实时推给界面（下载几十 MB，静默几分钟是最难受的）。
+///
+/// 安装脚本里的地址是各家写死的 GitHub 地址，国内经常连不上。这里按当前网络
+/// 偏好改写：配了代理就注入代理变量，否则把脚本里明写的 GitHub 地址换成可达的
+/// 加速站（见 [`crate::net::rewrite_github_urls`]）。脚本内部再下载别的 GitHub
+/// 文件时靠 `runner()` 注入的变量继续走代理。
 pub async fn install_cli(shell: &AppShell, id: &str) -> Result<(), String> {
     let Some(v) = vendor(id) else {
         return Err(format!("没有 `{id}` 这个连接器"));
     };
+    let env = child_env().await;
+    let command = crate::net::rewrite_github_urls(&install_command(v), env.github.as_deref());
     let mut cmd = tokio::process::Command::new(install_shell_program());
-    cmd.arg(install_shell_flag()).arg(install_command(v));
+    cmd.arg(install_shell_flag()).arg(command);
     let status = run_streamed(shell, v, cmd, Duration::from_secs(600), false).await?;
     if !status.success() {
         return Err(format!("安装失败（退出码 {:?}）", status.code()));
@@ -783,6 +790,11 @@ pub async fn install_skill(shell: &AppShell, id: &str) -> Result<(), String> {
         message: Some("技能已装进 ~/.carter/skills（会话里立刻可用）".into()),
     });
     Ok(())
+}
+
+/// 当前该给子进程用的加速 / 代理（按设置里的网络偏好，结果有十分钟缓存）。
+async fn child_env() -> crate::net::ChildEnv {
+    crate::net::probe_child_env(&crate::app_settings::AppSettings::load().net_prefs()).await
 }
 
 /// 装技能里**跟 UI 无关**的那一半：临时目录里跑 `skill setup`，再把产物搬进 `dst`。
@@ -1189,7 +1201,9 @@ async fn run_streamed(
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    // 安装 / 取技能 / 登录都经过这里：统一补 PATH，npm 装的 CLI 才找得到 node。
+    // 安装 / 取技能 / 登录都经过这里：统一补 PATH，npm 装的 CLI 才找得到 node；
+    // 顺带把加速 / 代理塞进环境变量 —— 脚本里的 curl、npm、CLI 自己都会读。
+    crate::net::apply_to_env(&child_env().await, &mut cmd);
     let program = PathBuf::from(cmd.as_std().get_program());
     cmd.env("PATH", child_path(Some(&program)));
     #[cfg(windows)]

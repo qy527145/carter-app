@@ -14,7 +14,8 @@
 //! * [`prompts`] —— 用户打的原文（展开之前）按轮存档，供「编辑」回填。
 //! * [`tools`] —— 在 carter 的装配结果之上套一层工具开关。
 //! * [`skills`] —— 技能：列举 / 查看 / 启停 / 新建 / 删除。
-//! * [`catalog`] —— 全部模型引用摊平成一张带元数据的表。
+//! * [`catalog`] —— 全部模型引用摊平成一张带元数据的表；models.dev 缓存的读取 / 刷新。
+//! * [`models_sync`] —— 渠道用了目录里没有的模型时，只补那几家服务商的条目。
 //! * [`templates`] —— 渠道模板（官方服务商的 kind / base_url / 目录 id）。
 //! * [`upstream_models`] —— 从上游 `/v1/models` 拉模型清单并对到目录元数据上。
 //! * [`input`] —— 输入框里的斜杠命令与 `@文件` 引用。
@@ -24,6 +25,7 @@
 //! * [`memory_suggest`] —— 轮末从用户的话里提炼候选记忆，交给用户确认后写入。
 //! * [`peers`] —— 跨会话消息：一条会话里的模型给另一条发信、看它说到哪了。
 //! * [`platform`] —— 操作系统与 shell 探测（bash 工具的跨平台基础）。
+//! * [`net`] —— GitHub 加速站、多源下载、子进程的代理 / 加速环境变量。
 //! * [`assistant`] —— 常驻助理：盯观察源、按规则接单、在后台会话里做完（移植自 dsh-superagent）。
 
 pub mod app_settings;
@@ -39,12 +41,15 @@ pub mod images;
 pub mod input;
 pub mod inspect;
 pub mod memory_suggest;
+pub mod models_sync;
+pub mod net;
 pub mod paths;
 pub mod peers;
 pub mod platform;
 pub mod preview;
 pub mod prompts;
 pub mod protocol;
+pub mod provider_link;
 pub mod schedules;
 pub mod session;
 pub mod sessions;

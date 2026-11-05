@@ -102,15 +102,29 @@ cargo-dist 生成，别手改）。
 则由 [release-on-tag.yml](.github/workflows/release-on-tag.yml) 转发成一次
 workflow_dispatch —— dist 的 workflow 一次只能挂一种触发器。
 
+### 自更新与网络
+
+应用启动 30 秒后（之后每 6 小时）在后台检查新版本，经加速站把安装包静默下好、
+验过签名，侧栏底部与托盘菜单出现「重启更新」，点了才重启生效。安装包用 minisign
+签名，**加速站最多让下载卡住，改不了内容**；签名私钥的生成、CI Secrets 的配置与
+发版清单见 [docs/release.md](docs/release.md)。
+
+GitHub 连不上时（连接器安装、团队同步、更新）会自动改走 `gh-proxy.com` /
+`ghproxy.net` / `ghfast.top`。models.dev 目录按「官方接口 → 内置镜像 → 打包快照」
+的顺序回退，所以离线首装也能直接配模型。这两项都可以在**设置 → 外观 → 网络**里
+调整，也可以填自己的代理。
+
 ### 本地配置
 
 `.env` 只在 debug 构建里加载，发布的安装包使用代码里的默认值。密钥放 `.env.local`（不会被提交）。
 
 | 变量              | 默认                                         | 说明                         |
 | ----------------- | -------------------------------------------- | ---------------------------- |
-| `CARTER_LOG`      | `info,carter_app_core=info,carter=warn`      | 日志过滤（tracing EnvFilter） |
-| `CARTER_HOME`     | `~/.carter`                                  | 与 CLI 共享的数据目录        |
-| `CARTER_APP_HOME` | `~/.carter-app`                              | 本应用独有的数据目录         |
+| `CARTER_LOG`       | `info,carter_app_core=info,carter=warn` | 日志过滤（tracing EnvFilter） |
+| `CARTER_HOME`      | `~/.carter`                             | 与 CLI 共享的数据目录        |
+| `CARTER_APP_HOME`  | `~/.carter-app`                         | 本应用独有的数据目录         |
+| `CARTER_ACCEL`     | `1`                                     | `0` 关掉 GitHub 加速站（排障用） |
+| `CARTER_NO_NETWORK` | 不设                                   | `1` 时不再主动联网补模型目录 |
 
 第一次跑需要至少一个渠道。可以直接在**设置 → 渠道**里新建（界面会写回
 `~/.carter/config.toml`），也可以先在文件里配好：

@@ -200,8 +200,16 @@ export function ModelsPage() {
   async function refresh() {
     setRefreshing(true);
     try {
-      const n = await refreshModelCatalog();
-      toastOk(`已更新模型元数据（${n} 条）`);
+      const out = await refreshModelCatalog();
+      if (out.source === "builtin") {
+        // 所有源都没拉到：缓存还是旧的那份（或内置快照）。说清楚，别让人以为成功了。
+        toastError(
+          `这次没拉到在线目录，用的是本地缓存 / 内置快照（${out.count} 条）。${out.failed[0]?.error ?? ""}`,
+        );
+      } else {
+        const via = out.source.includes("models.dev") ? "" : `，走的是 ${new URL(out.source).host}`;
+        toastOk(`已更新模型元数据（${out.count} 条${via}）`);
+      }
       state.reload();
     } catch (e) {
       toastError(e);

@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { ModePill } from "../../components/ModePill";
-import { Segmented } from "../../components/ui/Input";
+import { Input, Segmented, Switch } from "../../components/ui/Input";
 import { Card, Section } from "../../components/ui/Panel";
 import { setAppSettings, type ThemePref } from "../../lib/api";
 import { toastError } from "../../lib/toast";
@@ -100,6 +100,97 @@ export function AppearancePage() {
           <div className="mt-2 text-[11px] leading-relaxed text-dim">
             也可以直接拖侧栏右边那条线，双击复位到 260px；往左拖到底会把侧栏收起。
           </div>
+        </Card>
+      </Section>
+
+      <Section title="更新">
+        <Card>
+          <div className="flex items-center gap-3">
+            <div className="flex-1">
+              <div className="text-sm text-ink">自动检查新版本</div>
+              <div className="mt-0.5 text-[11px] leading-relaxed text-dim">
+                打开时每 6 小时在后台查一次，新版本静默下载好，侧栏出现「重启更新」再点一下。
+                关掉之后只会在「关于」页手动检查时更新。
+              </div>
+            </div>
+            <Switch
+              label="自动检查新版本"
+              checked={settings.auto_update}
+              onChange={(v) => {
+                const next = { ...settings, auto_update: v };
+                setSettings(next);
+                setAppSettings(next).catch(toastError);
+              }}
+            />
+          </div>
+        </Card>
+      </Section>
+
+      <Section title="网络">
+        <Card>
+          <div className="flex items-start gap-3">
+            <div className="flex-1">
+              <div className="text-sm text-ink">GitHub 加速站</div>
+              <div className="mt-0.5 text-[11px] leading-relaxed text-dim">
+                连不上 GitHub 的网络里，连接器安装 / 团队同步 / 更新会被重定向到国内的加速站
+                （gh-proxy.com、ghproxy.net、ghfast.top，按顺序试）。下载包都带签名校验，
+                加速站只能延迟，改不了内容。能直连的机器开着也不亏：官方地址总是第一个试。
+              </div>
+            </div>
+            <Switch
+              label="GitHub 加速站"
+              checked={settings.github_accel}
+              onChange={(v) => {
+                const next = { ...settings, github_accel: v };
+                setSettings(next);
+                setAppSettings(next).catch(toastError);
+              }}
+            />
+          </div>
+          <label className="mt-3 block border-t border-edge pt-3">
+            <span className="text-sm text-ink">代理</span>
+            <span className="ml-2 text-[11px] text-dim">留空 = 直连</span>
+            <Input
+              mono
+              defaultValue={settings.http_proxy}
+              placeholder="http://127.0.0.1:7897"
+              className="mt-1.5 text-xs"
+              onBlur={(e) => {
+                const proxy = e.target.value.trim();
+                if (proxy === settings.http_proxy) return;
+                const next = { ...settings, http_proxy: proxy };
+                setSettings(next);
+                setAppSettings(next).catch(toastError);
+              }}
+            />
+            <span className="mt-1 block text-[11px] leading-relaxed text-dim">
+              填了之后下载（更新、连接器、团队同步）都走它，支持{" "}
+              <span className="mono">http://</span> 与 <span className="mono">socks5://</span>
+              。空着就直连 —— 不读系统代理设置：加速站 在国内，绕去境外再回来只会更慢。
+            </span>
+          </label>
+          <label className="mt-3 block border-t border-edge pt-3">
+            <span className="text-sm text-ink">额外的模型目录源</span>
+            <span className="ml-2 text-[11px] text-dim">一行一个 URL，可选</span>
+            <textarea
+              defaultValue={settings.model_sources}
+              rows={2}
+              spellCheck={false}
+              placeholder="https://我的镜像/models.json"
+              className="mono mt-1.5 w-full resize-y rounded-md border border-edge bg-base px-2 py-1.5 text-[11px] text-ink outline-none focus:border-edge-strong"
+              onBlur={(e) => {
+                const model_sources = e.target.value.trim();
+                if (model_sources === settings.model_sources) return;
+                const next = { ...settings, model_sources };
+                setSettings(next);
+                setAppSettings(next).catch(toastError);
+              }}
+            />
+            <span className="mt-1 block text-[11px] leading-relaxed text-dim">
+              「模型」页刷新元数据时，内置的源（models.dev 官方 + 内置镜像）都失败之后才试这里的。
+              全部失败时用打包在应用里的快照，离线也能配模型。
+            </span>
+          </label>
         </Card>
       </Section>
 

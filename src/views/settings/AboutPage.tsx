@@ -5,8 +5,119 @@
 
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { ExternalLink, FolderOpen } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Button } from "../../components/ui/Button";
 import { Card, Section } from "../../components/ui/Panel";
+import { checkUpdate, installUpdate, networkRoute, type UpdateStatus } from "../../lib/api";
+import { toastError } from "../../lib/toast";
 import { useStore } from "../../store";
+
+/** 时间戳 → 「今天 10:32」这种能一眼看出新旧的样子。 */
+function fmtWhen(ms: number | null | undefined): string {
+  if (!ms) return "还没检查过";
+  const d = new Date(ms);
+  const now = new Date();
+  const sameDay = d.toDateString() === now.toDateString();
+  const time = d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  return sameDay ? `今天 ${time}` : `${d.toLocaleDateString()} ${time}`;
+}
+
+function fmtMB(bytes: number): string {
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/** 更新状态一句话（关于页用；侧栏另有一个更短的版本）。 */
+function updateLine(s: UpdateStatus | null): string {
+  if (!s) return "…";
+  switch (s.phase) {
+    case "idle":
+      return s.error
+        ? `已是最新（${fmtWhen(s.checked_at)}）· 备注：${s.error}`
+        : `已是最新（${fmtWhen(s.checked_at)}）`;
+    case "checking":
+      return "正在检查…";
+    case "downloading":
+      return `正在下载 v${s.version}${
+        s.total
+          ? ` · ${Math.min(100, Math.round((s.downloaded / s.total) * 100))}%`
+          : ` · ${fmtMB(s.downloaded)}`
+      }`;
+    case "ready":
+      return `v${s.version} 已下载并验签通过（${fmtMB(s.downloaded)}），重启即生效`;
+    case "installing":
+      return `正在安装 v${s.version}，马上重启…`;
+    case "failed":
+      return `这一次没成功：${s.error}`;
+  }
+}
+
+function UpdateSection() {
+  const status = useStore((s) => s.updateStatus);
+  const version = useStore((s) => s.appInfo?.version);
+  const [busy, setBusy] = useState(false);
+  const [route, setRoute] = useState<string>("");
+
+  useEffect(() => {
+    // 探测一下「现在走的是哪条线」，让人在排查「下不动」时有据可查。
+    networkRoute().then(setRoute, () => setRoute(""));
+  }, []);
+
+  const check = async () => {
+    setBusy(true);
+    try {
+      await checkUpdate();
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const install = async () => {
+    setBusy(true);
+    try {
+      await installUpdate();
+    } catch (e) {
+      toastError(e);
+      setBusy(false);
+    }
+  };
+
+  const ready = status?.phase === "ready";
+  return (
+    <Section title="更新">
+      <Card>
+        <div className="flex items-center gap-3 py-1.5">
+          <span className="w-24 shrink-0 text-xs text-dim">当前版本</span>
+          <span className="mono text-xs text-ink">{version ?? "…"}</span>
+        </div>
+        <div className="flex items-baseline gap-3 py-1.5">
+          <span className="w-24 shrink-0 text-xs text-dim">状态</span>
+          <span className="min-w-0 flex-1 break-all text-[11px] text-ink">
+            {updateLine(status)}
+          </span>
+        </div>
+        <div className="flex items-center gap-3 py-1.5">
+          <span className="w-24 shrink-0 text-xs text-dim">网络线路</span>
+          <span className="text-[11px] text-ink">{route || "…"}</span>
+        </div>
+        <div className="mt-2 flex items-center gap-2 border-t border-edge pt-2.5">
+          <Button size="sm" onClick={check} disabled={busy || status?.phase === "downloading"}>
+            检查更新
+          </Button>
+          {ready && (
+            <Button size="sm" variant="primary" onClick={install} disabled={busy}>
+              重启更新
+            </Button>
+          )}
+          <span className="text-[11px] text-dim">
+            新版本在后台下载，验签通过后才出现在这里。装的是自签名的包，加速站也替换不了内容。
+          </span>
+        </div>
+      </Card>
+    </Section>
+  );
+}
 
 function PathRow({ label, value }: { label: string; value: string }) {
   return (
@@ -30,6 +141,8 @@ export function AboutPage() {
       <div className="mb-5 text-xs text-dim">
         {appInfo ? `${appInfo.name} v${appInfo.version}` : "…"}
       </div>
+
+      <UpdateSection />
 
       <Section title="路径">
         <Card>
@@ -57,6 +170,17 @@ export function AboutPage() {
               <span className="text-dim">models.dev 缓存</span>
               <span className={appInfo?.models_cache_exists ? "text-ink" : "text-tone-orange"}>
                 {appInfo?.models_cache_exists ? "已存在" : "还没有 —— 去「模型」页点「刷新元数据」"}
+              </span>
+            </div>
+            <div className="flex items-baseline gap-2">
+              <span className="text-dim">目录来源</span>
+              {/* `source === "builtin"`：上次刷新没联网成功，用的是包里带的快照。 */}
+              <span className="min-w-0 flex-1 break-all text-[11px] text-ink">
+                {!appInfo?.models_meta
+                  ? `内置快照（${appInfo?.models_snapshot_date ?? "…"}）`
+                  : appInfo.models_meta.source === "builtin"
+                    ? `内置快照（${appInfo.models_snapshot_date}）· ${fmtWhen(appInfo.models_meta.fetched_at)} 尝试联网刷新未成功`
+                    : `${appInfo.models_meta.source} · ${fmtWhen(appInfo.models_meta.fetched_at)} · ${appInfo.models_meta.count} 条`}
               </span>
             </div>
             <div className="flex items-center gap-2">

@@ -16,11 +16,13 @@ export type Toast = {
   leaving?: boolean;
   /** 同一句话短时间内重复推送时的次数 —— 合并成一条带 ×N，而不是叠一摞。 */
   count: number;
+  /** 可选的「点一下做点什么」按钮（如「重启更新」让用户**点**让于自动重启）。 */
+  action?: { label: string; run: () => void };
 };
 
 type ToastStore = {
   toasts: Toast[];
-  push: (message: string, kind?: ToastKind) => void;
+  push: (message: string, kind?: ToastKind, action?: Toast["action"]) => void;
   dismiss: (id: number) => void;
   /** 鼠标停在 toast 上时暂停全部计时：正读着的那条不该在眼前消失。 */
   pause: () => void;
@@ -56,8 +58,9 @@ function arm(id: number) {
 
 export const useToastStore = create<ToastStore>((set, get) => ({
   toasts: [],
-  push: (message, kind = "info") => {
-    const ms = kind === "error" ? ERROR_MS : TOAST_MS;
+  push: (message, kind = "info", action) => {
+    // 带按钮的不自己走：那是「等你做一件事」，2.5 秒后消失等于没提示。
+    const ms = action ? Number.POSITIVE_INFINITY : kind === "error" ? ERROR_MS : TOAST_MS;
     // 同一句话还挂着：计数 +1、重新计时，不再叠一条。
     const same = get().toasts.find((t) => !t.leaving && t.message === message && t.kind === kind);
     if (same) {
@@ -71,7 +74,7 @@ export const useToastStore = create<ToastStore>((set, get) => ({
       return;
     }
     const id = nextId++;
-    set((s) => ({ toasts: [...s.toasts, { id, kind, message, count: 1 }] }));
+    set((s) => ({ toasts: [...s.toasts, { id, kind, message, count: 1, action }] }));
     timers.set(id, { left: ms, started: Date.now(), handle: null });
     arm(id);
     const live = get().toasts.filter((t) => !t.leaving);
@@ -110,4 +113,13 @@ export function toastError(e: unknown): void {
 
 export function toastOk(message: string): void {
   useToastStore.getState().push(message, "info");
+}
+
+/** 带一个按钮的提示（e.g. 「新版本已就绪」+「重启更新」）。不自动消失。 */
+export function toastAction(
+  message: string,
+  action: { label: string; run: () => void },
+  kind: ToastKind = "info",
+): void {
+  useToastStore.getState().push(message, kind, action);
 }

@@ -42,6 +42,15 @@ pub(crate) fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
         // 后台同步没有终端可问。https 远端缺凭据时，默认的交互式提示会一直挂着，
         // 直到观察源那 60 秒超时；关掉它，直接失败、下一轮再试。
         .env("GIT_TERMINAL_PROMPT", "0");
+    // 远端在 GitHub 上、用户又配了代理时，fetch / push 要走代理，否则后台同步
+    // 永远超时（界面上的表现是「同步一直没动」，看不出是网络）。
+    let proxy = crate::app_settings::AppSettings::load().net_prefs().proxy;
+    if !proxy.is_empty() {
+        cmd.env("https_proxy", &proxy)
+            .env("HTTPS_PROXY", &proxy)
+            .env("http_proxy", &proxy)
+            .env("HTTP_PROXY", &proxy);
+    }
     // 装好的 release 包没有控制台；不带这个 flag 在 Windows 上会连闪黑框。
     #[cfg(windows)]
     crate::platform::hide_console(&mut cmd);

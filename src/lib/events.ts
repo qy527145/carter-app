@@ -20,8 +20,9 @@
 import { listen } from "@tauri-apps/api/event";
 import { useEffect } from "react";
 import { useStore } from "../store";
-import { type AppEvent, EVENT_NAME, type SessionEvent } from "./api";
+import { type AppEvent, EVENT_NAME, installUpdate, type SessionEvent } from "./api";
 import { refreshAssistant, refreshSessions } from "./sessionOps";
+import { toastAction, toastError } from "./toast";
 
 type Chunk = { kind: "text" | "thinking"; text: string };
 
@@ -109,6 +110,20 @@ export function useAppEvents() {
     };
 
     listen<AppEvent>(EVENT_NAME, ({ payload }) => {
+      if (payload.type === "update_changed") {
+        // 更新状态整份推过来，直接替换 store 里那份；侧栏据此显示「重启更新」。
+        const before = useStore.getState().updateStatus?.phase;
+        useStore.getState().setUpdateStatus(payload.status);
+        // 刚下载好：弹一条带按钮的提示。作者常在托盘里不看窗口，只靠侧栏那条
+        // 小字提醒等于没提醒；点按钮就是去装。
+        if (payload.status.phase === "ready" && before !== "ready") {
+          toastAction(`新版本 v${payload.status.version} 已下载好，重启即可使用`, {
+            label: "重启更新",
+            run: () => void installUpdate().catch(toastError),
+          });
+        }
+        return;
+      }
       if (payload.type === "config_changed") {
         // 配置被界面改过并已热重载。设置页据此重拉数据。
         useStore.getState().bumpConfig();

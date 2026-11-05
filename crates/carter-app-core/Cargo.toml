@@ -32,6 +32,9 @@ reqwest = { workspace = true }
 ignore = { workspace = true }
 grep-searcher = { workspace = true }
 grep-regex = { workspace = true }
+# 自更新包的签名校验（`net::verify_update`）。只验签、不装包 —— 装包在桌面端的
+# updater 插手里。版本与 tauri-plugin-updater 用的同一主版本。
+minisign-verify = "0.3"
 # 定时任务的「每天 9:00」要按本机时间算（见 `schedules.rs`）。
 chrono = { workspace = true }
 

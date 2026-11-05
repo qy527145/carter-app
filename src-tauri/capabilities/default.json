@@ -5,9 +5,14 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
+    "core:webview:allow-internal-toggle-devtools",
     "opener:default",
     {
       "identifier": "opener:allow-open-path",
+      "allow": [{ "path": "**" }]
+    },
+    {
+      "identifier": "opener:allow-reveal-item-in-dir",
       "allow": [{ "path": "**" }]
     },
     "dialog:default",

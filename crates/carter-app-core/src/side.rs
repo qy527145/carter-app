@@ -40,10 +40,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::catalog;
 use carter::agent::Thread;
 use carter::config::Config;
 use carter::provider::WireMessage;
-use carter::registry::{ModelInfo, fetch};
+use carter::registry::ModelInfo;
 use llm_adapt_core::{Block, Role};
 
 use crate::app_settings::AppSettings;
@@ -107,10 +108,10 @@ pub fn start_side_session(shell: Arc<AppShell>, parent_id: &str) -> Result<Start
     let cwd = parent.cwd.clone();
     let model_ref = parent.model.load().key.clone();
     let config = shell.config.load_full();
-    let cache_json = fetch::read_cache().map_err(|e| e.to_string())?;
+    let cache_json = catalog::read_cache().map_err(|e| e.to_string())?;
     // 刻意**不挂抓包钩子**：侧边会话的 id 不进侧栏、不进报文面板，
     // 记下来的报文只会变成没人翻得到的垃圾文件。
-    let resolved = carter::provider::resolve_provider(&config, &cache_json, &model_ref, Vec::new())
+    let resolved = catalog::resolve_provider(&config, &cache_json, &model_ref, Vec::new())
         .map_err(|e| e.to_string())?;
     let model: ModelInfo = resolved.model;
 

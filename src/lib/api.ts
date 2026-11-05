@@ -189,6 +189,8 @@ export type AppEvent =
   | { type: "connector_auth_url"; vendor: string; url: string }
   /** 一个连接器动作（装 CLI / 装技能 / 登录 / 退出）结束了。界面据此重拉整张卡片。 */
   | { type: "connector_done"; vendor: string; ok: boolean; message: string | null }
+  /** 自更新状态变了（检查中 / 下载进度 / 已就绪 / 失败）。 */
+  | { type: "update_changed"; status: UpdateStatus }
   | { type: "error"; message: string };
 
 /** `agent` 工具里一个子 agent 的当前状态。 */
@@ -379,6 +381,39 @@ export type AppSettings = {
   changes_ignore: string[];
   /** 全局昵称：加入新团队时预填的称呼。空 = 用 git 的 `user.name`。 */
   nickname: string;
+  /** 打开时自动检查新版本（后台下载，不自动重启）。 */
+  auto_update: boolean;
+  /** 从 GitHub 下载（连接器安装、更新）时允许走加速站。 */
+  github_accel: boolean;
+  /** 显式代理，如 `http://127.0.0.1:7897`。空 = 直连。 */
+  http_proxy: string;
+  /** models.dev 的额外源，一行一个完整 URL，排在内置源之后试。 */
+  model_sources: string;
+};
+
+/**
+ * 自更新的状态。镜像 `src-tauri/src/updater.rs` 的 `Status`（内部标签 `phase`），
+ * 改一边就要改另一边。
+ *
+ * - `idle`：没在做事；`error` 是上一次检查的失败原因（有的话）。
+ * - `checking` / `downloading` / `installing`：进行中。
+ * - `ready`：包已下好、验过签，等用户点「重启更新」。
+ * - `failed`：这一次失败了，`error` 里说明了哪个源、为什么。
+ */
+export type UpdateStatus =
+  | { phase: "idle"; checked_at: number | null; error: string | null }
+  | { phase: "checking" }
+  | { phase: "downloading"; version: string; downloaded: number; total: number | null }
+  | { phase: "ready"; version: string; notes: string | null; downloaded: number }
+  | { phase: "installing"; version: string }
+  | { phase: "failed"; version: string | null; error: string };
+
+/** models.dev 缓存是哪一次、从哪个源拉的。镜像 `catalog::CacheMeta`。 */
+export type ModelsMeta = {
+  source: string;
+  fetched_at: number;
+  count: number;
+  snapshot_date: string;
 };
 
 export type AppInfo = {
@@ -391,6 +426,12 @@ export type AppInfo = {
   config_exists: boolean;
   models_cache_exists: boolean;
   settings: AppSettings;
+  /** 启动时的更新状态（「已就绪」的那份也会直接带回来）。 */
+  update: UpdateStatus;
+  /** models.dev 缓存的来源记录；从没刷新过是 `null`。 */
+  models_meta: ModelsMeta | null;
+  /** 编进安装包的目录快照是哪天的（`YYYY-MM-DD`）。 */
+  models_snapshot_date: string;
 };
 
 export function appInfo(): Promise<AppInfo> {
@@ -399,6 +440,26 @@ export function appInfo(): Promise<AppInfo> {
 
 export function setAppSettings(settings: AppSettings): Promise<void> {
   return invoke<void>("set_app_settings", { settings });
+}
+
+/** 当前更新状态（界面刚打开时用；之后靠 `update_changed` 事件推）。 */
+export function updateStatus(): Promise<UpdateStatus> {
+  return invoke<UpdateStatus>("update_status");
+}
+
+/** 手动检查一次，有新版就在后台下载。 */
+export function checkUpdate(): Promise<void> {
+  return invoke<void>("check_update");
+}
+
+/** 「重启更新」：装已经验过签的包，然后重启应用（本调用通常不会返回）。 */
+export function installUpdate(): Promise<void> {
+  return invoke<void>("install_update");
+}
+
+/** 当前给下载 / 外部命令用的线路：「直连官方」「走 gh-proxy.com」「走代理 …」。 */
+export function networkRoute(): Promise<string> {
+  return invoke<string>("network_route");
 }
 
 /**
@@ -1058,9 +1119,22 @@ export function listCatalogModels(providerId: string): Promise<CatalogEntry[]> {
   return invoke<CatalogEntry[]>("list_catalog_models", { providerId });
 }
 
-/** 拉一次 models.dev 目录，返回拉到的模型条数。 */
-export function refreshModelCatalog(): Promise<number> {
-  return invoke<number>("refresh_model_catalog");
+/**
+ * 一次刷新的结果。镜像 `catalog::RefreshOutcome`。
+ *
+ * `source === "builtin"` 表示所有源都没拉到，用的是编进安装包的快照 —— 界面要
+ * 明说这一点，别让用户以为刷新成功了。
+ */
+export type RefreshOutcome = {
+  count: number;
+  source: string;
+  failed: { source: string; error: string }[];
+  fetched_at: number;
+};
+
+/** 拉一次 models.dev 目录（按官方 → 镜像 → 用户填的源的顺序试）。 */
+export function refreshModelCatalog(): Promise<RefreshOutcome> {
+  return invoke<RefreshOutcome>("refresh_model_catalog");
 }
 
 // ---------------------------------------------------------------------------

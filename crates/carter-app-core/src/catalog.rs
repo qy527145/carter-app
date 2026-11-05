@@ -6,10 +6,28 @@
 //!
 //! 一条解析不了**不能**让整页失败：最常见的原因是 `meta` 写错了、或者本地还没有
 //! models.dev 缓存。那种情况下把错误挂在该行上，其余行照常显示。
+//!
+//! ## 缓存从哪来
+//!
+//! `carter` 自己只认 `~/.carter/models.json` 这一个文件，拉取也只走
+//! `https://models.dev/api.json` 一条路。国内网络下那一跳经常要几十秒、还会断，
+//! 而首次安装时文件根本不存在 —— carter 的 `read_cache` 失败，连会话都开不了。
+//!
+//! 所以本模块接管「怎么拿这份缓存」：
+//!
+//! 1. [`read_cache`]：文件在就读；不在就先把**编进二进制的快照**写出来再用，
+//!    离线首装也能解析模型；
+//! 2. [`refresh`]：按 [`crate::net`] 的候选源挨个试（官方接口 → 镜像 → 用户
+//!    自己填的），拿到之后验一下形状再落盘；全失败就**不覆盖**旧缓存，界面
+//!    明说是拉取失败还是用的快照。
+//!
+//! 快照（`data/models-snapshot.json`）由 `scripts/models-snapshot.ts` 从 models.dev
+//! 源仓库生成，字段形状与 `api.json` 一致。
 
 use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use carter::config::Config;
 use carter::registry::{Capability, ModelInfo, Pricing, fetch, resolve_model};
@@ -224,18 +242,155 @@ pub fn list(config: &Config) -> Vec<ModelRow> {
     rows
 }
 
-/// 拉一次 models.dev 目录并落盘。返回模型条数。
-pub async fn refresh() -> Result<usize, String> {
-    let json = fetch::fetch_models_dev()
-        .await
-        .map_err(|e| format!("拉取 models.dev 失败：{e}"))?;
-    fetch::write_cache(&json).map_err(|e| format!("写缓存失败：{e}"))?;
+/// 解析模型引用并装配 provider —— carter 的 `resolve_provider` 之外只多做一件事：
+/// 目录里查不到的模型（本地 Ollama 之类）也能开。
+///
+/// carter 对**任何**模型都要求 models.dev 目录里有对应条目，查不到整条会话都开
+/// 不了。本地跑什么模型，models.dev 不可能收全 —— 那些模型照样能用，只是不知道
+/// 上下文窗口和能力。
+///
+/// 放行的条件很窄：引用的**服务商 id** 在目录里不存在（用户自己起的名字 `ws`、
+/// `ollama` 天然如此）。服务商在目录里、但这条模型查不到，就是 meta 写错了 ——
+/// 照原样把 carter 的错误抛回去，别掩盖。
+pub fn resolve_provider(
+    config: &Config,
+    cache_json: &str,
+    model_ref: &str,
+    extra_hooks: Vec<std::sync::Arc<dyn llm_adapt_core::RequestHook>>,
+) -> carter::Result<carter::provider::resolve::ResolvedProvider> {
+    let err = match carter::provider::resolve_provider(
+        config,
+        cache_json,
+        model_ref,
+        extra_hooks.clone(),
+    ) {
+        Ok(r) => return Ok(r),
+        Err(e) => e,
+    };
+    let Some(model) = local_model_info(config, cache_json, model_ref) else {
+        return Err(err);
+    };
+    tracing::info!(
+        model = model_ref,
+        "目录里没有这个模型，按本地模型放行（上下文窗口未知）"
+    );
+    crate::provider_link::build(config, model, extra_hooks)
+}
 
-    // 数一下缓存里有多少模型，好给用户一个「确实拉到了东西」的反馈。
-    let v: serde_json::Value =
-        serde_json::from_str(&json).map_err(|e| format!("目录内容无法解析：{e}"))?;
-    let count = v
-        .as_object()
+/// 目录里没有的模型的最小元数据。服务商在目录里（或配置里没有这个服务商）时
+/// 返回 `None` —— 那种情况下「查不到」是要报给用户看的。
+fn local_model_info(config: &Config, cache_json: &str, reference: &str) -> Option<ModelInfo> {
+    let (provider_name, model_name) = reference.split_once('/')?;
+    let pcfg = config.providers.get(provider_name)?;
+    let root = parse_cache(cache_json).ok()?;
+    if root.get(provider_name).is_some() {
+        return None;
+    }
+    Some(ModelInfo {
+        key: reference.to_string(),
+        provider: provider_name.to_string(),
+        api_name: pcfg
+            .models
+            .get(model_name)
+            .and_then(|m| m.api_name.clone())
+            .unwrap_or_else(|| model_name.to_string()),
+        // 0 = 未知。carter 的压缩阈值按它算，0 永远不触发 —— 「不知道就别切」。
+        context_window: 0,
+        max_output_tokens: 0,
+        tokenizer: String::new(),
+        capabilities: vec![Capability::Tools, Capability::Streaming],
+        pricing: Pricing {
+            input: 0.0,
+            output: 0.0,
+            cache_write: None,
+            cache_read: None,
+        },
+        // 用户为这个模型写的推理档位照常生效（`resolve_model` 也会覆盖这一项）。
+        default_reasoning: pcfg
+            .models
+            .get(model_name)
+            .and_then(|m| m.default_reasoning.clone()),
+    })
+}
+
+/// 编进二进制的目录快照。见模块头「缓存从哪来」。
+const BUILTIN_SNAPSHOT: &str = include_str!("../data/models-snapshot.json");
+
+/// 快照里记录的那次生成时间（`YYYY-MM-DD`，按 models.dev 源仓库的文件估算）。
+///
+/// 快照是「发版那一刻」的目录，用户看到「用的是内置快照（x 月 y 日的）」
+/// 才知道该不该联网刷新一次。
+pub fn builtin_snapshot_date() -> &'static str {
+    static DATE: OnceLock<String> = OnceLock::new();
+    DATE.get_or_init(|| {
+        let v: serde_json::Value = serde_json::from_str(BUILTIN_SNAPSHOT).unwrap_or_default();
+        v.get("$generated_at")
+            .and_then(|x| x.as_str())
+            .unwrap_or("未知")
+            .to_string()
+    })
+}
+
+/// carter 缓存的落盘位置（`~/.carter/models.json`，与 CLI 共用）。
+pub fn cache_path() -> std::path::PathBuf {
+    carter::config::paths::models_cache_path()
+}
+
+fn cache_is_usable(json: &str) -> bool {
+    // 空文件 / 半截文件（写到一半断电）都算不可用；形状不对的缓存比没有更糟，
+    // 它会让 `resolve_model` 对每条都报「找不到」而不是「还没拉过」。
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|v| v.as_object().map(|o| !o.is_empty()))
+        .unwrap_or(false)
+}
+
+fn write_snapshot() -> Result<(), String> {
+    fetch::write_cache(BUILTIN_SNAPSHOT).map_err(|e| format!("写入内置快照失败：{e}"))?;
+    Ok(())
+}
+
+/// 读 models.dev 缓存。文件不在（或坏了）时先把内置快照写出去，再用它。
+///
+/// 所有「要用模型元数据」的地方都该走这里，而不是直接
+/// `carter::registry::fetch::read_cache()` —— 后者在首次安装时直接失败。
+pub fn read_cache() -> Result<String, String> {
+    let path = cache_path();
+    if let Ok(json) = std::fs::read_to_string(&path)
+        && cache_is_usable(&json)
+    {
+        return Ok(json);
+    }
+    write_snapshot().map_err(|e| format!("{e}（{} 也用不了）", path.display()))?;
+    tracing::info!("没有可用的 models.dev 缓存，已写入内置快照");
+    Ok(BUILTIN_SNAPSHOT.to_string())
+}
+
+/// 一次刷新是怎么完成的。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RefreshOutcome {
+    /// 模型条数。
+    pub count: usize,
+    /// 实际用的源（URL）。内置快照时是 `builtin`。
+    pub source: String,
+    /// 这个源排在前面、但失败了的那些。
+    pub failed: Vec<crate::net::SourceFailure>,
+    /// 这次刷新的时刻（epoch 毫秒）。
+    pub fetched_at: u64,
+}
+
+impl RefreshOutcome {
+    /// 是不是用的内置快照（没联网成功）。
+    pub fn builtin(&self) -> bool {
+        self.source == BUILTIN
+    }
+}
+
+const BUILTIN: &str = "builtin";
+
+/// 缓存里有多少模型。
+fn count_models(v: &serde_json::Value) -> usize {
+    v.as_object()
         .map(|providers| {
             providers
                 .values()
@@ -243,8 +398,101 @@ pub async fn refresh() -> Result<usize, String> {
                 .map(|m| m.len())
                 .sum()
         })
-        .unwrap_or(0);
-    Ok(count)
+        .unwrap_or(0)
+}
+
+/// 拉一次 models.dev 目录并落盘。
+///
+/// 源按「官方接口 → 内置镜像 → 用户填的」顺序试，第一个拿到**像目录**的响应就用。
+/// 一个都没成功时**不覆盖**已有缓存，返回内置快照的条数并标记 `builtin` ——
+/// 界面上要说清楚「这次没拉到，用的是快照」，而不是假装刷新成功了。
+pub async fn refresh() -> Result<RefreshOutcome, String> {
+    let settings = crate::app_settings::AppSettings::load();
+    let prefs = settings.net_prefs();
+    let urls = settings.model_source_urls();
+    let base: Vec<&str> = urls.iter().map(String::as_str).collect();
+    let now = crate::protocol::now_ms();
+
+    let res = crate::net::get_first(&prefs, &base, crate::net::SOURCE_TIMEOUT, None, None).await;
+    match res {
+        Ok(fetched) => {
+            let text =
+                String::from_utf8(fetched.bytes).map_err(|_| "目录内容不是 UTF-8".to_string())?;
+            let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+                format!(
+                    "{} 返回的内容不是目录 JSON：{e}",
+                    crate::net::source_label(&fetched.source)
+                )
+            })?;
+            let count = count_models(&v);
+            if count == 0 {
+                return Err(format!(
+                    "{} 返回的目录里没有任何模型",
+                    crate::net::source_label(&fetched.source)
+                ));
+            }
+            fetch::write_cache(&text).map_err(|e| format!("写缓存失败：{e}"))?;
+            let out = RefreshOutcome {
+                count,
+                source: fetched.source,
+                failed: fetched.failed,
+                fetched_at: now,
+            };
+            record_meta(&out);
+            Ok(out)
+        }
+        Err(e) => {
+            // 全失败：不覆盖旧缓存。没有旧缓存的话把快照铺上，别让界面停在「没有」。
+            let _ = read_cache();
+            let out = RefreshOutcome {
+                count: count_models(&serde_json::from_str(BUILTIN_SNAPSHOT).unwrap_or_default()),
+                source: BUILTIN.into(),
+                failed: vec![crate::net::SourceFailure {
+                    source: "全部源".into(),
+                    error: e,
+                }],
+                fetched_at: now,
+            };
+            record_meta(&out);
+            Ok(out)
+        }
+    }
+}
+
+/// 刷新记录：哪一次、从哪个源、几条模型。关于页显示它，也用来判断「缓存是
+/// 不是内置快照」。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CacheMeta {
+    pub source: String,
+    pub fetched_at: u64,
+    pub count: usize,
+    pub snapshot_date: String,
+}
+
+fn record_meta(out: &RefreshOutcome) {
+    let meta = CacheMeta {
+        source: out.source.clone(),
+        fetched_at: out.fetched_at,
+        count: out.count,
+        snapshot_date: builtin_snapshot_date().to_string(),
+    };
+    let path = crate::paths::models_meta_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    match serde_json::to_string_pretty(&meta) {
+        Ok(json) => {
+            let _ = std::fs::write(&path, json);
+        }
+        Err(e) => tracing::warn!(error = %e, "刷新记录写不进去"),
+    }
+}
+
+/// 读刷新记录。没有记录（老的安装、或者从没刷新过）时返回 `None`。
+pub fn cache_meta() -> Option<CacheMeta> {
+    let raw = std::fs::read_to_string(crate::paths::models_meta_path()).ok()?;
+    serde_json::from_str(&raw).ok()
 }
 
 // ---------------------------------------------------------------------------

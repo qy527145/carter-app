@@ -31,10 +31,11 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
+use crate::catalog;
 use carter::agent::{CompactModel, RunOptions, Thread, UiEvent, UiSink, run_turn};
 use carter::config::Config;
 use carter::hooks::HookRegistry;
-use carter::registry::{ModelInfo, fetch};
+use carter::registry::ModelInfo;
 use carter::session::{self, SessionOpts};
 use carter::tools::Tool;
 
@@ -163,7 +164,7 @@ pub fn start_session(shell: Arc<AppShell>, opts: SessionOptions) -> carter::Resu
         )));
     }
     let config = shell.config.load_full();
-    let cache_json = fetch::read_cache()?;
+    let cache_json = catalog::read_cache().map_err(carter::CarterError::Config)?;
     let model_ref = opts
         .model
         .clone()
@@ -171,12 +172,8 @@ pub fn start_session(shell: Arc<AppShell>, opts: SessionOptions) -> carter::Resu
     // 抓包钩子挂在 provider 上，写进 shell 里那个按会话分文件的仓库。
     let capture_store = shell.capture.clone();
     let capture_hook = Arc::new(crate::capture::CaptureHook::new(capture_store.clone()));
-    let resolved = carter::provider::resolve_provider(
-        &config,
-        &cache_json,
-        &model_ref,
-        vec![capture_hook.clone()],
-    )?;
+    let resolved =
+        catalog::resolve_provider(&config, &cache_json, &model_ref, vec![capture_hook.clone()])?;
     let (model, provider) = (resolved.model, resolved.provider);
     let unsupported_server_tools = resolved.unsupported_server_tools;
     // 协议回填给钩子：抓包存的是最终字节，解码要先知道按哪套语法解。
@@ -523,30 +520,30 @@ impl SessionCtx {
             .map(|h| h.clone() as Arc<dyn llm_adapt_core::RequestHook>)
             .collect();
 
-        let cache = match fetch::read_cache() {
+        let cache = match crate::catalog::read_cache() {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!("副模型 `{reference}` 用不上：读模型缓存失败（{e}）");
                 return None;
             }
         };
-        self.fast =
-            match carter::provider::resolve_provider(&self.config, &cache, &reference, hooks) {
-                Ok(r) => {
-                    // 协议按**副模型自己那个渠道**标（主模型可能在另一个渠道、另一个协议上）。
-                    if let Some(h) = &hook {
-                        label_capture(h, &self.config, &r.model);
-                    }
-                    Some(CompactModel {
-                        provider: r.provider,
-                        model: r.model,
-                    })
+        self.fast = match crate::catalog::resolve_provider(&self.config, &cache, &reference, hooks)
+        {
+            Ok(r) => {
+                // 协议按**副模型自己那个渠道**标（主模型可能在另一个渠道、另一个协议上）。
+                if let Some(h) = &hook {
+                    label_capture(h, &self.config, &r.model);
                 }
-                Err(e) => {
-                    tracing::warn!("副模型 `{reference}` 解析失败，这一轮回落主模型：{e}");
-                    None
-                }
-            };
+                Some(CompactModel {
+                    provider: r.provider,
+                    model: r.model,
+                })
+            }
+            Err(e) => {
+                tracing::warn!("副模型 `{reference}` 解析失败，这一轮回落主模型：{e}");
+                None
+            }
+        };
         self.fast.clone()
     }
 
@@ -2335,7 +2332,7 @@ fn switch_model(
     ctx: &SessionCtx,
     model_ref: &str,
 ) -> carter::Result<carter::provider::resolve::ResolvedProvider> {
-    let cache_json = fetch::read_cache()?;
+    let cache_json = catalog::read_cache().map_err(carter::CarterError::Config)?;
     // 换模型时也保留抓包 —— 否则一切换就静默停止记录了。
     let hook = ctx
         .capture
@@ -2345,7 +2342,7 @@ fn switch_model(
         .iter()
         .map(|h| h.clone() as Arc<dyn llm_adapt_core::RequestHook>)
         .collect();
-    let resolved = carter::provider::resolve_provider(&ctx.config, &cache_json, model_ref, hooks)?;
+    let resolved = crate::catalog::resolve_provider(&ctx.config, &cache_json, model_ref, hooks)?;
     // 换模型可能换协议（anthropic 渠道 → deepseek 渠道），钩子的协议要跟着走，
     // 否则新报文会按旧协议的语法去解。
     if let Some(h) = hook {

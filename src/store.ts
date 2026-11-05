@@ -45,6 +45,7 @@ import type {
   TurnFiles,
   TurnPrompt,
   TurnTime,
+  UpdateStatus,
   UsageView,
 } from "./lib/api";
 import { contextKey, type PromptContext } from "./lib/promptContext";
@@ -199,6 +200,11 @@ type Store = Conv & {
   // 侧栏 / 底栏用
   sessions: SessionRow[];
   appInfo: AppInfo | null;
+  /**
+   * 自更新状态。启动时从 `appInfo.update` 落地，之后由 `update_changed` 事件整份替换。
+   * `null` 只出现在拿到应用信息之前（前端在浏览器里跑时也一直是 `null`）。
+   */
+  updateStatus: UpdateStatus | null;
   /** 界面设置（主题、工具开关、侧栏宽度）。carter CLI 不读它。 */
   settings: AppSettings | null;
   /**
@@ -255,6 +261,7 @@ type Store = Conv & {
   composerContexts: PromptContext[];
 
   setAppInfo: (i: AppInfo) => void;
+  setUpdateStatus: (s: UpdateStatus) => void;
   setSettings: (s: AppSettings) => void;
   bumpConfig: () => void;
   setSessions: (s: SessionRow[]) => void;
@@ -867,6 +874,7 @@ export const useStore = create<Store>((set) => ({
   inspectorTurn: null,
   sessions: [],
   appInfo: null,
+  updateStatus: null,
   settings: null,
   configNonce: 0,
   view: "chat",
@@ -878,8 +886,10 @@ export const useStore = create<Store>((set) => ({
   opening: false,
   composerContexts: [],
 
-  // 应用信息里带着设置，一起落地 —— 分开拉会让主题在首帧闪一下。
-  setAppInfo: (i) => set({ appInfo: i, settings: i.settings }),
+  // 应用信息里带着设置与更新状态，一起落地 —— 分开拉会让主题在首帧闪一下。
+  setAppInfo: (i) => set({ appInfo: i, settings: i.settings, updateStatus: i.update }),
+
+  setUpdateStatus: (updateStatus) => set({ updateStatus }),
 
   setSettings: (settings) => set({ settings }),
 

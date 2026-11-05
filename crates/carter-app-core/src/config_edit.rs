@@ -433,6 +433,7 @@ pub fn remove_mcp_server(doc: &mut DocumentMut, name: &str) -> Result<(), String
 fn apply(shell: &crate::shell::AppShell, doc: &DocumentMut) -> Result<(), String> {
     let config = write_and_reload(doc)?;
     shell.config.store(std::sync::Arc::new(config));
+    crate::models_sync::spawn_for_models_sync(shell);
     shell.emit(crate::protocol::AppEvent::ConfigChanged);
     Ok(())
 }

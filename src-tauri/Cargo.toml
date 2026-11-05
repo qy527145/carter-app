@@ -25,6 +25,7 @@ serde_json = { workspace = true }
 tokio = { workspace = true }
 tauri-plugin-dialog = "2.8.3"
 tauri-plugin-notification = "2"
+tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # debug 构建里读仓库根的 `.env`（`CARTER_LOG` 等本地开发开关）。发布包不读它。
 dotenvy = "0.15"
@@ -35,3 +36,8 @@ dotenvy = "0.15"
 tauri-plugin-single-instance = "2"
 # 记住窗口位置、尺寸与最大化状态。
 tauri-plugin-window-state = "2"
+# 自更新：验签 / 装包 / 在 Windows 上拉起安装器。只作库用（`UpdaterBuilder`），
+# 不注册前端命令 —— 检查和下载由 `updater.rs` 自己做（要先在我们自己的加速源里选）。
+tauri-plugin-updater = "2.14"
+# 更新包先下到应用私有目录再验签，需要原子落盘。
+tempfile = "3"

@@ -208,7 +208,7 @@ pub fn resolve(
     config: &Config,
     model_ref: Option<&str>,
 ) -> Result<(Arc<dyn LlmProvider>, ModelInfo), String> {
-    let cache = carter::registry::fetch::read_cache().map_err(|e| e.to_string())?;
+    let cache = crate::catalog::read_cache().map_err(|e| e.to_string())?;
     let candidates = [
         model_ref.map(str::to_string),
         config.agent.fast_model.clone(),
@@ -220,7 +220,7 @@ pub fn resolve(
         .flatten()
         .filter(|r| !r.trim().is_empty())
     {
-        match carter::provider::resolve_provider(config, &cache, &r, vec![]) {
+        match crate::catalog::resolve_provider(config, &cache, &r, vec![]) {
             Ok(p) => return Ok((p.provider, p.model)),
             Err(e) => last = format!("模型 {r} 解析不出来：{e}"),
         }

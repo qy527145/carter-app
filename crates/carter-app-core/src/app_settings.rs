@@ -64,6 +64,17 @@ pub struct AppSettings {
     /// git 的 `user.name` 进的是每一条提交，很多人那里写的是拼音或工号，不一定是
     /// 想在团队里被叫的名字。
     pub nickname: String,
+    /// 打开时自动检查新版本（后台下载，不自动重启）。
+    pub auto_update: bool,
+    /// 从 GitHub 下载时允许走加速站（`gh-proxy.com` 等）。默认开 —— 关掉的话
+    /// 连接器安装、团队同步、更新在连不上 GitHub 的网络里都会失败。
+    pub github_accel: bool,
+    /// 显式代理，如 `http://127.0.0.1:7897`。空 = 直连，不读系统代理设置
+    /// （理由见 `net` 模块开头：绕出去再回来的加速站反而更慢）。
+    pub http_proxy: String,
+    /// models.dev 目录的额外源（多行，每行一个完整 URL）。会排在内置源之后试，
+    /// 适合自建镜像；留空就是内置的那几个。
+    pub model_sources: String,
 }
 
 impl Default for AppSettings {
@@ -77,6 +88,10 @@ impl Default for AppSettings {
             ignored_skills: Vec::new(),
             changes_ignore: Vec::new(),
             nickname: String::new(),
+            auto_update: true,
+            github_accel: true,
+            http_proxy: String::new(),
+            model_sources: String::new(),
         }
     }
 }
@@ -116,6 +131,38 @@ impl AppSettings {
     /// 某个工具是否启用。
     pub fn tool_enabled(&self, name: &str) -> bool {
         !self.disabled_tools.iter().any(|d| d == name)
+    }
+
+    /// 用户在设置里选的网络偏好。
+    pub fn net_prefs(&self) -> crate::net::NetPrefs {
+        crate::net::NetPrefs::from_raw(self.github_accel, &self.http_proxy)
+    }
+
+    /// 完全离线的开关（排障 / 内网部署用）：`CARTER_NO_NETWORK=1` 时不主动去外网
+    /// 拉目录，只用缓存或内置快照。默认值 = 允许联网。
+    pub fn network_ok(&self) -> bool {
+        !matches!(
+            std::env::var("CARTER_NO_NETWORK").as_deref(),
+            Ok("1" | "true" | "on" | "yes")
+        )
+    }
+
+    /// models.dev 的候选源：内置的（官方接口 + 镜像），再追加用户自己填的。
+    ///
+    /// 用户填的在**后面**：他写的有可能是自建镜像，比内置的慢或过期，但它
+    /// 进了列表就说明他希望被用到 —— 内置的那几条全失败时它就是兜底。
+    pub fn model_source_urls(&self) -> Vec<String> {
+        let mut out: Vec<String> = crate::net::MODEL_SOURCES
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        for line in self.model_sources.lines() {
+            let url = line.trim();
+            if !url.is_empty() && !out.iter().any(|u| u == url) {
+                out.push(url.to_string());
+            }
+        }
+        out
     }
 
     /// 额外的技能扫描根，按加入顺序（= 优先级）。
@@ -233,6 +280,11 @@ mod tests {
             ignored_skills: vec!["pdf".into()],
             changes_ignore: vec!["*.snap".into()],
             nickname: "徐侨".into(),
+            auto_update: false,
+            github_accel: false,
+            http_proxy: "http://127.0.0.1:7897".into(),
+            model_sources: "https://mirror.example/models.json\n\n  \nhttps://models.dev/api.json"
+                .into(),
         };
         s.save_to(&path).unwrap();
 
@@ -245,8 +297,36 @@ mod tests {
         assert!(back.skill_ignored("pdf"));
         assert_eq!(back.changes_ignore, vec!["*.snap".to_string()]);
         assert_eq!(back.nickname, "徐侨");
+        assert!(!back.auto_update);
+        assert!(!back.github_accel);
+        assert_eq!(back.http_proxy, "http://127.0.0.1:7897");
+        // 同一行重复的内置源不该出现两次；空行忽略。
+        let sources = back.model_source_urls();
+        assert_eq!(
+            sources
+                .iter()
+                .filter(|u| *u == "https://models.dev/api.json")
+                .count(),
+            1
+        );
+        assert!(sources.contains(&"https://mirror.example/models.json".to_string()));
+        assert_eq!(
+            sources.last().unwrap(),
+            "https://mirror.example/models.json"
+        );
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// 老设置文件里没有网络那几项：要能缺省成「自动更新开、加速开、直连」。
+    #[test]
+    fn network_defaults_are_on_and_direct() {
+        let s: AppSettings = serde_json::from_str("{}").unwrap();
+        assert!(s.auto_update && s.github_accel);
+        assert!(s.http_proxy.is_empty());
+        let prefs = s.net_prefs();
+        assert!(prefs.accel && prefs.proxy.is_empty());
+        assert_eq!(s.model_source_urls(), crate::net::MODEL_SOURCES.to_vec());
     }
 
     #[test]

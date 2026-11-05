@@ -3,6 +3,14 @@
 # 的构建机都会执行一遍。
 #
 # 放在 .github/ 而不是 .github/workflows/，免得 GitHub 把它当成独立 workflow。
+#
+# ## 为什么这里要自己跑一遍 tauri build
+#
+# 自更新要的是 tauri 自己签过名的安装包：mac 的 `.app`、Windows 的 NSIS、Linux
+# 的 AppImage —— 外加一个 `.sig`。签名私钥只在 CI secrets 里，dist 不认识它。
+# 所以出包这一步交给 tauri；dist 接着照常跑它的 release 构建，负责把二进制打成
+# tgz / zip、算 sha256、拼 release notes、上传。两边产物互不影响（tauri 的输出
+# 被挪到 `$RUNNER_TEMP`，dist 清 `target/` 也碰不到）。
 
 # dist 的 [dist.dependencies.apt] 解析不了 libwebkit2gtk-4.1-dev 这个名字
 # （会把 -4.1-dev 当成版本号，生成出不存在的 libwebkit2gtk-4），只能显式装。
@@ -10,7 +18,9 @@
   if: runner.os == 'Linux'
   run: |
     sudo apt-get update
-    sudo apt-get install -y libwebkit2gtk-4.1-dev
+    # dist 的 [dist.dependencies.apt] 会装 appindicator / rsvg / patchelf 等，
+    # 但它在 build-setup **之后**才跑；tauri bundle 现在就把它用到的补齐。
+    sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
 
 - name: 安装 Bun
   uses: oven-sh/setup-bun@v2
@@ -23,3 +33,34 @@
 - name: 构建前端
   # tauri::generate_context! 在编译期就把 ../dist 嵌进二进制，这里必须先产出。
   run: bun run web:build
+
+- name: 用 tauri 出安装包（带自更新签名）
+  shell: bash
+  env:
+    MATRIX_TARGETS: ${{ toJson(matrix.targets) }}
+    TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+    TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+  run: |
+    # 每台构建机只出 native 产物。`updater` 是隐藏的包类型（`tauri bundle -b updater`
+    # 也能单独出）：mac 上是 `.app.tar.gz`、Linux 上是 AppImage 复制的 `.tar.gz`、
+    # Windows 上是 NSIS 的 `.exe.zip` —— 正是自更新要下载的那个包，必须显式带上，
+    # 只列 app / nsis 不会生成它。Windows 选 NSIS 而不是 MSI：只有 NSIS 支持
+    # 静默 `/UPDATE` 并在装完后自己把应用拉起来。
+    case "$RUNNER_OS" in
+      macOS)   BUNDLES="app,dmg,updater" ;;
+      Windows) BUNDLES="nsis,updater" ;;
+      *)       BUNDLES="appimage,deb,updater" ;;
+    esac
+    TARGET="$(node -e 'console.log(JSON.parse(process.env.MATRIX_TARGETS || "[]")[0] || "")')"
+    if [ -n "$TARGET" ]; then
+      bun x tauri build --target "$TARGET" --bundles "$BUNDLES"
+      OUT="target/$TARGET/release/bundle"
+    else
+      bun x tauri build --bundles "$BUNDLES"
+      OUT="target/release/bundle"
+    fi
+    # 出包之后 tauri 的产物可以被清掉了（这里只借它的编译结果缓存给 dist 用），
+    # 把 bundle 目录整个搬去 $RUNNER_TEMP，留给后面的「发布」job。
+    mkdir -p "$RUNNER_TEMP/tauri-bundles"
+    cp -R "$OUT" "$RUNNER_TEMP/tauri-bundles/"
+    find "$RUNNER_TEMP/tauri-bundles" -type f | sort

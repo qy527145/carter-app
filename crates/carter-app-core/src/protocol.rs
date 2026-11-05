@@ -210,6 +210,12 @@ pub enum AppEvent {
     /// 不带载荷：状态整份由 `get_assistant` 取。变化很碎（一次轮询就改好几处），
     /// 逐条推增量让界面自己拼，迟早拼出一份与盘上对不上的状态。
     AssistantChanged,
+    /// 自更新的状态变了（检查中 / 下载进度 / 已就绪 / 失败）。
+    ///
+    /// 这里的 `status` 是外壳自己的 JSON 形状（`src-tauri/src/updater.rs` 的
+    /// `Status`），core 不知道它的细节 —— 原样转发给前端，前端按 `phase` 分派。
+    /// 与上面两条一样，带载荷是因为它很小、且变化不频繁（下载时已节流到 256 KB 一次）。
+    UpdateChanged { status: serde_json::Value },
     /// 一张工单进入了要人处理的状态。外壳把它变成系统通知 —— 这是助理唯一主动
     /// 出声的地方。
     AssistantAlert {

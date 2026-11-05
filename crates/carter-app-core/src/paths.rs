@@ -192,6 +192,18 @@ pub fn schedules_path() -> PathBuf {
     app_home().join("schedules.json")
 }
 
+/// `<root>/updates/`：自更新下载下来的安装包（以及「已就绪」的记录）。见 `carter-app`
+/// 的 `updater` 模块。放在应用私有目录而不是系统临时目录：临时目录可能被清理，
+/// 而「第二天再重启更新」是正常用法。
+pub fn updates_dir() -> PathBuf {
+    app_home().join("updates")
+}
+
+/// `<root>/models-meta.json`：models.dev 缓存是哪一次、从哪个源拉来的。见 `catalog`。
+pub fn models_meta_path() -> PathBuf {
+    app_home().join("models-meta.json")
+}
+
 /// 常驻助理的全部状态（设置、观察源、决定、工单）。见 `assistant/mod.rs`。
 pub fn assistant_path() -> PathBuf {
     app_home().join("assistant.json")
