@@ -6,17 +6,20 @@ jobs:
   probe:
     runs-on: ubuntu-22.04
     steps:
-      - name: 打印 token 与 release 权限
+      - name: 探测
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -x
-          gh api repos/$GITHUB_REPOSITORY/actions/permissions/workflow
-          echo "---- 建一个一次性 tag"
-          gh api -X POST repos/$GITHUB_REPOSITORY/git/refs -f ref=refs/tags/probe-$GITHUB_RUN_ID -f sha=$GITHUB_SHA || true
-          echo "---- 用它建 release"
-          gh api -X POST repos/$GITHUB_REPOSITORY/releases \
-            -f tag_name=probe-$GITHUB_RUN_ID -f name=probe -f body=probe -F draft=true ; echo "exit=$?"
-          echo "---- 删掉"
-          gh api -X DELETE repos/$GITHUB_REPOSITORY/releases/tags/probe-$GITHUB_RUN_ID || true
-          gh api -X DELETE repos/$GITHUB_REPOSITORY/git/refs/tags/probe-$GITHUB_RUN_ID || true
+          echo "== 1) 建 tag（同样要 contents:write）"
+          gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f ref="refs/tags/probe-$GITHUB_RUN_ID" -f sha="$GITHUB_SHA" && echo "TAG_OK" || echo "TAG_FAIL"
+          echo "== 2) 建 draft release"
+          gh api -X POST "repos/$GITHUB_REPOSITORY/releases" \
+            -f tag_name="probe-$GITHUB_RUN_ID" -f name=probe -f body=probe -F draft=true \
+            && echo "RELEASE_OK" || echo "RELEASE_FAIL"
+          echo "== 3) 带 -i 看响应头"
+          gh api -i "repos/$GITHUB_REPOSITORY" 2>&1 | grep -iE "x-oauth-scopes|x-accepted|http/" | head -5
+          echo "== 4) 清理"
+          gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/tags/probe-$GITHUB_RUN_ID" && echo "DEL_OK" || true
+          gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/probe-$GITHUB_RUN_ID" && echo "DELTAG_OK" || true
+          exit 0
