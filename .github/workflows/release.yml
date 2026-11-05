@@ -364,6 +364,9 @@ jobs:
     needs:
       - plan
       - announce
+    permissions:
+      contents: write
+      actions: read
     uses: ./.github/workflows/updater-release.yml
     with:
       plan: ${{ needs.plan.outputs.val }}
