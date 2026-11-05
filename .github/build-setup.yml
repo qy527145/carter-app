@@ -38,20 +38,21 @@
   shell: bash
   env:
     MATRIX_TARGETS: ${{ toJson(matrix.targets) }}
-    # 先写一次性的密钥文件：用 `envs:`/secret 本身当「是否存在」的标志，
-    # 再导出成 tauri 要的那两个变量。没配置时下面一步直接失败，报文里把两个
-    # Secret 名都写上。用文件而不是直接 export 键，是因为「文件内容再套一层
-    # base64」那一长串贴进 Secrets 时很容易贴坏，原始 minisign 文本更不容易出错。
-    KEY: ${{ secrets.MINISIGN_SECRET_KEY || secrets.TAURI_SIGNING_PRIVATE_KEY }}
-    KEY_PASSWORD: ${{ secrets.MINISIGN_KEY_PASSWORD || secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+    # 签名密钥直接用 tauri 认识的那个变量名注入（`TAURI_SIGNING_PRIVATE_KEY`）。
+    #
+    # 早先这里绕了一圈：把值先写进 `$RUNNER_TEMP/updater.key`，再在 `run:` 里
+    # 通过 `$GITHUB_ENV` 导给后续步骤 —— 但**同一步**里的 `tauri build` 根本看不到
+    # 刚刚写进 GITHUB_ENV 的变量（那要等下一步才生效），于是 tauri 报
+    # 「有公钥没私钥」，而 GITHUB_ENV 里的路径还指着一个根本不存在的密钥文件。
+    # 现在：值必须是 tauri 要的格式（私钥文件内容再套一层 base64），
+    # 由 step 级 env 直接给，`tauri build` 当场就能读到。
+    TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY || secrets.MINISIGN_SECRET_KEY }}
+    TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || secrets.MINISIGN_KEY_PASSWORD }}
   run: |
-    if [ -z "$KEY" ]; then
-      echo "::error::没有配置更新签名密钥：请在仓库 Secrets 里加 TAURI_SIGNING_PRIVATE_KEY（私钥文件内容）或 MINISIGN_SECRET_KEY（私钥去掉注释行后的那一行）"
+    if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+      echo "::error::没有配置更新签名密钥：请在仓库 Secrets 里加 TAURI_SIGNING_PRIVATE_KEY（私钥文件再套一层 base64）"
       exit 1
     fi
-    printf '%s' "$KEY" > "$RUNNER_TEMP/updater.key"
-    echo "TAURI_SIGNING_PRIVATE_KEY=$RUNNER_TEMP/updater.key" >> "$GITHUB_ENV"
-    echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$KEY_PASSWORD" >> "$GITHUB_ENV"
 
     # 每台构建机只出 native 产物。`updater` 是隐藏的包类型（`tauri bundle -b updater`
     # 也能单独出）：mac 上是 `.app.tar.gz`、Linux 上是 AppImage 复制的 `.tar.gz`、
