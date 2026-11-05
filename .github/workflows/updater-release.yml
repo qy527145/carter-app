@@ -5,13 +5,16 @@ name: Updater release
 #
 # 这个文件**不会**被 dist 生成或校验，所以可以随便写。它是通过
 # `dist-workspace.toml` 的 `post-announce-jobs` 被 dist 的 release.yml 调起的：
-# dist 会把 `needs: [plan, announce]` 的 `custom-updater-release` job 追加进
+# dist 会把一个 `needs: [plan, announce]` 的 `custom-updater-release` job 追加进
 # release.yml，也就是「Release 已经建好、dist 的产物已经传完」之后才跑。
 #
 # 为什么不直接改 release.yml：dist 会校验那个文件必须与它生成的内容完全一致，
 # 任何手改都会让 CI 在 plan 阶段失败（v0.1.0 的 Release 连着几次就是这么挂的）。
-# dist 认识的扩展点只有两个：`github-build-setup`（构建步骤）与这里的
-# custom jobs。
+#
+# **不要**在这里声明 `permissions:`：reusable workflow 的权限是「调用方 ∩ 自己」，
+# 而调用方（dist 生成的 job）只有仓库默认的 `contents: write`。声明 `actions: read`
+# 反而会让整条 workflow 在启动时被判无效（startup_failure）。下载同一次运行里
+# 上传的 artifacts 用运行自带的 token 就能读，不需要额外权限。
 
 on:
   workflow_call:
@@ -24,9 +27,6 @@ on:
 jobs:
   latest-json:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write # 往 Release 里加附件
-      actions: read # 下载构建机上传的 artifacts
     steps:
       - uses: actions/checkout@v6
         with:
