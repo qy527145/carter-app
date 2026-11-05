@@ -6,24 +6,19 @@ jobs:
   probe:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-      - name: 原样复刻 release.yml 的建 release 命令
+      - name: 建 → 删 release（留 tag）→ 再建
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          T="probe-gh-$GITHUB_RUN_ID"
-          git tag "$T"
-          git push origin "refs/tags/$T" || echo "push tag failed"
-          echo "== A) gh release create 带 --target + 一个附件"
+          T="probe-del-$GITHUB_RUN_ID"
           echo hi > a.txt
-          gh release create "$T" --target "$GITHUB_SHA" --title "$T" --notes-file a.txt a.txt \
-            && echo "CREATE_OK" || echo "CREATE_FAIL"
-          echo "== B) 干净环境再试一次（不带 --target）"
-          T2="probe2-$GITHUB_RUN_ID"; git tag "$T2"; git push origin "refs/tags/$T2"
-          gh release create "$T2" --title "$T2" --notes-file a.txt \
-            && echo "CREATE2_OK" || echo "CREATE2_FAIL"
+          echo "== 1) 首次建 release"
+          gh release create "$T" --target "$GITHUB_SHA" --title "$T" --notes-file a.txt a.txt && echo "FIRST_OK" || echo "FIRST_FAIL"
+          echo "== 2) 删 release，保留 tag"
+          gh release delete "$T" --yes && echo "DEL_OK" || echo "DEL_FAIL"
+          echo "== 3) 同一个 tag 再建一次"
+          gh release create "$T" --target "$GITHUB_SHA" --title "$T" --notes-file a.txt a.txt && echo "SECOND_OK" || echo "SECOND_FAIL"
+          echo "== 4) 清理"
           gh release delete "$T" --yes --cleanup-tag || true
-          gh release delete "$T2" --yes --cleanup-tag || true
+          gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$T" || true
           exit 0
