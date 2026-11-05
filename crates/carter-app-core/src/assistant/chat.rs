@@ -16,6 +16,7 @@ use std::sync::Arc;
 use crate::protocol::Command;
 use crate::session::{SessionOptions, StartedSession, start_session};
 use crate::shell::AppShell;
+use crate::timeline::ReportTag;
 
 use super::{CHAT_SESSION_ID, Decision, REPORT_MARK, Ticket};
 
@@ -142,64 +143,24 @@ pub fn answered_text(label: &str, text: &str) -> String {
     format!("{REPORT_MARK}已答复 · {label}\n用户直接回复了这张工单（已送进去，不用再转达）：{text}")
 }
 
-/// 助理对话里**这张工单最近一条汇报**在第几轮 —— 卡片上的「去工单对话」据此跳过去。
+/// 助理对话里每张工单**最近一条汇报**在第几轮（工单 id → 轮次）—— 面板卡片上的
+/// 「跳到这条汇报」据此跳过去。
 ///
-/// 「最近」是为了与界面一致：只有一张工单最后那条汇报给回答框（见 `ChatView` 的
-/// `latestReports`），跳转也只该落在那一轮。数轮次用的是 `view.rs::is_turn_start`
-/// 的同一判据：工具结果不带正文，不算一轮。
-pub fn turn_of_report(history: &[llm_adapt_core::WireMessage], number: u32) -> Option<u32> {
-    // 轮次号与界面**看到的那份**对齐（`ChatView` 的 `messagesToTurns`）：历史里带正文的
-    // user 消息从 0 数起，但真正的第 0 轮——用户说的第一句话——界面会把它与它引出来的
-    // 那条回复合成一个桶画出来，所以这里的第 N 个桶对应界面上的第 N-1 轮。
-    //
-    // 边数边记，最后留下的就是这张工单**最近**那条汇报所在的桶 —— 卡片显示的就是它。
-    // 先按完整的序号记，最后统一减一。
-    let mut turn: u32 = 0;
-    // 轮次号在**见到第 0 轮之后**才开始递增：第一个带正文的 user 消息是第 0 轮，
-    // 它之后每一条是新的一轮。
-    let mut next = false;
-    let mut hits: Vec<u32> = Vec::new();
-    for m in history {
-        let text: String = m
-            .content
-            .iter()
-            .filter_map(|b| match b {
-                llm_adapt_core::Block::Text { text, .. } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        if !crate::view::is_turn_start(m) {
-            continue;
-        }
-        if next {
-            turn += 1;
-        }
-        next = true;
-        let head = text
-            .strip_prefix(REPORT_MARK)
-            .map(|rest| rest.lines().next().unwrap_or(""))
-            .unwrap_or("");
-        if report_number(head) == Some(number) {
-            hits.push(turn);
+/// 只看记录时挂上的归属（`timeline` 里的 [`ReportTag`]），不看正文。等着用户回答的那
+/// 条优先；一张工单只有事后记的几笔（已答复、来信……）时退回最近的那一笔。
+pub fn report_turns(times: &[crate::timeline::TurnTime]) -> std::collections::HashMap<String, u32> {
+    let mut ask = std::collections::HashMap::new();
+    let mut any = std::collections::HashMap::new();
+    // `times` 按轮次升序，后写的覆盖先写的 = 留下最近的。
+    for t in times {
+        let Some(r) = &t.report else { continue };
+        any.insert(r.ticket_id.clone(), t.turn);
+        if r.ask {
+            ask.insert(r.ticket_id.clone(), t.turn);
         }
     }
-    hits.last().map(|n| n.saturating_sub(1))
-}
-
-/// 汇报标题里的工单编号：`等你拍板 · #3 标题` → 3。与界面 `reportTicket` 同一条规则
-/// —— 「已答复 / 已结束 / 本来会接 / 已忽略」这类不算（它们不是那张工单的汇报）。
-fn report_number(head: &str) -> Option<u32> {
-    if ["已答复", "已结束", "本来会接", "已忽略"]
-        .iter()
-        .any(|p| head.starts_with(p))
-    {
-        return None;
-    }
-    let at = head.find(" · #")?;
-    let rest = &head[at + " · #".len()..];
-    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-    digits.parse().ok()
+    any.extend(ask);
+    any
 }
 
 /// 用户在助理对话里对这张工单做了一件事（回了一句、划掉了汇报）—— 记进对话的那段话。
@@ -231,20 +192,42 @@ pub fn proposal_text(d: &Decision) -> String {
 ///
 /// 只记、不跑模型（`Command::Record`）：用户不在场时那一轮没人看，汇报却会把上下文
 /// 越撑越大。用户下次开口时，模型连同这期间的汇报一起看到。
-pub(crate) fn record(shell: &Arc<AppShell>, text: String) -> bool {
+///
+/// `report` 是这段话属于哪张工单 —— 调用方手里有工单就用 [`tag`] / [`ask_tag`] 填上。
+/// 界面靠它（而不是正文里的任何字样）把卡片绑到工单、给出「打开工单对话」。
+pub(crate) fn record(shell: &Arc<AppShell>, text: String, report: Option<ReportTag>) -> bool {
     if let Err(e) = ensure(shell) {
         tracing::warn!(error = %e, "助理：开不出助理对话，汇报只走系统通知");
         return false;
     }
-    shell.send(CHAT_SESSION_ID, Command::Record { text })
+    shell.send(CHAT_SESSION_ID, Command::Record { text, report })
 }
 
+/// 一张工单要人处理了：记进对话，标成「等着用户回答」。
 pub fn push_report(shell: &Arc<AppShell>, t: &Ticket) -> bool {
-    record(shell, report_text(t))
+    record(shell, report_text(t), Some(ask_tag(t)))
 }
 
+/// 「本来会接」的提议还没有工单，不挂归属。
 pub fn push_proposal(shell: &Arc<AppShell>, d: &Decision) -> bool {
-    record(shell, proposal_text(d))
+    record(shell, proposal_text(d), None)
+}
+
+/// 事后记的一笔（已答复、已结束、已忽略、工单来信）的归属：绑工单，不给回答框。
+pub fn tag(t: &Ticket) -> ReportTag {
+    ReportTag {
+        ticket_id: t.id.clone(),
+        session_id: t.session_id.clone(),
+        ask: false,
+    }
+}
+
+/// 要人处理的汇报的归属：绑工单，并且是一次提问。
+pub fn ask_tag(t: &Ticket) -> ReportTag {
+    ReportTag {
+        ask: true,
+        ..tag(t)
+    }
 }
 
 /// 面板上的「开新一期」：之前的对话不再进上下文，只留纪要与记忆（见 `Command::NewEpisode`）。
@@ -290,8 +273,8 @@ mod tests {
         assert!(!text.contains("改好了"));
     }
 
-    /// 界面（`ChatView.tsx` 的 `reportTicket`）靠标题里的 ` · #编号 ` 找到工单、画回答框，
-    /// 靠末行 `候选：` 去掉重复；已答复的标题以「已答复」开头，不给回答框。
+    /// 标题是写给模型看的（它靠编号用 `send_message(to="#N")` 指工单），候选放在末行，
+    /// 界面画成按钮时去掉那行重复。界面**不**从标题里认工单 —— 那靠 [`ReportTag`]。
     #[test]
     fn report_titles_carry_the_ticket_number_and_options_go_last() {
         let mut s = super::super::State::default();
@@ -313,8 +296,22 @@ mod tests {
         );
     }
 
-    /// 划掉一条汇报的那句话：标题以「已忽略」开头（界面据此不再给回答框），正文说清
-    /// 不是结束 —— 面板上那张工单还在。
+    /// 归属按工单本身填：提问带 `ask`，事后记的一笔不带；会话 id 取工单上记的那条。
+    #[test]
+    fn tags_come_from_the_ticket_itself() {
+        let mut s = super::super::State::default();
+        let id = s.assign_ticket("/tmp", "修登录", "x");
+        let t = s.ticket_mut(&id).unwrap();
+        t.session_id = Some("1-abcd-w".into());
+        let t = t.clone();
+        let ask = ask_tag(&t);
+        assert_eq!(ask.ticket_id, id);
+        assert_eq!(ask.session_id.as_deref(), Some("1-abcd-w"));
+        assert!(ask.ask);
+        assert!(!tag(&t).ask);
+    }
+
+    /// 划掉一条汇报的那句话：正文说清不是结束 —— 面板上那张工单还在。
     #[test]
     fn an_ignored_note_says_the_ticket_is_not_closed() {
         let text = noted_text("已忽略", "#3 修登录", "知道了，不用再催。");
@@ -322,21 +319,34 @@ mod tests {
         assert!(text.contains("知道了，不用再催。"));
     }
 
-    /// 卡片上的「去工单对话」要跳到写着它的那一轮：助手轮的回答归到同一轮，工具
-    /// 结果不带正文不算一轮，已答复 / 已忽略那些也不算这张工单的上报。
+    /// 跳转只认记录时挂的归属：正文里写什么编号都不算；提问优先于事后记的一笔。
     #[test]
-    fn a_report_is_located_in_the_turn_that_carried_it() {
-        let msgs = vec![
-            WireMessage::user_text("第一轮"),
-            WireMessage::user_text(format!("{REPORT_MARK}待查看 · #1 修 CI\n好")),
-            WireMessage::user_text("第二轮"),
-            WireMessage::user_text(format!("{REPORT_MARK}已答复 · #1 修 CI\n答过了")),
-            WireMessage::user_text(format!("{REPORT_MARK}等你拍板 · #1 修 CI\n再来一次")),
+    fn report_turns_follow_the_tags_not_the_text() {
+        use crate::timeline::{ReportTag, TurnTime};
+        let at = |turn, report| TurnTime {
+            turn,
+            started_at: 0,
+            ended_at: None,
+            report,
+        };
+        let tag = |id: &str, ask| {
+            Some(ReportTag {
+                ticket_id: id.into(),
+                session_id: Some(format!("{id}-w")),
+                ask,
+            })
+        };
+        let times = vec![
+            at(0, None),
+            at(1, tag("a", true)),
+            at(2, tag("a", false)),
+            at(3, tag("b", false)),
+            at(4, tag("b", false)),
         ];
-        // 界面上第 0 轮是第一句话引出来的那条；「等你拍板」落在第 3 轮。已答复那条
-        // 不算这张工单的上报。
-        assert_eq!(turn_of_report(&msgs, 1), Some(3));
-        assert_eq!(turn_of_report(&msgs, 2), None);
+        let got = report_turns(&times);
+        assert_eq!(got.get("a"), Some(&1), "提问优先于之后的「已答复」");
+        assert_eq!(got.get("b"), Some(&4), "只有事后记的就落在最近那一笔");
+        assert_eq!(got.len(), 2);
     }
 
     #[test]

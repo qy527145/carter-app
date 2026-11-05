@@ -328,22 +328,25 @@ pub async fn ticket_action(
             if text.is_empty() {
                 return Err("回复不能为空".into());
             }
-            let label = shell
-                .assistant
-                .read(|s| s.ticket(ticket_id).map(|t| t.label()));
             if !deliver(shell, ticket_id, format!("用户回复：{text}"), Wake::Person) {
                 return Err("这张工单已经叫停，不再接收消息".into());
             }
             // 在面板或汇报卡片上答的，助理对话里也记一笔（只记不跑）：否则它不知道
             // 用户已经答过，下次开口还会再问一遍。
-            if let Some(label) = label {
-                // 用户回过了，这条就不该再算「等着我」。之前划掉的汇报也一并作废。
-                let _ = shell.assistant.with(|s| {
-                    let t = s.ticket_mut(ticket_id)?;
-                    t.ignored = false;
-                    Some(())
-                });
-                super::chat::record(shell, super::chat::answered_text(&label, text));
+            //
+            // 用户回过了，这条就不该再算「等着我」。之前划掉的汇报也一并作废。
+            // 送进去之后再取工单：刚开出来的执行会话 id 这时才有。
+            let t = shell.assistant.with(|s| {
+                let t = s.ticket_mut(ticket_id)?;
+                t.ignored = false;
+                Some(t.clone())
+            });
+            if let Ok(Some(t)) = t {
+                super::chat::record(
+                    shell,
+                    super::chat::answered_text(&t.label(), text),
+                    Some(super::chat::tag(&t)),
+                );
             }
         }
         TicketAction::Retry => {
@@ -361,29 +364,34 @@ pub async fn ticket_action(
                 t.question = None;
                 t.options.clear();
                 t.updated_at = now_ms();
-                Some(t.label())
+                Some(t.clone())
             })?;
             // 与回复同理：在面板或汇报卡片上结束的，助理对话里也记一笔，免得它还当这张没处理。
-            if let Some(label) = closed {
-                super::chat::record(shell, super::chat::closed_text(&label));
+            if let Some(t) = closed {
+                super::chat::record(
+                    shell,
+                    super::chat::closed_text(&t.label()),
+                    Some(super::chat::tag(&t)),
+                );
             }
         }
         TicketAction::Ignore => {
-            let label = shell.assistant.with(|s| {
+            let ignored = shell.assistant.with(|s| {
                 let t = s.ticket_mut(ticket_id)?;
                 t.ignored = true;
                 t.updated_at = now_ms();
-                Some(t.label())
+                Some(t.clone())
             })?;
             // 让助理知道这条它别再等着了 —— 否则它下次开口还会把这条当成没处理。
-            if let Some(label) = label {
+            if let Some(t) = ignored {
                 super::chat::record(
                     shell,
                     super::chat::noted_text(
                         "已忽略",
-                        &label,
+                        &t.label(),
                         "用户把这条汇报划掉了：知道了，不用再催，也不用跟进；有事它会自己再来。",
                     ),
+                    Some(super::chat::tag(&t)),
                 );
             }
         }
@@ -1000,18 +1008,9 @@ pub fn view(shell: &AppShell) -> AssistantView {
         .map(|s| s.id.clone())
         .collect();
     let attention = attention(&state);
-    // 助理对话在后台跑着的话，历史就在句柄的快照上（每轮刷新）；没在跑就退回盘上那份。
-    // 都没有（还没开过）就跳到哪算哪 —— 空表。
-    let history: Vec<llm_adapt_core::WireMessage> =
-        match shell.session(crate::assistant::CHAT_SESSION_ID) {
-            Some(h) => h.history.load_full().as_ref().clone(),
-            None => crate::session::chat_history().unwrap_or_default(),
-        };
-    let report_turns = state
-        .tickets
-        .iter()
-        .filter_map(|t| super::chat::turn_of_report(&history, t.number).map(|n| (t.id.clone(), n)))
-        .collect();
+    // 归属在记录汇报时就和那一轮一起存进了 `timeline`（见 `chat::record`），这里只是查表。
+    let report_turns =
+        super::chat::report_turns(&crate::timeline::load(crate::assistant::CHAT_SESSION_ID));
     AssistantView {
         state,
         busy,

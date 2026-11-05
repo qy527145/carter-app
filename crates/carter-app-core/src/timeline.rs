@@ -22,6 +22,13 @@
 //!
 //! 什么都不影响 —— 界面上那条消息就不显示时间（老会话、fork 出去的会话在补上
 //! 之前都是这个状态）。时间纯粹是给人看的，不值得为了它让界面报错。
+//!
+//! ## 汇报的归属也挂在这里
+//!
+//! 助理对话里的汇报要知道「说的是哪张工单、那张工单的对话是哪条」。这件事**不能**
+//! 从正文里读：正文是给模型看的文字，标题怎么写随时会改，也可能被外部内容带偏。
+//! 同样不能写进会话文件（理由同上）。它与时刻一样是**轮**的属性、生命周期也完全
+//! 一样（重试回退、压缩重排、分叉复制、开新一期清空），所以跟着时刻一起存。
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -31,13 +38,30 @@ use serde::{Deserialize, Serialize};
 use crate::paths;
 
 /// 某一轮的时刻（IPC 用）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnTime {
     pub turn: u32,
     /// 用户发问的时刻（epoch 毫秒）。
     pub started_at: u64,
     /// 这一轮跑完的时刻。`None` = 还在跑（或没跑完就被中断了）。
     pub ended_at: Option<u64>,
+    /// 这一轮是助理记进来的一条工单消息时，它属于哪张工单。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<ReportTag>,
+}
+
+/// 一条汇报属于哪张工单 —— 记的时候由后端按工单本身填，不从正文里解析。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReportTag {
+    /// 工单 id（`assistant.json` 里那张）。
+    pub ticket_id: String,
+    /// 记这条时工单的执行会话。还没开工的工单没有。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// 这条是在**等用户回答**（汇报到了要人处理的状态），而不是事后记的一笔
+    /// （已答复、已结束、已忽略、工单来信）。界面只给前者回答框。
+    #[serde(default)]
+    pub ask: bool,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -47,11 +71,13 @@ struct Stored {
     turns: BTreeMap<u32, Entry>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Entry {
     started_at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     ended_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    report: Option<ReportTag>,
 }
 
 /// 会话 id → 文件名。与 `changes.rs::file_for` 同一条白名单：拼路径的地方不信任输入。
@@ -82,6 +108,7 @@ fn load_from(path: &Path) -> Vec<TurnTime> {
             turn,
             started_at: e.started_at,
             ended_at: e.ended_at,
+            report: e.report,
         })
         .collect()
 }
@@ -91,19 +118,30 @@ fn load_from(path: &Path) -> Vec<TurnTime> {
 /// 同一轮重跑（重试）时以最后一次为准：用户看到的是「刚才又问了一遍」，显示的
 /// 该是这一遍的时间，不是上一遍的。结束时刻一并清掉 —— 上一遍的「答完」不属于这一遍。
 pub fn started(session_id: &str, turn: u32, at: u64) -> Result<(), String> {
+    started_tagged(session_id, turn, at, None)
+}
+
+/// 与 [`started`] 一样，同时记下这一轮属于哪张工单（助理对话里记进来的汇报）。
+pub fn started_tagged(
+    session_id: &str,
+    turn: u32,
+    at: u64,
+    report: Option<ReportTag>,
+) -> Result<(), String> {
     if ephemeral(session_id) {
         return Ok(());
     }
-    started_at(&file_for(session_id), turn, at)
+    started_at(&file_for(session_id), turn, at, report)
 }
 
-fn started_at(path: &Path, turn: u32, at: u64) -> Result<(), String> {
+fn started_at(path: &Path, turn: u32, at: u64, report: Option<ReportTag>) -> Result<(), String> {
     let mut stored = read(path);
     stored.turns.insert(
         turn,
         Entry {
             started_at: at,
             ended_at: None,
+            report,
         },
     );
     write(path, &stored)
@@ -132,6 +170,7 @@ fn ended_at(path: &Path, turn: u32, at: u64) -> Result<(), String> {
     let entry = stored.turns.entry(turn).or_insert(Entry {
         started_at: at,
         ended_at: None,
+        report: None,
     });
     entry.ended_at = Some(at);
     write(path, &stored)
@@ -227,9 +266,9 @@ mod tests {
     fn records_start_and_end_per_turn() {
         let dir = tmp_dir("rt");
         let path = dir.join("s.json");
-        started_at(&path, 0, 1000).unwrap();
+        started_at(&path, 0, 1000, None).unwrap();
         ended_at(&path, 0, 1500).unwrap();
-        started_at(&path, 1, 2000).unwrap();
+        started_at(&path, 1, 2000, None).unwrap();
         assert_eq!(
             load_from(&path),
             vec![
@@ -237,22 +276,25 @@ mod tests {
                     turn: 0,
                     started_at: 1000,
                     ended_at: Some(1500),
+                    report: None,
                 },
                 TurnTime {
                     turn: 1,
                     started_at: 2000,
                     ended_at: None,
+                    report: None,
                 },
             ]
         );
         // 重跑第 0 轮：开始时刻换新，上一遍的结束时刻不该留着。
-        started_at(&path, 0, 3000).unwrap();
+        started_at(&path, 0, 3000, None).unwrap();
         assert_eq!(
             load_from(&path)[0],
             TurnTime {
                 turn: 0,
                 started_at: 3000,
                 ended_at: None,
+                report: None,
             }
         );
         // 坏文件按「没有记录」处理。
@@ -267,7 +309,7 @@ mod tests {
         let dir = tmp_dir("retract");
         let path = dir.join("s.json");
         for t in 0..4 {
-            started_at(&path, t, u64::from(t) * 100).unwrap();
+            started_at(&path, t, u64::from(t) * 100, None).unwrap();
         }
         retract_from(&path, 2).unwrap();
         let turns: Vec<u32> = load_from(&path).iter().map(|t| t.turn).collect();
@@ -283,7 +325,7 @@ mod tests {
         let dir = tmp_dir("remap");
         let path = dir.join("s.json");
         for t in 0..3 {
-            started_at(&path, t, u64::from(t) * 100).unwrap();
+            started_at(&path, t, u64::from(t) * 100, None).unwrap();
         }
         // 第 1 轮被摘要吃掉，第 2 轮变成第 1 轮。
         remap_at(&path, |t| match t {
@@ -299,11 +341,13 @@ mod tests {
                     turn: 0,
                     started_at: 0,
                     ended_at: None,
+                    report: None,
                 },
                 TurnTime {
                     turn: 1,
                     started_at: 200,
                     ended_at: None,
+                    report: None,
                 },
             ]
         );
@@ -317,7 +361,7 @@ mod tests {
         let from = dir.join("a.json");
         let to = dir.join("b.json");
         for t in 0..4 {
-            started_at(&from, t, u64::from(t) * 100).unwrap();
+            started_at(&from, t, u64::from(t) * 100, None).unwrap();
         }
         copy_between(&from, &to, Some(2)).unwrap();
         let turns: Vec<u32> = load_from(&to).iter().map(|t| t.turn).collect();
@@ -329,6 +373,33 @@ mod tests {
         let empty = dir.join("c.json");
         copy_between(&dir.join("nope.json"), &empty, None).unwrap();
         assert!(!empty.exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 汇报的归属跟着这一轮一起存、一起读回；同一轮重跑（重试）时以新的为准。
+    #[test]
+    fn a_report_tag_rides_along_with_its_turn() {
+        let dir = tmp_dir("tag");
+        let path = dir.join("s.json");
+        let tag = ReportTag {
+            ticket_id: "ticket_1".into(),
+            session_id: Some("1-abcd-w".into()),
+            ask: true,
+        };
+        started_at(&path, 0, 100, None).unwrap();
+        started_at(&path, 1, 200, Some(tag.clone())).unwrap();
+        ended_at(&path, 1, 250).unwrap();
+        let got = load_from(&path);
+        assert_eq!(got[0].report, None);
+        assert_eq!(got[1].report.as_ref(), Some(&tag));
+        assert_eq!(got[1].ended_at, Some(250), "收尾不能把归属冲掉");
+
+        // 分叉、重排都带着它走。
+        let to = dir.join("b.json");
+        copy_between(&path, &to, None).unwrap();
+        assert_eq!(load_from(&to)[1].report.as_ref(), Some(&tag));
+        remap_at(&path, |t| (t == 1).then_some(0)).unwrap();
+        assert_eq!(load_from(&path)[0].report.as_ref(), Some(&tag));
         std::fs::remove_dir_all(&dir).ok();
     }
 }

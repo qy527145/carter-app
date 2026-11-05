@@ -422,7 +422,15 @@ export function reduceConv(c: Conv, e: SessionEvent, sessionId?: string): Partia
       // `timeline::started` 同一个口径）。老后端不带这个字段 —— 那时不动，界面不显示。
       const times =
         e.started_at != null
-          ? { ...c.times, [e.turn]: { turn: e.turn, started_at: e.started_at, ended_at: null } }
+          ? {
+              ...c.times,
+              [e.turn]: {
+                turn: e.turn,
+                started_at: e.started_at,
+                ended_at: null,
+                report: e.report ?? null,
+              },
+            }
           : c.times;
       // 末尾已经是**同号**的助手轮 → 重复事件，或就地重试接着这一轮往下写，复用。
       if (last && last.role === "assistant" && last.turn === e.turn) {
@@ -543,6 +551,7 @@ export function reduceConv(c: Conv, e: SessionEvent, sessionId?: string): Partia
           [e.turn]: {
             // 只有收尾没有开头（界面中途接上来的老会话）时，宁可让开始时刻
             // 缺省成 0，也不要凭空编一个 —— 界面上会退成只显示完成时刻。
+            ...c.times[e.turn],
             turn: e.turn,
             started_at: c.times[e.turn]?.started_at ?? 0,
             ended_at: e.at,

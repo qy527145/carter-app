@@ -940,7 +940,7 @@ impl Runner {
                 self.ctx.refresh();
                 self.compact(false);
             }
-            Command::Record { text } => self.record_only(text),
+            Command::Record { text, report } => self.record_only(text, report),
             Command::NewEpisode => self.close_episode(true).await,
             // 空闲时才走到这里（生成中收到的排队等这一轮跑完），所以下一轮的号
             // 就是 `user_turns` —— 起点从它开始，已经跑完的轮次都算「清空之前」。
@@ -1049,6 +1049,7 @@ impl Runner {
             prompt_id: None,
             prompt: None,
             started_at,
+            report: None,
         });
         let result = self.run_one_turn(git.clone()).await;
         self.settle_history();
@@ -1065,7 +1066,9 @@ impl Runner {
     /// 界面上与一轮的开头一样画出来：`turn_started` 带原文，紧跟一条 `idle`。
     /// 它在历史里算一轮用户输入（正文非空的 user 消息），号要占上，否则之后的轮次号
     /// 与 `view.rs` 从历史数出来的对不上。
-    fn record_only(&mut self, text: String) {
+    ///
+    /// `report` 跟着这一轮存进 `timeline`，并随 `turn_started` 发给界面。
+    fn record_only(&mut self, text: String, report: Option<crate::timeline::ReportTag>) {
         self.settle_history();
         self.thread.lock().append_user(text.clone());
         let turn = self.thread.lock().user_turns;
@@ -1074,7 +1077,9 @@ impl Runner {
             .handle
             .publish_history(&self.thread.lock().messages);
         let started_at = crate::protocol::now_ms();
-        if let Err(e) = crate::timeline::started(&self.ctx.handle.id, turn, started_at) {
+        if let Err(e) =
+            crate::timeline::started_tagged(&self.ctx.handle.id, turn, started_at, report.clone())
+        {
             tracing::warn!("记录本轮开始时刻失败：{e}");
         }
         self.emit(SessionEvent::TurnStarted {
@@ -1082,6 +1087,7 @@ impl Runner {
             prompt_id: None,
             prompt: Some(text),
             started_at,
+            report,
         });
         // 这条不跑模型，写完就算结束 —— 时间要立刻收口，否则界面上它会一直
         // 停在没有结束时刻的状态。
@@ -1356,6 +1362,7 @@ impl Runner {
             prompt_id,
             prompt: echo,
             started_at,
+            report: None,
         });
 
         let result = self.run_one_turn(git.clone()).await;
@@ -2238,6 +2245,7 @@ impl Runner {
                         prompt_id: None,
                         prompt: None,
                         started_at,
+                        report: None,
                     });
                     result = self.run_one_turn(git.clone()).await;
                     self.settle_history();
@@ -2984,15 +2992,6 @@ fn expand_input(cwd: &std::path::Path, raw: &str) -> Result<(String, Option<Stri
 /// 打开 —— 否则会出现「列表里有、点开却是另一个会话」这种最令人困惑的失败。
 /// 按 id 找是 uuid，全局唯一，让调用方传对目录只会引入「传错了所以打不开」
 /// 这类沉默的失败。
-/// 助理对话的历史（没在内存里跑就从盘上读）。面板要按它把工单对到对话的某一轮上。
-pub(crate) fn chat_history() -> Option<Vec<llm_adapt_core::WireMessage>> {
-    let id = crate::assistant::CHAT_SESSION_ID;
-    if let Some(entry) = find_by_id(id) {
-        return carter::session::load(&entry).ok().map(|(t, _)| t.messages);
-    }
-    None
-}
-
 fn find_by_id(id: &str) -> Option<session::SessionEntry> {
     session::list(std::path::Path::new("."), true)
         .into_iter()

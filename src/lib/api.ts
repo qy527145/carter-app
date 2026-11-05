@@ -51,6 +51,8 @@ export type SessionEvent =
       prompt?: string | null;
       /** 这一轮被问的时刻（epoch 毫秒）。用户气泡旁边显示它。 */
       started_at?: number;
+      /** 助理记进来的工单消息：属于哪张工单。 */
+      report?: ReportTag | null;
     }
   /**
    * 一轮跑完了（回答已经有了，或这一轮失败/被中断）。
@@ -521,6 +523,20 @@ export type TurnTime = {
   started_at: number;
   /** 这一轮跑完的时刻。`null` = 还在跑（或没跑完就被中断了）。 */
   ended_at: number | null;
+  /** 这一轮是助理记进来的工单消息时，它属于哪张工单。与 core 的 `timeline::TurnTime` 对应。 */
+  report?: ReportTag | null;
+};
+
+/**
+ * 一条汇报属于哪张工单。后端记录时按工单本身填好（core 的 `timeline::ReportTag`），
+ * 界面**只认它**，不从正文里解析任何东西。
+ */
+export type ReportTag = {
+  ticket_id: string;
+  /** 记这条时工单的执行会话。还没开工的工单没有。 */
+  session_id?: string | null;
+  /** 这条在等用户回答（只有它给回答框）；事后记的一笔（已答复、已结束……）为 false。 */
+  ask: boolean;
 };
 
 export type CreatedSession = {

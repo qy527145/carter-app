@@ -579,12 +579,21 @@ fn is_assistant_address(to: &str) -> bool {
 /// 开口时模型连同这些信一起看到。只收助理自己派出去的工单 —— 别的会话没有理由
 /// 往这条对话里塞东西。
 fn to_assistant(shell: &Arc<AppShell>, me: &str, body: &str) -> Result<String, String> {
-    let label = shell
+    let t = shell
         .assistant
-        .read(|s| s.ticket_by_session(me).map(|t| t.label()))
+        .read(|s| s.ticket_by_session(me).cloned())
         .ok_or("助理对话只收它派出去的工单的信。要找用户，直接在回复里说")?;
-    let text = format!("{}来信 · {label}\n{body}", crate::assistant::REPORT_MARK);
-    if !crate::assistant::chat::record(shell, text) {
+    let text = format!(
+        "{}来信 · {}\n{body}",
+        crate::assistant::REPORT_MARK,
+        t.label()
+    );
+    // 归属按**发信的那条会话**定，不按信里写了什么。
+    let tag = crate::timeline::ReportTag {
+        session_id: Some(me.to_string()),
+        ..crate::assistant::chat::tag(&t)
+    };
+    if !crate::assistant::chat::record(shell, text, Some(tag)) {
         return Err("助理对话开不起来，这封没有送到".into());
     }
     Ok(
@@ -1034,8 +1043,11 @@ mod tests {
         )
         .unwrap();
         match rx[0].try_recv().unwrap() {
-            crate::protocol::Command::Record { text } => {
+            crate::protocol::Command::Record { text, report } => {
                 assert!(text.starts_with(crate::assistant::REPORT_MARK), "{text}");
+                let report = report.expect("工单来信要挂上归属");
+                assert_eq!(report.session_id.as_deref(), Some("1-abcd1234-w"));
+                assert!(!report.ask, "来信不是提问，不给回答框");
                 assert!(
                     text.contains("#1 修登录") && text.contains("注册也有"),
                     "{text}"

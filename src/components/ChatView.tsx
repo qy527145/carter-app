@@ -40,13 +40,17 @@ import {
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { getAssistantEpisode, newAssistantEpisode, type TurnTime } from "../lib/api";
+import {
+  getAssistantEpisode,
+  newAssistantEpisode,
+  type ReportTag,
+  type TurnTime,
+} from "../lib/api";
 import { copyText } from "../lib/clipboard";
 import { useConversationMode } from "../lib/conversationMode";
 import { fmtDuration, fullTime, msgTime } from "../lib/format";
 import { displayName, modelTitle, useModelCatalog } from "../lib/modelLabel";
 import { parseContexts, stripContextTags } from "../lib/promptContext";
-import { reportNumberOf, ticketNumberOf } from "../lib/reportCard";
 import {
   ASSISTANT_CHAT_ID,
   clearChanges,
@@ -1074,11 +1078,11 @@ function UserTurn({
 
   const retry = () => (retryAsks ? setConfirmingRetry(true) : onRetry?.());
 
-  // 工单任务书里「你在替用户处理一张工单：#12 标题」那一行 → 对应工单（按号找，
-  // 面板状态里就有）。
-  const number = /你在替用户处理一张工单：#(\d+)/.exec(turn.text)?.[1];
+  // 这条会话是不是某张工单的执行会话：按会话 id 认（工单上记着它的执行会话），
+  // 不读任务书里写了什么。
+  const sessionId = useStore((s) => s.sessionId);
   const ticket = useStore((s) =>
-    number ? (s.assistant?.tickets.find((t) => t.number === Number(number)) ?? null) : null,
+    sessionId ? (s.assistant?.tickets.find((t) => t.session_id === sessionId) ?? null) : null,
   );
 
   const menuEntries = (): MenuEntry[] => {
@@ -1099,8 +1103,8 @@ function UserTurn({
         onSelect: onFork,
       });
     }
-    // 这是助理派出去的工单（任务书第一行带着工单号）：给它一个入口跳回助理对话 ——
-    // 落在那张工单最近一条汇报上，而不是让用户在一长串汇报里自己翻。
+    // 这条会话是助理派出去的工单：给它一个入口跳回助理对话 —— 落在那张工单最近
+    // 一条汇报上，而不是让用户在一长串汇报里自己翻。
     if (ticket !== null) {
       entries.push({
         label: "去助理对话看这条汇报",
@@ -1200,28 +1204,34 @@ const EVENT_MARK = "【新事件】";
  * 助理送进来的一条消息：汇报（进助理对话）或观察源的新事件（进工单会话）。
  * 第一行是标题，后面是正文。靠左 —— 不是用户在说话。
  *
- * 标题里带着工单编号（见 `lib/reportCard.ts`），所以**每张卡**都能绑到它说的那张工单：
- * 「跑完未汇报」的正文让人「点开会话看看停在了哪」，那就得有个真能点的东西。
- * 只有等着人回答的那一种才额外给回答框。
+ * 这张卡属于哪张工单、能不能回答，**只看 `tag`** —— 后端记这条时按工单本身填好、
+ * 跟着这一轮存下来的归属（见 core 的 `timeline::ReportTag`）。正文与标题只拿来显示，
+ * 不从里面解析任何东西：那是给模型看的文字，写法随时会变，也可能带着外部内容。
  */
-function ReportTurn({ mark, text, latest }: { mark: string; text: string; latest?: boolean }) {
+function ReportTurn({
+  mark,
+  text,
+  tag,
+  latest,
+}: {
+  mark: string;
+  text: string;
+  tag?: ReportTag | null;
+  /** 这是这张工单最近的一次提问（旧提问上的回答框会答到早就不是这个问题的工单上）。 */
+  latest?: boolean;
+}) {
   const rest = text.slice(mark.length);
   const cut = rest.indexOf("\n");
   const title = cut < 0 ? rest : rest.slice(0, cut);
   let body = cut < 0 ? "" : rest.slice(cut + 1).trim();
-  // 这张卡说的是哪张工单 —— 任何一张汇报卡都答得上来，给不给按钮看它开没开过执行会话。
-  const ownerNumber = mark === REPORT_MARK ? ticketNumberOf(title) : null;
-  const owner = useStore((s) =>
-    ownerNumber === null ? undefined : s.assistant?.tickets.find((t) => t.number === ownerNumber),
-  );
-  // 回答框只给**等着人回答、而且是这张工单最近一条**的汇报：旧汇报上的按钮点了会回答
-  // 一个早就不是这个问题的工单；「已答复 / 已结束 / 已忽略」不是提问，也不该给。
-  const number = mark === REPORT_MARK ? reportNumberOf(title) : null;
   const ticket = useStore((s) =>
-    number === null || !latest ? undefined : s.assistant?.tickets.find((t) => t.number === number),
+    tag ? s.assistant?.tickets.find((t) => t.id === tag.ticket_id) : undefined,
   );
-  // 划掉过的（或用户在面板/工单里已经回过的）不再给回答框：那不是「等我回复」了。
-  const answerable = ticket && TICKET_WAITING.includes(ticket.status) && !ticket.ignored;
+  // 打开哪条对话：工单现在的执行会话优先（重开过会换），没有就用记这条时的那条。
+  const sessionId = ticket?.session_id ?? tag?.session_id ?? null;
+  // 回答框：是一次提问、是最近那次、工单还等着人、用户没划掉。
+  const answerable =
+    tag?.ask && latest && ticket && TICKET_WAITING.includes(ticket.status) && !ticket.ignored;
   // 候选已经画成按钮了，正文里那行给模型看的「候选：」不再重复。
   if (answerable && ticket.options?.length) body = body.replace(/\n?候选：.*$/, "").trim();
   return (
@@ -1233,11 +1243,10 @@ function ReportTurn({ mark, text, latest }: { mark: string; text: string; latest
           <Megaphone size={12} className="shrink-0" />
         )}
         <span className="truncate">{title}</span>
-        {/* 这张工单开过执行会话才给 —— 还没开工的（排队、本来会接）没有对话可去。 */}
-        {owner?.session_id && (
+        {sessionId && (
           <button
             className="ml-auto flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-dim hover:bg-ink/5 hover:text-ink"
-            onClick={() => owner.session_id && openSession(owner.session_id)}
+            onClick={() => openSession(sessionId)}
           >
             <MessageSquare size={11} />
             打开工单对话
@@ -1257,17 +1266,16 @@ function ReportTurn({ mark, text, latest }: { mark: string; text: string; latest
 /** 等人回答的工单状态（与面板「等你处理」里能回话的那几种一致）。 */
 const TICKET_WAITING = ["ready", "needs_user", "blocked", "failed", "unreported"];
 
-/** 每张工单最近一条汇报在第几轮 —— 只有那一条给回答框。 */
-function latestReports(turns: Turn[]): Set<number> {
-  const seen = new Set<number>();
+/** 每张工单最近一次提问在第几个位置 —— 只有那一条给回答框。只看归属，不看正文。 */
+function latestAsks(turns: Turn[], times?: Record<number, TurnTime>): Set<number> {
+  const seen = new Set<string>();
   const out = new Set<number>();
   for (let i = turns.length - 1; i >= 0; i--) {
     const t = turns[i];
-    if (t.role !== "user" || !t.text.startsWith(REPORT_MARK)) continue;
-    const rest = t.text.slice(REPORT_MARK.length);
-    const n = reportNumberOf(rest.split("\n", 1)[0]);
-    if (n === null || seen.has(n)) continue;
-    seen.add(n);
+    if (t.role !== "user" || t.turn === undefined) continue;
+    const tag = times?.[t.turn]?.report;
+    if (!tag?.ask || seen.has(tag.ticket_id)) continue;
+    seen.add(tag.ticket_id);
     out.add(i);
   }
   return out;
@@ -1390,7 +1398,14 @@ function TurnView({
   if (turn.role === "user") {
     // 助理自己送进来的汇报：不是用户说的话，不画成用户气泡，也不给重试 / 分叉。
     if (turn.text.startsWith(REPORT_MARK))
-      return wrap(<ReportTurn mark={REPORT_MARK} text={turn.text} latest={latestReport} />);
+      return wrap(
+        <ReportTurn
+          mark={REPORT_MARK}
+          text={turn.text}
+          tag={turn.turn !== undefined ? time?.report : undefined}
+          latest={latestReport}
+        />,
+      );
     if (turn.text.startsWith(EVENT_MARK))
       return wrap(<ReportTurn mark={EVENT_MARK} text={turn.text} />);
     if (turn.text.startsWith(DONE_MARK)) return wrap(<BackgroundDoneTurn text={turn.text} />);
@@ -1460,7 +1475,7 @@ export function TurnList({
   // 与排队里的消息会跟着没掉 —— 按钮看着只是「分一条出去」，不该有这个副作用。
   const live = !streaming;
   const slots = onRetry && live ? assistantActionSlots(turns) : [];
-  const reports = useMemo(() => latestReports(turns), [turns]);
+  const reports = useMemo(() => latestAsks(turns, times), [turns, times]);
   // 会话正在跑的是**最后那一轮**（一问一答成对）；不是最后几轮各算各的 —— 否则
   // 切走再回来时，历史里最后一张没结果的工具卡会被当成「还在跑」。
   const liveTurn = useMemo(() => {

@@ -128,7 +128,15 @@ pub enum Command {
     ///
     /// 汇报每来一条就跑一轮的话，助理对话会被它们撑大，每一轮还带着整段上下文 ——
     /// 用户不在场时这一轮也没人看。改成只记一笔：用户下次开口时模型一并看到。
-    Record { text: String },
+    ///
+    /// `report` 是这段话属于哪张工单、那张工单的对话是哪条。由发起记录的那一侧按工单
+    /// 本身填好，跟着这一轮存进 `timeline`（会话文件里放不下），界面据此把卡片绑到
+    /// 工单上 —— **不从正文里解析**，正文怎么写只是给模型看的。
+    Record {
+        text: String,
+        #[serde(default)]
+        report: Option<crate::timeline::ReportTag>,
+    },
     /// 清空底栏的变更条：从下一轮起重新统计（界面上变更条的「清空」）。
     ///
     /// 只动统计口径，不动磁盘上的文件。生成中收到会排队，这一轮跑完再清 ——
@@ -300,6 +308,9 @@ pub enum SessionEvent {
         /// 时间要与当时看到的一致，不能按「界面收到事件的时刻」重新算一遍。
         #[serde(default)]
         started_at: u64,
+        /// 这一轮是助理记进来的工单消息时，它属于哪张工单（见 `Command::Record`）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        report: Option<crate::timeline::ReportTag>,
     },
     /// 一轮跑完了（回答已经有了，或这一轮失败/被中断）。
     ///
