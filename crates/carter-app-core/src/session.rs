@@ -2800,8 +2800,10 @@ async fn run_one_call(
     );
     let mut result = match tools.tools().iter().find(|t| t.name() == call.name) {
         Some(inner) => {
-            // 编号由外面给（`ToolCall.id`），启动 / 结果两张卡片也由外面配对 ——
-            // 这里只要「结果落到界面」这一件事：子 agent 的进度事件走同一条通道。
+            // 工具池里是**裸工具**（见 `tools::build_tools` 的文档），`Recorded` 只在
+            // 这一层套、且只套一层：编号由外面给（`ToolCall.id`），启动 / 结果两张
+            // 卡片也由外面配对 —— 这里只要「结果落到界面」这一件事：子 agent 的进度
+            // 事件走同一条通道。再套一层的话内层会自己编号并发第二张卡。
             let recorded: Arc<dyn carter::tools::Tool> = Arc::new(
                 crate::tools::record::Recorded::new(
                     inner.clone(),
@@ -3375,6 +3377,126 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&mine).unwrap();
+    }
+
+    /// 一次工具调用只能画**一张**卡。
+    ///
+    /// 守的是「明明只调了一次，界面上却有两行一模一样的 `bash`」那个 bug：工具池里的
+    /// 工具是裸的，`Recorded` 只在派发这一层套。两边都套的话，外层用模型的 `call_id`
+    /// 发一张、内层用现编的 `t0` 再发一张，两张还都能拿到结果、都打勾。
+    #[tokio::test]
+    async fn one_dispatch_draws_exactly_one_card() {
+        use carter::provider::{ChatRequest, EventStream, LlmProvider, ToolCall};
+
+        // 这条测试不发请求，provider 只用来把工具池装配起来。
+        struct Quiet;
+        #[async_trait::async_trait]
+        impl LlmProvider for Quiet {
+            async fn stream(&self, _req: ChatRequest) -> carter::Result<EventStream> {
+                unreachable!("装配工具池不该发请求")
+            }
+        }
+
+        let shell = AppShell::new(Config::default());
+        let mut events = shell.subscribe();
+
+        let dir = std::env::temp_dir().join(format!(
+            "carter-app-dispatch-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "hi").unwrap();
+
+        let (tx, mut tool_rx) = mpsc::unbounded_channel();
+        let activity = Arc::new(AtomicU32::new(0));
+        let running = crate::tools::control::RunningTools::new();
+        let registry = build_tools(
+            ToolBuildArgs {
+                provider: Arc::new(Quiet),
+                model: ModelInfo {
+                    key: "k".into(),
+                    provider: "p".into(),
+                    api_name: "m".into(),
+                    context_window: 100_000,
+                    max_output_tokens: 8_000,
+                    tokenizer: "cl100k".into(),
+                    capabilities: vec![],
+                    pricing: carter::registry::Pricing {
+                        input: 0.0,
+                        output: 0.0,
+                        cache_write: None,
+                        cache_read: None,
+                    },
+                    default_reasoning: None,
+                },
+                agent_cfg: Default::default(),
+                base_system: String::new(),
+                cancel: carter::agent::CancelToken::new(),
+                mcp_tools: Vec::new(),
+                cwd: dir.clone(),
+                skills_enabled: false,
+                tool_tx: tx.clone(),
+                ask_tx: None,
+                include_task: false,
+                shells: None,
+                session_id: "test".into(),
+                shell_cwd: None,
+                running: Some(running.clone()),
+                goal_signal: Arc::new(GoalSignal::default()),
+                schedules: crate::schedules::ScheduleStore::open(dir.join("schedules.json")),
+                activity: activity.clone(),
+                live: None,
+                assistant: None,
+                assistant_chat: None,
+                peers: None,
+            },
+            &AppSettings::default(),
+        );
+
+        let cx = CallCtx {
+            shell: &shell,
+            session_id: "test",
+            live: None,
+            tx,
+            activity: activity.clone(),
+            running,
+            tools: &registry,
+        };
+        let call = ToolCall {
+            id: "call_from_model".into(),
+            name: "read_file".into(),
+            args: serde_json::json!({ "path": dir.join("a.txt") }),
+        };
+        run_one_call(&cx, &call).await;
+
+        // 卡片的两个来源都要数：派发层直接 `emit` 的，以及 `Recorded` 经通道交给
+        // `forward_events` 的（后者在真实应用里会被翻成同一个事件）。
+        let mut started = Vec::new();
+        while let Ok(ev) = events.try_recv() {
+            if let AppEvent::Session {
+                event: SessionEvent::ToolStarted { call_id, .. },
+                ..
+            } = ev
+            {
+                started.push(call_id);
+            }
+        }
+        while let Ok(ev) = tool_rx.try_recv() {
+            if let ToolEvent::Started { call_id, .. } = ev {
+                started.push(call_id);
+            }
+        }
+        assert_eq!(
+            started,
+            vec!["call_from_model".to_string()],
+            "一次调用只该发一张卡，编号用模型给的那个"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
 

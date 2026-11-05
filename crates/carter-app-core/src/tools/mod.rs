@@ -222,9 +222,14 @@ pub fn substitute_with(
 
 /// 装配工具池。
 ///
-/// 顺序：carter 装配 → 换实现 → 过滤 → 记录包装 → 快照 → 挂上 `agent`。
+/// 顺序：carter 装配 → 换实现 → 过滤 → 快照 → 挂上 `agent`。
 /// `agent` 拿到的是「此刻已有的工具」的快照，所以子 agent 那里没有 `agent`
 /// 自身 —— 这个顺序就是递归守卫。
+///
+/// 池子里放的是**裸工具**，不套 `Recorded`：发卡片是派发那一层的事（会话自己派发
+/// 时编号现成，见 `session.rs::run_one_call` 的 `with_call_id`）。在这里先套一层，
+/// 派发时会被再套一层 —— 同一次调用发两张卡，一张用模型的 `call_id`、一张用这里
+/// 现编的号，界面上看着就是「明明只调了一次，却画了两张」。
 pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry {
     let ToolBuildArgs {
         provider,
@@ -253,17 +258,12 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
 
     let seq = Arc::new(AtomicU64::new(0));
     let mut tools = ToolRegistry::empty();
-    // `agent` 要自己发进度事件，而 `push` 闭包把这两个吃掉了 —— 先各留一份。
+    // `agent` 要自己发进度事件，而工具池那边也要用同一份 —— 先各留一份。
     let agent_tx = tool_tx.clone();
     let agent_activity = activity.clone();
 
-    let push = |t: Arc<dyn Tool>, tools: &mut ToolRegistry| {
-        tools.push(Arc::new(
-            Recorded::new(t, tool_tx.clone(), seq.clone(), activity.clone())
-                .with_live(live.clone())
-                .with_running(running.clone()),
-        ));
-    };
+    // 直接放进注册表 —— 别在这里套 `Recorded`，理由见本函数的文档。
+    let push = |t: Arc<dyn Tool>, tools: &mut ToolRegistry| tools.push(t);
 
     // 助理对话是大脑，不是手：只给配置、派单、收尾、记忆和与工单通信的工具。
     // 没有 bash / 文件 / `agent` / MCP —— 要动手的事派成工单，由独立的执行会话去做
@@ -358,11 +358,21 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
     // `ask_user_question`（几个子 agent 同时弹表单，人会疯）、`goal_update`（子 agent
     // 一次 status = completed 就能把父会话的目标标完成，而这种错不报错，只会让长任务
     // 悄悄停下）。这个快照必须在挂 `goal_update` **之前**取。
+    //
+    // 只有这里套 `Recorded`：子 agent 跑的是 carter 的 `run_turn`，没有会话派发那一层
+    // （见 `session.rs::run_one_call`），不套的话它们敲的命令在界面上一步都看不到。
+    // 编号按到达次序现编 —— 子 agent 的调用没有界面侧的 `call_id`。
     let snapshot: Vec<Arc<dyn Tool>> = tools
         .tools()
         .iter()
         .filter(|t| !matches!(t.name(), "agent" | "ask_user_question" | "goal_update"))
-        .cloned()
+        .map(|t| {
+            Arc::new(
+                Recorded::new(t.clone(), tool_tx.clone(), seq.clone(), activity.clone())
+                    .with_live(live.clone())
+                    .with_running(running.clone()),
+            ) as Arc<dyn Tool>
+        })
         .collect();
     if include_task {
         push(
