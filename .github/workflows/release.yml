@@ -148,6 +148,14 @@ jobs:
         run: "bun run web:build"
       - name: "用 tauri 出安装包（带自更新签名）"
         run: |
+          if [ -z "$KEY" ]; then
+            echo "::error::没有配置更新签名密钥：请在仓库 Secrets 里加 TAURI_SIGNING_PRIVATE_KEY（私钥文件内容）或 MINISIGN_SECRET_KEY（私钥去掉注释行后的那一行）"
+            exit 1
+          fi
+          printf '%s' "$KEY" > "$RUNNER_TEMP/updater.key"
+          echo "TAURI_SIGNING_PRIVATE_KEY=$RUNNER_TEMP/updater.key" >> "$GITHUB_ENV"
+          echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$KEY_PASSWORD" >> "$GITHUB_ENV"
+
           # 每台构建机只出 native 产物。`updater` 是隐藏的包类型（`tauri bundle -b updater`
           # 也能单独出）：mac 上是 `.app.tar.gz`、Linux 上是 AppImage 复制的 `.tar.gz`、
           # Windows 上是 NSIS 的 `.exe.zip` —— 正是自更新要下载的那个包，必须显式带上，
@@ -173,9 +181,9 @@ jobs:
           find "$RUNNER_TEMP/tauri-bundles" -type f | sort
         shell: "bash"
         env:
+          "KEY": "${{ secrets.MINISIGN_SECRET_KEY || secrets.TAURI_SIGNING_PRIVATE_KEY }}"
+          "KEY_PASSWORD": "${{ secrets.MINISIGN_KEY_PASSWORD || secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}"
           "MATRIX_TARGETS": "${{ toJson(matrix.targets) }}"
-          "TAURI_SIGNING_PRIVATE_KEY": "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}"
-          "TAURI_SIGNING_PRIVATE_KEY_PASSWORD": "${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}"
       - name: Install dist
         run: ${{ matrix.install_dist.run }}
       # Get the dist-manifest
@@ -190,11 +198,8 @@ jobs:
           ${{ matrix.packages_install }}
       - name: Build artifacts
         run: |
-          # Actually do builds and make zips and whatnot.
-          # `--pin=always`：不让 dist 在构建机上重跑 cargo；同一个 target 目录里
-          # tauri 已经编好了一份（`tauri build` 刚才出的安装包就是它），
-          # 重跑一遍 cargo 没意义，而 --pin=cp 会在两个 profile 之间来回拷几百 MB。
-          dist build ${{ needs.plan.outputs.tag-flag }} --pin=always --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
+          # Actually do builds and make zips and whatnot
+          dist build ${{ needs.plan.outputs.tag-flag }} --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
           echo "dist ran successfully"
       - id: cargo-dist
         name: Post-build
@@ -216,17 +221,6 @@ jobs:
           path: |
             ${{ steps.cargo-dist.outputs.paths }}
             ${{ env.BUILD_MANIFEST_NAME }}
-
-      # 自更新的安装包（tauri 出的、带 .sig）不在 dist 的产物清单里，单独传。
-      # `updater-artifacts-*` 的命名有意与 `artifacts-*` 错开：后者会被下面
-      # host job 的 `dist host --steps=upload` 一并上传成 Release 附件，那些
-      # 带 .sig 和 latest.json 的文件只需要我们自己发布。
-      - name: "Upload updater artifacts"
-        uses: actions/upload-artifact@v7
-        with:
-          name: updater-artifacts-${{ join(matrix.targets, '_') }}
-          path: ${{ runner.temp }}/tauri-bundles/
-          if-no-files-found: error
 
   # Build and package all the platform-agnostic(ish) things
   build-global-artifacts:
@@ -318,20 +312,6 @@ jobs:
           # Overwrite the previous copy
           name: artifacts-dist-manifest
           path: dist-manifest.json
-      # 自更新：把所有平台的 tauri 安装包收齐，生成 latest.json。
-      - name: "Download updater artifacts"
-        uses: actions/download-artifact@v8
-        with:
-          pattern: updater-artifacts-*
-          path: updater
-          merge-multiple: true
-      - name: "Generate latest.json"
-        shell: bash
-        # `<版本>` 从 tag 里取：dist 只接受 semver 形式的 tag（`v0.2.0`）。
-        run: |
-          TAG="${{ needs.plan.outputs.tag }}"
-          bun run scripts/latest-json.ts "${TAG#v}" "$TAG" updater
-          cp updater/latest.json artifacts/latest.json
       # Create a GitHub Release while uploading all files to it
       - name: "Download GitHub Artifacts"
         uses: actions/download-artifact@v8
@@ -353,8 +333,6 @@ jobs:
           # Write and read notes from a file to avoid quoting breaking things
           echo "$ANNOUNCEMENT_BODY" > $RUNNER_TEMP/notes.txt
 
-          # `latest.json` 必须是 npm 风格的 semver：`gh release create` 收下
-          # `v0.2.0` 时文件名不变，而我们发给客户端的地址里写死了 `v0.2.0/…`。
           gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
 
   announce:

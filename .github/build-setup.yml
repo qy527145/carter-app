@@ -38,21 +38,20 @@
   shell: bash
   env:
     MATRIX_TARGETS: ${{ toJson(matrix.targets) }}
-    TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-    TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-    MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
-    MINISIGN_KEY_PASSWORD: ${{ secrets.MINISIGN_KEY_PASSWORD }}
+    # 先写一次性的密钥文件：用 `envs:`/secret 本身当「是否存在」的标志，
+    # 再导出成 tauri 要的那两个变量。没配置时下面一步直接失败，报文里把两个
+    # Secret 名都写上。用文件而不是直接 export 键，是因为「文件内容再套一层
+    # base64」那一长串贴进 Secrets 时很容易贴坏，原始 minisign 文本更不容易出错。
+    KEY: ${{ secrets.MINISIGN_SECRET_KEY || secrets.TAURI_SIGNING_PRIVATE_KEY }}
+    KEY_PASSWORD: ${{ secrets.MINISIGN_KEY_PASSWORD || secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
   run: |
-    # 签名密钥。Tauri 要的是「整份私钥再套一层 base64」那一长串（或者私钥文件
-    # 路径）；minisign 的原始格式（`untrusted comment:` + 一行密钥）也认。
-    # 两种都接受，谁少一步手工出错就用谁。
-    KEY="${TAURI_SIGNING_PRIVATE_KEY:-${MINISIGN_SECRET_KEY:-}}"
     if [ -z "$KEY" ]; then
-      echo "::error::没有配置签名私钥：请在仓库 Secrets 里加 TAURI_SIGNING_PRIVATE_KEY（私钥文件内容）或 MINISIGN_SECRET_KEY（私钥去掉注释行后的那一行）"
+      echo "::error::没有配置更新签名密钥：请在仓库 Secrets 里加 TAURI_SIGNING_PRIVATE_KEY（私钥文件内容）或 MINISIGN_SECRET_KEY（私钥去掉注释行后的那一行）"
       exit 1
     fi
-    export TAURI_SIGNING_PRIVATE_KEY="$KEY"
-    export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-${MINISIGN_KEY_PASSWORD:-}}"
+    printf '%s' "$KEY" > "$RUNNER_TEMP/updater.key"
+    echo "TAURI_SIGNING_PRIVATE_KEY=$RUNNER_TEMP/updater.key" >> "$GITHUB_ENV"
+    echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$KEY_PASSWORD" >> "$GITHUB_ENV"
 
     # 每台构建机只出 native 产物。`updater` 是隐藏的包类型（`tauri bundle -b updater`
     # 也能单独出）：mac 上是 `.app.tar.gz`、Linux 上是 AppImage 复制的 `.tar.gz`、
