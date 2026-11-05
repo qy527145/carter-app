@@ -5,7 +5,7 @@
 //! 可以脱离 webview 测。
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use tauri::{Emitter, Manager, State};
@@ -139,6 +139,119 @@ fn open_devtools(webview: tauri::WebviewWindow) -> Result<(), String> {
 #[tauri::command]
 fn set_app_settings(settings: AppSettings) -> Result<(), String> {
     settings.save()
+}
+
+// ---------------------------------------------------------------------------
+// 自更新
+//
+// 查、下、装都在 `carter_app_core::update` 里（不依赖 Tauri，能单独测）。
+// 这里只管三件事：把下载进度推给界面、给一个取消开关、重启进程。
+// ---------------------------------------------------------------------------
+
+/// 前端订阅的下载进度事件名。改这里必须同步改 `src/lib/api.ts` 的 `UPDATE_PROGRESS`。
+const UPDATE_PROGRESS: &str = "carter://update-progress";
+
+/// 「发现新版本」事件。启动后自动检查查到新版时发一次，前端据此弹一条提示。
+const UPDATE_AVAILABLE: &str = "carter://update-available";
+
+/// 正在进行的下载的取消开关。同一时间只允许一次下载 —— 界面上的按钮也只有
+/// 一个状态，多开只会让两个任务抢同一个 `.part` 文件。
+#[derive(Default)]
+struct DownloadState {
+    cancel: Mutex<Option<Arc<std::sync::atomic::AtomicBool>>>,
+}
+
+/// 查最新版本。**没有新版时** `has_update` 为 false，其余字段是占位。
+#[derive(Serialize)]
+struct UpdateCheck {
+    has_update: bool,
+    current: &'static str,
+    release: Option<carter_app_core::update::ReleaseInfo>,
+}
+
+#[tauri::command]
+async fn check_update() -> Result<UpdateCheck, String> {
+    let current = env!("CARGO_PKG_VERSION");
+    let settings = AppSettings::load();
+    let release = carter_app_core::update::check(current, &settings).await?;
+    let has_update = !release.asset_name.is_empty();
+    Ok(UpdateCheck {
+        has_update,
+        current,
+        release: has_update.then_some(release),
+    })
+}
+
+/// 重新查一次再下载 —— **不让前端把 URL 传回来**。下载地址只由后端按仓库名
+/// 拼出来（见 `update` 模块开头），webview 里想换一个地址也换不了。
+#[tauri::command]
+async fn download_update(
+    app: tauri::AppHandle,
+    state: State<'_, DownloadState>,
+) -> Result<String, String> {
+    let settings = AppSettings::load();
+    let release = carter_app_core::update::check(env!("CARGO_PKG_VERSION"), &settings).await?;
+    if release.asset_name.is_empty() {
+        return Err("已经是最新版本".into());
+    }
+    // 上一轮下载留下的开关先清掉，否则新下载一开始就是「已取消」。
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let mut slot = state.cancel.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.is_some() {
+            return Err("上一次下载还没结束".into());
+        }
+        *slot = Some(cancel.clone());
+    }
+
+    // 进度回调是同步的、每收到一块就调一次：直接 emit 到 webview，界面自己
+    // 节流。闭包要 `Sync`，`AppHandle` 的 emit 满足。
+    let emitter = app.clone();
+    let progress = move |done: u64, total: Option<u64>| {
+        let _ = emitter.emit(
+            UPDATE_PROGRESS,
+            serde_json::json!({ "downloaded": done, "total": total }),
+        );
+    };
+
+    let result =
+        carter_app_core::update::download(&release, &settings, Some(&cancel), Some(&progress))
+            .await;
+
+    if let Ok(mut slot) = state.cancel.lock() {
+        *slot = None;
+    }
+    result.map(|p| p.to_string_lossy().to_string())
+}
+
+/// 取消正在进行的下载。没有下载在跑时什么也不做。
+#[tauri::command]
+fn cancel_update_download(state: State<'_, DownloadState>) {
+    if let Ok(slot) = state.cancel.lock()
+        && let Some(flag) = slot.as_ref()
+    {
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// 装下载好的安装包。返回给界面的一句话（各平台说法不同）。
+#[tauri::command]
+fn install_update(path: String) -> Result<String, String> {
+    carter_app_core::update::install(Path::new(&path))
+}
+
+/// 重启应用。
+///
+/// 不用 `app.restart()`：本应用关窗只是藏进托盘，`restart` 走的是正常的退出
+/// 流程，托盘、助理那些后台任务得跟着走一遍关闭逻辑，而这里只是「换个程序
+/// 映像」。重新起一个自己再退出更直接。
+#[tauri::command]
+fn restart_app(app: tauri::AppHandle) {
+    app.cleanup_before_exit();
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = std::process::Command::new(exe).spawn();
+    }
+    app.exit(0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1715,6 +1828,7 @@ pub fn run() {
             let config = carter::config::Config::load()?;
             let shell = AppShell::new(config);
             app.manage(shell.clone());
+            app.manage(DownloadState::default());
 
             // GUI 进程拿不到 shell 启动文件里写的 PATH（见 `platform::ensure_user_paths` 的
             // 说明）。官方 CLI 的安装脚本把二进制放进 `~/.local/bin`，不补这一步的话
@@ -1766,6 +1880,24 @@ pub fn run() {
             });
             // 启动时把托盘标题对齐一次（上次退出时可能还有等人处理的工单）。
             shell.emit(AppEvent::AssistantChanged);
+
+            // 启动后顺手查一次新版本。延后一会儿再查：启动那一瞬要建窗口、
+            // 起助理、读配置，抢网络没有意义。查不到（断网、加速站都挂）就
+            // 静默算了 —— 用户没在做「检查更新」，不该看到一条报错。
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                if !AppSettings::load().auto_check_update {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+                let settings = AppSettings::load();
+                if let Ok(info) =
+                    carter_app_core::update::check(env!("CARGO_PKG_VERSION"), &settings).await
+                    && !info.asset_name.is_empty()
+                {
+                    let _ = handle.emit(UPDATE_AVAILABLE, &info);
+                }
+            });
             Ok(())
         })
         // 关窗 = 收到托盘里，不退出：助理要接着盯观察源。真要退出走托盘菜单的「退出」。
@@ -1782,6 +1914,12 @@ pub fn run() {
             app_info,
             open_devtools,
             set_app_settings,
+            // 自更新
+            check_update,
+            download_update,
+            cancel_update_download,
+            install_update,
+            restart_app,
             // 会话
             create_session,
             detach_session,

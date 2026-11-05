@@ -8,8 +8,13 @@ git push origin main --tags
 ```
 
 推 tag 后 `release-on-tag.yml` 转成一次 `workflow_dispatch` 交给 `release.yml`
-（cargo-dist 生成）。四台构建机各自编出二进制，dist 打成 `tar.xz` / `zip` 并算
-sha256，最后一起放进同一个 GitHub Release。
+（cargo-dist 生成）。三台构建机（Windows / Apple Silicon macOS / Linux x86_64）各自
+先用 `tauri build` 出**安装包**（NSIS `.exe` / `.dmg` / `.deb`）并上传成
+`installers-<target>` artifact；dist 照常编一遍、把压缩包和安装包一起发进 Release，
+最后由 `post-announce.yml` 删掉除安装包之外的全部附件。
+
+macOS 只发 Apple Silicon 的 DMG —— Intel Mac 用的那一台构建机不值得为它多跑一遍，
+需要时在 `dist-workspace.toml` 的 `targets` 里加回 `x86_64-apple-darwin` 即可。
 
 ## 不要手改 release.yml
 

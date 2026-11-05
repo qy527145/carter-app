@@ -135,7 +135,9 @@ jobs:
         if: "runner.os == 'Linux'"
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev
+          # dist 的 [dist.dependencies.apt] 会装 appindicator / rsvg / patchelf 等，
+          # 但它在 build-setup **之后**才跑；tauri bundle 现在就把它用到的补齐。
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
       - name: "安装 Bun"
         uses: "oven-sh/setup-bun@v2"
         with:
@@ -144,6 +146,46 @@ jobs:
         run: "bun install --frozen-lockfile"
       - name: "构建前端"
         run: "bun run web:build"
+      - name: "用 tauri 出安装包"
+        run: |
+          # 每台构建机只出 native 产物，且只要安装包本身：
+          #   Windows → NSIS `.exe`（不写 msi：WiX 只在这台机器上才编得出来，而用户只要 NSIS）
+          #   macOS   → `.dmg`（x86_64 那份矩阵里没有，见 dist-workspace.toml）
+          #   Linux   → `.deb`（AppImage / rpm 不要）
+          case "$RUNNER_OS" in
+            macOS)   BUNDLES="dmg" ;;
+            Windows) BUNDLES="nsis" ;;
+            *)       BUNDLES="deb" ;;
+          esac
+          TARGET="$(node -e 'console.log(JSON.parse(process.env.MATRIX_TARGETS || "[]")[0] || "")')"
+          if [ -n "$TARGET" ]; then
+            bun x tauri build --target "$TARGET" --bundles "$BUNDLES"
+            OUT="target/$TARGET/release/bundle"
+          else
+            bun x tauri build --bundles "$BUNDLES"
+            OUT="target/release/bundle"
+          fi
+          # dist 后面会用 `tauri build` 同样的 target 再编一次，产物目录会整个重写。
+          # 先把安装包挪出 `target/`。
+          STAGE="$RUNNER_TEMP/installers"
+          mkdir -p "$STAGE"
+          case "$RUNNER_OS" in
+            macOS)   cp "$OUT"/dmg/*.dmg "$STAGE"/ ;;
+            Windows) cp "$OUT"/nsis/*.exe "$STAGE"/ ;;
+            *)       cp "$OUT"/deb/*.deb "$STAGE"/ ;;
+          esac
+          # 产物文件名带空格（`Carter_0.1.0_aarch64.dmg`），上传那一步用
+          # `strip_components` 式的逐文件处理，不靠 shell 展开。
+          echo "INSTALLER_DIR=$STAGE" >> "$GITHUB_ENV"
+        shell: "bash"
+        env:
+          "MATRIX_TARGETS": "${{ toJson(matrix.targets) }}"
+      - name: "上传 tauri 安装包"
+        uses: "actions/upload-artifact@v7"
+        with:
+          "if-no-files-found": "error"
+          "name": "installers-${{ matrix.targets && matrix.targets[0] || 'native' }}"
+          "path": "${{ env.INSTALLER_DIR }}/*"
       - name: Install dist
         run: ${{ matrix.install_dist.run }}
       # Get the dist-manifest
@@ -311,3 +353,12 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+
+  custom-post-announce:
+    needs:
+      - plan
+      - announce
+    uses: ./.github/workflows/post-announce.yml
+    with:
+      plan: ${{ needs.plan.outputs.val }}
+    secrets: inherit

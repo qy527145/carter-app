@@ -73,6 +73,11 @@ pub struct AppSettings {
     /// models.dev 目录的额外源（多行，每行一个完整 URL）。会排在内置源之后试，
     /// 适合自建镜像；留空就是内置的那几个。
     pub model_sources: String,
+    /// 启动后自动去 GitHub Release 查一次新版本（见 `update` 模块）。默认开。
+    ///
+    /// 关掉之后只剩「设置 → 关于 → 检查更新」这一个手动入口 —— 有些网络
+    /// 环境里每次启动都查一遍既慢又多一次失败日志。
+    pub auto_check_update: bool,
 }
 
 impl Default for AppSettings {
@@ -89,6 +94,7 @@ impl Default for AppSettings {
             github_accel: true,
             http_proxy: String::new(),
             model_sources: String::new(),
+            auto_check_update: true,
         }
     }
 }
@@ -281,6 +287,7 @@ mod tests {
             http_proxy: "http://127.0.0.1:7897".into(),
             model_sources: "https://mirror.example/models.json\n\n  \nhttps://models.dev/api.json"
                 .into(),
+            auto_check_update: false,
         };
         s.save_to(&path).unwrap();
 
@@ -295,6 +302,7 @@ mod tests {
         assert_eq!(back.nickname, "徐侨");
         assert!(!back.github_accel);
         assert_eq!(back.http_proxy, "http://127.0.0.1:7897");
+        assert!(!back.auto_check_update);
         // 同一行重复的内置源不该出现两次；空行忽略。
         let sources = back.model_source_urls();
         assert_eq!(
@@ -318,6 +326,7 @@ mod tests {
     fn network_defaults_are_on_and_direct() {
         let s: AppSettings = serde_json::from_str("{}").unwrap();
         assert!(s.github_accel);
+        assert!(s.auto_check_update);
         assert!(s.http_proxy.is_empty());
         let prefs = s.net_prefs();
         assert!(prefs.accel && prefs.proxy.is_empty());

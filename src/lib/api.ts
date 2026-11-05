@@ -385,6 +385,8 @@ export type AppSettings = {
   http_proxy: string;
   /** models.dev 的额外源，一行一个完整 URL，排在内置源之后试。 */
   model_sources: string;
+  /** 启动后自动检查新版本。关掉只剩「关于」页的手动入口。 */
+  auto_check_update: boolean;
 };
 
 /** models.dev 缓存是哪一次、从哪个源拉的。镜像 `catalog::CacheMeta`。 */
@@ -427,6 +429,66 @@ export function setAppSettings(settings: AppSettings): Promise<void> {
  */
 export function openDevtools(): Promise<void> {
   return invoke<void>("open_devtools");
+}
+
+// ---------------------------------------------------------------------------
+// 自更新
+//
+// 查、下、装全在后端（`crates/carter-app-core/src/update.rs`）。Release 里放的是
+// 三平台的原生安装包，不是 Tauri 更新器那一套 `latest.json` + 归档 —— 这里没有
+// 「签名」这一步，装之前由界面把文件名与大小报给用户确认。
+// ---------------------------------------------------------------------------
+
+/** 下载进度事件。与 `src-tauri/src/lib.rs` 的 `UPDATE_PROGRESS` 必须一致。 */
+export const UPDATE_PROGRESS = "carter://update-progress";
+
+/** 「发现新版本」事件（启动后自动检查时发出）。与 `UPDATE_AVAILABLE` 一致。 */
+export const UPDATE_AVAILABLE = "carter://update-available";
+
+/** GitHub Release 里挑出来的那个安装包。 */
+export type ReleaseInfo = {
+  /** `v0.1.2`。 */
+  tag: string;
+  /** 去掉 `v` 的版本号。 */
+  version: string;
+  /** Release 页面，界面上的「更新说明」跳这里。 */
+  html_url: string;
+  /** 安装包文件名，如 `Carter_0.1.2_aarch64.dmg`。 */
+  asset_name: string;
+  /** 下载地址（后端按仓库名拼出来的，前端只回显，不能改）。 */
+  asset_url: string;
+  asset_size: number;
+};
+
+export type UpdateCheck = {
+  has_update: boolean;
+  /** 当前运行的版本。 */
+  current: string;
+  /** 有新版时才有；没有新版时是 `null`。 */
+  release: ReleaseInfo | null;
+};
+
+export function checkUpdate(): Promise<UpdateCheck> {
+  return invoke<UpdateCheck>("check_update");
+}
+
+/** 下载安装包，返回落盘路径。进度走 [`UPDATE_PROGRESS`] 事件。 */
+export function downloadUpdate(): Promise<string> {
+  return invoke<string>("download_update");
+}
+
+export function cancelUpdateDownload(): Promise<void> {
+  return invoke<void>("cancel_update_download");
+}
+
+/** 把下载好的安装包交给系统装。返回给用户看的一句话。 */
+export function installUpdate(path: string): Promise<string> {
+  return invoke<string>("install_update", { path });
+}
+
+/** 重启应用（macOS 用 `ditto` 覆盖后在跑的这一份已经是新的了）。 */
+export function restartApp(): Promise<void> {
+  return invoke<void>("restart_app");
 }
 
 // ---------------------------------------------------------------------------
@@ -488,6 +550,8 @@ export type CreatedSession = {
   live?: LiveView[];
   /** 这一轮正在等用户回答的问题。`ask_form` 事件不回放，错过了靠它把表单补出来。 */
   pending_ask?: { id: number; questions: AskQuestion[] } | null;
+  /** 这条会话现在的 todo 列表。事件不回放，接上后台那条时靠它把底栏的进度补回来。 */
+  todos?: TodoView[];
 };
 
 export type LiveView =
@@ -953,6 +1017,8 @@ export type AssistantTicket = {
   options?: string[];
   pending: string[];
   runs: number;
+  /** 助理对话里这条的汇报被划掉了（「忽略」）。面板上照常显示。 */
+  ignored?: boolean;
 };
 
 export type AssistantMemory = {
@@ -990,7 +1056,9 @@ export type TicketAction =
   | { type: "reply"; text: string }
   | { type: "retry" }
   | { type: "done" }
-  | { type: "stop" };
+  | { type: "stop" }
+  /** 助理对话里那条汇报划掉：不回答、也不结束，只是别再排在「等你回复」里。 */
+  | { type: "ignore" };
 
 export function getAssistant(): Promise<AssistantView> {
   return invoke<AssistantView>("get_assistant");

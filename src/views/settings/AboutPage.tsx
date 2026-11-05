@@ -3,9 +3,22 @@
 // 设置项里有几件事只能在文件里做（比如 hooks、env、system.md）。与其假装它们
 // 不存在，不如把路径列在这里 —— 用户至少知道该去翻哪个文件。
 
+import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { ExternalLink, FolderOpen } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Button } from "../../components/ui/Button";
 import { Card, Section } from "../../components/ui/Panel";
+import {
+  cancelUpdateDownload,
+  checkUpdate,
+  downloadUpdate,
+  installUpdate,
+  type ReleaseInfo,
+  restartApp,
+  UPDATE_PROGRESS,
+  type UpdateCheck,
+} from "../../lib/api";
 import { useStore } from "../../store";
 
 function PathRow({ label, value }: { label: string; value: string }) {
@@ -14,6 +27,179 @@ function PathRow({ label, value }: { label: string; value: string }) {
       <span className="w-24 shrink-0 text-xs text-dim">{label}</span>
       <span className="mono min-w-0 flex-1 break-all text-[11px] text-ink">{value}</span>
     </div>
+  );
+}
+
+/** 下载到哪一步了。`idle` 之外的状态都会锁住「检查更新」按钮。 */
+type Download = { kind: "idle" } | { kind: "downloading"; done: number; total: number | null };
+
+function mb(bytes: number): string {
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/**
+ * 更新卡片。
+ *
+ * 流程刻意是「检查 → 下载 → 装」三步各自一个按钮，而不是一个「一键更新」：
+ * 下载一百多 MB 之前，用户得能看到**要下哪个文件、多大** —— Release 里没有
+ * 签名清单，文件名与大小就是他能核对的全部。装完了也不自动重启（macOS 的
+ * 重启会丢掉正跑着的会话），由用户自己选时机。
+ */
+function UpdateCard() {
+  const appInfo = useStore((s) => s.appInfo);
+  // 启动后自动检查查到的新版（如果有）直接作为初始结果，免得进这一页再查一次。
+  const autoFound = useStore((s) => s.updateAvailable);
+  const [result, setResult] = useState<UpdateCheck | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [download, setDownload] = useState<Download>({ kind: "idle" });
+  /** 下载好的安装包路径。 */
+  const [file, setFile] = useState<string | null>(null);
+  const [installed, setInstalled] = useState<string | null>(null);
+
+  // 进度事件。订阅放在这里而不是全局：只有这一页开着的时候才需要进度。
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    listen<{ downloaded: number; total: number | null }>(UPDATE_PROGRESS, ({ payload }) => {
+      setDownload({ kind: "downloading", done: payload.downloaded, total: payload.total });
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  const current = appInfo?.version ?? "";
+  const release: ReleaseInfo | null = result?.release ?? autoFound;
+
+  const run = async (f: () => Promise<void>) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await f();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Section title="版本">
+      <Card>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="mono text-xs text-ink">{current ? `v${current}` : "…"}</span>
+          <Button
+            size="sm"
+            disabled={busy || download.kind === "downloading"}
+            onClick={() =>
+              run(async () => {
+                setFile(null);
+                setInstalled(null);
+                const r = await checkUpdate();
+                setResult(r);
+                // 手动查过就以这次为准：启动时那个标记可能已经过期。
+                useStore.getState().setUpdateAvailable(r.release);
+              })
+            }
+          >
+            {busy ? "检查中…" : "检查更新"}
+          </Button>
+          {result && !result.has_update && (
+            <span className="text-[11px] text-dim">已经是最新版本</span>
+          )}
+          {release && (
+            <span className="text-[11px] text-tone-orange">
+              有新版 {release.version}
+              {release.asset_name ? `（${release.asset_name}，${mb(release.asset_size)}）` : ""}
+            </span>
+          )}
+        </div>
+
+        {error && <div className="mt-2 text-[11px] text-tone-red">{error}</div>}
+
+        {release?.asset_name && !installed && (
+          <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-edge pt-3">
+            {download.kind === "downloading" ? (
+              <>
+                <div className="h-1 min-w-40 flex-1 overflow-hidden rounded-full bg-bubble">
+                  <div
+                    className="h-full bg-accent transition-[width]"
+                    style={{
+                      width: download.total
+                        ? `${Math.min(100, (download.done / download.total) * 100)}%`
+                        : "100%",
+                    }}
+                  />
+                </div>
+                <span className="text-[11px] tabular-nums text-dim">
+                  {download.total
+                    ? `${mb(download.done)} / ${mb(download.total)}`
+                    : `已下载 ${mb(download.done)}`}
+                </span>
+                <Button size="sm" variant="ghost" onClick={() => void cancelUpdateDownload()}>
+                  取消
+                </Button>
+              </>
+            ) : file ? (
+              <>
+                <Button
+                  size="sm"
+                  onClick={() => run(async () => setInstalled(await installUpdate(file)))}
+                >
+                  安装
+                </Button>
+                <span className="text-[11px] text-dim">
+                  安装包已下好：{file.split(/[\\/]/).pop()}
+                </span>
+              </>
+            ) : (
+              <Button
+                size="sm"
+                disabled={busy}
+                onClick={() =>
+                  run(async () => {
+                    setDownload({ kind: "downloading", done: 0, total: release.asset_size });
+                    try {
+                      setFile(await downloadUpdate());
+                    } finally {
+                      setDownload({ kind: "idle" });
+                    }
+                  })
+                }
+              >
+                下载
+              </Button>
+            )}
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => void openUrl(release.html_url).catch(() => {})}
+            >
+              更新说明
+            </Button>
+          </div>
+        )}
+
+        {installed && (
+          <div className="mt-3 border-t border-edge pt-3">
+            <div className="text-[11px] leading-relaxed text-ink">{installed}</div>
+            <Button size="sm" className="mt-2" onClick={() => void restartApp()}>
+              重启 Carter
+            </Button>
+          </div>
+        )}
+
+        <div className="mt-2 text-[11px] leading-relaxed text-dim">
+          Release 里直接放各平台的安装包：Windows 的 NSIS、macOS（Apple Silicon）的 DMG、 Linux 的
+          deb。
+        </div>
+      </Card>
+    </Section>
   );
 }
 
@@ -30,6 +216,8 @@ export function AboutPage() {
       <div className="mb-5 text-xs text-dim">
         {appInfo ? `${appInfo.name} v${appInfo.version}` : "…"}
       </div>
+
+      <UpdateCard />
 
       <Section title="路径">
         <Card>

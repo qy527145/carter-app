@@ -39,6 +39,7 @@ import type {
   LiveView,
   MemoryCandidate,
   MessageView,
+  ReleaseInfo,
   SessionEvent,
   SessionRow,
   TodoView,
@@ -199,6 +200,14 @@ type Store = Conv & {
   // 侧栏 / 底栏用
   sessions: SessionRow[];
   appInfo: AppInfo | null;
+  /**
+   * 启动后自动检查查到的新版本（`null` = 没有 / 还没查）。
+   *
+   * 不常驻成一个页面，只是给侧栏或底栏一个「有新版」的标记：用户点进去到
+   * 「关于」页才看详情。手动点「检查更新」**不**写这里 —— 那是用户在那一页
+   * 主动问的，答案直接显示在按钮旁边，不该再往别处挂一个标记。
+   */
+  updateAvailable: ReleaseInfo | null;
   /** 界面设置（主题、工具开关、侧栏宽度）。carter CLI 不读它。 */
   settings: AppSettings | null;
   /**
@@ -255,6 +264,7 @@ type Store = Conv & {
   composerContexts: PromptContext[];
 
   setAppInfo: (i: AppInfo) => void;
+  setUpdateAvailable: (r: ReleaseInfo | null) => void;
   setSettings: (s: AppSettings) => void;
   bumpConfig: () => void;
   setSessions: (s: SessionRow[]) => void;
@@ -867,11 +877,13 @@ export const useStore = create<Store>((set) => ({
   inspectorTurn: null,
   sessions: [],
   appInfo: null,
+  updateAvailable: null,
   settings: null,
   configNonce: 0,
   view: "chat",
   teamCwd: readTeamCwd(),
   assistant: null,
+  focusTurn: null,
   queued: [],
   sessionsNonce: 0,
   composerDraft: null,
@@ -882,6 +894,8 @@ export const useStore = create<Store>((set) => ({
   setAppInfo: (i) => set({ appInfo: i, settings: i.settings }),
 
   setSettings: (settings) => set({ settings }),
+
+  setUpdateAvailable: (updateAvailable) => set({ updateAvailable }),
 
   bumpConfig: () => set((s) => ({ configNonce: s.configNonce + 1 })),
 

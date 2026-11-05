@@ -61,6 +61,7 @@ pub mod templates;
 pub mod timeline;
 pub mod title;
 pub mod tools;
+pub mod update;
 pub mod upstream_models;
 pub mod view;
 
@@ -81,6 +82,7 @@ pub use shell::{AppShell, SessionHandle};
 pub use side::{StartedSide, start_side_session};
 pub use skills::SkillRow;
 pub use team::{InitOutcome, Store, TeamMeta};
+pub use update::ReleaseInfo;
 pub use view::{BlockView, MessageView};
 
 /// 该渠道声明不出去的服务端工具（协议没有对应物，或名字不认识）。

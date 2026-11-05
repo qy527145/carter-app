@@ -17,14 +17,20 @@ ci = "github"
 # dist 不支持同一个 workflow 同时挂 tag 推送和手动触发。
 dispatch-releases = true
 # 只构建原生平台：Tauri 的 webkit 依赖没法交叉编译到 aarch64 Linux。
+# 三个平台各一台：Windows（NSIS）、Apple Silicon（DMG）、Linux x86_64（deb）。
+# 不编 Intel Mac —— 安装包只要用户装机的那一档，少一台机器就少一次编译。
 targets = [
   "aarch64-apple-darwin",
-  "x86_64-apple-darwin",
   "x86_64-unknown-linux-gnu",
   "x86_64-pc-windows-msvc",
 ]
 # GUI 应用，不发 shell/powershell 安装器，只出归档包。
+# 归档包本身不会出现在 Release 里：发版之后由 post-announce 删掉，
+# 只留 tauri 出的安装包（见 .github/workflows/post-announce.yml）。
 installers = []
+# 发版之后：删掉 GitHub Release 里的归档包，只留安装包（见 .github/workflows/post-announce.yml）。
+# 这是 dist 的自定义 job（reusable workflow），执行时 Release 已经建好了。
+post-announce-jobs = ["./post-announce"]
 # dist 自带更新器是给 CLI 用的，桌面端用不上。
 install-updater = false
 # cargo build 之前先跑前端构建：tauri 的 generate_context! 在编译期就把

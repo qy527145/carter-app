@@ -97,6 +97,34 @@ bun run dev           # 打开桌面窗口：前端 HMR，Rust 改动自动重�
 发布流水线（[.github/workflows/release.yml](.github/workflows/release.yml)，由
 cargo-dist 生成，别手改）。
 
+Release 里**只放三份安装包**，没有压缩包：
+
+| 平台 | 文件 | 装法 |
+| ---- | ---- | ---- |
+| Windows | `Carter_<版本>_x64-setup.exe`（NSIS） | 双击 |
+| macOS（Apple Silicon） | `Carter_<版本>_aarch64.dmg` | 打开镜像，把 Carter 拖进 Applications |
+| Linux（x86_64） | `carter-app_<版本>_amd64.deb` | `sudo dpkg -i …` |
+
+安装包由各平台构建机上的 `tauri build` 产出（见
+[.github/build-setup.yml](.github/build-setup.yml)）；dist 照常编一遍、打压缩包、
+发 Release，然后 [`post-announce.yml`](.github/workflows/post-announce.yml)
+把 Release 里除 `.exe` / `.dmg` / `.deb` 之外的东西删干净，少一份安装包就判流水线失败。
+
+### 应用内更新
+
+Release 里既然就是安装包，应用就按平台把这一份下载下来交给系统装，不另养一套
+「更新器专用」的归档与签名清单（见 `crates/carter-app-core/src/update.rs`）：
+
+- 启动 8 秒后查一次 GitHub Release（**设置 → 外观 → 网络**里可以关掉），有新版时在
+  **设置 → 关于** 挂一个提示；
+- 下载前把文件名和大小报出来，下载中可取消；下载完点「安装」——
+  Windows 起 NSIS 安装程序，macOS 用 `hdiutil` 挂载、`ditto` 覆盖当前那个 `.app`，
+  Linux 在终端里跑 `sudo dpkg -i`；
+- 装完点「重启 Carter」切到新版。
+
+下载走与连接器、团队同步同一条网络路径：官方地址优先，连不上时依次试加速站，
+也吃「设置 → 外观 → 网络」里填的代理。
+
 也可以手动触发：Actions → **Release** → Run workflow，`tag` 填要发布的版本
 （如 `v0.1.1`）。默认值 `dry-run` 只构建、不发 Release，适合验证流水线；tag 推送
 则由 [release-on-tag.yml](.github/workflows/release-on-tag.yml) 转发成一次

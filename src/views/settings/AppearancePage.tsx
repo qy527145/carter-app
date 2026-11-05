@@ -110,8 +110,8 @@ export function AppearancePage() {
               <div className="text-sm text-ink">GitHub 加速站</div>
               <div className="mt-0.5 text-[11px] leading-relaxed text-dim">
                 连不上 GitHub 的网络里，连接器安装 / 团队同步会被重定向到国内的加速站
-                （gh-proxy.com、ghproxy.net、ghfast.top，按顺序试）。下载包都带签名校验，
-                加速站只能延迟，改不了内容。能直连的机器开着也不亏：官方地址总是第一个试。
+                （gh-proxy.com、ghproxy.net、ghfast.top，按顺序试）。能直连的机器开着也不亏：
+                官方地址总是第一个试。
               </div>
             </div>
             <Switch
@@ -146,6 +146,24 @@ export function AppearancePage() {
               。空着就直连 —— 不读系统代理设置：加速站 在国内，绕去境外再回来只会更慢。
             </span>
           </label>
+          <div className="mt-3 flex items-start gap-3 border-t border-edge pt-3">
+            <div className="flex-1">
+              <div className="text-sm text-ink">启动时检查更新</div>
+              <div className="mt-0.5 text-[11px] leading-relaxed text-dim">
+                启动几秒后去 GitHub Release 查一次新版本，有的话在「关于」页挂一个提示。
+                断网时静默失败，不会弹报错。关掉之后只能从「关于」页手动检查。
+              </div>
+            </div>
+            <Switch
+              label="启动时检查更新"
+              checked={settings.auto_check_update}
+              onChange={(v) => {
+                const next = { ...settings, auto_check_update: v };
+                setSettings(next);
+                setAppSettings(next).catch(toastError);
+              }}
+            />
+          </div>
           <label className="mt-3 block border-t border-edge pt-3">
             <span className="text-sm text-ink">额外的模型目录源</span>
             <span className="ml-2 text-[11px] text-dim">一行一个 URL，可选</span>

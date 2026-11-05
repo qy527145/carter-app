@@ -20,7 +20,13 @@
 import { listen } from "@tauri-apps/api/event";
 import { useEffect } from "react";
 import { useStore } from "../store";
-import { type AppEvent, EVENT_NAME, type SessionEvent } from "./api";
+import {
+  type AppEvent,
+  EVENT_NAME,
+  type ReleaseInfo,
+  type SessionEvent,
+  UPDATE_AVAILABLE,
+} from "./api";
 import { refreshAssistant, refreshSessions } from "./sessionOps";
 
 type Chunk = { kind: "text" | "thinking"; text: string };
@@ -174,9 +180,22 @@ export function useAppEvents() {
       else unlisten = fn;
     });
 
+    // 启动后自动检查查到新版本。只落一个标记，不弹窗打断 —— 用户可能正开着
+    // 某个对话，突然盖上来一个「有新版本」只会被当成广告。详情在「关于」页。
+    let unlistenUpdate: (() => void) | undefined;
+    let updateCancelled = false;
+    listen<ReleaseInfo>(UPDATE_AVAILABLE, ({ payload }) => {
+      useStore.getState().setUpdateAvailable(payload);
+    }).then((fn) => {
+      if (updateCancelled) fn();
+      else unlistenUpdate = fn;
+    });
+
     return () => {
       cancelled = true;
       unlisten?.();
+      updateCancelled = true;
+      unlistenUpdate?.();
       // 卸载（退出应用）时攒着的增量直接丢掉，不再交出去。
       for (const buf of buffers.values()) {
         cancelAnimationFrame(buf.raf);

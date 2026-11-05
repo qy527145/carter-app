@@ -1,0 +1,63 @@
+name: Post-announce
+
+# 由 dist-workspace.toml 的 `post-announce-jobs` 引用：dist 在创建完 GitHub
+# Release 之后调它（见 .github/workflows/release.yml 里的 custom-post-announce）。
+#
+# Release 里只要安装包：Windows 的 NSIS `.exe`、macOS arm64 的 `.dmg`、
+# Linux 的 `.deb`。dist 自己发的 tar.xz / zip / `.sha256` / dist-manifest.json /
+# source.tar.gz 全部删掉。
+#
+# 为什么发完再删，而不是让 dist 别产：
+#   - `installers = []` 只能保证「不发 dist 自己的安装器」，归档包照发；
+#   - 往 `artifacts/` 目录里删文件那条路在 dist 的 host job 内部，外部
+#     extend 不了；`--artifacts` 也只管编不管传。
+# 而 `gh release delete-asset` 不受这些限制，语义也最直白。
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+permissions:
+  # 删 Release 里的附件要用。
+  contents: write
+
+jobs:
+  trim:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: 只留安装包
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ fromJson(inputs.plan).announcement_tag }}
+        shell: bash
+        run: |
+          if [ -z "$TAG" ]; then
+            echo "::notice::这次只构建、不发版（dry-run），没有 Release 要清理"
+            exit 0
+          fi
+
+          # 三种安装包缺一不可：宁可发版失败，也别让用户下到一个没有安装包的版本。
+          names="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+          echo "$names"
+          for ext in exe dmg deb; do
+            if ! grep -q "\.$ext$" <<<"$names"; then
+              echo "::error::Release $TAG 里缺少 .$ext 安装包"
+              exit 1
+            fi
+          done
+
+          # 删掉所有不是安装包的东西：tar.xz / zip，连着 dist 为它们生成的
+          # `<name>.sha256` / `sha256.sum`，以及 dist-manifest.json / source.tar.gz。
+          # 不按清单精确删（`upload_files` 在构建清单里，plan 阶段还是空的），
+          # 扩展名白名单已经足够窄，漏删的会是明显的「压缩包又回来了」。
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets \
+            --jq '.assets[].name' | grep -Ev '\.(exe|dmg|deb)$' | while read -r name; do
+            gh release delete-asset "$TAG" "$name" --repo "$GITHUB_REPOSITORY" --yes \
+              && echo "删除：$name"
+          done
+
+          echo "剩余附件："
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name'
