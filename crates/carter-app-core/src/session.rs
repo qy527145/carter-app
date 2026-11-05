@@ -298,6 +298,13 @@ pub fn start_session(shell: Arc<AppShell>, opts: SessionOptions) -> carter::Resu
     };
     // 会话文件里还没标题（`meta` 下面要整个移进 Runner，先问一句）。
     let unnamed = meta.title.is_none();
+    // 续接一条没标题的老会话时，补标题该用**历史里的第一句**，而不是用户现在说的
+    // 这句话（见 `Runner::title_seed`）。
+    let first_user_text = if unnamed && resumed {
+        first_user_prompt(&thread.messages)
+    } else {
+        None
+    };
     let runner = Runner {
         ctx,
         thread: std::sync::Arc::new(parking_lot::Mutex::new(thread)),
@@ -314,9 +321,11 @@ pub fn start_session(shell: Arc<AppShell>, opts: SessionOptions) -> carter::Resu
         queued: VecDeque::new(),
         // 主会话的系统提示每轮现算（技能会变、目标会变），见 `run_one_turn`。
         fixed_system: None,
-        // 只有「新起的会话」才配自动标题：续接一条已经在聊的会话，标题早该有了；
-        // 而它没有的时候（老版本建的），也不该拿用户**现在**说的这句话去给它起名。
-        title_pending: !resumed && unnamed,
+        // 新会话：用这一轮的第一句话起名。
+        // 续接一条**没有标题**的老会话：用历史里的第一句补上（`title_seed`）——
+        // 否则它会永远停在「未命名会话」，而侧栏里一排没名字的会话分不清谁是谁。
+        title_pending: unnamed && (!resumed || first_user_text.is_some()),
+        title_seed: if resumed { first_user_text } else { None },
         last_message_at: last_written,
         changes: None,
         changes_turn: 0,
@@ -415,6 +424,7 @@ pub(crate) fn start_side(w: SideWiring, id: String, parent_id: String) -> Arc<Se
         fixed_system: Some(w.system),
         // 侧边聊天不落盘，也就没有「会话列表里那一行」要起名。
         title_pending: false,
+        title_seed: None,
         last_message_at: None,
         changes: None,
         changes_turn: 0,
@@ -425,6 +435,26 @@ pub(crate) fn start_side(w: SideWiring, id: String, parent_id: String) -> Arc<Se
     };
     tokio::spawn(runner.run());
     handle
+}
+
+/// 历史里第一条用户消息的文本。给「续接一条没标题的老会话」补标题用。
+///
+/// 只要文本块：老会话的第一条完整消息可能带图片 / 工具结果，标题只该看字。
+fn first_user_prompt(messages: &[carter::provider::WireMessage]) -> Option<String> {
+    use carter::provider::{Block, Role};
+    messages
+        .iter()
+        .find(|m| m.role == Role::User)
+        .and_then(|m| {
+            let text = m
+                .content
+                .iter()
+                .filter_map(Block::as_text)
+                .collect::<Vec<_>>()
+                .join(" ");
+            let text = text.trim();
+            (!text.is_empty()).then(|| text.to_string())
+        })
 }
 
 /// 侧边会话没有会话文件，但 `SessionMeta` 在几处被读（git 快照、模型名）。
@@ -655,6 +685,12 @@ struct Runner {
     fixed_system: Option<Vec<String>>,
     /// 还欠这条会话一个自动标题（首轮开始时去生成，见 [`Runner::spawn_title`]）。
     title_pending: bool,
+    /// 起标题用的那句话。`None` = 用这一轮用户刚发的那句。
+    ///
+    /// 续接一条**没有标题**的老会话时，拿用户**现在**说的这句话去起名是错的
+    /// （这条对话早就不是那个话题了）；该用历史里的第一句。所以那条路把这里
+    /// 填成历史里的第一句用户消息。
+    title_seed: Option<String>,
     /// 最近一次有消息进历史的时间。助理对话靠它判断「空闲多久了」该不该切期。
     /// 启动时取会话文件的修改时间（重启之后也能接上空闲时长）。
     last_message_at: Option<u64>,
@@ -1285,7 +1321,8 @@ impl Runner {
         // 放在 append 之后：carter 的 Recorder 是惰性建文件的，第一条消息落盘
         // 才让会话文件存在，而写标题要往那个文件里追加。
         if std::mem::take(&mut self.title_pending) {
-            self.spawn_title(&text);
+            let seed = self.title_seed.take().unwrap_or_else(|| text.clone());
+            self.spawn_title(&seed);
         }
         // 轮次开头也发布一次：这一轮可能很长，侧边聊天在这期间至少要能看到
         // 「用户提了什么要求」（之后的进展由 `live` 补上）。
@@ -1402,13 +1439,15 @@ impl Runner {
     ///
     /// ## 与手动改名的先后
     ///
-    /// 写回走 [`sessions::title_if_unnamed`]：**只在还没有标题时写**。用户在这几百
+    /// 写回走 [`crate::sessions::auto_title_allowed`]：**只在还没有标题时写**。用户在这几百
     /// 毫秒里自己改了名字的话（侧栏行内重命名），机器起的这个名字不该把它盖掉。
     ///
-    /// ## 失败就静默
+    /// ## 失败也不静默
     ///
-    /// 副模型配错、网络不通、上游拒答 —— 都只让这条会话暂时没有标题，侧栏显示
-    /// 「未命名会话」。为它弹一个错误条，比没有标题更打扰人。
+    /// 副模型配错、网络不通、上游拒答 —— 重试之后仍然拿不到，就用首句话截出来的
+    /// 兜底标题（见 [`crate::title::generate`]）。侧栏绝不能停在「未命名会话」上：
+    /// 一排没名字的会话，用户分不清哪条是哪条。但兜底也不是完整的成功，所以
+    /// 顺带发一条提示 —— 不弹错误条，只在对话里一行字。
     fn spawn_title(&mut self, first_prompt: &str) {
         // 侧边会话没有 recorder（不落盘），也就没有「列表里那一行」要起名。
         let Some(recorder) = self.thread.lock().recorder() else {
@@ -1432,12 +1471,16 @@ impl Runner {
         let prompt = first_prompt.to_string();
 
         tokio::spawn(async move {
-            let Ok(title) =
-                crate::title::generate(&prompt, &session_id, provider, &model, &kind).await
-            else {
+            let outcome =
+                crate::title::generate(&prompt, &session_id, provider, &model, &kind).await;
+            let title = outcome.title.trim().to_string();
+            if title.is_empty() {
                 return;
-            };
-            if title.trim().is_empty() {
+            }
+            // 用户在这几秒里自己改过名字的话，机器起的名字（哪怕是兜底的）不该盖掉它。
+            if !crate::sessions::auto_title_allowed(
+                crate::sessions::title_of(&session_id).as_deref(),
+            ) {
                 return;
             }
             // 用**会话自己那个 recorder** 追加，而不是新开一个句柄：同一个文件上的
@@ -1446,14 +1489,18 @@ impl Runner {
             //
             // 文件还没建出来也不怕：carter 的 recorder 是惰性的，第一次写会先把
             // 文件头（SessionMeta）落下去 —— 第一条消息早就写过了，这一步只是兜底。
-            if !crate::sessions::auto_title_allowed(
-                crate::sessions::title_of(&session_id).as_deref(),
-            ) {
-                return;
-            }
             recorder.record(carter::session::RecordKind::Title {
                 title: title.clone(),
             });
+            if outcome.degraded {
+                emit(
+                    &shell,
+                    &session_id,
+                    SessionEvent::Notice {
+                        message: "自动命名没成功，先用首句话当了标题，可以右键重命名".into(),
+                    },
+                );
+            }
             emit(&shell, &session_id, SessionEvent::Title { title });
         });
     }
