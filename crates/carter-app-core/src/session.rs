@@ -1693,6 +1693,9 @@ impl Runner {
                 let message_count = wire.messages.len();
                 let provider = Arc::clone(&self.ctx.provider);
                 let cancel = self.ctx.handle.cancel.clone();
+                // 等第一个字的这段时间里也要听「关会话」：不然关掉之后要等上游开口
+                // 才轮得到下面那段流循环，`close_session` 就一直等不到 runner 退出。
+                let close = self.ctx.handle.close.clone();
                 // 报告/接手工具白名单在请求装配时定好，见 `Runner::turn_tools`。
                 let out = match self.before_request(round - 1, message_count).await {
                     Ok(RequestGate::Compact) => Ok(Canceled::Compact),
@@ -1702,7 +1705,7 @@ impl Runner {
                             wire,
                         };
                         // 让出历史：自动压缩、断口自愈要在这几秒里动它。
-                        provider_call(&*provider, req, &cancel)
+                        provider_call(&*provider, req, &cancel, &close)
                             .await
                             .map(Canceled::Stream)
                     }
@@ -1733,8 +1736,13 @@ impl Runner {
             loop {
                 let ev = {
                     let cancel = self.ctx.handle.cancel.clone();
+                    let close = self.ctx.handle.close.clone();
                     let ev = tokio::select! {
                         biased;
+                        // 关会话（换走时空闲就关、应用退出）也要立刻断流。以前这里
+                        // 只听取消：关会话时流不会被断开，runner 要等上游自己说完才退，
+                        // `close_session` 一直等不到它 —— 关完也接不上。
+                        _ = close.cancelled() => None,
                         _ = cancel.cancelled() => {
                             cancelled = true;
                             None
@@ -1963,7 +1971,16 @@ impl Runner {
             // 被中断：用户自己点的停止不算失败（那条规则在 `decide_after_turn` 里
             // 优先级更高）；自己断的（关会话等）算，免得在这儿打转。
             carter::agent::TurnOutcome::Cancelled => !cancelled,
-            carter::agent::TurnOutcome::Limit => true,
+            carter::agent::TurnOutcome::Limit => {
+                // 撞上「一轮里最多几次模型调用」了。carter 原来只是默默停下，
+                // 界面上看着和「工具没执行」一模一样 —— 说清楚是哪条限、怎么调。
+                self.notice(&format!(
+                    "这一轮里模型已经调了 {max_turns} 次（agent.max_turns 的上限），\
+                     剩下的工具调用**没有执行**，这一轮到此为止。接着做可以：在输入框里\
+                     说一句「继续」，或者把 ~/.carter/config.toml 里 agent.max_turns 调大。"
+                ));
+                true
+            }
             carter::agent::TurnOutcome::Assistant => false,
         };
         TurnResult {
@@ -2650,15 +2667,18 @@ async fn provider_call(
     provider: &dyn carter::provider::LlmProvider,
     req: carter::provider::ChatRequest,
     cancel: &carter::agent::CancelToken,
+    close: &carter::agent::CancelToken,
 ) -> carter::Result<carter::provider::EventStream> {
     let mut fut = Box::pin(provider.stream(req));
     let mut stream = tokio::select! {
         biased;
+        _ = close.cancelled() => return Err(carter::CarterError::Config("会话已关闭".into())),
         _ = cancel.cancelled() => return Err(carter::CarterError::Config("已取消".into())),
         res = &mut fut => res?,
     };
     let first = tokio::select! {
         biased;
+        _ = close.cancelled() => return Err(carter::CarterError::Config("会话已关闭".into())),
         _ = cancel.cancelled() => {
             return Err(carter::CarterError::Config("已取消".into()));
         }

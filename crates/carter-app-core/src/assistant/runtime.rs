@@ -1293,10 +1293,30 @@ mod live {
             shapes.push((has_result, last_assistant_tools));
         }
         println!("{} 次请求：{shapes:?}", rows.len());
+        // 模型说完最后一句话就不再发请求，所以「最后一个请求里带着工具结果」是正常的
+        // —— 那句正文和最后的工具调用在同一次回复里，回灌之后没有下文就是收尾。
+        // 要守的是：每一条工具结果**都走到了模型跟前**（下一条请求里带着它），
+        // 而且这一轮确实跑过工具。
+        let results: Vec<bool> = shapes.iter().map(|(r, _)| *r).collect();
         assert!(
-            shapes.iter().filter(|(r, _)| *r).count() >= 3,
-            "三次工具结果之后都该再发一次请求（实际：{shapes:?}）"
+            results.iter().any(|r| *r),
+            "这一轮应该跑过工具（实际：{shapes:?}）"
         );
+        // 连续两次请求里，后一次带的工具结果**不能更少** —— 少了就说明结果丢在了
+        // 半路（回灌了、但模型没看到）。
+        let count = |i: usize| {
+            rows[i]
+                .request_body
+                .matches("\"type\":\"tool_result\"")
+                .count()
+        };
+        for i in 0..rows.len().saturating_sub(1) {
+            assert!(
+                count(i + 1) >= count(i),
+                "第 {} 次请求里的工具结果没有出现在下一次请求里（实际：{shapes:?}）",
+                i + 1
+            );
+        }
         // 每次请求里「最后一条助手消息带的工具」都不该是上一轮就没跑完的那条：
         // 所有 tool_use 都要有对应的 tool_result（断口必须在请求前补上）。
         for r in &rows {
@@ -1320,6 +1340,77 @@ mod live {
             assert!(open.is_empty(), "请求里带着没结果的工具调用：{open:?}");
         }
         let _ = crate::sessions::delete(&id);
+    }
+
+    /// 浏览器里切页面 = 界面 attach / detach。工单会话跑长命令的途中反复切，
+    /// 那条命令必须照常跑完 —— 切页面不该打断它。
+    ///
+    /// 这条对着用户报的现象：他的工单跑 `dws ... | head` 时切来切去，最后拿到的
+    /// 却是「这一轮被中断了，工具没有执行」。默认不跑：
+    /// `cargo test -p carter-app-core live_switching -- --ignored --nocapture`
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn live_switching_pages_does_not_interrupt_a_running_ticket() {
+        let config = carter::config::Config::load().expect("读不到 ~/.carter/config.toml");
+        let shell = AppShell::new(config);
+        let dir = std::env::temp_dir().join(format!("carter-live-switch-{}", now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = super::super::AssistantStore::open(dir.join("assistant.json"));
+        let shell = Arc::new(Arc::try_unwrap(shell).ok().unwrap().with_assistant(store));
+        tokio::spawn(watch(shell.clone()));
+
+        let mut src = crate::assistant::tests::source();
+        src.cwd = dir.to_string_lossy().into_owned();
+        let id = shell
+            .assistant
+            .with(|s| {
+                s.open_ticket(
+                    &src,
+                    "慢命令",
+                    "跑一条慢命令",
+                    "先用 bash 跑 `sleep 6 && echo done`（前台，别转后台），命令结束后用 \
+                     assistant_report 汇报 ready，汇报里写出命令的输出。",
+                    vec!["有人要看看慢命令".into()],
+                )
+            })
+            .unwrap();
+        launch_queued(&shell).await;
+
+        // 模拟用户来回切页面：切到别处（detach）再切回来（attach），持续到工单结束。
+        let s = shell.clone();
+        let switched = id.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                let sid = match s
+                    .assistant
+                    .read(|st| st.ticket(&switched).and_then(|t| t.session_id.clone()))
+                {
+                    Some(sid) => sid,
+                    None => continue,
+                };
+                let Some(h) = s.session(&sid) else { continue };
+                h.attached.store(false, std::sync::atomic::Ordering::SeqCst);
+                s.detach_session(&sid).await;
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                if s.session(&sid).is_some() {
+                    let _ = crate::session::attach_session(&s, &sid);
+                }
+            }
+        });
+
+        let t = loop {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let t = shell.assistant.read(|s| s.ticket(&id).cloned()).unwrap();
+            if !matches!(t.status, TicketStatus::Working | TicketStatus::Queued) {
+                break t;
+            }
+        };
+        println!("{:?} {:?}", t.status, t.summary);
+        let summary = t.summary.clone().unwrap_or_default();
+        assert_ne!(t.status, TicketStatus::Unreported, "{summary}");
+        assert!(!summary.contains("被中断"), "{summary}");
+        assert!(summary.contains("done"), "报告里没看到命令输出：{summary}");
     }
 
     /// 等助理对话跑完一轮，返回这期间模型调过的工具名。
