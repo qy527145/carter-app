@@ -124,16 +124,17 @@ function ProjectGroups({
   query: string;
 }) {
   const searching = query !== "";
+  const setView = useStore((s) => s.setView);
+  const setTeamCwd = useStore((s) => s.setTeamCwd);
+  const home = useStore((s) => s.appInfo?.default_cwd ?? "");
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set([currentCwd]));
   useEffect(() => {
     // 空 = 当前会话刚被删掉（store 清了 cwd）或启动首帧还没开会话。这时保持原样，
     // 侧栏该继续展开刚才那组，而不是全部收起。
-    if (currentCwd) setExpanded(new Set([currentCwd]));
-  }, [currentCwd]);
-
-  const setView = useStore((s) => s.setView);
-  const setTeamCwd = useStore((s) => s.setTeamCwd);
-  const home = useStore((s) => s.appInfo?.default_cwd ?? "");
+    // 家目录下的会话（卡特助理、在 ~ 里开的对话）也不是项目：从项目点进助理再回来，
+    // 展开集合若跟着改到 ~，原项目就被折叠了 —— 用户根本没在项目之间切换。
+    if (currentCwd && currentCwd !== home) setExpanded(new Set([currentCwd]));
+  }, [currentCwd, home]);
   const menu = useContextMenu();
   // 待确认删除的那一组。
   const [deleting, setDeleting] = useState<{ cwd: string; count: number } | null>(null);
