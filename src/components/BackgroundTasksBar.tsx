@@ -7,21 +7,19 @@
 // 风平浪静，而命令还在跑（起服务、跑长构建、`tail -f`）。等它跑完，系统会自己唤醒
 // 会话接着做；在那之前，用户没有任何办法从界面上知道「还有事没完」。
 //
-// 所以这一条常驻在输入框上方，只要还有命令在跑就显示，跑完了自动消失。它有两个
-// 必须说清的信息：**有几条**、**已经跑了多久** —— 前者回答「我能不能走开」，后者
-// 回答「是不是卡死了」。
+// ## 长什么样
+//
+// 与「变更 N 个文件」那条同一个骨架：一行 `bg-card` 圆角条，展开才多说几句。
+// 它常驻在输入框上方，不能是一块占满宽度的彩色横幅 —— 那样每一轮都在抢注意力，
+// 几天之后人只会学会无视它。真正要一直在的只有三样东西：**在跑**（蓝点）、
+// **几条**、**多久**；命令原文收在展开里。
 //
 // ## 为什么是整表快照
 //
 // 状态来自后端的 `background_shells` 事件，给的是「此刻还在跑的那些」。增量在这里
 // 没有意义：漏掉一条「结束了」只会让提醒条一直挂着，而它的全部价值就是「还挂着 = 还没完」。
-//
-// ## 位置
-//
-// 贴在输入框正上方：用户准备打字时一定会看到。放到顶栏或侧栏，正在读长回答的人
-// 根本不会往那儿看。
 
-import { ChevronDown, LoaderCircle, Terminal } from "lucide-react";
+import { ChevronRight, Terminal } from "lucide-react";
 import { useEffect, useState } from "react";
 import { fmtDuration } from "../lib/format";
 import { useStore } from "../store";
@@ -29,6 +27,7 @@ import { Collapse } from "./ui/Panel";
 
 export function BackgroundTasksBar() {
   const shells = useStore((s) => s.backgroundShells);
+  const streaming = useStore((s) => s.streaming);
   const [open, setOpen] = useState(false);
   const [now, setNow] = useState(() => Date.now());
 
@@ -48,43 +47,45 @@ export function BackgroundTasksBar() {
   if (shells.length === 0) return null;
 
   const elapsed = (startedAt: number) => Math.max(0, now - startedAt);
-  const oldest = Math.min(...shells.map((s) => elapsed(s.started_at)));
+  const longest = Math.max(...shells.map((s) => elapsed(s.started_at)));
+  // 折起来时也要能看出「在跑什么」，否则只剩一个数字，等于什么都没说。
+  const preview = shells.map((s) => s.command).join(" · ");
 
   return (
     <div className="shrink-0 px-4 pt-2">
-      <div className="mx-auto overflow-hidden rounded-xl bg-tone-blue-soft ring-1 ring-tone-blue/20">
+      {/* 前台这一轮还在跑时它只是背景信息；这一轮结束了、它成了界面上唯一还在动的
+          东西，用一圈淡蓝提醒一下 —— 别让人以为对话已经收工了。 */}
+      <div
+        className={`mx-auto max-w-3xl rounded-xl bg-card px-3 py-1.5 transition-shadow ${
+          streaming ? "" : "ring-1 ring-tone-blue/25"
+        }`}
+      >
         <button
           type="button"
           onClick={() => setOpen((v) => !v)}
           aria-expanded={open}
-          title={open ? "收起后台任务" : "查看后台任务"}
-          className="carter-press flex w-full items-center gap-2.5 px-3 py-2 text-left"
+          title={open ? "收起后台任务" : "展开后台任务"}
+          className="flex w-full min-w-0 items-center gap-2 py-0.5 text-left"
         >
-          <LoaderCircle size={14} className="shrink-0 animate-spin text-tone-blue" />
-          <span className="min-w-0 flex-1">
-            <span className="flex flex-wrap items-baseline gap-x-2">
-              <span className="text-xs font-medium text-ink">
-                {shells.length} 个后台任务正在运行
-              </span>
-              <span className="text-[11px] tabular-nums text-dim">最长 {fmtDuration(oldest)}</span>
-            </span>
-            <span className="mt-0.5 block truncate text-[11px] text-dim">
-              跑完会自动唤醒这条对话接着做。
-            </span>
-          </span>
-          <ChevronDown
-            size={13}
-            className={`shrink-0 text-dim transition-transform duration-200 ${
-              open ? "rotate-180" : ""
-            }`}
+          <ChevronRight
+            size={12}
+            className={`shrink-0 text-dim transition-transform ${open ? "rotate-90" : ""}`}
           />
+          <span className="size-1.5 shrink-0 animate-pulse rounded-full bg-tone-blue" />
+          <span className="shrink-0 text-xs text-ink">{shells.length} 个后台任务运行中</span>
+          <span className="shrink-0 tabular-nums text-[11px] text-dim">
+            {shells.length > 1 ? "最长" : "已运行"} {fmtDuration(longest)}
+          </span>
+          {!open && (
+            <span className="mono min-w-0 flex-1 truncate text-[11px] text-dim/70">{preview}</span>
+          )}
         </button>
         <Collapse open={open}>
-          <div className="space-y-1 px-3 pb-2 pl-9">
+          <div className="space-y-1 pb-1 pt-1.5 pl-5">
             {shells.map((s) => (
-              <div key={s.id} className="flex items-baseline gap-2 text-[11px]">
-                <Terminal size={11} className="shrink-0 self-center text-tone-blue" />
-                <code className="min-w-0 flex-1 truncate font-mono text-ink/90" title={s.command}>
+              <div key={s.id} className="flex min-w-0 items-center gap-2 text-[11px]">
+                <Terminal size={11} className="shrink-0 text-dim" />
+                <code className="mono min-w-0 flex-1 truncate text-ink/90" title={s.command}>
                   {s.command}
                 </code>
                 <span className="shrink-0 tabular-nums text-dim">
@@ -92,6 +93,7 @@ export function BackgroundTasksBar() {
                 </span>
               </div>
             ))}
+            <div className="pt-0.5 text-[11px] text-dim/70">跑完会自动唤醒这条对话接着做。</div>
           </div>
         </Collapse>
       </div>
