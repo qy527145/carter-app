@@ -1,0 +1,37 @@
+# cargo-dist 配置：`dist generate` 生成 .github/workflows/release.yml。
+# 这个文件里别手写 CI 步骤 —— 可扩展点见 [dist] 下的 build-setup / custom jobs。
+#
+#   dist plan                 # 看推 tag 后 CI 会产出什么
+#   dist generate            # 重新生成 release.yml（改完本文件后跑）
+
+[workspace]
+members = ["cargo:."]
+
+[dist]
+# CI 里使用的 dist 版本；本地版本不一致时 `dist init` 会提示升级。
+cargo-dist-version = "0.32.0"
+# 推 v* tag 时在 GitHub Actions 上构建并发 Release。
+ci = "github"
+# 只构建原生平台：Tauri 的 webkit 依赖没法交叉编译到 aarch64 Linux。
+targets = [
+  "aarch64-apple-darwin",
+  "x86_64-apple-darwin",
+  "x86_64-unknown-linux-gnu",
+  "x86_64-pc-windows-msvc",
+]
+# GUI 应用，不发 shell/powershell 安装器，只出归档包。
+installers = []
+# dist 自带更新器是给 CLI 用的，桌面端用不上。
+install-updater = false
+# cargo build 之前先跑前端构建：tauri 的 generate_context! 在编译期就把
+# ../dist 嵌进二进制，目录不存在会直接编译失败。
+github-build-setup = "../build-setup.yml"
+# Linux 构建机的系统依赖（dist 会用 apt 装，见 dist 的 dependencies 文档）。
+# libwebkit2gtk-4.1-dev 不能写在这：dist 的依赖名解析会把 `-4.1-dev` 当成版本号，
+# 生成出并不存在的 `libwebkit2gtk-4`，所以它放在 build-setup.yml 里单独装。
+[dist.dependencies.apt]
+libayatana-appindicator3-dev = "*"
+librsvg2-dev = "*"
+libxdo-dev = "*"
+patchelf = "*"
+build-essential = "*"

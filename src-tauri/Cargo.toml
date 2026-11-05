@@ -3,6 +3,8 @@ name = "carter-app"
 version.workspace = true
 edition.workspace = true
 description = "carter-app —— Tauri 桌面 agent 客户端"
+# dist 据此决定 GitHub Release 发到哪个仓库。
+repository = "https://github.com/qy527145/carter-app"
 
 [lib]
 # `_lib` 后缀看似多余，但它是必要的：不加的话 lib 名与 bin 名冲突（Windows 上必现）。
