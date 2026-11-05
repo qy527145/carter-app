@@ -6,24 +6,19 @@ jobs:
   probe:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-      - name: 建 → 删 → 重建（同一个 tag）
+      - name: draft vs published
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          T="probe-recreate-$GITHUB_RUN_ID"
-          git tag "$T"
-          git push origin "refs/tags/$T"
-          echo hi > notes.txt
-          echo "== 1) 首次建"
-          gh release create "$T" --target "$GITHUB_SHA" --title "$T" --notes-file notes.txt notes.txt && echo "FIRST_OK" || echo "FIRST_FAIL"
-          echo "== 2) 删 release、留 tag"
-          gh release delete "$T" --yes && echo "DEL_OK" || echo "DEL_FAIL"
-          echo "== 3) 同一 tag 重建"
-          gh release create "$T" --target "$GITHUB_SHA" --title "$T" --notes-file notes.txt notes.txt && echo "SECOND_OK" || echo "SECOND_FAIL"
-          echo "== 4) 清理"
-          gh release delete "$T" --yes || true
-          gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$T" || true
+          echo "== A) 建 published release（github-actions 自动建 tag）"
+          gh api -X POST "repos/$GITHUB_REPOSITORY/releases" \
+            -f tag_name="probe-pub-$GITHUB_RUN_ID" -f name=probe -f body=probe \
+            && echo "PUBLISHED_OK" || echo "PUBLISHED_FAIL"
+          echo "== B) 建 draft release"
+          gh api -X POST "repos/$GITHUB_REPOSITORY/releases" \
+            -f tag_name="probe-draft-$GITHUB_RUN_ID" -f name=probe -f body=probe -F draft=true \
+            && echo "DRAFT_OK" || echo "DRAFT_FAIL"
+          gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/tags/probe-pub-$GITHUB_RUN_ID" || true
+          gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/tags/probe-draft-$GITHUB_RUN_ID" || true
+          gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/probe-pub-$GITHUB_RUN_ID" || true
           exit 0
