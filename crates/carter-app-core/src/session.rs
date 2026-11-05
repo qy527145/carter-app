@@ -107,6 +107,10 @@ pub struct StartedSession {
     /// 不是一次 `todo_updated` —— 不带上的话底栏那条进度就是空的，明明还在干活。
     /// 每次工具调用落地时由 `run_one_call` 直接更新句柄上那份（不经过事件流）。
     pub todos: Vec<TodoView>,
+    /// 这一轮里**已经跑完**的工具（结果已定）。工具事件不回放，切走页面再回来时
+    /// 那些卡片只剩 `live` 里一条没有结果的记录 —— 看起来像还卡着。接回时一并带上，
+    /// 界面按 `call_id` 把结果补进卡片。
+    pub finished_tools: Vec<crate::protocol::ToolUsageView>,
 }
 
 /// 接上一条正在后台跑的会话（不关掉重开），返回界面要的那份状态。
@@ -134,6 +138,7 @@ pub fn attach_session(shell: &AppShell, id: &str) -> Option<StartedSession> {
         // 接上时不 await 会话自己的那把锁（它可能正跑着一轮）：读的是事件流已经
         // 发布过的那份快照，见 `Runner::emit` 里 `TodoUpdated` 那一支。
         todos: handle.todos.load().iter().map(todo_view).collect(),
+        finished_tools: handle.live.finished_calls(),
         handle,
     })
 }
@@ -337,6 +342,7 @@ pub fn start_session(shell: Arc<AppShell>, opts: SessionOptions) -> carter::Resu
         live: Vec::new(),
         pending_ask: None,
         todos: Vec::new(),
+        finished_tools: Vec::new(),
     })
 }
 
@@ -659,7 +665,8 @@ struct Runner {
     changes: Option<ChangeWatch>,
     /// 系统提示 + 工具声明的 token 数（见 [`Runner::measure_overhead`]）。
     overhead: u64,
-    /// 最近一次主对话请求、上游回报的上下文占用（见 [`ContextTap`]）。0 = 还没有
+    /// 最近一次主对话请求、上游回报的上下文占用（见 [`Runner::run_one_turn`] 里
+    /// 处理 `StreamChunk::Usage` 那一段）。0 = 还没有
     /// （刚打开 / 刚续接，或历史刚被改写过），这时百分比环回落到估算值。
     reported: Arc<AtomicU64>,
     /// 这一轮里每个请求上报的「这次请求的完整输入」里最大的一份 —— 自动压缩按它判。
@@ -1722,6 +1729,7 @@ impl Runner {
             let mut stop_reason = carter::provider::FinishReason::Stop;
             let mut had_text = false;
             let mut stream_err: Option<String> = None;
+            let mut seen_usage = carter::provider::Usage::default();
             loop {
                 let ev = {
                     let cancel = self.ctx.handle.cancel.clone();
@@ -1760,6 +1768,26 @@ impl Runner {
                                 // 厂商在流里报的错：告知用户，但不当致命错误 ——
                                 // 已经生成的内容照常收尾。
                                 self.notice(&format!("[stream] {error}"));
+                            }
+                            // 输入框旁那个占用环：主对话请求看上游回报的完整输入
+                            // （含缓存命中与写入）+ 输出 —— 输出会进历史，下一次
+                            // 请求就要带上它。
+                            carter::provider::StreamChunk::Usage { usage } => {
+                                // 一帧只报一部分（Claude 的 `message_start` 报输入、
+                                // `message_delta` 报输出），按非零覆盖合并 —— 直接拿
+                                // 这一帧算，输出那帧会把输入盖成 0。
+                                seen_usage.merge_non_zero(usage);
+                                let used = u64::from(seen_usage.total_input_billed())
+                                    + u64::from(seen_usage.output_tokens);
+                                if used > 0 {
+                                    self.reported.store(used, Ordering::Relaxed);
+                                    let ctx = context_view(
+                                        used,
+                                        self.ctx.model.context_window,
+                                        &self.ctx.config.agent,
+                                    );
+                                    self.emit(SessionEvent::Context(ctx));
+                                }
                             }
                             _ => {}
                         }
@@ -1817,35 +1845,89 @@ impl Runner {
             }
 
             // ── 工具 ───────────────────────────────────────────────
-            // **一条一条来**：结果落地立刻写回历史，不等别的调用、也不等谁回信。
-            // 整个循环只在这里会等很久（bash 一跑就是几分钟），用户的中断也在这里
-            // 生效 —— 和 carter 一样，这一轮停下，已生成的块照常留在历史里。
-            for call in &calls {
+            // 同一个回复里的几条工具按 carter 的老规矩跑：
+            //
+            // * 连着几条「并发安全」的（读文件、grep、skill、todo…）一起跑，按原顺序
+            //   收结果 —— 这些是模型一口气要看好几样东西，串着跑只是白等；
+            // * 遇到会动外部世界的（bash、写文件、子 agent、MCP）就切开，一条一条跑。
+            //
+            // 不管哪一批，**整批结果一起写回历史**，再发下一次请求：一半结果回灌给
+            // 模型、另一半还在路上，模型那边看到的历史就是残缺的。这一批跑完之前
+            // 界面一直是「生成中」（`busy` 到 `idle` 之间），用户看到的就是它在干活。
+            for batch in batches(&calls) {
                 if self.ctx.handle.cancel.is_cancelled() || self.ctx.handle.close.is_cancelled() {
                     cancelled = true;
                     break;
                 }
-                let result = run_one_call(
-                    &self.ctx.shell,
-                    &self.ctx.handle.id,
-                    self.live(),
-                    self.activity.clone(),
-                    self.ctx.running.clone(),
-                    call,
-                    &tools,
-                )
-                .await;
-                thread.append(llm_adapt_core::WireMessage::new(
-                    llm_adapt_core::Role::User,
-                    vec![llm_adapt_core::Block::ToolResult {
-                        tool_use_id: call.id.clone(),
-                        content: carter::provider::ToolResultContent::Text {
-                            text: result.to_model_string(),
-                        },
-                        is_error: !result.ok,
-                        cache: None,
-                    }],
-                ));
+                let mut results = Vec::with_capacity(batch.len());
+                if batch.len() > 1 {
+                    // 界面「开始」先全部发出，再一起跑：用户一眼看得到在并发干什么。
+                    for call in &batch {
+                        if let Some(live) = &self.live() {
+                            live.tool_started(&call.id, &call.name, &call.args);
+                        }
+                        self.emit(SessionEvent::ToolStarted {
+                            call_id: call.id.clone(),
+                            name: call.name.clone(),
+                            args: call.args.clone(),
+                        });
+                    }
+                    // 结果按原顺序收回来。每条各记各的耗时（卡片上「用时 1.2s」）。
+                    let mut futs = futures::stream::FuturesOrdered::new();
+                    for call in &batch {
+                        let cx = CallCtx {
+                            shell: &self.ctx.shell,
+                            session_id: &self.ctx.handle.id,
+                            live: None,
+                            tx: self.tool_tx.clone().expect("事件通道在 run() 里建好"),
+                            activity: self.activity.clone(),
+                            running: self.ctx.running.clone(),
+                            tools: &tools,
+                        };
+                        futs.push_back(async move {
+                            let started = std::time::Instant::now();
+                            let r = run_one_call(&cx, call).await;
+                            (r, started.elapsed().as_millis() as u64)
+                        });
+                    }
+                    let mut took = Vec::with_capacity(batch.len());
+                    while let Some((r, ms)) = futures::StreamExt::next(&mut futs).await {
+                        results.push(r);
+                        took.push(ms);
+                    }
+                    for ((call, r), ms) in batch.iter().zip(results.iter()).zip(took) {
+                        self.finish_one_call(call, r, ms);
+                    }
+                } else {
+                    for call in &batch {
+                        let started = std::time::Instant::now();
+                        let cx = CallCtx {
+                            shell: &self.ctx.shell,
+                            session_id: &self.ctx.handle.id,
+                            live: self.live(),
+                            tx: self.tool_tx.clone().expect("事件通道在 run() 里建好"),
+                            activity: self.activity.clone(),
+                            running: self.ctx.running.clone(),
+                            tools: &tools,
+                        };
+                        let r = run_one_call(&cx, call).await;
+                        self.finish_one_call(call, &r, started.elapsed().as_millis() as u64);
+                        results.push(r);
+                    }
+                }
+                for (call, result) in batch.iter().zip(results.iter()) {
+                    thread.append(llm_adapt_core::WireMessage::new(
+                        llm_adapt_core::Role::User,
+                        vec![llm_adapt_core::Block::ToolResult {
+                            tool_use_id: call.id.clone(),
+                            content: carter::provider::ToolResultContent::Text {
+                                text: result.to_model_string(),
+                            },
+                            is_error: !result.ok,
+                            cache: None,
+                        }],
+                    ));
+                }
                 // 历史快照顺手刷新一次：侧边聊天在这几分钟里要能看到进展。
                 self.ctx.handle.publish_history(&thread.messages);
             }
@@ -1905,6 +1987,37 @@ impl Runner {
     /// 请求发出前那一串 hook：`PreTurn` 观察、`PreCompact` 可阻断。
     ///
     /// 与 carter `run_turn` 循环顶上那一段同形：每一圈都发一次 `PreTurn`；需要压缩时
+    /// 一条工具结果落地之后界面那边要做的两件事：发「结束」卡片、记 todo。
+    ///
+    /// 与 `run_one_call` 开头的「开始」配对。并发批里「开始」在跑之前统一发、
+    /// 结果按序回来之后才逐条收，所以这一半放在批的收尾，不进 `run_one_call`。
+    fn finish_one_call(
+        &self,
+        call: &carter::provider::ToolCall,
+        result: &carter::tools::ToolResult,
+        elapsed_ms: u64,
+    ) {
+        let shown = crate::tools::record::cap(&result.content);
+        if let Some(live) = &self.live() {
+            live.tool_finished(&call.id, &result.content);
+        }
+        self.emit(SessionEvent::ToolFinished {
+            call_id: call.id.clone(),
+            ok: result.ok,
+            content: shown,
+            elapsed_ms,
+        });
+        if call.name == "todo_write"
+            && result.ok
+            && let Ok(todos) = carter::tools::parse_todos(&call.args)
+        {
+            self.ctx.handle.todos.store(Arc::new(todos.clone()));
+            self.emit(SessionEvent::TodoUpdated {
+                todos: todos.iter().map(todo_view).collect(),
+            });
+        }
+    }
+
     /// 先问 `PreCompact`，被拦下就当这一圈不用压、照常发请求。
     async fn before_request(
         &mut self,
@@ -2475,6 +2588,28 @@ fn thinking_for(
     })
 }
 
+/// 把一轮里的工具调用按「能不能一起跑」切批，保持原顺序。
+///
+/// 与 carter 的切法一致（见 `carter::tools::is_concurrent_safe`）：连着几条只读 /
+/// 幂等的合成一批并发跑；碰到会动外部世界的一条就自己成一批、串行跑。批与批之间
+/// 每次都要把整批结果写回历史再发请求 —— 一条慢命令不会拖住别的批，但同一批里
+/// 先跑完的也不会被单独扣着（它们本来就该一起回灌）。
+fn batches(calls: &[carter::provider::ToolCall]) -> Vec<Vec<&carter::provider::ToolCall>> {
+    let mut out: Vec<Vec<&carter::provider::ToolCall>> = Vec::new();
+    for call in calls {
+        match out.last_mut() {
+            Some(last)
+                if carter::tools::is_concurrent_safe(&call.name)
+                    && carter::tools::is_concurrent_safe(&last[0].name) =>
+            {
+                last.push(call)
+            }
+            _ => out.push(vec![call]),
+        }
+    }
+    out
+}
+
 /// 发请求之前那一步该怎么走。
 enum RequestGate {
     /// 照常发。
@@ -2538,24 +2673,32 @@ async fn provider_call(
     })
 }
 
-/// 执行一条工具调用，把结果写回历史 —— 返回它给模型的那份结果。
-///
-/// 一条一条来、结果落地就写：某个慢调用（bash 跑几分钟）不该把同批的其它结果
-/// 一起扣着，更不该等谁回信。整个循环只在这个点上会等很久，所以这里是唯一能
-/// 插进用户中断的地方。
+/// 跑一条工具调用要用到的那点会话状态（见 [`run_one_call`]）。
+struct CallCtx<'a> {
+    shell: &'a Arc<AppShell>,
+    session_id: &'a str,
+    /// `None` = 并发批（那批的「开始」在派发前统一发过，不再逐条记）。
+    live: Option<Arc<crate::shell::LiveLog>>,
+    /// 工具里的子 agent 等事件往这里送。
+    tx: mpsc::UnboundedSender<ToolEvent>,
+    activity: Arc<AtomicU32>,
+    running: Arc<crate::tools::control::RunningTools>,
+    tools: &'a carter::tools::ToolRegistry,
+}
+
+/// 执行一条工具调用，把结果交给调用方 —— 「开始」那张卡片也在这里发。
 ///
 /// 界面那两张卡片用**模型给的** `call_id` 发：`carter::tools::Tool` 的
 /// `execute` 拿不到调用编号，我们自己发、自己配对（见 `tools/record.rs` 的
 /// `Recorded::with_call_id`），界面上的「中断 / 转后台」才找得到这条命令。
+///
+/// 「结束」那张不在这里：并发批里要等整批结果按序回来再一起发（见
+/// [`Runner::finish_one_call`]）。
 async fn run_one_call(
-    shell: &Arc<AppShell>,
-    session_id: &str,
-    live: Option<Arc<crate::shell::LiveLog>>,
-    activity: Arc<AtomicU32>,
-    running: Arc<crate::tools::control::RunningTools>,
+    cx: &CallCtx<'_>,
     call: &carter::provider::ToolCall,
-    tools: &carter::tools::ToolRegistry,
 ) -> carter::tools::ToolResult {
+    let (shell, session_id, live, tools) = (cx.shell, cx.session_id, &cx.live, cx.tools);
     if let Some(live) = &live {
         live.tool_started(&call.id, &call.name, &call.args);
     }
@@ -2568,19 +2711,19 @@ async fn run_one_call(
             args: call.args.clone(),
         },
     );
-    let started = std::time::Instant::now();
-    let result = match tools.tools().iter().find(|t| t.name() == call.name) {
+    let mut result = match tools.tools().iter().find(|t| t.name() == call.name) {
         Some(inner) => {
-            let (tx, _rx) = mpsc::unbounded_channel();
+            // 编号由外面给（`ToolCall.id`），启动 / 结果两张卡片也由外面配对 ——
+            // 这里只要「结果落到界面」这一件事：子 agent 的进度事件走同一条通道。
             let recorded: Arc<dyn carter::tools::Tool> = Arc::new(
                 crate::tools::record::Recorded::new(
                     inner.clone(),
-                    tx,
+                    cx.tx.clone(),
                     Arc::new(std::sync::atomic::AtomicU64::new(0)),
-                    activity,
+                    cx.activity.clone(),
                 )
                 .with_live(live.clone())
-                .with_running(Some(running))
+                .with_running(Some(cx.running.clone()))
                 .with_call_id(Some(call.id.clone())),
             );
             recorded.execute(call.args.clone()).await
@@ -2588,38 +2731,12 @@ async fn run_one_call(
         // 与 carter 的 `dispatch` 一致：找不到工具也回一个结构化 err，让模型改用别的。
         None => carter::tools::ToolResult::err(format!("unknown tool: {}", call.name)),
     };
-    // 界面只显示截断后的正文（与 carter 的记录包装层同一口径）；回灌给模型的
-    // 是完整结果。
-    let shown = crate::tools::record::cap(&result.content);
-    if let Some(live) = &live {
-        live.tool_finished(&call.id, &result.content);
-    }
-    emit(
-        shell,
-        session_id,
-        SessionEvent::ToolFinished {
-            call_id: call.id.clone(),
-            ok: result.ok,
-            content: shown,
-            elapsed_ms: started.elapsed().as_millis() as u64,
-        },
-    );
-    if call.name == "todo_write"
-        && result.ok
-        && let Ok(todos) = carter::tools::parse_todos(&call.args)
-    {
-        // 整表先记到句柄上（界面切走再回来靠它补），再往前端送。
-        if let Some(h) = shell.session(session_id) {
-            h.todos.store(Arc::new(todos.clone()));
-        }
-        emit(
-            shell,
-            session_id,
-            SessionEvent::TodoUpdated {
-                todos: todos.iter().map(todo_view).collect(),
-            },
-        );
-    }
+    // 这一轮进行中到的跨会话来信，搭这条结果送进模型（见 `peers.rs`）。界面卡片上
+    // 也照样带着 —— 模型看到了什么，用户就该看到什么。
+    //
+    // 卡片本身（「结束」与 todo）由调用方发，见 `Runner::finish_one_call`：并发批里
+    // 结果是按序统一收的。
+    crate::peers::drain_into(&mut result.content);
     result
 }
 
@@ -2937,7 +3054,15 @@ async fn forward_events(
                     send(&shell, SessionEvent::ToolStarted { call_id, name, args });
                 }
                 Some(ToolEvent::Finished { call_id, ok, content, elapsed_ms }) => {
-                    send(&shell, SessionEvent::ToolFinished { call_id, ok, content, elapsed_ms });
+                    send(
+                        &shell,
+                        SessionEvent::ToolFinished {
+                            call_id,
+                            ok,
+                            content,
+                            elapsed_ms,
+                        },
+                    );
                 }
                 Some(ToolEvent::Agent { call_id, agents }) => {
                     send(&shell, SessionEvent::AgentProgress { call_id, agents });
@@ -3186,5 +3311,44 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&mine).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn call(id: &str, name: &str) -> carter::provider::ToolCall {
+        carter::provider::ToolCall {
+            id: id.into(),
+            name: name.into(),
+            args: json!({}),
+        }
+    }
+
+    /// 同一个回复里的几条工具：连着的只读调用合成一批并发跑，动外部世界的那条自己
+    /// 一批 —— 与 carter 的调度一致，但结果仍然按模型给的顺序回灌。
+    #[test]
+    fn only_consecutive_safe_calls_share_a_batch() {
+        let calls = vec![
+            call("1", "read_file"),
+            call("2", "grep"),
+            call("3", "bash"),
+            call("4", "read_file"),
+        ];
+        let groups: Vec<Vec<&str>> = batches(&calls)
+            .into_iter()
+            .map(|b| b.iter().map(|c| c.id.as_str()).collect())
+            .collect();
+        assert_eq!(groups, vec![vec!["1", "2"], vec!["3"], vec!["4"]]);
+    }
+
+    /// 一条独立的工具自己成批（串行跑）。
+    #[test]
+    fn a_lone_unsafe_call_is_its_own_batch() {
+        let calls = vec![call("1", "bash")];
+        assert_eq!(batches(&calls).len(), 1);
+        assert_eq!(batches(&calls)[0].len(), 1);
     }
 }

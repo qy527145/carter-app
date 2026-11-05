@@ -285,6 +285,9 @@ struct CreatedSession {
     pending_ask: Option<carter_app_core::protocol::PendingAsk>,
     /// 这条会话现在的 todo 列表。`todo_updated` 事件不回放，切走再接上时靠它补回来。
     todos: Vec<carter_app_core::TodoView>,
+    /// 这一轮里已经跑完的工具。工具事件不回放，接回时靠它把卡片上的结果补齐
+    /// （否则最后一张卡会一直停在「运行中」）。
+    finished_tools: Vec<carter_app_core::ToolUsageView>,
 }
 
 /// 进行中那一轮的一条记录（`LiveItem` 的界面形态）。
@@ -338,6 +341,7 @@ impl CreatedSession {
                 .collect(),
             pending_ask: started.pending_ask,
             todos: started.todos,
+            finished_tools: started.finished_tools,
         }
     }
 }

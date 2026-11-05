@@ -248,12 +248,14 @@ function runningName(items: Item[]): string | null {
   return null;
 }
 
-function ProcessGroup({ items, cwd }: { items: Item[]; cwd: string }) {
+function ProcessGroup({ items, cwd, liveTurn }: { items: Item[]; cwd: string; liveTurn: boolean }) {
   const failed = items.filter(
     (i): i is Extract<Item, { kind: "tool" }> =>
       i.kind === "tool" && i.result !== undefined && !i.result.ok,
   );
-  const running = runningName(items);
+  // 只有这一轮真在跑时才算「正在 …」：切走再回来的历史里，最后一个工具没有结果
+  // 只是因为那一轮当时被中断了，不是还在执行。
+  const running = liveTurn ? runningName(items) : null;
   const [manual, setManual] = useState<boolean | null>(null);
   // 失败时强制展开；用户手动点过之后以用户为准（与工具卡片的开关同一套规矩）。
   const open = manual ?? failed.length > 0;
@@ -284,8 +286,15 @@ function ProcessGroup({ items, cwd }: { items: Item[]; cwd: string }) {
       <Collapse open={open}>
         <div className="space-y-2 border-t border-edge px-3 py-2">
           {items.map((it, i) => (
-            // biome-ignore lint/suspicious/noArrayIndexKey: 工具调用条目只追加不重排，内容重复时序号最稳
-            <ItemView key={i} item={it} cwd={cwd} writing={false} isLast={i === items.length - 1} />
+            <ItemView
+              // biome-ignore lint/suspicious/noArrayIndexKey: 工具调用条目只追加不重排，内容重复时序号最稳
+              key={i}
+              item={it}
+              cwd={cwd}
+              writing={false}
+              isLast={i === items.length - 1}
+              liveTurn={liveTurn}
+            />
           ))}
         </div>
       </Collapse>
@@ -328,11 +337,14 @@ function ItemView({
   item,
   writing,
   isLast,
+  liveTurn,
   cwd,
 }: {
   item: Item;
   writing: boolean;
   isLast: boolean;
+  /** 这一轮还在跑（见 `AssistantTurn` 的 `liveTurn`）。 */
+  liveTurn: boolean;
   /** 解析正文里的相对图片路径、判断本地链接用。 */
   cwd: string;
 }) {
@@ -353,7 +365,9 @@ function ItemView({
     // 按名字分派到各自的呈现。所有工具共用一种卡片是之前数据不够的产物，
     // 不是设计选择 —— 见 toolcards/ToolCard.tsx 的模块头。
     case "tool":
-      return <ToolCard item={item} isLast={isLast} cwd={cwd} />;
+      // 只有「这一轮还在跑」时最后那一项才算在跑：切走再回来时历史整段重建，
+      // 最后一项若还是张工具卡，`isLast` 一身都会把它画成转圈 —— 而那一轮其实早结束了。
+      return <ToolCard item={item} isLast={isLast && liveTurn} cwd={cwd} />;
     case "server":
       return <ServerCard item={item} />;
     case "image":
@@ -786,6 +800,7 @@ function AssistantTurn({
   turn: t,
   time,
   isLast,
+  liveTurn,
   streaming,
   awaitingUser,
   showPayload,
@@ -798,6 +813,9 @@ function AssistantTurn({
   /** 这一轮的起止时刻。回答末尾显示答完的时刻与用时。 */
   time?: TurnTime;
   isLast: boolean;
+  /** 会话还在跑**这**一轮（不只是「有东西在跑」）：过程分组靠它显示「正在 …」，
+   *  也靠它保住末尾的「正在生成」—— 切页面回来时重建的那几轮不再谎报还在跑。 */
+  liveTurn: boolean;
   streaming: boolean;
   awaitingUser: boolean;
   showPayload: boolean;
@@ -910,7 +928,7 @@ function AssistantTurn({
             if (seg.kind === "process") {
               return (
                 // biome-ignore lint/suspicious/noArrayIndexKey: 分段按事件流顺序生成，没有独立 id
-                <ProcessGroup key={i} items={seg.items} cwd={cwd} />
+                <ProcessGroup key={i} items={seg.items} cwd={cwd} liveTurn={liveTurn} />
               );
             }
             // 「正在写」只算正在生成的那一段正文，与详细模式的判断口径一致。
@@ -921,6 +939,7 @@ function AssistantTurn({
                 item={seg.item}
                 cwd={cwd}
                 isLast={last}
+                liveTurn={liveTurn}
                 writing={streaming && isLast && last && seg.kind === "text"}
               />
             );
@@ -932,12 +951,15 @@ function AssistantTurn({
               item={item}
               cwd={cwd}
               isLast={i === items.length - 1}
+              liveTurn={liveTurn}
               writing={streaming && isLast && i === items.length - 1 && item.kind === "text"}
             />
           ))}
       {/* 挂在整轮末尾，不挂在某一段正文后面：思考、跑工具的时候最后一项不是正文，
           挂在正文上这几段就看不出还在跑。等用户回答提问时不算在跑。 */}
-      {streaming && isLast && !awaitingUser && <GeneratingHint label={items.length === 0} />}
+      {streaming && isLast && liveTurn && !awaitingUser && (
+        <GeneratingHint label={items.length === 0} />
+      )}
       {/* 回答下面那一行小动作。悬停才浮出来，但一直占着位置 —— 否则鼠标移上来
           的一瞬间整段对话会跳一下。一条动作都没有时整行不渲染（纯工具输出的回答
           不该在末尾留一条空白）。 */}
@@ -1319,6 +1341,7 @@ function TurnView({
   turn,
   time,
   isLast,
+  liveTurn,
   streaming,
   awaitingUser,
   showPayload,
@@ -1331,6 +1354,8 @@ function TurnView({
   turn: Turn;
   time?: TurnTime;
   isLast: boolean;
+  /** 会话正在跑的就是这一轮（见 `TurnList` 的 `liveTurn`）。 */
+  liveTurn: boolean;
   streaming: boolean;
   awaitingUser: boolean;
   showPayload: boolean;
@@ -1364,6 +1389,7 @@ function TurnView({
       turn={turn}
       time={time}
       isLast={isLast}
+      liveTurn={liveTurn}
       streaming={streaming}
       awaitingUser={awaitingUser}
       showPayload={showPayload}
@@ -1420,6 +1446,14 @@ export function TurnList({
   const live = !streaming;
   const slots = onRetry && live ? assistantActionSlots(turns) : [];
   const reports = useMemo(() => latestReports(turns), [turns]);
+  // 会话正在跑的是**最后那一轮**（一问一答成对）；不是最后几轮各算各的 —— 否则
+  // 切走再回来时，历史里最后一张没结果的工具卡会被当成「还在跑」。
+  const liveTurn = useMemo(() => {
+    for (let i = turns.length - 1; i >= 0; i--) {
+      if (turns[i].turn !== undefined) return turns[i].turn;
+    }
+    return undefined;
+  }, [turns]);
 
   return (
     <div className="flex flex-col gap-6">
@@ -1433,6 +1467,7 @@ export function TurnList({
             turn={t}
             time={turn !== undefined ? times?.[turn] : undefined}
             isLast={i === turns.length - 1}
+            liveTurn={i === turns.length - 1 && turn !== undefined && turn === liveTurn}
             streaming={streaming}
             awaitingUser={awaitingUser}
             showPayload={showPayload}
@@ -2107,7 +2142,6 @@ function TouchFocus() {
       { duration: 1400, easing: "ease-out" },
     );
     clear();
-    // biome-ignore lint/correctness/useExhaustiveDependencies: `turns` 只是「列表变了，再看一眼落没落上」，不参与计算
   }, [focus, sessionId, turns, clear]);
   return null;
 }

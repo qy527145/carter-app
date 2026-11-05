@@ -43,6 +43,7 @@ import type {
   SessionEvent,
   SessionRow,
   TodoView,
+  ToolUsageView,
   TurnFiles,
   TurnPrompt,
   TurnTime,
@@ -758,6 +759,31 @@ function withLive(turns: Turn[], live: LiveView[]): Turn[] {
   return [...turns, { role: "assistant", turn: last?.turn, items }];
 }
 
+/**
+ * 接回一条正在跑的会话时，把**已经跑完**那几条工具的结果补进 `live` 画出来的卡片。
+ *
+ * 历史快照在轮末才刷新，切回来这一刻这一轮还没结束：`withLive` 用 `live` 画出的
+ * 那几张卡里，有的已经跑完（`live` 里带结果），有的还悬着。悬着的若其实早就结束
+ * 了（事件在界面不在这条会话上时发过了），按 `call_id` 用 `finished_tools` 补上，
+ * 顺序不变。
+ */
+function restoreFinished(turns: Turn[], done: ToolUsageView[]): Turn[] {
+  if (done.length === 0) return turns;
+  const byId = new Map(done.map((d) => [d.call_id, d]));
+  return turns.map((t) => {
+    if (t.role !== "assistant") return t;
+    let changed = false;
+    const items = t.items.map((it) => {
+      if (it.kind !== "tool" || it.result !== undefined) return it;
+      const d = byId.get(it.callId);
+      if (!d) return it;
+      changed = true;
+      return { ...it, result: { ok: d.ok, content: d.result, elapsedMs: d.elapsed_ms } };
+    });
+    return changed ? { ...t, items } : t;
+  });
+}
+
 // ---------------------------------------------------------------------------
 // store
 // ---------------------------------------------------------------------------
@@ -936,7 +962,10 @@ export const useStore = create<Store>((set) => ({
       // `startProjectChat`），会话后到，这时再清一次就把刚落地的卡片抹掉了。
       ...(opts?.keepComposer ? {} : { composerContexts: [] }),
       goal: c.goal,
-      turns: withLive(historyToTurns(c.history, c.prompts), c.live ?? []),
+      turns: restoreFinished(
+        withLive(historyToTurns(c.history, c.prompts), c.live ?? []),
+        c.finished_tools ?? [],
+      ),
       // 接上的是正在跑的会话：错过的 `turn_started` 补不回来，按后端说的来。
       streaming: c.running ?? false,
       // 同理：切走时错过的提问也补不回来。不摆出表单，那一轮就永远等着。

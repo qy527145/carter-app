@@ -74,7 +74,7 @@ pub use connectors::{AuthState, CliState, ConnectorRow, SkillState};
 pub use goal::{Goal, GoalStatus};
 pub use input::{CommandRow, FileKind};
 pub use preview::FilePreview;
-pub use protocol::{AppEvent, Command, GoalView, SessionEvent, TodoView, UsageView};
+pub use protocol::{AppEvent, Command, GoalView, SessionEvent, TodoView, ToolUsageView, UsageView};
 pub use schedules::{Schedule, ScheduleKind, ScheduleStore};
 pub use session::{SessionOptions, StartedSession, start_session};
 pub use sessions::{SearchHit, SessionRow};

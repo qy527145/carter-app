@@ -552,6 +552,21 @@ export type CreatedSession = {
   pending_ask?: { id: number; questions: AskQuestion[] } | null;
   /** 这条会话现在的 todo 列表。事件不回放，接上后台那条时靠它把底栏的进度补回来。 */
   todos?: TodoView[];
+  /**
+   * 这一轮里已经跑完的工具（结果已定）。工具事件不回放，接回时按 `call_id` 把结果
+   * 补进卡片 —— 否则最后那张卡会一直停在「运行中」。
+   */
+  finished_tools?: ToolUsageView[];
+};
+
+/** 一条已经跑完的工具调用（见 `CreatedSession.finished_tools`）。 */
+export type ToolUsageView = {
+  call_id: string;
+  name: string;
+  ok: boolean;
+  /** 截断过的展示文本（与 `tool_finished` 的 `content` 同一口径）。 */
+  result: string;
+  elapsed_ms: number;
 };
 
 export type LiveView =

@@ -98,7 +98,7 @@ pub fn user_turn_count(messages: &[WireMessage]) -> u32 {
 ///
 /// 公开给 `history.rs`：重试要把历史回退到某一轮之前，靠同一个判据数轮次 ——
 /// 两边用两套判据的话，界面上的「第 N 轮」与回退点迟早对不上。
-pub(crate) fn is_turn_start(msg: &WireMessage) -> bool {
+pub fn is_turn_start(msg: &WireMessage) -> bool {
     msg.role == Role::User
         && msg.content.iter().any(|b| match b {
             Block::Text { text, .. } => !text.trim().is_empty(),

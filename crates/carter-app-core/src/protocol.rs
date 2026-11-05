@@ -359,6 +359,14 @@ pub enum SessionEvent {
         content: String,
         elapsed_ms: u64,
     },
+    /// 这条会话里**已经跑完**的工具调用（整表快照，只随接回时带回）。
+    ///
+    /// 工具事件不回放：切走页面再回来时，那些卡片只剩历史里的 `tool_use`，结果
+    /// 是空的 —— 看起来像还卡在那里。接回时把 `live` 里已经落定的那几条一并带上，
+    /// 界面按 `call_id` 补进卡片。
+    ///
+    /// `result` 是截断过的展示文本（与 `ToolFinished.content` 同一口径）。
+    ToolHistory { tools: Vec<ToolUsageView> },
     /// `agent` 工具里各个子 agent 的进度（整表快照）。
     AgentProgress {
         call_id: String,
@@ -470,6 +478,16 @@ pub struct AgentRun {
     pub tool: Option<String>,
     /// 最近一段输出（尾部截断）。
     pub text: String,
+}
+
+/// 一条已经跑完的工具调用（见 [`SessionEvent::ToolHistory`]）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolUsageView {
+    pub call_id: String,
+    pub name: String,
+    pub ok: bool,
+    pub result: String,
+    pub elapsed_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

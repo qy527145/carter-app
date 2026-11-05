@@ -153,9 +153,12 @@ pub fn turn_of_report(history: &[llm_adapt_core::WireMessage], number: u32) -> O
     // 那条回复合成一个桶画出来，所以这里的第 N 个桶对应界面上的第 N-1 轮。
     //
     // 边数边记，最后留下的就是这张工单**最近**那条汇报所在的桶 —— 卡片显示的就是它。
+    // 先按完整的序号记，最后统一减一。
     let mut turn: u32 = 0;
-    let mut first = true;
-    let mut found = None;
+    // 轮次号在**见到第 0 轮之后**才开始递增：第一个带正文的 user 消息是第 0 轮，
+    // 它之后每一条是新的一轮。
+    let mut next = false;
+    let mut hits: Vec<u32> = Vec::new();
     for m in history {
         let text: String = m
             .content
@@ -166,23 +169,22 @@ pub fn turn_of_report(history: &[llm_adapt_core::WireMessage], number: u32) -> O
             })
             .collect::<Vec<_>>()
             .join("\n");
-        if m.role != llm_adapt_core::Role::User || text.trim().is_empty() {
+        if !crate::view::is_turn_start(m) {
             continue;
         }
-        if first {
-            first = false;
-        } else {
+        if next {
             turn += 1;
         }
+        next = true;
         let head = text
             .strip_prefix(REPORT_MARK)
             .map(|rest| rest.lines().next().unwrap_or(""))
             .unwrap_or("");
         if report_number(head) == Some(number) {
-            found = Some(turn);
+            hits.push(turn);
         }
     }
-    found.map(|n| n.saturating_sub(1))
+    hits.last().map(|n| n.saturating_sub(1))
 }
 
 /// 汇报标题里的工单编号：`等你拍板 · #3 标题` → 3。与界面 `reportTicket` 同一条规则

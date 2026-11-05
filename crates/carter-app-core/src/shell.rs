@@ -232,6 +232,49 @@ impl LiveLog {
         });
     }
 
+    /// 这一轮已经跑完的工具：`(call_id, 名字, 参数, 完整结果)`。界面接上时用来补卡片。
+    pub fn finished_tools(&self) -> Vec<(String, String, String, String)> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|i| match i {
+                LiveItem::Tool {
+                    call_id,
+                    name,
+                    args,
+                    result: Some(result),
+                } => Some((call_id.clone(), name.clone(), args.clone(), result.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 已跑完的那些，成没成功按回灌给模型的那段正文判（失败带 `ERROR: ` 前缀，
+    /// 见 carter 的 `ToolResult::to_model_string`）。
+    pub fn finished_calls(&self) -> Vec<crate::protocol::ToolUsageView> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|i| match i {
+                LiveItem::Tool {
+                    call_id,
+                    name,
+                    args: _,
+                    result: Some(result),
+                } => Some(crate::protocol::ToolUsageView {
+                    call_id: call_id.clone(),
+                    name: name.clone(),
+                    ok: !result.starts_with("ERROR: "),
+                    result: crate::tools::record::cap(result),
+                    elapsed_ms: 0,
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+
     pub fn tool_finished(&self, call_id: &str, content: &str) {
         let mut live = self.0.lock().unwrap();
         for item in live.iter_mut().rev() {
