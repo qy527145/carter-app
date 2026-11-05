@@ -199,7 +199,9 @@ jobs:
       - name: Build artifacts
         run: |
           # Actually do builds and make zips and whatnot
-          dist build ${{ needs.plan.outputs.tag-flag }} --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
+          # `--pin=always`：不让 dist 重新编一遍 —— 同一个 target 目录里 tauri 刚
+          # 编好了一份（安装包就是它），`--pin=cp` 又会在两个 profile 间来回拷几百 MB。
+          dist build ${{ needs.plan.outputs.tag-flag }} --pin=always --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
           echo "dist ran successfully"
       - id: cargo-dist
         name: Post-build
@@ -221,6 +223,16 @@ jobs:
           path: |
             ${{ steps.cargo-dist.outputs.paths }}
             ${{ env.BUILD_MANIFEST_NAME }}
+
+      # 自更新的安装包（tauri 出的、带 .sig）不在 dist 的产物清单里，单独传。
+      # 有意与 `artifacts-*` 错开：后者会被 host job 的 `dist host --steps=upload`
+      # 一并传到 Release，而这些带 .sig 的文件要我们自己收齐、生成 latest.json 再发。
+      - name: "Upload updater artifacts"
+        uses: actions/upload-artifact@v7
+        with:
+          name: updater-artifacts-${{ join(matrix.targets, '_') }}
+          path: ${{ runner.temp }}/tauri-bundles/
+          if-no-files-found: error
 
   # Build and package all the platform-agnostic(ish) things
   build-global-artifacts:
@@ -312,6 +324,19 @@ jobs:
           # Overwrite the previous copy
           name: artifacts-dist-manifest
           path: dist-manifest.json
+      # 自更新：收齐各平台的 tauri 安装包，生成 latest.json，放进一起发布的那批文件。
+      - name: "Download updater artifacts"
+        uses: actions/download-artifact@v8
+        with:
+          pattern: updater-artifacts-*
+          path: updater
+          merge-multiple: true
+      - name: "Generate latest.json"
+        shell: bash
+        run: |
+          TAG="${{ needs.plan.outputs.tag }}"
+          bun run scripts/latest-json.ts "${TAG#v}" "$TAG" updater
+          cp updater/latest.json artifacts/latest.json
       # Create a GitHub Release while uploading all files to it
       - name: "Download GitHub Artifacts"
         uses: actions/download-artifact@v8
