@@ -115,6 +115,11 @@ pub struct StartedSession {
     /// 那些卡片只剩 `live` 里一条没有结果的记录 —— 看起来像还卡着。接回时一并带上，
     /// 界面按 `call_id` 把结果补进卡片。
     pub finished_tools: Vec<crate::protocol::ToolUsageView>,
+    /// 这条会话此刻还在跑的后台命令（`bash` 的 `run_in_background`）。
+    ///
+    /// 与 `todos` 同理：事件不回放，用户切走再回来时靠它把「还有后台任务在跑」
+    /// 那条提醒补回来 —— 不带的话，明明有任务在跑，界面上却什么都不显示。
+    pub background_shells: Vec<crate::protocol::BackgroundShellView>,
 }
 
 /// 接上一条正在后台跑的会话（不关掉重开），返回界面要的那份状态。
@@ -143,8 +148,25 @@ pub fn attach_session(shell: &AppShell, id: &str) -> Option<StartedSession> {
         // 发布过的那份快照，见 `Runner::emit` 里 `TodoUpdated` 那一支。
         todos: handle.todos.load().iter().map(todo_view).collect(),
         finished_tools: handle.live.finished_calls(),
+        background_shells: handle.background.running(),
         handle,
     })
+}
+
+/// 把后台命令表的变化接到事件总线上：界面据此画「还有后台任务在跑」的提醒条。
+///
+/// 表挂在句柄上（工具在轮内直接往里塞命令），所以开头这一接、侧边聊天各接一次。
+/// 事件不回放 —— 切走再回来靠 [`attach_session`] 带回的那份快照。
+fn watch_background(shell: &Arc<AppShell>, handle: &Arc<SessionHandle>) {
+    let shell = shell.clone();
+    let session_id = handle.id.clone();
+    handle.background.set_observer(Arc::new(move |shells| {
+        emit(
+            &shell,
+            &session_id,
+            SessionEvent::BackgroundShells { shells },
+        );
+    }));
 }
 
 /// 新建 / 续接一个会话。返回的句柄立即可以投递命令。
@@ -266,6 +288,7 @@ pub fn start_session(shell: Arc<AppShell>, opts: SessionOptions) -> carter::Resu
     // 侧边聊天要靠这份快照拿父会话的上下文，所以一开始就得有值。
     handle.publish_history(&thread.messages);
     shell.sessions.insert(meta.id.clone(), handle.clone());
+    watch_background(&shell, &handle);
     let history = crate::view::to_views(&thread.messages);
 
     // 盘上的目标是 `active` 的话，降级成 `paused`：用户关掉应用时它还在跑，
@@ -297,7 +320,8 @@ pub fn start_session(shell: Arc<AppShell>, opts: SessionOptions) -> carter::Resu
         include_task: true,
         fast: None,
         fast_ref: None,
-        shells: crate::tools::background::BackgroundShells::new(),
+        // 与句柄上那份是同一个：界面接回这条会话时要能读到「还有几条在跑」。
+        shells: handle.background.clone(),
         running: crate::tools::control::RunningTools::new(),
     };
     // 会话文件里还没标题（`meta` 下面要整个移进 Runner，先问一句）。
@@ -355,6 +379,9 @@ pub fn start_session(shell: Arc<AppShell>, opts: SessionOptions) -> carter::Resu
         pending_ask: None,
         todos: Vec::new(),
         finished_tools: Vec::new(),
+        // 新起的 runner 手里还没有后台命令（续接一条**还在跑**的会话走的是
+        // `attach_session`，那条路会带回真正在跑的那些）。
+        background_shells: Vec::new(),
     })
 }
 
@@ -389,6 +416,7 @@ pub(crate) fn start_side(w: SideWiring, id: String, parent_id: String) -> Arc<Se
     );
     handle.publish_history(&w.thread.messages);
     w.shell.sessions.insert(id.clone(), handle.clone());
+    watch_background(&w.shell, &handle);
 
     let ctx = SessionCtx {
         shell: w.shell,
@@ -406,7 +434,8 @@ pub(crate) fn start_side(w: SideWiring, id: String, parent_id: String) -> Arc<Se
         capture: None,
         fast: None,
         fast_ref: None,
-        shells: crate::tools::background::BackgroundShells::new(),
+        // 同上：侧边聊天也可能起后台命令，句柄上那份要跟着变。
+        shells: handle.background.clone(),
         running: crate::tools::control::RunningTools::new(),
     };
     let runner = Runner {

@@ -65,6 +65,7 @@ import {
 import { TOAST_MS, toastError } from "../lib/toast";
 import { historyToTurns, type Item, type Turn, useStore } from "../store";
 import { AskForm } from "./AskForm";
+import { BackgroundTasksBar } from "./BackgroundTasksBar";
 import { Composer, MessageImages } from "./Composer";
 import { ContextChips } from "./ContextChip";
 import { FilePreviewModal } from "./FilePreview";
@@ -2133,6 +2134,8 @@ export function ChatView() {
       <AskForm />
       {/* 目标条贴着输入框：它和「我要它干什么」是一件事，读起来是一句话。 */}
       <GoalBar />
+      {/* 后台任务还在跑：前台这一轮可能已经结束了，这里要一直提醒到它跑完。 */}
+      <BackgroundTasksBar />
       <MemorySuggestBar />
       <Composer />
       <TouchFocus />

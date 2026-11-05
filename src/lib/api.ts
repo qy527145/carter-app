@@ -110,6 +110,14 @@ export type SessionEvent =
   /** `agent` 工具里几个子 agent 的进度（整表快照，按 `call_id` 配对那张卡片）。 */
   | { type: "agent_progress"; call_id: string; agents: AgentRun[] }
   | { type: "todo_updated"; todos: TodoView[] }
+  /**
+   * 后台命令表变了（启动 / 从前台转后台 / 自己结束 / 被结束）。
+   *
+   * 整表快照，只含**还在跑的**。前台那一轮可能已经结束而命令还在跑（起服务、
+   * 长构建、`tail -f`），界面要在输入框上方留一条提醒，让用户知道「还没完，
+   * 跑完会自动唤醒接着做」。空数组 = 全跑完了。
+   */
+  | { type: "background_shells"; shells: BackgroundShellView[] }
   /** 长任务目标变了（设定 / 暂停 / 恢复 / 完成 / 清除）。`null` = 已经没有目标。 */
   | { type: "goal"; goal: GoalView | null }
   | { type: "ask_form"; id: number; questions: AskQuestion[] }
@@ -573,6 +581,21 @@ export type CreatedSession = {
    * 补进卡片 —— 否则最后那张卡会一直停在「运行中」。
    */
   finished_tools?: ToolUsageView[];
+  /**
+   * 这条会话此刻还在跑的后台命令。事件不回放，切走再接上时靠它把「还有后台任务
+   * 在跑」那条提醒补回来。
+   */
+  background_shells?: BackgroundShellView[];
+};
+
+/** 一条还在跑的后台命令（`bash` 的 `run_in_background`）。 */
+export type BackgroundShellView = {
+  /** `shell_id`（`bash` 返回的那个）。 */
+  id: string;
+  /** 起它时的命令行原文。界面截断显示，完整内容放在 `title` 里。 */
+  command: string;
+  /** 开始的时刻（epoch 毫秒）。界面据此显示「已运行多久」。 */
+  started_at: number;
 };
 
 /** 一条已经跑完的工具调用（见 `CreatedSession.finished_tools`）。 */

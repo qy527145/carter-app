@@ -137,6 +137,11 @@ pub struct SessionHandle {
     /// 别的会话发来的信（见 `peers.rs`）。放在句柄上而不走命令通道：正在跑的那一轮
     /// 要在工具返回时就能取走它，命令通道那时是会话任务自己在读。
     pub inbox: Arc<crate::peers::Inbox>,
+    /// 这条会话的后台命令表（`bash` 的 `run_in_background`）。
+    ///
+    /// 放在句柄上而不是只放在会话任务里：界面切走再切回来时，要能立刻知道
+    /// 「还有几条后台命令在跑」（`attach_session` 从这里取快照）。
+    pub background: Arc<crate::tools::background::BackgroundShells>,
     /// 只有 crate 内能构造 —— 命令通道的持有者是会话运行器，不该由外部塞进来。
     pub(crate) cmd_tx: mpsc::UnboundedSender<Command>,
 }
@@ -165,6 +170,7 @@ impl SessionHandle {
             attached: std::sync::atomic::AtomicBool::new(false),
             clock_skew_ms: std::sync::atomic::AtomicU64::new(0),
             inbox: Arc::default(),
+            background: crate::tools::background::BackgroundShells::new(),
             cmd_tx,
         })
     }

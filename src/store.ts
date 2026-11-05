@@ -31,6 +31,7 @@ import type {
   AppSettings,
   AskQuestion,
   AssistantView,
+  BackgroundShellView,
   BlockView,
   ContextView,
   CreatedSession,
@@ -151,6 +152,13 @@ export type Conv = {
   compacting: boolean;
   /** 等用户确认的候选记忆（输入框上方那一条）。空 = 不显示。 */
   memorySuggestions: MemoryCandidate[];
+  /**
+   * 还在跑的后台命令（`bash` 的 `run_in_background`）。整表快照，空 = 都跑完了。
+   *
+   * 前台那一轮结束时它们可能还在跑，跑完会自动唤醒会话接着做 —— 输入框上方那条
+   * 提醒就认这几位。
+   */
+  backgroundShells: BackgroundShellView[];
 };
 
 /**
@@ -489,6 +497,8 @@ export function reduceConv(c: Conv, e: SessionEvent, sessionId?: string): Partia
       };
     case "todo_updated":
       return { todos: e.todos };
+    case "background_shells":
+      return { backgroundShells: e.shells };
     case "ask_form":
       return { pendingForm: { id: e.id, questions: e.questions } };
     case "files_changed":
@@ -846,6 +856,7 @@ const emptyConversation: Conv = {
   context: null,
   compacting: false,
   memorySuggestions: [],
+  backgroundShells: [],
 };
 
 /** 主对话那部分状态（`Conv` 的字段藏在 store 里，还原出来给 reducer 用）。 */
@@ -866,6 +877,7 @@ function convOf(s: Conv): Conv {
     context: s.context,
     compacting: s.compacting,
     memorySuggestions: s.memorySuggestions,
+    backgroundShells: s.backgroundShells,
   };
 }
 
@@ -982,6 +994,8 @@ export const useStore = create<Store>((set) => ({
       // 待办不在历史里：它由 `todo_updated` 整表推过来，事件不回放。切走再接上时
       // 靠这里把底栏那条进度补回来，否则会话明明还在干活，列表却是空的。
       todos: c.todos ?? [],
+      // 后台命令同理：接上的这条会话可能还有命令在跑（提醒条要立刻出现）。
+      backgroundShells: c.background_shells ?? [],
       changed: changedRecord(c.changes),
       changesSince: c.changes_since ?? 0,
       times: timesRecord(c.times),

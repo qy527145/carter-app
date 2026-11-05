@@ -385,6 +385,15 @@ pub enum SessionEvent {
     },
     /// todo 列表整表更新。用于底栏那条进度提示。
     TodoUpdated { todos: Vec<TodoView> },
+    /// 后台命令表变了（启动 / 从前台转后台 / 自己结束 / 被 `kill_shell` 结束）。
+    ///
+    /// 整表快照，只含**还在跑的**那些。前台那一轮可能已经结束而命令还在跑
+    /// （起服务、长构建、`tail -f`），界面要据此画一条「还有后台任务在跑」的
+    /// 提醒 —— 增量在这件事上没用：漏掉一条「结束了」只会让提醒条一直挂着。
+    ///
+    /// 空数组 = 全跑完了。命令自己结束时这条之后还会跟着一轮完成通知
+    /// （见 `tools::background`），界面会看到会话被唤醒接着做。
+    BackgroundShells { shells: Vec<BackgroundShellView> },
     /// 长任务目标变了（设定 / 暂停 / 恢复 / 完成 / 清除）。`None` = 已经没有目标。
     ///
     /// 会话刚建好时也会发一次：界面据此画出目标条，否则重启后目标要等下一次变化
@@ -499,6 +508,17 @@ pub struct ToolUsageView {
     pub ok: bool,
     pub result: String,
     pub elapsed_ms: u64,
+}
+
+/// 一条还在跑的后台命令（见 [`SessionEvent::BackgroundShells`]）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BackgroundShellView {
+    /// `shell_id`（`bash` 返回的那个）。
+    pub id: String,
+    /// 起它时的命令行原文。界面截断显示，完整内容留在 `title` 里。
+    pub command: String,
+    /// 开始的时刻（epoch 毫秒）。界面据此显示「已运行多久」。
+    pub started_at: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

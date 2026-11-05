@@ -46,6 +46,7 @@ use serde_json::{Value, json};
 use carter::tools::{Tool, ToolResult};
 
 use crate::platform::Shell;
+use crate::protocol::BackgroundShellView;
 
 /// 单次读回的上限。与 bash 的结果上限一致：够模型看清，又不至于把上下文撑爆。
 const MAX_READ: usize = 30_000;
@@ -68,6 +69,9 @@ pub(crate) fn follow_up(id: &str) -> String {
 
 /// 完成通知的发送端，由会话任务订阅。见 [`BackgroundShells::subscribe`]。
 type Notifier = Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<String>>>>;
+
+/// 表变化时推给界面的回调（整表快照，只含还在跑的）。见 [`BackgroundShells::set_observer`]。
+type Observer = Arc<dyn Fn(Vec<BackgroundShellView>) + Send + Sync>;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ShellStatus {
@@ -102,21 +106,8 @@ struct ShellState {
     pid: Option<u32>,
     /// 模型已经知道它结束了（`bash_output` 读到过结束状态，或完成通知已经送过）。
     told: bool,
-}
-
-/// 命令自己结束：记下退出码并通知会话。被 kill 过的不要被「进程确实退出了」覆盖成
-/// Exited —— 界面上「我杀掉了它」和「它自己跑完了」是两件事，也不必通知。
-fn on_exit(state: &Mutex<ShellState>, id: &str, code: i32, notify: &Notifier) {
-    {
-        let mut s = state.lock().unwrap();
-        if !s.status.is_running() {
-            return;
-        }
-        s.status = ShellStatus::Exited(code);
-    }
-    if let Some(tx) = notify.lock().unwrap().as_ref() {
-        let _ = tx.send(id.to_string());
-    }
+    /// 起它的时刻（epoch 毫秒）。界面上的提醒条按它显示「已运行多久」。
+    started_at: u64,
 }
 
 /// 接管过来的一条命令（前台转后台）。见 [`BackgroundShells::adopt`]。
@@ -126,13 +117,13 @@ pub(crate) struct AdoptedShell {
     /// 继续往日志里追加输出用的句柄（读取任务持有它）。
     pub file: std::fs::File,
     state: Arc<Mutex<ShellState>>,
-    notify: Notifier,
+    owner: Arc<BackgroundShells>,
 }
 
 impl AdoptedShell {
     /// 进程退出了，把状态写回后台表。
     pub fn mark_exited(&self, code: i32) {
-        on_exit(&self.state, &self.id, code, &self.notify);
+        self.owner.finish(&self.state, &self.id, code);
     }
 }
 
@@ -141,6 +132,8 @@ pub struct BackgroundShells {
     shells: Mutex<HashMap<String, Arc<Mutex<ShellState>>>>,
     seq: AtomicU64,
     notify: Notifier,
+    /// 表有变化时推给界面。见 [`BackgroundShells::set_observer`]。
+    observer: Mutex<Option<Observer>>,
     /// 日志根目录。生产是 `~/.carter-app/shells`；测试给一个自己的临时目录 ——
     /// 测试之间共享 `CARTER_APP_HOME` 会互相删掉对方的文件（那是进程级环境变量）。
     root: PathBuf,
@@ -156,6 +149,7 @@ impl BackgroundShells {
             shells: Mutex::new(HashMap::new()),
             seq: AtomicU64::new(0),
             notify: Arc::default(),
+            observer: Mutex::new(None),
             root,
         })
     }
@@ -168,13 +162,75 @@ impl BackgroundShells {
         rx
     }
 
+    /// 订阅表的变化（启动、转后台、结束、被结束）。一条会话订阅一次，
+    /// 再订阅会顶掉前一个。收到的是**整表快照**，见 [`BackgroundShells::running`]。
+    pub(crate) fn set_observer(&self, observer: Observer) {
+        *self.observer.lock().unwrap() = Some(observer);
+    }
+
+    /// 还在跑的命令快照，按开始时间排序。
+    ///
+    /// 给界面画提醒条用：它要知道「还有几条、分别是什么」。已结束的不在里面 ——
+    /// 提醒条跟着消失，之后由完成通知推动下一轮对话。
+    pub fn running(&self) -> Vec<BackgroundShellView> {
+        let mut out: Vec<BackgroundShellView> = self
+            .shells
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|(id, state)| {
+                let s = state.lock().unwrap();
+                s.status.is_running().then(|| BackgroundShellView {
+                    id: id.clone(),
+                    command: s.command.clone(),
+                    started_at: s.started_at,
+                })
+            })
+            .collect();
+        out.sort_by(|a, b| {
+            a.started_at
+                .cmp(&b.started_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        out
+    }
+
+    /// 把当前快照推给界面。**每一处改了「还在跑的那些」的地方都要调** ——
+    /// 少一次，提醒条就停在上一份状态上（比如一直显示一条早就跑完的命令）。
+    fn publish(&self) {
+        let observer = self.observer.lock().unwrap().clone();
+        if let Some(f) = observer {
+            f(self.running());
+        }
+    }
+
+    /// 命令自己结束：记下退出码、通知界面、唤醒会话。被 kill 过的不要被
+    /// 「进程确实退出了」覆盖成 Exited —— 界面上「我杀掉了它」和「它自己跑完了」
+    /// 是两件事，也不必通知。
+    ///
+    /// 先推界面再唤醒会话：唤醒之后紧接着就是 `turn_started`，提醒条不该在新一轮
+    /// 已经开始之后还挂着。
+    fn finish(&self, state: &Mutex<ShellState>, id: &str, code: i32) {
+        {
+            let mut s = state.lock().unwrap();
+            if !s.status.is_running() {
+                return;
+            }
+            s.status = ShellStatus::Exited(code);
+        }
+        self.publish();
+        if let Some(tx) = self.notify.lock().unwrap().as_ref() {
+            let _ = tx.send(id.to_string());
+        }
+    }
+
     fn log_path(&self, session_id: &str, id: &str) -> PathBuf {
         self.root.join(session_id).join(format!("{id}.log"))
     }
 
     /// 起一条后台命令。返回 `(shell_id, 日志路径)`。
     pub fn spawn(
-        &self,
+        self: &Arc<Self>,
         command: &str,
         cwd: &std::path::Path,
         shell: &Shell,
@@ -222,18 +278,24 @@ impl BackgroundShells {
             status: ShellStatus::Running,
             pid,
             told: false,
+            started_at: crate::protocol::now_ms(),
         }));
-        let watcher = state.clone();
-        let (watch_id, notify) = (id.clone(), self.notify.clone());
+        // 先进表、推快照，再挂等待退出的任务：短命令可能在挂任务之前就结束了，
+        // 反过来写的话两份快照的顺序会飘（先「没了」再「有一条」）。
+        self.shells
+            .lock()
+            .unwrap()
+            .insert(id.clone(), state.clone());
+        self.publish();
+        let watcher = state;
+        let (watch_id, owner) = (id.clone(), self.clone());
         tokio::spawn(async move {
             let code = match child.wait().await {
                 Ok(st) => st.code().unwrap_or(-1),
                 Err(_) => -1,
             };
-            on_exit(&watcher, &watch_id, code, &notify);
+            owner.finish(&watcher, &watch_id, code);
         });
-
-        self.shells.lock().unwrap().insert(id.clone(), state);
         Ok((id, log))
     }
 
@@ -243,7 +305,7 @@ impl BackgroundShells {
     /// 日志文件里 —— 调用方把已经攒下的输出写进返回的 `file`，之后继续往里追加。
     /// 退出状态由调用方的监视任务回填（`AdoptedShell::mark_exited`）。
     pub(crate) fn adopt(
-        &self,
+        self: &Arc<Self>,
         command: &str,
         session_id: &str,
         pid: Option<u32>,
@@ -271,17 +333,19 @@ impl BackgroundShells {
             status: ShellStatus::Running,
             pid,
             told: false,
+            started_at: crate::protocol::now_ms(),
         }));
         self.shells
             .lock()
             .unwrap()
             .insert(id.clone(), state.clone());
+        self.publish();
         Ok(AdoptedShell {
             id,
             log,
             file,
             state,
-            notify: self.notify.clone(),
+            owner: self.clone(),
         })
     }
 
@@ -381,15 +445,19 @@ impl BackgroundShells {
             .get(id)
             .cloned()
             .ok_or_else(|| format!("没有这个后台命令：{id}"))?;
-        let mut s = state.lock().unwrap();
-        if !s.status.is_running() {
-            return Ok(s.status.clone());
+        {
+            let mut s = state.lock().unwrap();
+            if !s.status.is_running() {
+                return Ok(s.status.clone());
+            }
+            if let Some(pid) = s.pid {
+                kill_process_tree(pid);
+            }
+            s.status = ShellStatus::Killed;
         }
-        if let Some(pid) = s.pid {
-            kill_process_tree(pid);
-        }
-        s.status = ShellStatus::Killed;
-        Ok(s.status.clone())
+        // 被结束也是「不在跑了」：提醒条要跟着少一条。
+        self.publish();
+        Ok(ShellStatus::Killed)
     }
 
     /// 关会话时把还活着的全部收掉。
@@ -402,12 +470,7 @@ impl BackgroundShells {
 
     /// 还活着的命令数（测试与诊断用）。
     pub fn running_count(&self) -> usize {
-        self.shells
-            .lock()
-            .unwrap()
-            .values()
-            .filter(|s| s.lock().unwrap().status.is_running())
-            .count()
+        self.running().len()
     }
 }
 
@@ -664,6 +727,45 @@ mod tests {
         let none = tokio::time::timeout(Duration::from_millis(500), rx.recv()).await;
         assert!(none.is_err(), "被 kill 的不该通知：{none:?}");
         assert!(shells.completion(&killed).is_none());
+    }
+
+    /// 界面上的提醒条认的是这份快照：起来了就有一条，被结束之后就没有。
+    #[tokio::test]
+    async fn running_snapshot_follows_start_and_kill() {
+        let shells = shells();
+        assert!(shells.running().is_empty(), "刚建的表是空的");
+        let (id, _) = shells
+            .spawn("sleep 30", &std::env::temp_dir(), &sh(), "test-session")
+            .unwrap();
+        let running = shells.running();
+        assert_eq!(running.len(), 1, "{running:?}");
+        assert_eq!(running[0].id, id);
+        assert_eq!(running[0].command, "sleep 30");
+        assert!(running[0].started_at > 0);
+        shells.kill(&id).unwrap();
+        assert!(shells.running().is_empty(), "杀掉之后不该还挂在提醒条上");
+    }
+
+    /// 起来、结束各推一次快照 —— 界面靠这两下画出来和收回去。
+    #[tokio::test]
+    async fn observer_gets_a_snapshot_on_start_and_exit() {
+        let shells = shells();
+        let seen = Arc::new(Mutex::new(Vec::<Vec<String>>::new()));
+        let sink = seen.clone();
+        shells.set_observer(Arc::new(move |view| {
+            sink.lock()
+                .unwrap()
+                .push(view.into_iter().map(|s| s.id).collect());
+        }));
+        let mut rx = shells.subscribe();
+        let (id, _) = shells
+            .spawn("echo hi", &std::env::temp_dir(), &sh(), "test-session")
+            .unwrap();
+        // 结束通知是在推完快照之后才发的，所以等到它就说明两次都推过了。
+        let _ = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.first(), Some(&vec![id.clone()]), "{seen:?}");
+        assert_eq!(seen.last(), Some(&Vec::new()), "{seen:?}");
     }
 
     #[tokio::test]

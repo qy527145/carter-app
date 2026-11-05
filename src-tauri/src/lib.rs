@@ -288,6 +288,9 @@ struct CreatedSession {
     /// 这一轮里已经跑完的工具。工具事件不回放，接回时靠它把卡片上的结果补齐
     /// （否则最后一张卡会一直停在「运行中」）。
     finished_tools: Vec<carter_app_core::ToolUsageView>,
+    /// 这条会话此刻还在跑的后台命令。事件不回放，切走再接上时靠它把「还有后台
+    /// 任务在跑」那条提醒补回来。
+    background_shells: Vec<carter_app_core::protocol::BackgroundShellView>,
 }
 
 /// 进行中那一轮的一条记录（`LiveItem` 的界面形态）。
@@ -342,6 +345,7 @@ impl CreatedSession {
             pending_ask: started.pending_ask,
             todos: started.todos,
             finished_tools: started.finished_tools,
+            background_shells: started.background_shells,
         }
     }
 }
