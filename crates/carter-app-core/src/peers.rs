@@ -657,6 +657,7 @@ fn wake(shell: &Arc<AppShell>, target: &Peer, letter: Letter) -> Result<(), Stri
                 resume_latest: false,
                 resume_id: Some(target.id.clone()),
                 new_id: None,
+                title: None,
             },
         )
     };

@@ -564,6 +564,7 @@ async fn fire(
         resume_latest: false,
         resume_id: None,
         new_id: None,
+        title: None,
     };
     let started = match start_session(shell.clone(), opts) {
         Ok(v) => v,

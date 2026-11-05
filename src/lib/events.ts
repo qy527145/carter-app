@@ -143,6 +143,14 @@ export function useAppEvents() {
         void refreshSessions();
         return;
       }
+      if (payload.type === "ticket_session_opened") {
+        // 工单的执行会话刚开出来。**立刻**重拉列表：左边那条对话在这一刻已经
+        // 带着标题落盘了，用户派完工单就该点得到它，而不是盯着一个空列表等它
+        // 跑出第一句话。助理面板也顺手刷一下（那张卡上要出现「打开工单对话」）。
+        void refreshSessions();
+        void refreshAssistant();
+        return;
+      }
       if (payload.type === "assistant_turn_ended") {
         // 助理对话这一轮跑完了：它可能刚用配置工具改了观察源、规则或模式，面板要跟上。
         void refreshAssistant();

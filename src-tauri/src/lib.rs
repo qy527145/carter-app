@@ -374,12 +374,27 @@ async fn create_session(
     {
         return Ok(CreatedSession::from_started(started));
     }
+    // 目标会话刚好在收尾（工单那一轮跑完、助理正在关它）：不等的话这里会直接
+    // 报「还在收尾，请稍后再打开」—— 从用户视角看就是「点了没反应，再点一次才好」。
+    // 最多等几秒；超时仍然照常往下走，让 `start_session` 给出那句明确的错误。
+    if let Some(id) = resume_id.as_deref() {
+        for _ in 0..50 {
+            if !shell.is_closing(id) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if let Some(started) = carter_app_core::session::attach_session(&shell, id) {
+                return Ok(CreatedSession::from_started(started));
+            }
+        }
+    }
     let opts = SessionOptions {
         cwd: cwd.map(PathBuf::from).unwrap_or_else(default_cwd),
         model,
         resume_latest: resume,
         resume_id,
         new_id: None,
+        title: None,
     };
     let started =
         carter_app_core::start_session(shell.inner().clone(), opts).map_err(|e| e.to_string())?;

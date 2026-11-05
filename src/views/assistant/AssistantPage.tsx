@@ -64,7 +64,6 @@ import {
   saveAssistantMemory,
   saveAssistantSettings,
   saveAssistantSource,
-  type TicketStatus,
   testAssistantCommand,
   type Verdict,
 } from "../../lib/api";
@@ -77,6 +76,13 @@ import {
   openSession,
   refreshAssistant,
 } from "../../lib/sessionOps";
+import {
+  TICKET_ACTIVE,
+  TICKET_NEEDS_PERSON,
+  TICKET_STATUS_LABEL,
+  TICKET_STATUS_TONE,
+  type TicketTone,
+} from "../../lib/ticketUi";
 import { toastError, toastOk } from "../../lib/toast";
 import { useStore } from "../../store";
 import { PageIntro } from "../settings/AsyncBody";
@@ -85,36 +91,11 @@ import { PageIntro } from "../settings/AsyncBody";
 // 词表
 // ---------------------------------------------------------------------------
 
-const STATUS_LABEL: Record<TicketStatus, string> = {
-  queued: "排队中",
-  working: "进行中",
-  ready: "待查看",
-  blocked: "受阻",
-  failed: "失败",
-  needs_user: "等你拍板",
-  unreported: "跑完未汇报",
-  dropped: "无需处理",
-  done: "已完成",
-  stopped: "已叫停",
-};
-
-type Tone = "blue" | "green" | "orange" | "violet" | "pink";
-
-const STATUS_TONE: Record<TicketStatus, Tone | undefined> = {
-  queued: undefined,
-  working: "blue",
-  ready: "green",
-  blocked: "orange",
-  failed: "pink",
-  needs_user: "violet",
-  unreported: "orange",
-  dropped: undefined,
-  done: undefined,
-  stopped: undefined,
-};
-
-const NEEDS_PERSON: TicketStatus[] = ["ready", "needs_user", "blocked", "failed", "unreported"];
-const ACTIVE: TicketStatus[] = ["queued", "working"];
+// 状态怎么说不在这里写：侧栏、对话头部与这页要画同一套话，词表在
+// `lib/ticketUi.ts`。这里只留这页独有的判定（哪些算「等你处理」、哪些贴在
+// 进行中那一节），它们从共享词表里取。
+const NEEDS_PERSON = TICKET_NEEDS_PERSON;
+const ACTIVE = TICKET_ACTIVE;
 
 const VERDICT_LABEL: Record<Verdict, string> = {
   accept: "已接单",
@@ -329,7 +310,7 @@ function TicketCard({ t }: { t: AssistantTicket }) {
         <span className="truncate text-sm font-medium text-ink" title={t.title}>
           {t.title}
         </span>
-        <Badge tone={STATUS_TONE[t.status]}>{STATUS_LABEL[t.status]}</Badge>
+        <Badge tone={TICKET_STATUS_TONE[t.status]}>{TICKET_STATUS_LABEL[t.status]}</Badge>
         {t.pending.length > 0 && t.status !== "queued" && (
           <Badge title="等着送进执行会话的消息">{t.pending.length} 条待送</Badge>
         )}
@@ -1179,7 +1160,7 @@ function HistorySection({
 
 function DecisionRow({ d }: { d: AssistantDecision }) {
   const [busy, setBusy] = useState(false);
-  const tone: Tone | undefined =
+  const tone: TicketTone | undefined =
     d.verdict === "accept"
       ? "green"
       : d.verdict === "would_accept"

@@ -7,6 +7,7 @@ import {
   Copy,
   FileJson,
   GitBranch,
+  ListChecks,
   MessageSquare,
   MoreHorizontal,
   Pencil,
@@ -20,6 +21,7 @@ import { copyText } from "../lib/clipboard";
 import { bucketOf, fmtBytes, fullTime, relTime } from "../lib/format";
 import { displayName, modelTitle, useModelCatalog } from "../lib/modelLabel";
 import * as ops from "../lib/sessionOps";
+import { ticketMarkTitle } from "../lib/ticketUi";
 import { useStore } from "../store";
 import { IconButton } from "./ui/Button";
 import { hasSelection, type MenuEntry, useContextMenu } from "./ui/ContextMenu";
@@ -127,6 +129,9 @@ function Row({
   const menu = useContextMenu();
   // 当前这条正在生成：行首给一个呼吸点，切到别处也看得见它还在跑。
   const running = useStore((st) => active && st.streaming);
+  // 这条会话是不是助理派出去的工单。按 `session_id` 认（工单上记着它的执行会话），
+  // 不读标题 —— 工单对话的标题就是普通对话的标题，编号只留在面板那一侧。
+  const ticket = useStore((st) => st.assistant?.tickets.find((t) => t.session_id === s.id));
   const title = s.title || "未命名会话";
   // 会话文件里记的是模型引用（`ds/opus`）。显示成 `渠道/显示名`，悬停给出
   // 实际请求名与 meta —— 见 `lib/modelLabel.ts` 的说明。
@@ -257,6 +262,13 @@ function Row({
                   title="正在生成"
                   className="size-1.5 shrink-0 animate-pulse rounded-full bg-tone-blue"
                 />
+              )}
+              {ticket && (
+                // 工单会话的标记：一个清单图标，不占标题的位置。悬停给出状态 ——
+                // 「这条为什么自己动起来了」的答案在这儿，而不在标题里。
+                <ListChecks size={11} className="shrink-0 text-tone-violet" aria-label="工单对话">
+                  <title>{ticketMarkTitle(ticket.status)}</title>
+                </ListChecks>
               )}
               <span
                 className={`truncate text-sm ${active ? "font-medium text-ink" : "text-ink/90"}`}

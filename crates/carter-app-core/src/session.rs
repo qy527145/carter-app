@@ -66,6 +66,14 @@ pub struct SessionOptions {
     /// 给**新**会话指定 id。用来让助理的对话有一个固定身份 —— 界面靠它找到那条会话，
     /// 续接时也用 `resume_id` 走同一条路。续接已有会话时忽略。
     pub new_id: Option<String>,
+    /// 新会话一开始就带的标题。
+    ///
+    /// 给助理派出去的工单用：它的标题用户已经定过了（派发时那个 `title`），
+    /// 不该再拿任务书交给副模型重新起一个 —— 那样侧栏里同一张工单在对话和面板上
+    /// 是两个名字，而且起标题那几秒它还叫「未命名会话」。给了就不再自动起标题。
+    ///
+    /// 只在会话还没有标题时生效（续接一条老会话时忽略）。
+    pub title: Option<String>,
 }
 
 /// 新建/续接的结果：句柄 + 已有历史。
@@ -239,7 +247,7 @@ pub fn start_session(shell: Arc<AppShell>, opts: SessionOptions) -> carter::Resu
         .and_then(|m| m.modified().ok())
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_millis() as u64);
-    let (mut thread, meta, resumed) = match existing {
+    let (mut thread, mut meta, resumed) = match existing {
         Some(entry) => {
             let (mut t, m) = session::load(&entry)?;
             // 续接时把用户轮序号接到历史后面。
@@ -325,6 +333,29 @@ pub fn start_session(shell: Arc<AppShell>, opts: SessionOptions) -> carter::Resu
         running: crate::tools::control::RunningTools::new(),
     };
     // 会话文件里还没标题（`meta` 下面要整个移进 Runner，先问一句）。
+    // 调用方给了标题（助理派工单时那个 `title`）：新会话一开始就叫这个名字，
+    // 不再交给副模型起 —— 见 `SessionOptions::title`。
+    let preset = opts
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty());
+    if let (true, Some(t)) = (!resumed && meta.title.is_none(), preset) {
+        meta.title = Some(t.to_string());
+        // 用会话自己的 recorder 追加（不是新开一个句柄）：同一个文件上的两个追加
+        // 句柄并发时会绞在一起，见 `Runner::spawn_title` 的同一段说明。
+        //
+        // 这一写还有第二个作用：会话文件是惰性建的，写下这条标题文件就存在了 ——
+        // 派出去的工单对话因此**立刻**出现在侧栏里，不用等它跑出第一条消息。
+        if let Some(rec) = thread.recorder() {
+            rec.record(carter::session::RecordKind::Title {
+                title: t.to_string(),
+            });
+        }
+    }
+    // 有名字了就不再欠一次自动起标题 —— 这里必须重算，不能沿用上面那个旧判断，
+    // 否则带着标题开出来的会话还会白白问一次副模型（结果会被
+    // `auto_title_allowed` 挡掉，纯浪费一次请求）。
     let unnamed = meta.title.is_none();
     // 续接一条没标题的老会话时，补标题该用**历史里的第一句**，而不是用户现在说的
     // 这句话（见 `Runner::title_seed`）。
@@ -3258,6 +3289,7 @@ mod live_close {
                 resume_latest: false,
                 resume_id: None,
                 new_id: None,
+                title: None,
             },
         )
         .unwrap();
@@ -3350,6 +3382,7 @@ mod tests {
             resume_latest: false,
             resume_id: None,
             new_id: None,
+            title: None,
         };
         // 不用 `expect_err`：`StartedSession` 没实现 Debug，而且这里关心的是「返回 Err」。
         let msg = match start_session(shell, opts) {

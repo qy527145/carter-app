@@ -21,6 +21,7 @@ import {
   Eraser,
   FileText,
   GitBranch,
+  ListChecks,
   LoaderCircle,
   Megaphone,
   MessageSquare,
@@ -62,6 +63,7 @@ import {
   rename,
   retryReply,
 } from "../lib/sessionOps";
+import { ticketMarkTitle } from "../lib/ticketUi";
 import { TOAST_MS, toastError } from "../lib/toast";
 import { historyToTurns, type Item, type Turn, useStore } from "../store";
 import { AskForm } from "./AskForm";
@@ -1112,7 +1114,9 @@ function UserTurn({
         icon: <CornerUpLeft size={12} />,
         onSelect: () => {
           const reportTurn = useStore.getState().assistant?.report_turns?.[ticket.id];
-          jumpToTurn(ASSISTANT_CHAT_ID, reportTurn ?? 0);
+          // 没有那条汇报的轮次（还没有汇报、或汇报在往期存档里）时就只是回到
+          // 助理对话：给个 0 等于跳到一个不存在的轮次，人会觉得按钮坏了。
+          jumpToTurn(ASSISTANT_CHAT_ID, reportTurn);
         },
       });
     }
@@ -1244,7 +1248,7 @@ function ReportTurn({
           <Megaphone size={12} className="shrink-0" />
         )}
         <span className="truncate">{title}</span>
-        {sessionId && (
+        {sessionId ? (
           <button
             className="ml-auto flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-dim hover:bg-ink/5 hover:text-ink"
             onClick={() => openSession(sessionId)}
@@ -1252,7 +1256,16 @@ function ReportTurn({
             <MessageSquare size={11} />
             打开工单对话
           </button>
-        )}
+        ) : ticket ? (
+          // 工单还没开工（排队中 / 已结束）：没有对话可开。说清楚，别让人对着
+          // 一条汇报找「按钮去哪了」。
+          <span
+            title="这张工单还没有执行会话：排队中，或者只是被记了一笔"
+            className="ml-auto shrink-0 px-1.5 py-0.5 text-[11px] text-dim/70"
+          >
+            尚无执行会话
+          </span>
+        ) : null}
       </div>
       {body && <div className="mt-1 whitespace-pre-wrap break-words text-sm text-ink">{body}</div>}
       {answerable && (
@@ -1612,6 +1625,9 @@ function MessageList() {
 
   return (
     <div className="relative flex min-h-0 flex-1 flex-col">
+      {/* 「跳到某一轮」的落点。放在滚动容器**同一层**：它要动这块滚动条，
+          也得能压住「贴底跟随」（见组件里的说明）。 */}
+      <TouchFocus stick={stick} />
       <div
         ref={scrollRef}
         onScroll={onScroll}
@@ -1991,6 +2007,11 @@ function ChatHeader() {
   const menu = useContextMenu();
   const row = sessions.find((s) => s.id === sessionId);
   const title = row?.title;
+  // 这条会话是助理派出去的工单：标题照常显示（就是派单时那个名字，不带编号），
+  // 只在旁边加一枚标记 —— 工单对话能用的工具与普通对话不一样，得让人看得出。
+  const ticket = useStore((s) =>
+    sessionId ? s.assistant?.tickets.find((t) => t.session_id === sessionId) : undefined,
+  );
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const settled = useRef(false);
@@ -2075,6 +2096,15 @@ function ChatHeader() {
           )}
         </button>
       )}
+      {ticket && (
+        <span
+          title={ticketMarkTitle(ticket.status)}
+          className="flex shrink-0 items-center gap-1 rounded bg-tone-violet-soft px-1.5 py-0.5 text-[10px] text-tone-violet"
+        >
+          <ListChecks size={10} />
+          工单
+        </span>
+      )}
       <div className="ml-auto flex items-center gap-1">
         <ModePill className="mr-1" />
         <IconButton
@@ -2138,7 +2168,6 @@ export function ChatView() {
       <BackgroundTasksBar />
       <MemorySuggestBar />
       <Composer />
-      <TouchFocus />
     </div>
   );
 }
@@ -2146,26 +2175,42 @@ export function ChatView() {
 /**
  * 「跳到某一轮」的落点（见 `sessionOps.jumpToTurn`）。
  *
- * 那一轮不一定已经画出来了 —— 按 id 打开一条会话时历史是异步取回来的。所以这里
- * 挂着 `turns` 盯着：画出来之后再滚过去、闪一下，然后把请求消掉（不留着，免得
- * 之后随便一次重渲染又跳一遍）。等不到（那次翻页失败了、或者这一轮被压缩掉了）
- * 就作罢 —— 总比停在别处还晃一下强。
+ * 三件事让这里以前偶尔跳不过去，现在逐条处理：
+ *
+ * 1. **那一轮还没画出来** —— 按 id 打开一条会话时历史是异步取回来的，`turns`
+ *    一变就再试一次；等十秒还没有（翻页失败、那一轮被压缩掉了）就作罢。
+ * 2. **被「贴底」拽回去** —— 对话视图在 `turns` / `streaming` 变化时会把滚动条
+ *    贴到底部，跳到中间某轮之后紧接着来一条增量，就又滑到底了。所以落位期间
+ *    先解除贴底（`stick.current = false`），落位后也不自动恢复：用户本来就想
+ *    停在那儿看。
+ * 3. **同一轮连着跳两次** —— 请求带自己的 id，不用轮次号去重。
  */
-function TouchFocus() {
+function TouchFocus({ stick }: { stick: React.RefObject<boolean> }) {
   const focus = useStore((s) => s.focusTurn);
   const sessionId = useStore((s) => s.sessionId);
   const turns = useStore((s) => s.turns);
   const clear = useStore((s) => s.clearTurnFocus);
-  const touched = useRef<number | null>(null);
+  // 已经落位过的**请求** id。同一请求只跳一次，之后的重渲染不再动滚动条。
+  const done = useRef<number | null>(null);
+  // 请求到达的时刻：超过 DEADLINE 还找不到那一轮就放弃。
+  const since = useRef(0);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 这里要的正是「turns 一变就再试一次」—— 那一轮是随历史异步画出来的，effect 本身不读它
   useEffect(() => {
     if (!focus || focus.sessionId !== sessionId) return;
-    if (touched.current === focus.turn) {
-      clear();
+    if (done.current === focus.id) return;
+    if (since.current === 0) since.current = performance.now();
+    const el = document.querySelector<HTMLElement>(`[data-turn="${focus.turn}"]`);
+    if (!el) {
+      if (performance.now() - since.current > 10_000) {
+        since.current = 0;
+        clear();
+      }
       return;
     }
-    const el = document.querySelector<HTMLElement>(`[data-turn="${focus.turn}"]`);
-    if (!el) return;
-    touched.current = focus.turn;
+    done.current = focus.id;
+    since.current = 0;
+    // 别让贴底逻辑把刚跳过去的位置抢回去。
+    stick.current = false;
     el.scrollIntoView({ block: "center", behavior: "smooth" });
     el.animate(
       [
@@ -2175,6 +2220,6 @@ function TouchFocus() {
       { duration: 1400, easing: "ease-out" },
     );
     clear();
-  }, [focus, sessionId, turns, clear]);
+  }, [focus, sessionId, turns, clear, stick]);
   return null;
 }

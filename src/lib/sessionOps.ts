@@ -175,10 +175,12 @@ async function closeUnlessChat(id: string | null): Promise<void> {
  * 换会话走 [`openSession`]；落位交给对话视图：`focusTurn` 存成「还没跳」，
  * `MessageList` 把这一轮画出来之后滚过去、闪一下，然后把请求消掉（见
  * `ChatView` 的 `TouchFocus`）—— 不留在 store 里，免得之后每次重渲染都再跳一次。
+ *
+ * `turn` 可以不给：那条会话还没有这一轮的记录时（汇报在往期存档里、工单刚派出去
+ * 还没跑），就只是打开它。给一个不存在的轮次号等于什么都不做，人会觉得按钮坏了。
  */
-export function jumpToTurn(sessionId: string, turn: number): void {
-  const store = useStore.getState();
-  store.requestTurnFocus(sessionId, turn);
+export function jumpToTurn(sessionId: string, turn?: number): void {
+  if (turn !== undefined) useStore.getState().requestTurnFocus(sessionId, turn);
   openSession(sessionId);
 }
 

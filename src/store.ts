@@ -307,8 +307,13 @@ type Store = Conv & {
   /** 常驻助理的状态（面板与侧栏角标共用一份，`assistant_changed` 时重拉）。 */
   assistant: AssistantView | null;
   setAssistant: (a: AssistantView) => void;
-  /** 请求对话视图把某一轮滚进视野并闪一下（见 `sessionOps.jumpToTurn`）。落位后清掉。 */
-  focusTurn: { sessionId: string; turn: number } | null;
+  /**
+   * 请求对话视图把某一轮滚进视野并闪一下（见 `sessionOps.jumpToTurn`）。落位后清掉。
+   *
+   * `id` 是这次请求的身份，不是轮次号：连着两次都跳到同一轮时，只按 `turn` 去重
+   * 会把第二次当成「已经跳过了」直接吞掉 —— 那正是「偶尔跳不过去」的由来。
+   */
+  focusTurn: { sessionId: string; turn: number; id: number } | null;
   requestTurnFocus: (sessionId: string, turn: number) => void;
   clearTurnFocus: () => void;
   setComposerDraft: (text: string | null) => void;
@@ -840,6 +845,10 @@ export function withCurrent(
   ];
 }
 
+/** 「跳到某一轮」的请求号。单调递增，只用来区分两次请求，不落盘。 */
+let focusSeq = 0;
+const nextFocusId = () => ++focusSeq;
+
 const emptyConversation: Conv = {
   turns: [],
   streaming: false,
@@ -1041,7 +1050,8 @@ export const useStore = create<Store>((set) => ({
   setView: (view) => set({ view }),
   setTeamCwd: (teamCwd) => set({ teamCwd: rememberTeamCwd(teamCwd) }),
   setAssistant: (assistant) => set({ assistant }),
-  requestTurnFocus: (sessionId, turn) => set({ focusTurn: { sessionId, turn } }),
+  // 每次请求换一个新 id —— 见 `focusTurn` 的说明。
+  requestTurnFocus: (sessionId, turn) => set({ focusTurn: { sessionId, turn, id: nextFocusId() } }),
   clearTurnFocus: () => set({ focusTurn: null }),
   setComposerDraft: (composerDraft) => set({ composerDraft }),
   setComposerContexts: (contexts) => set({ composerContexts: contexts }),

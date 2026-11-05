@@ -229,6 +229,11 @@ pub enum AppEvent {
     AssistantOpen,
     /// 一条助理的执行会话跑完了一轮。界面据此拉起（或刷新）常驻的助理对话。
     AssistantTurnEnded { session_id: String },
+    /// 助理刚给一张工单开出了执行会话。
+    ///
+    /// 单独一条事件、而且**不等这一轮跑完**：派完工单，侧栏里那条对话就该立刻出现，
+    /// 用户点得到。只靠 `AssistantChanged` 不够 —— 那个只重拉面板，不重拉会话列表。
+    TicketSessionOpened { session_id: String },
     /// 一条会话给另一条发了信（见 `peers.rs`）。界面据此刷新侧栏（收信方可能刚被续接起来），
     /// 并在用户没看着收信方时提示一句。
     PeerMessage {

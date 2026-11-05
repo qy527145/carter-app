@@ -189,6 +189,11 @@ export type AppEvent =
   /** 托盘菜单点了「助理面板」：切过去。 */
   | { type: "assistant_open" }
   | { type: "assistant_turn_ended"; session_id: string }
+  /**
+   * 助理刚给一张工单开出了执行会话。会话文件这一下已经带着标题落盘了，
+   * 界面收到要**立刻**重拉会话列表 —— 左边那条对话不该等它跑出第一句话才出现。
+   */
+  | { type: "ticket_session_opened"; session_id: string }
   /** 一条会话给另一条发了信（跨会话消息）。收信方可能刚在后台被续接起来。 */
   | { type: "peer_message"; from: string; to: string; preview: string }
   /**

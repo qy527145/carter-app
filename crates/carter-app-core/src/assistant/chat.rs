@@ -31,6 +31,7 @@ pub fn options(model: Option<String>) -> SessionOptions {
         resume_latest: false,
         resume_id: Some(CHAT_SESSION_ID.into()),
         new_id: Some(CHAT_SESSION_ID.into()),
+        title: None,
     }
 }
 

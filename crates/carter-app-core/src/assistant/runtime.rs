@@ -70,6 +70,10 @@ pub async fn run(shell: Arc<AppShell>) {
         Ok(_) => {}
         Err(e) => tracing::warn!(error = %e, "助理：恢复工单时写盘失败"),
     }
+    // 老版本把工单会话的标题改成了「助理 #3 xxx」。现在标题就是普通对话的标题，
+    // 编号与「助理」前缀只在助理面板里出现 —— 这里把盘上那些旧名字改回来，
+    // 用户不必自己去侧栏一条条重命名。
+    migrate_ticket_titles(&shell);
     tokio::spawn(watch(shell.clone()));
     // 助理对话跟着应用一起起来：汇报随时有地方送，不等用户先点进去。
     if let Err(e) = super::chat::ensure(&shell) {
@@ -81,6 +85,36 @@ pub async fn run(shell: Arc<AppShell>) {
     loop {
         ticker.tick().await;
         tick(&shell).await;
+    }
+}
+
+/// 把老版本留在工单会话上的「助理 #3 xxx」标题改回普通对话的标题。
+///
+/// 旧版本在第一次跑完时把会话名改成 `助理 {工单标签}`，标签本身带编号。现在标题
+/// 就是派单时起的那个名字 —— 编号与「助理」只在助理面板里用。只动**能确定是我们
+/// 自己起的**那些（前缀 + 编号），用户自己重命名过的原样留着。
+fn migrate_ticket_titles(shell: &AppShell) {
+    let tickets: Vec<(String, String, u32)> = shell.assistant.read(|s| {
+        s.tickets
+            .iter()
+            .filter_map(|t| {
+                t.session_id
+                    .clone()
+                    .map(|sid| (sid, t.title.clone(), t.number))
+            })
+            .collect()
+    });
+    for (sid, title, number) in tickets {
+        let Some(current) = crate::sessions::title_of(&sid) else {
+            continue;
+        };
+        let old = format!("助理 #{number} {title}");
+        if current != old {
+            continue;
+        }
+        if let Err(e) = crate::sessions::rename(&sid, &title) {
+            tracing::warn!(session = %sid, error = %e, "助理：改回工单会话的标题失败");
+        }
     }
 }
 
@@ -664,6 +698,10 @@ async fn start(shell: &Arc<AppShell>, l: &Launch, model: Option<String>) -> Resu
                     resume_latest: false,
                     resume_id: t.session_id.clone(),
                     new_id: None,
+                    // 工单会话的标题就是工单的标题：用户在派单时已经给它起过名，
+                    // 不该再让副模型起一个（侧栏与面板上会是两个名字），也不带编号 ——
+                    // 编号是助理那边指代工单用的，对话列表里它就是一条普通对话。
+                    title: Some(t.title.clone()),
                 },
             )
             .map_err(|e| format!("开不出执行会话：{e}"))?;
@@ -688,6 +726,11 @@ async fn start(shell: &Arc<AppShell>, l: &Launch, model: Option<String>) -> Resu
         shell.assistant.take_worker(&sid);
         return Err("执行会话没能接收消息".into());
     }
+    // 会话文件在开会话那一步就已经带着标题落盘了（见 `SessionOptions::title`），
+    // 所以侧栏重拉一次就能看到它 —— 不用等这一轮跑出第一条消息。
+    shell.emit(AppEvent::TicketSessionOpened {
+        session_id: sid.clone(),
+    });
     changed(shell);
     Ok(())
 }
@@ -882,9 +925,9 @@ async fn on_idle(shell: &Arc<AppShell>, session_id: &str) {
             }
         }
         if let Some(t) = &after {
-            if t.runs == 1 {
-                let _ = crate::sessions::rename(session_id, &format!("助理 {}", t.label()));
-            }
+            // 工单会话的标题在开会话时就定好了（就是工单标题，见 `start`），
+            // 这里不再改名：改成一个带编号、带「助理」前缀的名字，会让侧栏里那条
+            // 对话与面板上这张工单看起来是两件事，而用户要的是同一条对话。
             if t.status.needs_person() {
                 alert(shell, t);
             }
@@ -1242,6 +1285,7 @@ mod live {
                 resume_latest: false,
                 resume_id: None,
                 new_id: Some(format!("live-loop-{}", now_ms())),
+                title: None,
             },
         )
         .unwrap();
@@ -1440,6 +1484,7 @@ mod live {
                 resume_latest: false,
                 resume_id: None,
                 new_id: Some(format!("live-nocap-{}", now_ms())),
+                title: None,
             },
         )
         .unwrap();
