@@ -13,8 +13,12 @@
 //!
 //! ## call_id 由谁定
 //!
-//! 由这里定。包装层就是被调用的那个对象，所以「开始」与「结束」是天然配对的 ——
+//! 默认在这里定。包装层就是被调用的那个对象，所以「开始」与「结束」是天然配对的 ——
 //! 不需要去猜 carter 内部怎么给调用编号（并发工具调用时那是会错的）。
+//!
+//! 会话自己派发调用时（`session.rs::Runner::run_one_call`）编号是现成的
+//! （`ToolCall.id`），用 [`Recorded::with_call_id`] 指定；那时两张卡片由调用方
+//! 自己发，这里只管执行。
 //!
 //! ## 一个已知的空档
 //!
@@ -35,6 +39,7 @@ use super::control::RunningTools;
 use crate::shell::LiveLog;
 
 /// 送给界面的工具事件。与 `protocol::SessionEvent` 的两条对应。
+#[derive(Clone)]
 pub enum ToolEvent {
     Started {
         call_id: String,
@@ -79,6 +84,12 @@ pub struct Recorded {
     live: Option<Arc<LiveLog>>,
     /// 正在跑的工具表。界面按 `call_id` 对单条命令做「中断 / 转后台」。
     running: Option<Arc<RunningTools>>,
+    /// 会话已经分配好了 `call_id`（见 [`Runner::run_one_call`]）。
+    ///
+    /// carter 的 `Tool` trait 只拿得到参数、拿不到调用编号，所以它每次自己编一个。
+    /// 会话自己派发时编号在外面（`ToolCall.id`），启动、结果两张卡片都按它配对 ——
+    /// 包装层不能另编一个，否则界面上的「中断」找不到那条命令。
+    call_id: Option<String>,
 }
 
 impl Recorded {
@@ -95,7 +106,14 @@ impl Recorded {
             activity,
             live: None,
             running: None,
+            call_id: None,
         }
+    }
+
+    /// 这次调用的编号由外面给定（会话的 `run_one_call` 会先报「开始」）。
+    pub fn with_call_id(mut self, call_id: Option<String>) -> Self {
+        self.call_id = call_id;
+        self
     }
 
     pub fn with_live(mut self, live: Option<Arc<LiveLog>>) -> Self {
@@ -109,7 +127,7 @@ impl Recorded {
     }
 }
 
-fn cap(content: &str) -> String {
+pub(crate) fn cap(content: &str) -> String {
     if content.len() <= MAX_RESULT {
         return content.to_string();
     }
@@ -140,19 +158,27 @@ impl Tool for Recorded {
     }
 
     async fn execute(&self, args: Value) -> ToolResult {
-        let call_id = format!("t{}", self.seq.fetch_add(1, Ordering::Relaxed));
+        let ours = self.call_id.is_some();
+        let call_id = self
+            .call_id
+            .clone()
+            .unwrap_or_else(|| format!("t{}", self.seq.fetch_add(1, Ordering::Relaxed)));
         let started = Instant::now();
         self.activity.fetch_add(1, Ordering::Relaxed);
 
-        if let Some(live) = &self.live {
-            live.tool_started(&call_id, self.inner.name(), &args);
+        // 外面给了编号：启动与结果两张卡片由调用方配对发出（见 `session.rs` 的
+        // `run_one_call`），这里不再重复。
+        if !ours {
+            if let Some(live) = &self.live {
+                live.tool_started(&call_id, self.inner.name(), &args);
+            }
+            // 先发「开始」再执行：长时间跑的命令（构建、测试）应当立刻在界面上出现。
+            let _ = self.tx.send(ToolEvent::Started {
+                call_id: call_id.clone(),
+                name: self.inner.name().to_string(),
+                args: args.clone(),
+            });
         }
-        // 先发「开始」再执行：长时间跑的命令（构建、测试）应当立刻在界面上出现。
-        let _ = self.tx.send(ToolEvent::Started {
-            call_id: call_id.clone(),
-            name: self.inner.name().to_string(),
-            args: args.clone(),
-        });
 
         // 把这次调用的控制句柄放进 task-local，工具（`bash`）执行时才能读到
         // 「用户按了中断 / 转后台」。包装层是唯一知道 `call_id` 的地方 —— 界面
@@ -164,6 +190,9 @@ impl Tool for Recorded {
         // 这一轮进行中到的跨会话来信，搭这条结果送进去（见 `peers.rs`）。界面卡片上
         // 也照样带着 —— 模型看到了什么，用户就该看到什么。
         crate::peers::drain_into(&mut res.content);
+        if ours {
+            return res;
+        }
         if let Some(live) = &self.live {
             live.tool_finished(&call_id, &res.content);
         }

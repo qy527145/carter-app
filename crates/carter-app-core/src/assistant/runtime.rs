@@ -276,6 +276,8 @@ pub fn deliver(shell: &Arc<AppShell>, ticket_id: &str, text: String, wake: Wake)
                 return false;
             }
             t.pending.push(text);
+            // 又有新动静了：之前划掉的那条汇报重新算数。
+            t.ignored = false;
             t.updated_at = now_ms();
             let wakes = match wake {
                 Wake::Person => !matches!(t.status, TicketStatus::Working | TicketStatus::Queued),
@@ -307,6 +309,8 @@ pub enum TicketAction {
     Done,
     /// 叫停：打断正在跑的这一轮，之后不再收任何事件。
     Stop,
+    /// 助理对话里那条汇报划掉：不回答、也不结束，只是别再排在助理的「等你回复」里。
+    Ignore,
 }
 
 pub async fn ticket_action(
@@ -333,6 +337,12 @@ pub async fn ticket_action(
             // 在面板或汇报卡片上答的，助理对话里也记一笔（只记不跑）：否则它不知道
             // 用户已经答过，下次开口还会再问一遍。
             if let Some(label) = label {
+                // 用户回过了，这条就不该再算「等着我」。之前划掉的汇报也一并作废。
+                let _ = shell.assistant.with(|s| {
+                    let t = s.ticket_mut(ticket_id)?;
+                    t.ignored = false;
+                    Some(())
+                });
                 super::chat::record(shell, super::chat::answered_text(&label, text));
             }
         }
@@ -356,6 +366,25 @@ pub async fn ticket_action(
             // 与回复同理：在面板或汇报卡片上结束的，助理对话里也记一笔，免得它还当这张没处理。
             if let Some(label) = closed {
                 super::chat::record(shell, super::chat::closed_text(&label));
+            }
+        }
+        TicketAction::Ignore => {
+            let label = shell.assistant.with(|s| {
+                let t = s.ticket_mut(ticket_id)?;
+                t.ignored = true;
+                t.updated_at = now_ms();
+                Some(t.label())
+            })?;
+            // 让助理知道这条它别再等着了 —— 否则它下次开口还会把这条当成没处理。
+            if let Some(label) = label {
+                super::chat::record(
+                    shell,
+                    super::chat::noted_text(
+                        "已忽略",
+                        &label,
+                        "用户把这条汇报划掉了：知道了，不用再催，也不用跟进；有事它会自己再来。",
+                    ),
+                );
             }
         }
         TicketAction::Stop => {
@@ -951,6 +980,11 @@ pub struct AssistantView {
     pub busy: Vec<String>,
     /// 要人处理的工单数（侧栏角标、托盘）。
     pub attention: usize,
+    /// 每张工单最近一条汇报在助理对话里的轮次号（工单 id → 轮）。
+    ///
+    /// 助理对话的卡片上要能「跳到那一轮」；事件不回放，这个映射随面板状态一起带回，
+    /// 卡片才不用自己把整段历史翻一遍（它在别的会话里，界面手里没有）。
+    pub report_turns: std::collections::HashMap<String, u32>,
 }
 
 pub fn view(shell: &AppShell) -> AssistantView {
@@ -966,19 +1000,33 @@ pub fn view(shell: &AppShell) -> AssistantView {
         .map(|s| s.id.clone())
         .collect();
     let attention = attention(&state);
+    // 助理对话在后台跑着的话，历史就在句柄的快照上（每轮刷新）；没在跑就退回盘上那份。
+    // 都没有（还没开过）就跳到哪算哪 —— 空表。
+    let history: Vec<llm_adapt_core::WireMessage> =
+        match shell.session(crate::assistant::CHAT_SESSION_ID) {
+            Some(h) => h.history.load_full().as_ref().clone(),
+            None => crate::session::chat_history().unwrap_or_default(),
+        };
+    let report_turns = state
+        .tickets
+        .iter()
+        .filter_map(|t| super::chat::turn_of_report(&history, t.number).map(|n| (t.id.clone(), n)))
+        .collect();
     AssistantView {
         state,
         busy,
         attention,
+        report_turns,
     }
 }
 
 /// 要人处理的东西有几件：要人处理的工单 + 等批准的「本来会接」+ 出问题的来源。
 pub fn attention(state: &State) -> usize {
+    // 用户划掉过的那些不再算「等着我」：他看过了，只是没回答、也没结束它。
     let tickets = state
         .tickets
         .iter()
-        .filter(|t| t.status.needs_person())
+        .filter(|t| t.status.needs_person() && !t.ignored)
         .count();
     let approvals = state
         .decisions
@@ -1097,6 +1145,10 @@ mod tests {
         assert_eq!(attention(&s), 3);
         s.decisions[0].dismissed = true;
         assert_eq!(attention(&s), 2);
+        // 用户在助理对话里划掉那条汇报：看过了，但没回答也没结束 —— 不再算「等着我」。
+        // 面板上那张卡片还在，只是角标少一个。
+        s.ticket_mut(&a).unwrap().ignored = true;
+        assert_eq!(attention(&s), 1);
     }
 }
 
@@ -1162,6 +1214,112 @@ mod live {
         }
         assert!(closed, "一轮跑完之后助理开的会话应当被关掉");
         let _ = crate::sessions::delete(t.session_id.as_deref().unwrap());
+    }
+
+    /// 同一套装配 + 一句工具很多的话：抓这一轮的请求体，看工具结果之后有没有再发请求。
+    ///
+    /// 这是用户报的那个现象在底层的样子：「工具调用了，但没再发请求」。默认不跑：
+    /// `cargo test -p carter-app-core live_tool_loop -- --ignored --nocapture`
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn live_tool_loop_sends_a_request_after_every_tool_result() {
+        let home = std::env::temp_dir().join(format!("carter-live-loop-{}", now_ms()));
+        std::fs::create_dir_all(&home).unwrap();
+        let config = carter::config::Config::load().expect("读不到 ~/.carter/config.toml");
+        let shell = AppShell::new(config);
+        let shell = Arc::new(
+            Arc::try_unwrap(shell)
+                .ok()
+                .unwrap()
+                .with_capture(home.join("captures")),
+        );
+        let dir = home.join("work");
+        std::fs::create_dir_all(&dir).unwrap();
+        let started = start_session(
+            shell.clone(),
+            SessionOptions {
+                cwd: dir.clone(),
+                model: None,
+                resume_latest: false,
+                resume_id: None,
+                new_id: Some(format!("live-loop-{}", now_ms())),
+            },
+        )
+        .unwrap();
+        let id = started.handle.id.clone();
+        let mut rx = shell.subscribe();
+        started.handle.send(Command::SendPrompt {
+            text: "依次建三个文件：先 a.txt 内容是 1，再 b.txt 内容是 2，最后 c.txt 内容是 3。\
+                   每个都用 write_file 工具，建完回一句「好了」。"
+                .into(),
+            id: None,
+            interject: false,
+        });
+        loop {
+            match tokio::time::timeout(Duration::from_secs(180), rx.recv()).await {
+                Ok(Ok(AppEvent::Session {
+                    event: SessionEvent::Idle,
+                    ..
+                })) => break,
+                Ok(Ok(_)) => {}
+                _ => panic!("这一轮没跑完"),
+            }
+        }
+        for f in ["a.txt", "b.txt", "c.txt"] {
+            assert!(dir.join(f).exists(), "{f} 没建出来");
+        }
+        // 抓包：每一条带 tool_result 的请求之后，都必须还有一次带 tool_use 的请求
+        // （或者它就是最后一次 —— 模型不再要工具了）。
+        let rows = shell.capture.load(&id);
+        let mut shapes = Vec::new();
+        for r in &rows {
+            let body: serde_json::Value = serde_json::from_str(&r.request_body).unwrap_or_default();
+            let msgs = body["messages"].as_array().cloned().unwrap_or_default();
+            let has_result = msgs.iter().any(|m| {
+                m["content"]
+                    .as_array()
+                    .is_some_and(|c| c.iter().any(|b| b["type"] == "tool_result"))
+            });
+            let last_assistant_tools = msgs
+                .iter()
+                .rev()
+                .find(|m| m["role"] == "assistant")
+                .and_then(|m| {
+                    let c = m["content"].as_array()?;
+                    c.iter()
+                        .find(|b| b["type"] == "tool_use")
+                        .map(|b| b["name"].as_str().unwrap_or("").to_string())
+                });
+            shapes.push((has_result, last_assistant_tools));
+        }
+        println!("{} 次请求：{shapes:?}", rows.len());
+        assert!(
+            shapes.iter().filter(|(r, _)| *r).count() >= 3,
+            "三次工具结果之后都该再发一次请求（实际：{shapes:?}）"
+        );
+        // 每次请求里「最后一条助手消息带的工具」都不该是上一轮就没跑完的那条：
+        // 所有 tool_use 都要有对应的 tool_result（断口必须在请求前补上）。
+        for r in &rows {
+            let body: serde_json::Value = serde_json::from_str(&r.request_body).unwrap_or_default();
+            let msgs = body["messages"].as_array().cloned().unwrap_or_default();
+            let mut open: Vec<String> = Vec::new();
+            for m in &msgs {
+                for b in m["content"].as_array().cloned().unwrap_or_default() {
+                    match b["type"].as_str() {
+                        Some("tool_use") => {
+                            open.push(b["id"].as_str().unwrap_or_default().to_string())
+                        }
+                        Some("tool_result") => {
+                            let id = b["tool_use_id"].as_str().unwrap_or_default();
+                            open.retain(|x| x != id);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            assert!(open.is_empty(), "请求里带着没结果的工具调用：{open:?}");
+        }
+        let _ = crate::sessions::delete(&id);
     }
 
     /// 等助理对话跑完一轮，返回这期间模型调过的工具名。

@@ -4,7 +4,7 @@
 // `assistant_ticket_action` 的 reply，原话送进工单，不经过助理模型转述；后端顺手在
 // 助理对话里记一笔「已答复」，所以从哪答，助理都知道。
 
-import { Check } from "lucide-react";
+import { Check, EyeOff } from "lucide-react";
 import { useState } from "react";
 import { type AssistantTicket, assistantTicketAction } from "../lib/api";
 import { toastError, toastOk } from "../lib/toast";
@@ -12,7 +12,7 @@ import { Button } from "./ui/Button";
 import { Input } from "./ui/Input";
 
 /**
- * `withDone`：带上「看过了，结束」。面板卡片顶栏已经有这个按钮，不重复；
+ * `withDone`：带上「看过了，结束」与「忽略」。面板卡片顶栏已经有结束按钮，不重复；
  * 助理对话的汇报卡片上没有别的入口，要带。
  */
 export function TicketReply({ t, withDone = false }: { t: AssistantTicket; withDone?: boolean }) {
@@ -36,6 +36,15 @@ export function TicketReply({ t, withDone = false }: { t: AssistantTicket; withD
     setBusy(true);
     assistantTicketAction(t.id, { type: "done" })
       .then(() => toastOk("已结束"))
+      .catch(toastError)
+      .finally(() => setBusy(false));
+  };
+
+  const ignore = () => {
+    if (busy) return;
+    setBusy(true);
+    assistantTicketAction(t.id, { type: "ignore" })
+      .then(() => toastOk("已忽略（工单没结束，面板上还在）"))
       .catch(toastError)
       .finally(() => setBusy(false));
   };
@@ -73,16 +82,28 @@ export function TicketReply({ t, withDone = false }: { t: AssistantTicket; withD
           发送
         </Button>
         {withDone && (
-          <Button
-            size="sm"
-            variant="ghost"
-            disabled={busy}
-            onClick={done}
-            title="看过了，不用再做什么，结束这张工单"
-          >
-            <Check size={12} />
-            结束
-          </Button>
+          <>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={busy}
+              onClick={ignore}
+              title="我知道了，先不回复 —— 这条汇报从助理对话里排掉。工单不结束，面板上照常显示"
+            >
+              <EyeOff size={12} />
+              忽略
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={busy}
+              onClick={done}
+              title="看过了，不用再做什么，结束这张工单"
+            >
+              <Check size={12} />
+              结束
+            </Button>
+          </>
         )}
       </div>
     </div>

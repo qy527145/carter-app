@@ -17,6 +17,7 @@ import {
   ChevronRight,
   CircleCheck,
   Copy,
+  CornerUpLeft,
   Eraser,
   FileText,
   GitBranch,
@@ -35,7 +36,7 @@ import {
   Wrench,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { getAssistantEpisode, newAssistantEpisode, type TurnTime } from "../lib/api";
@@ -49,6 +50,7 @@ import {
   clearChanges,
   export_,
   fork,
+  jumpToTurn,
   regenerate,
   rename,
   retryReply,
@@ -1047,6 +1049,13 @@ function UserTurn({
 
   const retry = () => (retryAsks ? setConfirmingRetry(true) : onRetry?.());
 
+  // 工单任务书里「你在替用户处理一张工单：#12 标题」那一行 → 对应工单（按号找，
+  // 面板状态里就有）。
+  const number = /你在替用户处理一张工单：#(\d+)/.exec(turn.text)?.[1];
+  const ticket = useStore((s) =>
+    number ? (s.assistant?.tickets.find((t) => t.number === Number(number)) ?? null) : null,
+  );
+
   const menuEntries = (): MenuEntry[] => {
     const entries: MenuEntry[] = [
       {
@@ -1063,6 +1072,18 @@ function UserTurn({
         label: "从这里分叉",
         icon: <GitBranch size={12} />,
         onSelect: onFork,
+      });
+    }
+    // 这是助理派出去的工单（任务书第一行带着工单号）：给它一个入口跳回助理对话 ——
+    // 落在那张工单最近一条汇报上，而不是让用户在一长串汇报里自己翻。
+    if (ticket !== null) {
+      entries.push({
+        label: "去助理对话看这条汇报",
+        icon: <CornerUpLeft size={12} />,
+        onSelect: () => {
+          const reportTurn = useStore.getState().assistant?.report_turns?.[ticket.id];
+          jumpToTurn(ASSISTANT_CHAT_ID, reportTurn ?? 0);
+        },
       });
     }
     return entries;
@@ -1165,7 +1186,8 @@ function ReportTurn({ mark, text, latest }: { mark: string; text: string; latest
   const ticket = useStore((s) =>
     number === null || !latest ? undefined : s.assistant?.tickets.find((t) => t.number === number),
   );
-  const answerable = ticket && TICKET_WAITING.includes(ticket.status);
+  // 划掉过的（或用户在面板/工单里已经回过的）不再给回答框：那不是「等我回复」了。
+  const answerable = ticket && TICKET_WAITING.includes(ticket.status) && !ticket.ignored;
   // 候选已经画成按钮了，正文里那行给模型看的「候选：」不再重复。
   if (answerable && ticket.options?.length) body = body.replace(/\n?候选：.*$/, "").trim();
   return (
@@ -1319,18 +1341,25 @@ function TurnView({
   /** 这是某张工单最近的一条汇报（只有它给回答框）。 */
   latestReport?: boolean;
 }) {
+  // 包一层带上这一轮的编号：助理面板上卡片里的「跳转」按它找过来（见 `jumpToTurn`）。
+  const wrap = (node: ReactNode) => (
+    <div data-turn={turn.turn} className="scroll-mt-6">
+      {node}
+    </div>
+  );
   if (turn.role === "user") {
     // 助理自己送进来的汇报：不是用户说的话，不画成用户气泡，也不给重试 / 分叉。
     if (turn.text.startsWith(REPORT_MARK))
-      return <ReportTurn mark={REPORT_MARK} text={turn.text} latest={latestReport} />;
-    if (turn.text.startsWith(EVENT_MARK)) return <ReportTurn mark={EVENT_MARK} text={turn.text} />;
-    if (turn.text.startsWith(DONE_MARK)) return <BackgroundDoneTurn text={turn.text} />;
-    if (turn.text.startsWith(PEER_MARK)) return <PeerTurn text={turn.text} />;
-    return (
-      <UserTurn turn={turn} time={time} onRetry={onRetry} retryAsks={retryAsks} onFork={onFork} />
+      return wrap(<ReportTurn mark={REPORT_MARK} text={turn.text} latest={latestReport} />);
+    if (turn.text.startsWith(EVENT_MARK))
+      return wrap(<ReportTurn mark={EVENT_MARK} text={turn.text} />);
+    if (turn.text.startsWith(DONE_MARK)) return wrap(<BackgroundDoneTurn text={turn.text} />);
+    if (turn.text.startsWith(PEER_MARK)) return wrap(<PeerTurn text={turn.text} />);
+    return wrap(
+      <UserTurn turn={turn} time={time} onRetry={onRetry} retryAsks={retryAsks} onFork={onFork} />,
     );
   }
-  return (
+  return wrap(
     <AssistantTurn
       turn={turn}
       time={time}
@@ -1342,7 +1371,7 @@ function TurnView({
       onRetry={onRetry}
       retryAsks={retryAsks}
       onFork={onFork}
-    />
+    />,
   );
 }
 
@@ -2041,6 +2070,44 @@ export function ChatView() {
       <GoalBar />
       <MemorySuggestBar />
       <Composer />
+      <TouchFocus />
     </div>
   );
+}
+
+/**
+ * 「跳到某一轮」的落点（见 `sessionOps.jumpToTurn`）。
+ *
+ * 那一轮不一定已经画出来了 —— 按 id 打开一条会话时历史是异步取回来的。所以这里
+ * 挂着 `turns` 盯着：画出来之后再滚过去、闪一下，然后把请求消掉（不留着，免得
+ * 之后随便一次重渲染又跳一遍）。等不到（那次翻页失败了、或者这一轮被压缩掉了）
+ * 就作罢 —— 总比停在别处还晃一下强。
+ */
+function TouchFocus() {
+  const focus = useStore((s) => s.focusTurn);
+  const sessionId = useStore((s) => s.sessionId);
+  const turns = useStore((s) => s.turns);
+  const clear = useStore((s) => s.clearTurnFocus);
+  const touched = useRef<number | null>(null);
+  useEffect(() => {
+    if (!focus || focus.sessionId !== sessionId) return;
+    if (touched.current === focus.turn) {
+      clear();
+      return;
+    }
+    const el = document.querySelector<HTMLElement>(`[data-turn="${focus.turn}"]`);
+    if (!el) return;
+    touched.current = focus.turn;
+    el.scrollIntoView({ block: "center", behavior: "smooth" });
+    el.animate(
+      [
+        { boxShadow: "inset 0 0 0 2px color-mix(in oklab, var(--accent) 45%, transparent)" },
+        { boxShadow: "inset 0 0 0 2px transparent" },
+      ],
+      { duration: 1400, easing: "ease-out" },
+    );
+    clear();
+    // biome-ignore lint/correctness/useExhaustiveDependencies: `turns` 只是「列表变了，再看一眼落没落上」，不参与计算
+  }, [focus, sessionId, turns, clear]);
+  return null;
 }

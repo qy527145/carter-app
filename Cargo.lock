@@ -655,6 +655,7 @@ dependencies = [
  "libc",
  "llm_adapt_core",
  "notify",
+ "parking_lot",
  "reqwest 0.13.5",
  "serde",
  "serde_json",

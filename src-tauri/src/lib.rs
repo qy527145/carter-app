@@ -283,6 +283,8 @@ struct CreatedSession {
     live: Vec<LiveView>,
     /// 这一轮正在等用户回答的问题：错过了 `ask_form` 事件时靠它把表单补出来。
     pending_ask: Option<carter_app_core::protocol::PendingAsk>,
+    /// 这条会话现在的 todo 列表。`todo_updated` 事件不回放，切走再接上时靠它补回来。
+    todos: Vec<carter_app_core::TodoView>,
 }
 
 /// 进行中那一轮的一条记录（`LiveItem` 的界面形态）。
@@ -335,6 +337,7 @@ impl CreatedSession {
                 })
                 .collect(),
             pending_ask: started.pending_ask,
+            todos: started.todos,
         }
     }
 }

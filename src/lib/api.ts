@@ -1050,6 +1050,8 @@ export type AssistantView = {
   busy: string[];
   /** 要人处理的件数。 */
   attention: number;
+  /** 每张工单最近一条汇报在助理对话里的轮次号（工单 id → 轮）。卡片上的「去对话」用它。 */
+  report_turns?: Record<string, number>;
 };
 
 export type TicketAction =

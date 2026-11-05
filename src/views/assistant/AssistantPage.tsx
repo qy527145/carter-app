@@ -15,6 +15,7 @@ import {
   Check,
   ChevronRight,
   CircleAlert,
+  CornerUpLeft,
   Eye,
   ListChecks,
   MessageSquare,
@@ -69,7 +70,13 @@ import {
 } from "../../lib/api";
 import { fullTime, relTime } from "../../lib/format";
 import { useModelCatalog } from "../../lib/modelLabel";
-import { openAssistantChat, openSession, refreshAssistant } from "../../lib/sessionOps";
+import {
+  ASSISTANT_CHAT_ID,
+  jumpToTurn,
+  openAssistantChat,
+  openSession,
+  refreshAssistant,
+} from "../../lib/sessionOps";
 import { toastError, toastOk } from "../../lib/toast";
 import { useStore } from "../../store";
 import { PageIntro } from "../settings/AsyncBody";
@@ -296,6 +303,9 @@ function FirstRun({ hasSources, hasRules }: { hasSources: boolean; hasRules: boo
 function TicketCard({ t }: { t: AssistantTicket }) {
   const [busy, setBusy] = useState(false);
   const [confirmStop, setConfirmStop] = useState(false);
+  // 这张工单最近一条汇报在助理对话的第几轮：卡片上「去对话」直接落在那儿，
+  // 不用在一长串汇报里自己翻。
+  const reportTurn = useStore((s) => s.assistant?.report_turns?.[t.id]);
 
   const act = (action: Parameters<typeof assistantTicketAction>[1], ok?: string) => {
     setBusy(true);
@@ -324,6 +334,14 @@ function TicketCard({ t }: { t: AssistantTicket }) {
           <Badge title="等着送进执行会话的消息">{t.pending.length} 条待送</Badge>
         )}
         <span className="ml-auto flex shrink-0 items-center gap-1">
+          {reportTurn !== undefined && (
+            <IconButton
+              title="跳到助理对话里的这条汇报"
+              onClick={() => jumpToTurn(ASSISTANT_CHAT_ID, reportTurn)}
+            >
+              <CornerUpLeft size={12} />
+            </IconButton>
+          )}
           {t.session_id && (
             <IconButton
               title="打开执行对话"

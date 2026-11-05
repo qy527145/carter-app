@@ -298,6 +298,10 @@ type Store = Conv & {
   /** 常驻助理的状态（面板与侧栏角标共用一份，`assistant_changed` 时重拉）。 */
   assistant: AssistantView | null;
   setAssistant: (a: AssistantView) => void;
+  /** 请求对话视图把某一轮滚进视野并闪一下（见 `sessionOps.jumpToTurn`）。落位后清掉。 */
+  focusTurn: { sessionId: string; turn: number } | null;
+  requestTurnFocus: (sessionId: string, turn: number) => void;
+  clearTurnFocus: () => void;
   setComposerDraft: (text: string | null) => void;
   /** 整体替换输入框里的卡片（分叉草稿带进来的、发送后清空）。 */
   setComposerContexts: (contexts: PromptContext[]) => void;
@@ -937,6 +941,9 @@ export const useStore = create<Store>((set) => ({
       streaming: c.running ?? false,
       // 同理：切走时错过的提问也补不回来。不摆出表单，那一轮就永远等着。
       pendingForm: c.pending_ask ?? null,
+      // 待办不在历史里：它由 `todo_updated` 整表推过来，事件不回放。切走再接上时
+      // 靠这里把底栏那条进度补回来，否则会话明明还在干活，列表却是空的。
+      todos: c.todos ?? [],
       changed: changedRecord(c.changes),
       changesSince: c.changes_since ?? 0,
       times: timesRecord(c.times),
@@ -982,6 +989,8 @@ export const useStore = create<Store>((set) => ({
   setView: (view) => set({ view }),
   setTeamCwd: (teamCwd) => set({ teamCwd: rememberTeamCwd(teamCwd) }),
   setAssistant: (assistant) => set({ assistant }),
+  requestTurnFocus: (sessionId, turn) => set({ focusTurn: { sessionId, turn } }),
+  clearTurnFocus: () => set({ focusTurn: null }),
   setComposerDraft: (composerDraft) => set({ composerDraft }),
   setComposerContexts: (contexts) => set({ composerContexts: contexts }),
   toggleComposerContext: (card) =>

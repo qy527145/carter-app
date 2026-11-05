@@ -99,6 +99,11 @@ pub struct SessionHandle {
     /// 会给父会话文件挂上 `Recorder`（侧边的 append 会写进父文件里），而会话文件
     /// 是惰性建的 —— 一条还没发过消息的新会话根本没有文件。
     pub history: ArcSwap<Vec<WireMessage>>,
+    /// 这条会话现在的 todo 列表（`UiEvent::TodoUpdated` 里那整表）。
+    ///
+    /// 与 `history` 同理：todo 事件只在变化时来、不回放，界面切走再回来时靠它
+    /// 把底栏那条进度补回来 —— 不带的话，会话明明还在跑，待办却是空的。
+    pub todos: std::sync::Arc<ArcSwap<Vec<carter::tools::TodoItem>>>,
     /// 正在跑的这一轮里已经发生的事（模型说到一半的话、调过的工具）。
     ///
     /// `history` 只在轮次边界上刷新，而 carter 的 `run_turn` 在一轮之内独占 `Thread`
@@ -151,6 +156,7 @@ impl SessionHandle {
             asks: Arc::new(AskRegistry::default()),
             parent_id,
             history: ArcSwap::from_pointee(Vec::<WireMessage>::new()),
+            todos: std::sync::Arc::new(ArcSwap::from_pointee(Vec::new())),
             live: Arc::new(LiveLog::default()),
             cancel: CancelToken::new(),
             close: CancelToken::new(),
@@ -283,6 +289,13 @@ impl AppShell {
             closing: Mutex::new(HashSet::new()),
             events,
         })
+    }
+
+    /// 换一份抓包目录（测试用：不往用户的 `~/.carter-app/captures` 里写）。
+    #[cfg(test)]
+    pub(crate) fn with_capture(mut self, root: std::path::PathBuf) -> Self {
+        self.capture = Arc::new(crate::capture::CaptureStore::open(root));
+        self
     }
 
     /// 换一份助理状态（测试用：不碰用户的 `assistant.json`）。

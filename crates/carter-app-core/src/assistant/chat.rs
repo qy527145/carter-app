@@ -21,10 +21,9 @@ use super::{CHAT_SESSION_ID, Decision, REPORT_MARK, Ticket};
 
 /// 打开或续接助理对话的参数。盘上有就续接，没有就用固定 id 新建。
 pub fn options(model: Option<String>) -> SessionOptions {
-    let cwd = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_dir())
-        .unwrap_or_else(std::env::temp_dir);
+    // 第一次开会话（盘上还没有）才用到 `cwd`；续接时以会话文件里记的为准。
+    // 家目录会被侧栏当成一个「项目」自动展开，所以这里能躲就躲（见 [`resume_cwd`]）。
+    let cwd = home();
     SessionOptions {
         cwd,
         model,
@@ -34,12 +33,49 @@ pub fn options(model: Option<String>) -> SessionOptions {
     }
 }
 
+/// 家目录（会话的兜底目录）。
+fn home() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_dir())
+        .unwrap_or_else(std::env::temp_dir)
+}
+
+/// 助理对话上次在哪里干活：最近一张工单的执行目录，那个目录还在就用它。
+///
+/// 助理对话本身不碰项目文件，它只是**派工单时**顺手定一个起点（见
+/// `assistant_ticket.rs` 的 `cwd` 参数）。固定在 `~` 的话，侧栏里家目录永远被
+/// 自动展开 —— 而用户真正在看的是工单所在的项目。跟着最近一张工单走，展开的就是
+/// 那个项目；一张工单都没有（全新安装）时才回家目录。
+///
+/// 用 shell 里那份现成的状态，不另开一个 store：另开一份读的是同一个文件，但会
+/// 多一次全量解析。
+pub fn resume_cwd(shell: &crate::shell::AppShell) -> Option<PathBuf> {
+    shell.assistant.read(|s| {
+        s.tickets
+            .iter()
+            .rev()
+            .map(|t| PathBuf::from(&t.cwd))
+            .find(|p| p.is_dir())
+    })
+}
+
 /// 确保助理对话在后台跑着。已经在跑（或正在收尾）就什么都不做。
 pub fn ensure(shell: &Arc<AppShell>) -> Result<(), String> {
     if shell.session(CHAT_SESSION_ID).is_some() || shell.is_closing(CHAT_SESSION_ID) {
         return Ok(());
     }
-    start_session(shell.clone(), options(None))
+    start_with(shell, None)
+}
+
+/// 与 [`ensure`] 同一条路，只是能指定模型（界面上第一次打开时带的那个）。
+fn start_with(shell: &Arc<AppShell>, model: Option<String>) -> Result<(), String> {
+    let mut opts = options(model);
+    // 新起一条（盘上没有）时的工作目录跟着最近的工单走，见 [`resume_cwd`]。
+    if let Some(dir) = resume_cwd(shell) {
+        opts.cwd = dir;
+    }
+    start_session(shell.clone(), opts)
         .map(|_| ())
         .map_err(|e| e.to_string())
 }
@@ -52,7 +88,11 @@ pub fn open(shell: &Arc<AppShell>, model: Option<String>) -> Result<StartedSessi
     if let Some(started) = crate::session::attach_session(shell, CHAT_SESSION_ID) {
         return Ok(started);
     }
-    start_session(shell.clone(), options(model)).map_err(|e| e.to_string())
+    start_with(shell, model)?;
+    Ok(
+        crate::session::attach_session(shell, CHAT_SESSION_ID)
+            .expect("刚起来的会话必须在 shell 里"),
+    )
 }
 
 /// 这一轮是不是汇报推起来的（最后一条用户输入带汇报标记）。
@@ -100,6 +140,72 @@ pub fn closed_text(label: &str) -> String {
 /// 用户直接（面板、汇报卡片上）回答了一张工单 —— 记进助理对话的那段话。
 pub fn answered_text(label: &str, text: &str) -> String {
     format!("{REPORT_MARK}已答复 · {label}\n用户直接回复了这张工单（已送进去，不用再转达）：{text}")
+}
+
+/// 助理对话里**这张工单最近一条汇报**在第几轮 —— 卡片上的「去工单对话」据此跳过去。
+///
+/// 「最近」是为了与界面一致：只有一张工单最后那条汇报给回答框（见 `ChatView` 的
+/// `latestReports`），跳转也只该落在那一轮。数轮次用的是 `view.rs::is_turn_start`
+/// 的同一判据：工具结果不带正文，不算一轮。
+pub fn turn_of_report(history: &[llm_adapt_core::WireMessage], number: u32) -> Option<u32> {
+    // 轮次号与界面**看到的那份**对齐（`ChatView` 的 `messagesToTurns`）：历史里带正文的
+    // user 消息从 0 数起，但真正的第 0 轮——用户说的第一句话——界面会把它与它引出来的
+    // 那条回复合成一个桶画出来，所以这里的第 N 个桶对应界面上的第 N-1 轮。
+    //
+    // 边数边记，最后留下的就是这张工单**最近**那条汇报所在的桶 —— 卡片显示的就是它。
+    let mut turn: u32 = 0;
+    let mut first = true;
+    let mut found = None;
+    for m in history {
+        let text: String = m
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                llm_adapt_core::Block::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if m.role != llm_adapt_core::Role::User || text.trim().is_empty() {
+            continue;
+        }
+        if first {
+            first = false;
+        } else {
+            turn += 1;
+        }
+        let head = text
+            .strip_prefix(REPORT_MARK)
+            .map(|rest| rest.lines().next().unwrap_or(""))
+            .unwrap_or("");
+        if report_number(head) == Some(number) {
+            found = Some(turn);
+        }
+    }
+    found.map(|n| n.saturating_sub(1))
+}
+
+/// 汇报标题里的工单编号：`等你拍板 · #3 标题` → 3。与界面 `reportTicket` 同一条规则
+/// —— 「已答复 / 已结束 / 本来会接 / 已忽略」这类不算（它们不是那张工单的汇报）。
+fn report_number(head: &str) -> Option<u32> {
+    if ["已答复", "已结束", "本来会接", "已忽略"]
+        .iter()
+        .any(|p| head.starts_with(p))
+    {
+        return None;
+    }
+    let at = head.find(" · #")?;
+    let rest = &head[at + " · #".len()..];
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
+}
+
+/// 用户在助理对话里对这张工单做了一件事（回了一句、划掉了汇报）—— 记进对话的那段话。
+///
+/// 不结束工单（面板上还在），只是让助理知道「这条我处理过了」，下次开口别再当成
+/// 还等着它、也别再问一遍。
+pub fn noted_text(what: &str, label: &str, detail: &str) -> String {
+    format!("{REPORT_MARK}{what} · {label}\n{detail}")
 }
 
 /// 观察模式下「本来会接」的那件事，推进对话时的那段话：请用户拍板。
@@ -153,6 +259,7 @@ pub fn new_episode(shell: &Arc<AppShell>) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use llm_adapt_core::WireMessage;
 
     #[test]
     fn the_chat_uses_a_fixed_id_for_both_new_and_resume() {
@@ -204,9 +311,34 @@ mod tests {
         );
     }
 
+    /// 划掉一条汇报的那句话：标题以「已忽略」开头（界面据此不再给回答框），正文说清
+    /// 不是结束 —— 面板上那张工单还在。
+    #[test]
+    fn an_ignored_note_says_the_ticket_is_not_closed() {
+        let text = noted_text("已忽略", "#3 修登录", "知道了，不用再催。");
+        assert!(text.starts_with(&format!("{REPORT_MARK}已忽略 · #3 修登录\n")));
+        assert!(text.contains("知道了，不用再催。"));
+    }
+
+    /// 卡片上的「去工单对话」要跳到写着它的那一轮：助手轮的回答归到同一轮，工具
+    /// 结果不带正文不算一轮，已答复 / 已忽略那些也不算这张工单的上报。
+    #[test]
+    fn a_report_is_located_in_the_turn_that_carried_it() {
+        let msgs = vec![
+            WireMessage::user_text("第一轮"),
+            WireMessage::user_text(format!("{REPORT_MARK}待查看 · #1 修 CI\n好")),
+            WireMessage::user_text("第二轮"),
+            WireMessage::user_text(format!("{REPORT_MARK}已答复 · #1 修 CI\n答过了")),
+            WireMessage::user_text(format!("{REPORT_MARK}等你拍板 · #1 修 CI\n再来一次")),
+        ];
+        // 界面上第 0 轮是第一句话引出来的那条；「等你拍板」落在第 3 轮。已答复那条
+        // 不算这张工单的上报。
+        assert_eq!(turn_of_report(&msgs, 1), Some(3));
+        assert_eq!(turn_of_report(&msgs, 2), None);
+    }
+
     #[test]
     fn only_a_turn_started_by_a_report_counts_as_one() {
-        use llm_adapt_core::WireMessage;
         let report = WireMessage::user_text(format!("{REPORT_MARK}待查看 · #1 修 CI\n改好了"));
         let person = WireMessage::user_text("开工");
         assert!(is_report_turn(&[person.clone(), report.clone()]));

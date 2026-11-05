@@ -337,6 +337,12 @@ pub struct Ticket {
     /// 等着送进执行会话的话（排队时到的跟进事件、重试说明、重启恢复说明）。
     #[serde(default)]
     pub pending: Vec<String>,
+    /// 用户把这张工单的汇报在助理对话里**划掉了**（「忽略」）。
+    ///
+    /// 只影响助理对话里那条汇报卡片：它不再给回答框、不再排进「等你回复」。
+    /// 面板上的那张卡片照常 —— 忽略的意思是「这条我知道了」，不是「不用处理了」。
+    #[serde(default)]
+    pub ignored: bool,
     /// 开过几次工（首次 + 跟进 + 重试）。
     #[serde(default)]
     pub runs: u32,
@@ -467,6 +473,7 @@ impl State {
             question: None,
             options: Vec::new(),
             pending: Vec::new(),
+            ignored: false,
             runs: 0,
         });
         self.prune_tickets();

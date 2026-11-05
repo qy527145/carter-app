@@ -170,6 +170,19 @@ async function closeUnlessChat(id: string | null): Promise<void> {
 }
 
 /**
+ * 切到一条会话里**某一轮**的位置（助理卡片上的「跳转」用）。
+ *
+ * 换会话走 [`openSession`]；落位交给对话视图：`focusTurn` 存成「还没跳」，
+ * `MessageList` 把这一轮画出来之后滚过去、闪一下，然后把请求消掉（见
+ * `ChatView` 的 `TouchFocus`）—— 不留在 store 里，免得之后每次重渲染都再跳一次。
+ */
+export function jumpToTurn(sessionId: string, turn: number): void {
+  const store = useStore.getState();
+  store.requestTurnFocus(sessionId, turn);
+  openSession(sessionId);
+}
+
+/**
  * 新建会话并切到对话视图。
  *
  * 沿用**当前会话的工作目录**：在某个项目里聊着、点「新对话」，本意是在同一个项目里
