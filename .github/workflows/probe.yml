@@ -1,0 +1,22 @@
+name: probe-token
+on: workflow_dispatch
+permissions:
+  contents: write
+jobs:
+  probe:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: 打印 token 与 release 权限
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -x
+          gh api repos/$GITHUB_REPOSITORY/actions/permissions/workflow
+          echo "---- 建一个一次性 tag"
+          gh api -X POST repos/$GITHUB_REPOSITORY/git/refs -f ref=refs/tags/probe-$GITHUB_RUN_ID -f sha=$GITHUB_SHA || true
+          echo "---- 用它建 release"
+          gh api -X POST repos/$GITHUB_REPOSITORY/releases \
+            -f tag_name=probe-$GITHUB_RUN_ID -f name=probe -f body=probe -F draft=true ; echo "exit=$?"
+          echo "---- 删掉"
+          gh api -X DELETE repos/$GITHUB_REPOSITORY/releases/tags/probe-$GITHUB_RUN_ID || true
+          gh api -X DELETE repos/$GITHUB_REPOSITORY/git/refs/tags/probe-$GITHUB_RUN_ID || true
