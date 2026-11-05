@@ -334,20 +334,20 @@ function TicketCard({ t }: { t: AssistantTicket }) {
           <Badge title="等着送进执行会话的消息">{t.pending.length} 条待送</Badge>
         )}
         <span className="ml-auto flex shrink-0 items-center gap-1">
+          {t.session_id && (
+            <IconButton
+              title="打开工单对话"
+              onClick={() => t.session_id && openSession(t.session_id)}
+            >
+              <MessageSquare size={12} />
+            </IconButton>
+          )}
           {reportTurn !== undefined && (
             <IconButton
               title="跳到助理对话里的这条汇报"
               onClick={() => jumpToTurn(ASSISTANT_CHAT_ID, reportTurn)}
             >
               <CornerUpLeft size={12} />
-            </IconButton>
-          )}
-          {t.session_id && (
-            <IconButton
-              title="打开执行对话"
-              onClick={() => t.session_id && openSession(t.session_id)}
-            >
-              <MessageSquare size={12} />
             </IconButton>
           )}
           {canRetry && (
