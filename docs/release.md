@@ -7,26 +7,23 @@ bun run upgrade patch     # 改三处版本号 → 提交 → 打 tag（不 push
 git push origin main --tags
 ```
 
-推 tag 后 `release-on-tag.yml` 转成一次 `workflow_dispatch` 交给 `release.yml`
-（cargo-dist 生成）。三台构建机（Windows / Apple Silicon macOS / Linux x86_64）各自
-先用 `tauri build` 出**安装包**（NSIS `.exe` / `.dmg` / `.deb`）并上传成
-`installers-<target>` artifact；dist 照常编一遍、把压缩包和安装包一起发进 Release，
-最后由 `post-announce.yml` 删掉除安装包之外的全部附件。
+推 `v*` tag 直接触发 [release.yml](../.github/workflows/release.yml)。三台构建机
+（Windows / Apple Silicon macOS / Linux x86_64）各跑一次 `tauri build`，出
+NSIS `.exe` / `.dmg` / `.deb`，直接传进 Release —— 不经过 cargo-dist，不产生
+tar.xz / zip。
 
-macOS 只发 Apple Silicon 的 DMG —— Intel Mac 用的那一台构建机不值得为它多跑一遍，
-需要时在 `dist-workspace.toml` 的 `targets` 里加回 `x86_64-apple-darwin` 即可。
+手动触发：Actions → **Release** → Run workflow，`tag` 填 `v0.1.2`。填 `dry-run`
+只构建、不发 Release，适合先验证流水线。
 
-## 不要手改 release.yml
+流水线里的 `plan` 会校验 tag 的版本号与 `src-tauri/tauri.conf.json`、
+`package.json` 一致 —— 不一致直接失败，免得发出版本号与文件名对不上的包。
 
-那个文件是 `dist generate --mode ci` 生成的，dist 在 CI 里会逐字比对，不一致就
-在 plan 阶段直接失败（那一步的日志只有仓库管理员看得到）。要加构建步骤就改
-`.github/build-setup.yml`（dist 会原样嵌进 `release.yml`），改完跑一次：
+## Release 建不出来（403）
 
-```bash
-dist generate --mode ci
-```
-
-再提交。本地 `dist plan` 能提前发现「生成物与磁盘不一致」。
+`gh release create` 报 `403 Resource not accessible by integration` 时，说明仓库
+把 `GITHUB_TOKEN` 的默认权限限制成了只读。补一个带 `repo` 权限的 PAT，存成
+仓库 Secrets 里的 `RELEASE_TOKEN`，流水线会自动改用它；不配则退回
+`GITHUB_TOKEN`。
 
 ## 模型目录快照
 
