@@ -87,7 +87,7 @@ jobs:
           - os: windows-2022
             bundles: nsis
             ext: exe
-          - os: macos-14 # Apple Silicon；Intel Mac 不发
+          - os: macos-15 # Apple Silicon；Intel Mac 不发
             bundles: dmg
             ext: dmg
           - os: ubuntu-22.04
