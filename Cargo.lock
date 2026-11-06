@@ -584,6 +584,8 @@ dependencies = [
 [[package]]
 name = "carter"
 version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b3f10c6424d0e72dd0efd4e29fe9f79dd7e68d0bf1385c51ce9ca01051ec103"
 dependencies = [
  "anyhow",
  "arboard",
@@ -616,7 +618,7 @@ dependencies = [
 
 [[package]]
 name = "carter-app"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "carter",
  "carter-app-core",
@@ -637,7 +639,7 @@ dependencies = [
 
 [[package]]
 name = "carter-app-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "arc-swap",
  "async-trait",
