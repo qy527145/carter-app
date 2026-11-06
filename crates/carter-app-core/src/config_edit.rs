@@ -430,6 +430,12 @@ pub fn remove_mcp_server(doc: &mut DocumentMut, name: &str) -> Result<(), String
 // 外壳层只调这几个函数，不碰 `DocumentMut` —— 它不该认识 TOML 编辑这套东西。
 // ---------------------------------------------------------------------------
 
+/// 写盘 → 换掉内存里的配置 → 广播 → 顺手补模型目录。
+///
+/// **调用方的命令必须是 `async fn`**：补目录那一步要 `tokio::spawn`，而同步的
+/// `#[tauri::command]` 跑在主线程上、没有 reactor —— 从那里调会 panic，release
+/// 又是 `panic = "abort"`，用户看到的就是「改完模型应用闪退」。真漏了也不会
+/// 崩（见 `models_sync::spawn_for_models_sync` 的兜底），但那次补全就悄悄没跑。
 fn apply(shell: &crate::shell::AppShell, doc: &DocumentMut) -> Result<(), String> {
     let config = write_and_reload(doc)?;
     shell.config.store(std::sync::Arc::new(config));

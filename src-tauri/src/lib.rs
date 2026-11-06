@@ -672,8 +672,11 @@ fn check_server_tools(kind: String, tools: Vec<String>) -> (Vec<String>, Vec<Str
 }
 
 /// 写一份渠道草稿并热重载。返回写回后的详情。
+///
+/// **必须是 `async fn`。** 热重载会顺手在后台补模型目录（`tokio::spawn`），而同步
+/// 命令跑在主线程上、没有 reactor —— 见 [`config_edit::apply`] 的说明。
 #[tauri::command]
-fn save_provider(
+async fn save_provider(
     shell: State<'_, Arc<AppShell>>,
     draft: ProviderDraft,
 ) -> Result<ProviderDetail, String> {
@@ -681,12 +684,12 @@ fn save_provider(
 }
 
 #[tauri::command]
-fn delete_provider(shell: State<'_, Arc<AppShell>>, name: String) -> Result<(), String> {
+async fn delete_provider(shell: State<'_, Arc<AppShell>>, name: String) -> Result<(), String> {
     config_edit::remove_provider_reload(shell.inner(), &name)
 }
 
 #[tauri::command]
-fn save_model(
+async fn save_model(
     shell: State<'_, Arc<AppShell>>,
     provider: String,
     model: carter_app_core::ModelDraft,
@@ -719,7 +722,7 @@ fn save_model(
 }
 
 #[tauri::command]
-fn delete_model(
+async fn delete_model(
     shell: State<'_, Arc<AppShell>>,
     provider: String,
     model: String,
@@ -778,15 +781,24 @@ async fn list_models(
         .map_err(|e| format!("读取模型列表中断：{e}"))
 }
 
+/// 设主模型（`agent.model`）。
+///
+/// **必须是 `async fn`**：热重载里有 `tokio::spawn`（模型目录补全），同步命令所在的
+/// 主线程没有 reactor，会 panic；release 是 `panic = "abort"`，用户看到的就是闪退。
 #[tauri::command]
-fn set_default_model(shell: State<'_, Arc<AppShell>>, model_ref: String) -> Result<(), String> {
+async fn set_default_model(
+    shell: State<'_, Arc<AppShell>>,
+    model_ref: String,
+) -> Result<(), String> {
     config_edit::set_default_model_reload(shell.inner(), &model_ref)
 }
 
 /// 设副模型（`agent.fast_model`）：压缩上下文、生成标题用的那个。`None` = 清除，
 /// 回落主模型 —— 所以界面上「清除副模型」和「设为副模型」共用一个命令。
+///
+/// **必须是 `async fn`**，理由同 [`set_default_model`]。
 #[tauri::command]
-fn set_fast_model(
+async fn set_fast_model(
     shell: State<'_, Arc<AppShell>>,
     model_ref: Option<String>,
 ) -> Result<(), String> {
@@ -810,7 +822,7 @@ fn get_compaction(shell: State<'_, Arc<AppShell>>) -> CompactionSettings {
 }
 
 #[tauri::command]
-fn set_compaction(
+async fn set_compaction(
     shell: State<'_, Arc<AppShell>>,
     enabled: bool,
     ratio: f64,
@@ -959,8 +971,10 @@ async fn approve_assistant_decision(
     assistant::approve(shell.inner(), &decision_id).await
 }
 
+/// **必须是 `async fn`**：助理对话还没开时这里要就地开一条（`start_session`
+/// 要求 tokio runtime），同步命令所在的主线程没有，会直接报「开不出助理对话」。
 #[tauri::command]
-fn new_assistant_episode(shell: State<'_, Arc<AppShell>>) -> Result<(), String> {
+async fn new_assistant_episode(shell: State<'_, Arc<AppShell>>) -> Result<(), String> {
     carter_app_core::assistant::chat::new_episode(shell.inner())
 }
 
@@ -1426,7 +1440,7 @@ fn delete_skill(
 }
 
 #[tauri::command]
-fn set_skills_enabled(shell: State<'_, Arc<AppShell>>, enabled: bool) -> Result<(), String> {
+async fn set_skills_enabled(shell: State<'_, Arc<AppShell>>, enabled: bool) -> Result<(), String> {
     config_edit::set_skills_enabled_reload(shell.inner(), enabled)
 }
 
@@ -1599,12 +1613,12 @@ fn sorted_pairs(m: &std::collections::HashMap<String, String>) -> Vec<(String, S
 }
 
 #[tauri::command]
-fn save_mcp_server(shell: State<'_, Arc<AppShell>>, draft: McpDraft) -> Result<(), String> {
+async fn save_mcp_server(shell: State<'_, Arc<AppShell>>, draft: McpDraft) -> Result<(), String> {
     config_edit::save_mcp_server_reload(shell.inner(), &draft)
 }
 
 #[tauri::command]
-fn delete_mcp_server(shell: State<'_, Arc<AppShell>>, name: String) -> Result<(), String> {
+async fn delete_mcp_server(shell: State<'_, Arc<AppShell>>, name: String) -> Result<(), String> {
     config_edit::remove_mcp_server_reload(shell.inner(), &name)
 }
 

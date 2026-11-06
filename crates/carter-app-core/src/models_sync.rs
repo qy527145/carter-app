@@ -106,11 +106,35 @@ pub fn spawn_for_models_sync(shell: &crate::shell::AppShell) {
         return;
     }
     let config = shell.config.load_full();
-    tokio::spawn(async move {
+    let sent = spawn_detached(async move {
         if let Err(e) = run_with(config).await {
             tracing::warn!(error = %e, "模型目录补全没做成");
         }
     });
+    if !sent {
+        // 配置已经写好了，补全只是锦上添花 —— 不能为了它把调用方崩掉。
+        // 走到这里说明命令还是同步的（见 `config_edit::apply` 的说明）。
+        tracing::warn!("模型目录补全要 tokio runtime，这次在同步上下文里，跳过");
+    }
+}
+
+/// 把任务送进**当前** runtime；没有 runtime 时返回 `false`，不 panic。
+///
+/// 为什么不能直接 `tokio::spawn`：`config_edit::apply` 既被 async 命令调用，
+/// 也被同步命令调用，而同步的 `#[tauri::command]` 跑在主线程上、那里没有
+/// reactor —— `tokio::spawn` 会 panic，release 又是 `panic = "abort"`，
+/// 表现就是「改一下主模型，应用当场闪退」。这类地方一律走这个入口。
+pub(crate) fn spawn_detached<F>(f: F) -> bool
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            handle.spawn(f);
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 /// 真正干活：找出该补的 → 逐家拉 → 合并 → 落盘。返回补进来的条数。
@@ -617,6 +641,33 @@ fn file_stem(path: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 同步上下文（没有 tokio runtime）里必须安静跳过 —— 用户报的「改主模型就闪退」
+    /// 就是这条路上 `tokio::spawn` panic（release 是 `panic = "abort"`）造成的。
+    #[test]
+    fn detached_spawn_outside_a_runtime_skips_instead_of_panicking() {
+        assert!(!spawn_detached(async {}), "没有 runtime 时应当跳过");
+    }
+
+    /// 有 runtime 时照常跑 —— 否则上面那条「不 panic」会靠「永远不干活」通过。
+    #[tokio::test]
+    async fn detached_spawn_inside_a_runtime_runs_the_task() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let ran = Arc::new(AtomicBool::new(false));
+        let flag = ran.clone();
+        assert!(
+            spawn_detached(async move { flag.store(true, Ordering::SeqCst) }),
+            "有 runtime 时应当送进去"
+        );
+        for _ in 0..50 {
+            if ran.load(Ordering::SeqCst) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("任务没有跑起来");
+    }
 
     const TOML: &str = r#"
 schema = 2
