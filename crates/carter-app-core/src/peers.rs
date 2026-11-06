@@ -40,6 +40,12 @@
 //! * 工单 → 助理：`to` 填 `assistant`，记进助理对话但**不叫醒**它（与汇报同一种待遇）：
 //!   助理对话的配置工具只听用户亲口说的话，不能让一封信推着它跑一轮。只收助理自己派出去
 //!   的工单的信。
+//!
+//! **投递机制分两套，界面上的卡片只有一套。** 工单是状态机（排队、开工、汇报），
+//! 一条只会收信的会话塞不进去，所以 `deliver` 这条路留着；但两个方向送进去的正文
+//! 都走同一个 [`render`] 格式，界面上就是同一张「跨会话」卡片 —— 带跳转按钮、
+//! 不冒充用户说的话。发送方那一侧同理：`send_message` 的工具结果末尾带着
+//! `目标会话：<id>`，界面据此画对称的一张卡，能点回对方。
 
 use std::collections::{HashSet, VecDeque};
 use std::future::Future;
@@ -203,7 +209,12 @@ fn render(letters: &[Letter], mid_turn: bool) -> String {
     }
     out.push('\n');
     for l in letters {
-        let mut attrs = format!("id=\"{}\" from=\"{}\"", l.id, l.from_name);
+        // `session` 是给界面用的：卡片上的「打开对方会话」按它跳。与 `from` 分开 ——
+        // 地址（`carter-app-79d8`）会重名、会变，跳转必须按 id。
+        let mut attrs = format!(
+            "id=\"{}\" from=\"{}\" session=\"{}\"",
+            l.id, l.from_name, l.from_id
+        );
         if let Some(r) = &l.reply_to {
             attrs.push_str(&format!(" reply_to=\"{r}\""));
         }
@@ -561,9 +572,12 @@ pub fn send(shell: &Arc<AppShell>, me: &str, req: SendRequest<'_>) -> Result<Str
     } else {
         "它回不回、什么时候回由它决定；回信会以一条 `【跨会话】` 消息送到你这里。"
     };
+    // `目标会话：<id>` 是给界面看的：发送方那一侧也画一张卡片、带一个跳到对方的按钮
+    // （与收信方那张对称）。模型读不读它都无所谓，所以放在最后一行，不打断上面那段话。
     Ok(format!(
-        "已送达 {}（消息号 {letter_id}）。{how}{back}不要轮询，也不要为了等回信空转 —— 手上没别的事就结束这一轮。",
-        target.name
+        "已送达 {}（消息号 {letter_id}）。{how}{back}不要轮询，也不要为了等回信空转 —— 手上没别的事就结束这一轮。\n\
+         目标会话：{}",
+        target.name, target.id
     ))
 }
 
@@ -596,16 +610,21 @@ fn to_assistant(shell: &Arc<AppShell>, me: &str, body: &str) -> Result<String, S
     if !crate::assistant::chat::record(shell, text, Some(tag)) {
         return Err("助理对话开不起来，这封没有送到".into());
     }
-    Ok(
-        "已记进助理对话。它不会因此被叫醒，用户下次开口时会一起看到；不要等回信，手上的事接着做。"
-            .into(),
-    )
+    Ok(format!(
+        "已记进助理对话。它不会因此被叫醒，用户下次开口时会一起看到；不要等回信，手上的事接着做。\n\
+         目标会话：{}",
+        crate::assistant::CHAT_SESSION_ID
+    ))
 }
 
 /// 助理对话给一张工单写信：按工单编号投进它的执行会话。
 ///
 /// 走 `runtime::deliver` 而不是直接塞收件箱：工单停着（待查看、等拍板、受阻）时要
 /// 重新排队、开回执行会话，跑完照常汇报 —— 那套状态只有工单那条路认得。
+///
+/// 正文用**与普通会话同一套** [`render`] 格式：界面上是同一张带跳转按钮的卡片，
+/// 而不是一条看着像用户亲口说的 `助理转达：…` 消息。机制没法合并（工单是状态机，
+/// 不是一条只会收信的会话），但用户在界面上看到的东西该只有一种。
 fn to_ticket(shell: &Arc<AppShell>, to: &str, body: &str) -> Result<String, String> {
     use crate::assistant::runtime::{Wake, deliver, launch_queued};
     let (id, label) = shell
@@ -628,18 +647,40 @@ fn to_ticket(shell: &Arc<AppShell>, to: &str, body: &str) -> Result<String, Stri
                 }
             )
         })?;
-    if !deliver(shell, &id, format!("助理转达：{body}"), Wake::Person) {
+    let letter = Letter {
+        id: shell.peers.next_id(),
+        from_id: crate::assistant::CHAT_SESSION_ID.into(),
+        from_name: crate::assistant::CHAT_LABEL.into(),
+        from_title: None,
+        body: body.to_string(),
+        reply_to: None,
+        hops: 0,
+        notify_back: false,
+        receipt: false,
+    };
+    let text = render(std::slice::from_ref(&letter), false);
+    if !deliver(shell, &id, text, Wake::Person) {
         return Err(format!("{label} 已经叫停，不再接收消息"));
     }
     let status = shell
         .assistant
         .read(|s| s.ticket(&id).map(|t| t.status.label()));
+    // 工单还没开过工（排队中）时没有会话可跳 —— 那一行干脆不写，界面上就不会出现
+    // 一个点了没反应的按钮。
+    let target = shell
+        .assistant
+        .read(|s| s.ticket(&id).and_then(|t| t.session_id.clone()))
+        .unwrap_or_default();
     let bg = shell.clone();
     tokio::spawn(async move { launch_queued(&bg).await });
-    Ok(format!(
+    let mut out = format!(
         "已送进 {label}（现在{}）。它跑完会照常汇报回这条对话；不要轮询，也不要空等。",
         status.unwrap_or("状态未知")
-    ))
+    );
+    if !target.is_empty() {
+        out.push_str(&format!("\n目标会话：{target}"));
+    }
+    Ok(out)
 }
 
 /// 续接一条盘上的会话并把信送进去。没人在看，处理完自己收起（见 [`reap_when_idle`]）。
@@ -1011,7 +1052,16 @@ mod tests {
         assert!(out.contains("#1 修登录"), "{out}");
         let t = shell.assistant.read(|s| s.ticket(&id).cloned()).unwrap();
         assert_eq!(t.status, crate::assistant::TicketStatus::Queued);
-        assert_eq!(t.pending, vec!["助理转达：用 A 方案".to_string()]);
+        // 正文走与普通会话同一套格式：界面上是同一张带跳转按钮的卡片，而不是一条
+        // 看着像用户亲口说的「助理转达：…」消息。
+        assert_eq!(t.pending.len(), 1, "{:?}", t.pending);
+        let sent = &t.pending[0];
+        assert!(sent.starts_with(PEER_MARK), "{sent}");
+        assert!(sent.contains("用 A 方案"), "{sent}");
+        assert!(
+            sent.contains("session=\"assistant\""),
+            "卡片要能跳回助理对话：{sent}"
+        );
 
         let err = send(
             &shell,

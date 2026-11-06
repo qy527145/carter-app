@@ -904,6 +904,12 @@ pub(crate) mod tests {
 /// 也送进这个会话。这里用固定 id 让它永远只有一条 —— 界面靠它找到，汇报靠它送进去。
 pub const CHAT_SESSION_ID: &str = "assistant";
 
+/// 助理对话在跨会话消息里显示成什么名字。
+///
+/// `peers::name_of` 按 `<目录名>-<id 片段>` 起名，固定 id `assistant` 没有那两段，
+/// 会原样返回一串英文 id —— 工单会话的卡片上写着「来自 assistant」看着像出了 bug。
+pub const CHAT_LABEL: &str = "助理";
+
 /// 用户在助理对话里直接指派的工单，`source_name` 记成这个。
 pub const ASSIGNED_SOURCE: &str = "助理对话";
 

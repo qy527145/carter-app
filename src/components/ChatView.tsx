@@ -1335,6 +1335,10 @@ const PEER_MARK = "【跨会话】";
 /**
  * 另一条会话发来的信（或回执）：第一行是「来自 xxx · m3」，后面是给模型看的说明与
  * `<来信>` 正文。界面只摊开正文，那段说明折在「原文」里。
+ *
+ * 每封信右上角有一个「打开对方会话」—— 与工单汇报卡上那个是同一个动作。它按
+ * `<来信 session="…">` 里那个 id 跳，不按地址：地址（`carter-app-79d8`）会重名、
+ * 改名之后就不认识了。
  */
 function PeerTurn({ text }: { text: string }) {
   const rest = text.slice(PEER_MARK.length);
@@ -1343,6 +1347,7 @@ function PeerTurn({ text }: { text: string }) {
   const letters = [...text.matchAll(/<(来信|回执)([^>]*)>\n([\s\S]*?)\n<\/\1>/g)].map((m) => ({
     receipt: m[1] === "回执",
     from: /from="([^"]*)"/.exec(m[2])?.[1] ?? "",
+    session: /session="([^"]*)"/.exec(m[2])?.[1] ?? "",
     body: m[3],
   }));
   return (
@@ -1354,7 +1359,19 @@ function PeerTurn({ text }: { text: string }) {
       {letters.map((l, i) => (
         // biome-ignore lint/suspicious/noArrayIndexKey: 跨会话来信按出现位置排列，同一封信可能重复
         <div key={i} className="mt-1.5">
-          {letters.length > 1 && <div className="text-xs text-dim">{l.from}</div>}
+          <div className="flex items-center gap-2">
+            {letters.length > 1 && <span className="text-xs text-dim">{l.from}</span>}
+            {l.session && (
+              <button
+                type="button"
+                onClick={() => openSession(l.session)}
+                className="ml-auto flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-dim hover:bg-ink/5 hover:text-ink"
+              >
+                <MessageSquare size={11} />
+                打开{l.from || "对方"}会话
+              </button>
+            )}
+          </div>
           <div
             className={`whitespace-pre-wrap break-words text-sm ${l.receipt ? "text-dim" : "text-ink"}`}
           >

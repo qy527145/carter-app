@@ -32,6 +32,8 @@ import {
   Globe,
   ListChecks,
   LoaderCircle,
+  MessageSquare,
+  MessagesSquare,
   Pencil,
   Search,
   Square,
@@ -43,6 +45,7 @@ import {
 import { useState } from "react";
 
 import { sendCommand } from "../../lib/api";
+import { openSession } from "../../lib/sessionOps";
 import { toastError } from "../../lib/toast";
 import type { Item } from "../../store";
 import { HtmlFilePreview, imageTokenIn, looksLikeHtml, StoredImage } from "../Media";
@@ -676,6 +679,47 @@ function GenericCard({ item }: { item: ToolItem }) {
   );
 }
 
+/**
+ * `send_message`：这条会话发出去的一封信。
+ *
+ * 收信方那边看到的是 `PeerTurn`（一张带「打开对方会话」的卡片），发送方这里以前
+ * 只有一张普通工具卡 —— 同一件事在两边长得完全不一样，而且在发送方根本看不出这封
+ * 信去了哪里、也点不过去。现在两边都摊成一张卡片：正文是发出去的那段话，右上角
+ * 一个回跳，按后端附在结果末行的 `目标会话：<id>` 找到对方。
+ *
+ * 不按地址（`carter-app-79d8`）跳：地址会重名，改名之后也不认识了。
+ */
+function PeerCard({ item }: { item: ToolItem }) {
+  const to = str(item.args, "to") ?? "";
+  const body = str(item.args, "message") ?? "";
+  const r = item.result;
+  const target = r ? /目标会话：(\S+)/.exec(r.content)?.[1] : undefined;
+  return (
+    <Card
+      tone="blue"
+      icon={<MessagesSquare size={11} />}
+      title="跨会话消息"
+      subtitle={to ? `发给 ${to}` : undefined}
+      status={<Status item={item} />}
+      defaultOpen
+      forceOpen={r ? !r.ok : false}
+    >
+      {target && (
+        <button
+          type="button"
+          onClick={() => openSession(target)}
+          className="mb-1.5 flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-dim hover:bg-ink/5 hover:text-ink"
+        >
+          <MessageSquare size={11} />
+          打开对方会话
+        </button>
+      )}
+      {body && <div className="whitespace-pre-wrap break-words text-sm text-ink">{body}</div>}
+      {r && !r.ok && <ErrorLine text={r.content} />}
+    </Card>
+  );
+}
+
 /** 一行摘要，给卡片标题右边用。 */
 function summarize(args: unknown): string {
   try {
@@ -699,6 +743,7 @@ const DISPATCH: Record<string, (p: CardProps) => React.ReactElement> = {
   glob: (p) => <SearchCard {...p} tone="blue" icon={<Folder size={11} />} title="glob" />,
   grep: (p) => <SearchCard {...p} tone="green" icon={<Search size={11} />} title="grep" />,
   read_file: ReadCard,
+  send_message: PeerCard,
   edit_file: EditCard,
   write_file: (p) => (
     <FileCard {...p} tone="orange" icon={<Pencil size={11} />} title="write_file" render />

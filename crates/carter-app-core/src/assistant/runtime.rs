@@ -445,6 +445,9 @@ pub async fn ticket_action(
                 }
             })?;
             // 正在跑的那一轮打断掉。Idle 会照常来，收尾在 `on_idle` 里做。
+            //
+            // 它起的后台命令不必在这里收：`should_settle` 对「已叫停」返回 true，
+            // 收尾会关掉会话，Runner 退出时自己 `kill_all`。
             if let Some(h) = sid.and_then(|id| shell.session(&id)) {
                 h.cancel.set();
             }
@@ -887,6 +890,24 @@ async fn on_idle(shell: &Arc<AppShell>, session_id: &str) {
         }
     }
 
+    // 这一轮结束了 —— 但「跑完」= 这条工单对话退出、**且没有后台命令还在跑**。
+    // 见 [`should_settle`]：还有命令在跑就先不收尾。
+    let status = shell
+        .assistant
+        .read(|s| s.ticket(&ticket.id).map(|t| t.status))
+        .unwrap_or(ticket.status);
+    let running = shell
+        .session(session_id)
+        .map_or(0, |h| h.background.running_count());
+    if !should_settle(status, error.as_deref(), running) {
+        tracing::info!(
+            session = session_id,
+            running,
+            "工单这一轮结束了，但还有后台命令在跑：先不收尾"
+        );
+        return;
+    }
+
     // 还是「进行中」= 这一轮没汇报。
     let after = shell
         .assistant
@@ -972,6 +993,23 @@ fn requeue_interrupted(shell: &Arc<AppShell>, ticket_id: &str) {
             t.updated_at = now_ms();
         }
     });
+}
+
+/// 这一轮跑完之后该不该收尾。
+///
+/// 「跑完」= **这条工单对话退出、且没有后台命令还在跑**。还有命令在跑时先不收尾，
+/// 理由有两层：
+///
+/// * 判成「跑完未汇报」是把还在干的活报成干完了 —— 用户看到的是「跑完未汇报」，
+///   点开却什么都没发生，而其实长构建还在跑；
+/// * 收尾会 `take_worker_entry` + `close_session`，而关会话要 `kill_all` 掉这条会话
+///   的后台命令（见 `Runner` 退出那段）。于是用户点开工单，后台任务一个都不在了。
+///
+/// 只在工单还是「进行中」时才这样等：用户叫停（`Stopped`）之后必须照常收掉，
+/// 否则那几条命令会没人管地一直跑着。`error` 也照旧判失败 —— 错误在 `on_idle`
+/// 已经被 `take_error` 取走，拖到下一轮就丢了，工单会显示成莫名其妙的「未汇报」。
+fn should_settle(status: TicketStatus, error: Option<&str>, running: usize) -> bool {
+    error.is_some() || status != TicketStatus::Working || running == 0
 }
 
 // ---------------------------------------------------------------------------
@@ -1122,6 +1160,24 @@ mod tests {
             }],
             ..Default::default()
         }
+    }
+
+    /// 「跑完」= 这条工单对话退出、**且没有后台命令还在跑**。还有命令在跑时先不收尾：
+    /// 否则会把还在干的活报成「跑完未汇报」，还会顺势关掉会话、连带杀掉那些命令。
+    #[test]
+    fn a_ticket_with_background_commands_is_not_finished_yet() {
+        use TicketStatus::*;
+        assert!(!should_settle(Working, None, 2), "还有命令在跑：不能算跑完");
+        assert!(should_settle(Working, None, 0), "没有命令了才收尾");
+        // 用户叫停之后要照常收掉，否则那几条命令会没人管地一直跑着。
+        assert!(should_settle(Stopped, None, 3), "叫停的不等后台命令");
+        assert!(should_settle(Done, None, 1));
+        // 出错那一轮照旧判失败：错误这时已经被取走，拖到下一轮就丢了。
+        assert!(should_settle(Working, Some("上游 500"), 2));
+        // 已经汇报过的（待查看 / 等拍板 / 受阻）不再等命令。
+        assert!(should_settle(Ready, None, 1));
+        assert!(should_settle(NeedsUser, None, 1));
+        assert!(should_settle(Blocked, None, 2));
     }
 
     /// 第一次开工发的是完整任务书：任务、依据、事件、约定、汇报要求一样不少。
