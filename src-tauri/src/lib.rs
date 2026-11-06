@@ -182,48 +182,6 @@ async fn check_update() -> Result<UpdateCheck, String> {
     })
 }
 
-/// 重新查一次再下载 —— **不让前端把 URL 传回来**。下载地址只由后端按仓库名
-/// 拼出来（见 `update` 模块开头），webview 里想换一个地址也换不了。
-#[tauri::command]
-async fn download_update(
-    app: tauri::AppHandle,
-    state: State<'_, DownloadState>,
-) -> Result<String, String> {
-    let settings = AppSettings::load();
-    let release = carter_app_core::update::check(env!("CARGO_PKG_VERSION"), &settings).await?;
-    if release.asset_name.is_empty() {
-        return Err("已经是最新版本".into());
-    }
-    // 上一轮下载留下的开关先清掉，否则新下载一开始就是「已取消」。
-    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    {
-        let mut slot = state.cancel.lock().unwrap_or_else(|e| e.into_inner());
-        if slot.is_some() {
-            return Err("上一次下载还没结束".into());
-        }
-        *slot = Some(cancel.clone());
-    }
-
-    // 进度回调是同步的、每收到一块就调一次：直接 emit 到 webview，界面自己
-    // 节流。闭包要 `Sync`，`AppHandle` 的 emit 满足。
-    let emitter = app.clone();
-    let progress = move |done: u64, total: Option<u64>| {
-        let _ = emitter.emit(
-            UPDATE_PROGRESS,
-            serde_json::json!({ "downloaded": done, "total": total }),
-        );
-    };
-
-    let result =
-        carter_app_core::update::download(&release, &settings, Some(&cancel), Some(&progress))
-            .await;
-
-    if let Ok(mut slot) = state.cancel.lock() {
-        *slot = None;
-    }
-    result.map(|p| p.to_string_lossy().to_string())
-}
-
 /// 取消正在进行的下载。没有下载在跑时什么也不做。
 #[tauri::command]
 fn cancel_update_download(state: State<'_, DownloadState>) {
@@ -234,23 +192,87 @@ fn cancel_update_download(state: State<'_, DownloadState>) {
     }
 }
 
-/// 装下载好的安装包。返回给界面的一句话（各平台说法不同）。
+/// 一键更新：查 → 下 → 装 → 自动重启。
+///
+/// 界面只调这一个命令，进度走 [`UPDATE_PROGRESS`]。**装完这一条就退出进程** ——
+/// macOS / Windows 要替换的是正在运行的程序文件，不退出就换不干净；换完之后
+/// 由那段脱离的脚本把新版拉起来（见 `core::update::install` 的说明）。
 #[tauri::command]
-fn install_update(path: String) -> Result<String, String> {
-    carter_app_core::update::install(Path::new(&path))
+async fn apply_update(
+    app: tauri::AppHandle,
+    state: State<'_, DownloadState>,
+) -> Result<(), String> {
+    let settings = AppSettings::load();
+    let release = carter_app_core::update::check(env!("CARGO_PKG_VERSION"), &settings).await?;
+    if release.asset_name.is_empty() {
+        return Err("已经是最新版本".into());
+    }
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let mut slot = state.cancel.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.is_some() {
+            return Err("上一次更新还没结束".into());
+        }
+        *slot = Some(cancel.clone());
+    }
+
+    let emitter = app.clone();
+    let progress = move |done: u64, total: Option<u64>| {
+        let _ = emitter.emit(
+            UPDATE_PROGRESS,
+            serde_json::json!({ "phase": "downloading", "downloaded": done, "total": total }),
+        );
+    };
+    let downloaded =
+        carter_app_core::update::download(&release, &settings, Some(&cancel), Some(&progress))
+            .await;
+    if let Ok(mut slot) = state.cancel.lock() {
+        *slot = None;
+    }
+    let file = downloaded?;
+
+    let _ = app.emit(
+        UPDATE_PROGRESS,
+        serde_json::json!({ "phase": "installing" }),
+    );
+    let installed = carter_app_core::update::install(&file)?;
+    match installed {
+        carter_app_core::update::Installed::WillRestart(_) => {
+            // 替换脚本已经在等本进程退出了。
+        }
+        carter_app_core::update::Installed::Ready(_) => {
+            carter_app_core::update::relaunch_after_exit()?;
+        }
+    }
+    let _ = app.emit(
+        UPDATE_PROGRESS,
+        serde_json::json!({ "phase": "restarting" }),
+    );
+    // 给前端一点时间把「正在重启」画出来，然后干净地退出 —— 托盘、助理那些
+    // 后台任务都得走一遍关闭逻辑，不能直接 `exit`。
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+        handle.cleanup_before_exit();
+        handle.exit(0);
+    });
+    Ok(())
 }
 
 /// 重启应用。
 ///
+/// **必须先退出再拉起**：本应用有 single-instance 插件，先起新进程的话它会立刻
+/// 发现旧进程还在、把参数转过去然后自己退出，紧接着旧进程也退出 —— 界面就没了。
+/// 所以起一段脱离的脚本等本进程死掉，再由它拉起可执行文件。
+///
 /// 不用 `app.restart()`：本应用关窗只是藏进托盘，`restart` 走的是正常的退出
-/// 流程，托盘、助理那些后台任务得跟着走一遍关闭逻辑，而这里只是「换个程序
-/// 映像」。重新起一个自己再退出更直接。
+/// 流程，托盘、助理那些后台任务得跟着走一遍关闭逻辑。
 #[tauri::command]
 fn restart_app(app: tauri::AppHandle) {
-    app.cleanup_before_exit();
-    if let Ok(exe) = std::env::current_exe() {
-        let _ = std::process::Command::new(exe).spawn();
+    if let Err(e) = carter_app_core::update::relaunch_after_exit() {
+        tracing::warn!(error = %e, "重启：拉不起新进程");
     }
+    app.cleanup_before_exit();
     app.exit(0);
 }
 
@@ -1942,9 +1964,8 @@ pub fn run() {
             set_app_settings,
             // 自更新
             check_update,
-            download_update,
+            apply_update,
             cancel_update_download,
-            install_update,
             restart_app,
             // 会话
             create_session,

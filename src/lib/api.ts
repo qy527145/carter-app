@@ -487,18 +487,29 @@ export function checkUpdate(): Promise<UpdateCheck> {
   return invoke<UpdateCheck>("check_update");
 }
 
-/** 下载安装包，返回落盘路径。进度走 [`UPDATE_PROGRESS`] 事件。 */
-export function downloadUpdate(): Promise<string> {
-  return invoke<string>("download_update");
+/** 更新进行到哪一步（`UPDATE_PROGRESS` 事件的载荷）。 */
+export type UpdateProgress = {
+  /**
+   * `downloading` 带字节数；`installing` / `restarting` 不带。
+   * 界面按它切换文案：下载时显示进度，之后只显示「正在安装 / 即将重启」。
+   */
+  phase: "downloading" | "installing" | "restarting";
+  downloaded?: number;
+  total?: number | null;
+};
+
+/**
+ * 一键更新：查 → 下 → 装 → 自动重启。进度走 [`UPDATE_PROGRESS`]。
+ *
+ * 装完之后**本进程会自己退出**，由后端把新版拉起来 —— 所以正常情况下这个
+ * Promise 的返回值前端根本看不到（窗口先一步没了）。它 Reject 才是真的失败。
+ */
+export function applyUpdate(): Promise<void> {
+  return invoke<void>("apply_update");
 }
 
 export function cancelUpdateDownload(): Promise<void> {
   return invoke<void>("cancel_update_download");
-}
-
-/** 把下载好的安装包交给系统装。返回给用户看的一句话。 */
-export function installUpdate(path: string): Promise<string> {
-  return invoke<string>("install_update", { path });
 }
 
 /** 重启应用（macOS 用 `ditto` 覆盖后在跑的这一份已经是新的了）。 */

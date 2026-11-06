@@ -28,6 +28,7 @@ import {
   UPDATE_AVAILABLE,
 } from "./api";
 import { refreshAssistant, refreshSessions } from "./sessionOps";
+import { watchUpdateProgress } from "./updater";
 
 type Chunk = { kind: "text" | "thinking"; text: string };
 
@@ -88,6 +89,9 @@ function push(sessionId: string, chunk: Chunk): void {
 /** 订阅 `carter://event`，在整个 App 生命周期内生效。 */
 export function useAppEvents() {
   useEffect(() => {
+    // 更新进度只订阅一次、状态放在 `updater.ts` 里：首页那条提示与「关于」页
+    // 共用同一份，两处各自订阅会在进度上差一帧。
+    watchUpdateProgress();
     let unlisten: (() => void) | undefined;
     // listen() 是异步的：清理可能先于它 resolve（React StrictMode 会立刻卸载再挂载）。
     // 用 cancelled 标记，晚到的 unlisten 就地调用，避免留下悬挂的监听器。

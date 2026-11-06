@@ -78,6 +78,7 @@ import { ModePill } from "./ModePill";
 import { TeamTodoDock } from "./TeamTodoDock";
 import { TicketReply } from "./TicketReply";
 import { Glyph, ServerCard, ToolCard } from "./toolcards/ToolCard";
+import { UpdateNotice } from "./UpdateNotice";
 import { IconButton } from "./ui/Button";
 import { hasSelection, type MenuEntry, useContextMenu } from "./ui/ContextMenu";
 import { Banner, Collapse, ConfirmDialog } from "./ui/Panel";
@@ -2153,6 +2154,10 @@ export function ChatView() {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <ChatHeader />
+      {/* 有新版时贴在顶栏下面：一条安静的行，不挡对话，点一下就装。
+          放在 `NoticeBanner` 之前 —— 通知条讲的是「这一轮发生了什么」，
+          它讲的是「这个应用本身」，后者靠上更像系统级的东西。 */}
+      <UpdateNotice />
       <NoticeBanner />
       <MessageList />
       <MainChangesPanel />

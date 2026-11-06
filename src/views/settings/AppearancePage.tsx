@@ -150,8 +150,9 @@ export function AppearancePage() {
             <div className="flex-1">
               <div className="text-sm text-ink">启动时检查更新</div>
               <div className="mt-0.5 text-[11px] leading-relaxed text-dim">
-                启动几秒后去 GitHub Release 查一次新版本，有的话在「关于」页挂一个提示。
-                断网时静默失败，不会弹报错。关掉之后只能从「关于」页手动检查。
+                启动几秒后去 GitHub Release 查一次新版本。有的话对话页顶部会出现一条
+                「立即更新」，点一下就会下载、静默装好并自动重启。断网时静默失败，
+                不会弹报错。关掉之后只能从「关于」页手动检查。
               </div>
             </div>
             <Switch

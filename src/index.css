@@ -657,3 +657,17 @@ body {
   background: var(--bg-card);
   font-weight: 600;
 }
+
+/* 不确定进度：总量未知时（服务端没给 Content-Length）画一段来回跑的光条。
+   只在「有动作在发生」时用 —— 静态的不确定条等于一个假的加载指示。 */
+@keyframes carter-slide {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(300%);
+  }
+}
+.carter-indeterminate {
+  animation: carter-slide 1.2s ease-in-out infinite;
+}

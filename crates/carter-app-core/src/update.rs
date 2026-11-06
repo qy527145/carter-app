@@ -260,11 +260,32 @@ pub async fn download(
     Ok(dest)
 }
 
-/// 把下载好的安装包交给系统装。返回给界面看的一句话。
+/// 装完之后的状态。
 ///
-/// 这一步不会等安装完成（Windows 的安装程序、Linux 的终端都是另起的进程），
-/// 界面拿到返回值后建议用户重启应用。
-pub fn install(path: &std::path::Path) -> Result<String, String> {
+/// 两个分支的差别只在「谁负责重启」：macOS / Windows 上要替换的是**正在运行的
+/// 程序本身**，必须等本进程退出之后才能动手，所以替换与拉起都交给一段脱离的
+/// 脚本（[`Installed::WillRestart`]）；Linux 的 deb 可以直接装，装完由外壳自己
+/// 退出再拉起（[`Installed::Ready`]）。
+pub enum Installed {
+    /// 已经装好了，重启就能用上新版。附一句给界面看的话。
+    Ready(String),
+    /// 安装脚本已经排好队：本进程退出后它会替换文件并拉起新版。
+    WillRestart(String),
+}
+
+impl Installed {
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Ready(m) | Self::WillRestart(m) => m,
+        }
+    }
+}
+
+/// 把下载好的安装包交给系统装。
+///
+/// macOS / Windows 上这一步**不会立刻**替换文件：它先安排好一段脚本，等本进程
+/// 退出之后再动手（见 [`spawn_after_exit`]）。调用方拿到 `WillRestart` 就该退出。
+pub fn install(path: &std::path::Path) -> Result<Installed, String> {
     if !path.is_file() {
         return Err(format!("安装包不见了：{}", path.display()));
     }
@@ -275,41 +296,125 @@ pub fn install(path: &std::path::Path) -> Result<String, String> {
     }
 }
 
+/// 本进程退出后把可执行文件重新拉起来。用于 Linux 的 `Ready` 分支，以及
+/// [`crate::update`] 之外那几个「重启」入口（见 tauri 层的 `restart_app`）。
+pub fn relaunch_after_exit() -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| format!("找不到自己的路径：{e}"))?;
+    let pid = std::process::id();
+    spawn_after_exit(&format!(
+        "while kill -0 {pid} 2>/dev/null; do sleep 0.2; done\n{}",
+        quote_start(&exe)
+    ))
+}
+
+/// 脱开的一段脚本：父进程退出后它接着跑。
+///
+/// Unix 上写一个 `.sh` 用 `sh` 起；Windows 上写一个 `.cmd` 用 `cmd /C` 起。
+/// 两边都**不继承标准输入输出**，父进程退出时不会被拖死。
+fn spawn_after_exit(script: &str) -> Result<(), String> {
+    let dir = crate::paths::app_home().join("updates");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("建更新目录失败：{e}"))?;
+    let (ext, program, args) = if cfg!(windows) {
+        (".cmd", "cmd", vec!["/C"])
+    } else {
+        (".sh", "sh", Vec::new())
+    };
+    let file = dir.join(format!("apply-{}{ext}", std::process::id()));
+    std::fs::write(&file, script).map_err(|e| format!("写安装脚本失败：{e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o700));
+    }
+
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(args).arg(&file);
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    crate::platform::hide_console(&mut cmd);
+    cmd.spawn().map_err(|e| format!("起安装脚本失败：{e}"))?;
+    Ok(())
+}
+
+/// 在脚本里安全地引一段路径：单引号包起来，里面的单引号按 shell 的写法转义。
+#[cfg(unix)]
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// `nohup 可执行文件` 那一行。macOS 用 `open -n` 打开 `.app`，unix 直接 exec。
+#[cfg(unix)]
+fn quote_start(exe: &std::path::Path) -> String {
+    format!(
+        "nohup {} >/dev/null 2>&1 &\n",
+        sh_quote(&exe.to_string_lossy())
+    )
+}
+
 #[cfg(windows)]
-fn install_windows(path: &std::path::Path) -> Result<String, String> {
-    let mut cmd = std::process::Command::new(path);
-    // 安装程序会接管、自己弹窗；这里不等它，用户装完自己重启。
-    cmd.spawn().map_err(|e| format!("启动安装程序失败：{e}"))?;
-    Ok("安装程序已启动。装完后请重新打开 Carter，旧进程会自动退出。".into())
+fn quote_start(exe: &std::path::Path) -> String {
+    format!("start \"\" \"{}\"\n", exe.display())
+}
+
+#[cfg(windows)]
+fn install_windows(path: &std::path::Path) -> Result<Installed, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("找不到自己的路径：{e}"))?;
+    let pid = std::process::id();
+    // NSIS 的 `/S` 是静默安装：不弹向导、不点「下一步」，装完自己退。它要求
+    // 目标文件没有被占用，所以先等本进程退出。
+    let script = format!(
+        "@echo off\r\n\
+         setlocal\r\n\
+         :carter_wait\r\n\
+         tasklist /FI \"PID eq {pid}\" /NH | find \"{pid}\" >nul\r\n\
+         if not errorlevel 1 (\r\n\
+           timeout /t 1 /nobreak >nul\r\n\
+           goto carter_wait\r\n\
+         )\r\n\
+         \"{installer}\" /S\r\n\
+         timeout /t 2 /nobreak >nul\r\n\
+         start \"\" \"{exe}\"\r\n",
+        installer = path.display(),
+        exe = exe.display(),
+    );
+    spawn_after_exit(&script)?;
+    Ok(Installed::WillRestart(
+        "正在静默安装，装完会自动重启 Carter".into(),
+    ))
 }
 
 #[cfg(not(windows))]
-fn install_windows(_path: &std::path::Path) -> Result<String, String> {
+fn install_windows(_path: &std::path::Path) -> Result<Installed, String> {
     Err("Windows 安装包只能在 Windows 上安装".into())
 }
 
-/// macOS：挂载 → `ditto` 覆盖正在跑的那个 `.app` → 卸载。
+/// macOS：挂载 → 把 `.app` 拷到暂存目录 → 卸载 → 退出后替换并重新打开。
 ///
-/// 目标是**当前可执行文件所在的那个 `.app`**，不是写死的 `/Applications` ——
-/// 用户可能从别处拖进去的（外置盘、另一个用户目录），覆盖错地方会装出两份
-/// 「都是 Carter、一个旧一个新」。从 `target/` 里直接跑的 dev 构建覆盖的是
-/// 编译产物，也无所谓（何况那种情况 `current_exe` 里根本没有 `.app`，会走
-/// 下面的报错分支让用户手动装）。
+/// 替换目标是**当前可执行文件所在的那个 `.app`**，不是写死的 `/Applications` ——
+/// 用户可能从别处拖进去的（外置盘、另一个用户目录）。从 `target/` 里直接跑的
+/// dev 构建没有 `.app`，走下面的报错分支让用户手动装。
+///
+/// 替换刻意放到本进程退出**之后**：`ditto` 覆盖正在运行的那个 bundle 时，
+/// 已映射的分散页一旦被换掉，进程随时可能崩在半路上（签名也当场失效）。
 #[cfg(target_os = "macos")]
-fn install_macos(path: &std::path::Path) -> Result<String, String> {
+fn install_macos(path: &std::path::Path) -> Result<Installed, String> {
     let dest = current_app_bundle()
         .ok_or("这个 Carter 不是从 .app 里启动的，没法自动安装 —— 请打开安装包，把 Carter 拖进 Applications")?;
 
     let mount = std::env::temp_dir().join(format!("carter-update-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&mount);
-    let mount = mount.to_string_lossy().to_string();
+    let _ = std::fs::remove_dir_all(&mount);
+    std::fs::create_dir_all(&mount).map_err(|e| format!("建挂载点失败：{e}"))?;
+    let mount_str = mount.to_string_lossy().to_string();
 
     let attach = std::process::Command::new("hdiutil")
-        .args(["attach", "-nobrowse", "-quiet", "-mountpoint", &mount])
+        .args(["attach", "-nobrowse", "-quiet", "-mountpoint", &mount_str])
         .arg(path)
         .output()
         .map_err(|e| format!("挂载安装包失败：{e}"))?;
     if !attach.status.success() {
+        let _ = std::fs::remove_dir_all(&mount);
         return Err(format!(
             "挂载安装包失败：{}",
             String::from_utf8_lossy(&attach.stderr).trim()
@@ -318,23 +423,74 @@ fn install_macos(path: &std::path::Path) -> Result<String, String> {
 
     // 不管后面成没成，都要先卸载镜像 —— 留着它，用户下次双击同一个 `.dmg`
     // 会看到「已挂载」而拿不到新窗口。
-    let result = {
-        let src = std::path::Path::new(&mount).join("Carter.app");
-        if src.exists() {
-            ditto(&src, &dest)
-        } else {
-            Err("安装包里没找到 Carter.app".into())
-        }
-    };
+    let staged = (|| {
+        let src = find_app(&mount).ok_or("安装包里没找到 .app（可能没下完整，删掉重下一次）")?;
+        let name = src
+            .file_name()
+            .ok_or("安装包里的 .app 没有名字")?
+            .to_string_lossy()
+            .to_string();
+        let staging =
+            std::env::temp_dir().join(format!("carter-update-staged-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&staging);
+        std::fs::create_dir_all(&staging).map_err(|e| format!("建暂存目录失败：{e}"))?;
+        let target = staging.join(&name);
+        ditto(&src, &target)?;
+        Ok::<PathBuf, String>(target)
+    })();
     let _ = std::process::Command::new("hdiutil")
-        .args(["detach", "-quiet", &mount])
+        .args(["detach", "-quiet", &mount_str])
         .output();
-    result?;
+    let _ = std::fs::remove_dir_all(&mount);
+    let staged = staged?;
 
-    Ok(format!(
-        "新版已装进 {}。退出后重新打开 Carter 就是新版。",
-        dest.display()
+    // 先用新名字换进来（`rm -rf` + `mv` 是原子的同一分区操作），失败了就把旧的
+    // 挪回去 —— 覆盖失败时不能把用户原来的 app 弄没。
+    let script = format!(
+        "#!/bin/sh\n\
+         while kill -0 {pid} 2>/dev/null; do sleep 0.2; done\n\
+         dest={dest}\n\
+         new={new}\n\
+         old=\"$dest.old-{pid}\"\n\
+         rm -rf \"$old\"\n\
+         mv \"$dest\" \"$old\" || exit 1\n\
+         if mv \"$new\" \"$dest\"; then\n\
+           rm -rf \"$old\"\n\
+         else\n\
+           mv \"$old\" \"$dest\"\n\
+           exit 1\n\
+         fi\n\
+         open \"$dest\"\n\
+         rm -rf {staging}\n",
+        pid = std::process::id(),
+        dest = sh_quote(&dest.to_string_lossy()),
+        new = sh_quote(&staged.to_string_lossy()),
+        staging = sh_quote(&staged.parent().unwrap_or(&staged).to_string_lossy()),
+    );
+    spawn_after_exit(&script)?;
+    Ok(Installed::WillRestart(
+        "新版已下载，退出后会自动替换并重新打开 Carter".into(),
     ))
+}
+
+/// 挂载点根目录里那个 `.app`。优先取与当前运行的同名的，否则取第一个。
+#[cfg(target_os = "macos")]
+fn find_app(mount: &std::path::Path) -> Option<PathBuf> {
+    let mut apps: Vec<PathBuf> = std::fs::read_dir(mount)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "app") && p.is_dir())
+        .collect();
+    if apps.len() > 1
+        && let Some(want) = current_app_bundle().and_then(|p| p.file_name().map(|n| n.to_owned()))
+        && let Some(hit) = apps
+            .iter()
+            .position(|p| p.file_name() == Some(want.as_os_str()))
+    {
+        return Some(apps.swap_remove(hit));
+    }
+    apps.into_iter().next()
 }
 
 /// 当前可执行文件往上找第一个 `*.app` 目录。
@@ -346,19 +502,17 @@ fn current_app_bundle() -> Option<PathBuf> {
         .map(|p| p.to_path_buf())
 }
 
-/// `ditto` 合并式写入：覆盖同名文件、保留资源分支与签名，比 rm + cp 安全
-/// （中途失败时不会把整个 app 删成半个）。
+/// `ditto`：保留资源分支与签名，比 `cp -r` 可靠。
 #[cfg(target_os = "macos")]
 fn ditto(src: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {
     let out = std::process::Command::new("ditto")
         .arg(src)
         .arg(dest)
         .output()
-        .map_err(|e| format!("安装失败：{e}"))?;
+        .map_err(|e| format!("复制新版失败：{e}"))?;
     if !out.status.success() {
         return Err(format!(
-            "安装失败（{} 可能没有写权限）：{}",
-            dest.display(),
+            "复制新版失败：{}",
             String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
@@ -366,17 +520,28 @@ fn ditto(src: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn install_macos(_path: &std::path::Path) -> Result<String, String> {
+fn install_macos(_path: &std::path::Path) -> Result<Installed, String> {
     Err("macOS 安装包只能在 macOS 上安装".into())
 }
 
-/// Linux：在终端里跑 `dpkg -i`。
+/// Linux：优先 `pkexec dpkg -i`（桌面上的 polkit 认证弹窗），没有或失败再退到
+/// 终端里跑 `sudo dpkg -i`。
 ///
-/// 不直接用 `pkexec dpkg -i`：有些桌面没配 polkit 的认证代理，失败时只有一行
-/// 无从查起的错误；开终端跑 sudo 卡住的时候用户至少看得到发生了什么。
-/// 依次试几个常见的模拟器，一个都没有就退回到「告诉用户手动装」。
+/// deb 替换的是磁盘上的文件，正在跑的这个进程不受影响，所以装完由外壳退出重开
+/// 即可（[`Installed::Ready`]）。
 #[cfg(target_os = "linux")]
-fn install_linux(path: &std::path::Path) -> Result<String, String> {
+fn install_linux(path: &std::path::Path) -> Result<Installed, String> {
+    if crate::platform::which("pkexec").is_some() {
+        let status = std::process::Command::new("pkexec")
+            .arg("dpkg")
+            .arg("-i")
+            .arg(path)
+            .status();
+        if matches!(status, Ok(s) if s.success()) {
+            return Ok(Installed::Ready("新版已安装，重启 Carter 就会用上".into()));
+        }
+    }
+
     // 路径要过一遍 shell，单引号包起来；里面本身有单引号的情况极罕见但还是要处理。
     let quoted = format!("'{}'", path.to_string_lossy().replace('\'', r"'\''"));
     let command = format!("sudo dpkg -i {quoted}; echo; echo '装完了可以关掉这个窗口。'");
@@ -390,7 +555,11 @@ fn install_linux(path: &std::path::Path) -> Result<String, String> {
         let mut cmd = std::process::Command::new(term);
         cmd.args(args).arg(&command);
         match cmd.spawn() {
-            Ok(_) => return Ok("已在终端里打开安装命令，输入密码后就会装上。".into()),
+            Ok(_) => {
+                return Ok(Installed::Ready(
+                    "已在终端里打开安装命令，输入密码后就会装上".into(),
+                ));
+            }
             Err(_) => continue,
         }
     }
@@ -401,7 +570,7 @@ fn install_linux(path: &std::path::Path) -> Result<String, String> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn install_linux(_path: &std::path::Path) -> Result<String, String> {
+fn install_linux(_path: &std::path::Path) -> Result<Installed, String> {
     Err("Linux 安装包只能在 Linux 上安装".into())
 }
 
