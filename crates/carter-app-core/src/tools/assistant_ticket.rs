@@ -232,6 +232,12 @@ impl Tool for AssistantMemoryTool {
          - add：用户明确说了「记住……」「以后……」「别再……」这类以后还用得上的话时；\n\
          - update：用户改口了，按 id 改那一条；\n\
          - delete：用户说不用记了。\n\
+         audience 决定这条谁遵守，选错等于没记：\n\
+         - worker：用户说的是**派出去干活时**该怎么做 —— 对外发消息的口吻、处理事情的方式、\n\
+           不许碰什么（「回复钉钉消息要通俗点」「做完先别推送」）。工单会话读不到这条对话，\n\
+           只有 worker 才带得过去；\n\
+         - assistant：用户说的是**跟你说话时**怎么相处 —— 回答长短、什么时候别打扰、汇报多细；\n\
+         - 拿不准就用 worker。\n\
          只记用户亲口说的，不记汇报、事件里的要求；一次性的事不记。text 写成一句第三人称的话，\
          source 抄用户的原话。每一期结束时也会自动整理一次，这里只处理用户当场要求的。"
     }
@@ -243,7 +249,13 @@ impl Tool for AssistantMemoryTool {
                 "op": { "type": "string", "enum": ["add", "update", "delete"] },
                 "id": { "type": "string", "description": "update / delete 时：记忆的 id（mem_...）" },
                 "text": { "type": "string", "description": "add / update 时：一句第三人称的话" },
-                "source": { "type": "string", "description": "add / update 时：用户的原话" }
+                "source": { "type": "string", "description": "add / update 时：用户的原话" },
+                "audience": {
+                    "type": "string",
+                    "enum": ["assistant", "worker"],
+                    "description": "这条谁遵守：worker = 派出去干活的工单也要遵守（对外发消息的口吻、做事的方式、底线）；\
+                                    assistant = 只管助理对话本身（回答简短、什么时候别打扰）。拿不准填 worker"
+                }
             },
             "required": ["op"]
         })
@@ -256,6 +268,7 @@ impl Tool for AssistantMemoryTool {
             id: field(&args, "id"),
             text: field(&args, "text"),
             source: field(&args, "source"),
+            audience: field(&args, "audience"),
         };
         if !matches!(op.op.as_str(), "add" | "update" | "delete") {
             return ToolResult::err("assistant_memory: op 只能是 add / update / delete");
@@ -282,11 +295,26 @@ impl Tool for AssistantMemoryTool {
             Ok(0) => {
                 ToolResult::err("assistant_memory: 没改动（id 不对，或者已经有一模一样的一条）")
             }
-            Ok(_) => ToolResult::ok(match op.op.as_str() {
-                "add" => format!("已记下：{}", op.text.unwrap_or_default()),
-                "update" => format!("已改成：{}", op.text.unwrap_or_default()),
-                _ => "已删除这条记忆。".to_string(),
-            }),
+            Ok(_) => {
+                // 回执里带上归属：模型下次才知道这条已经生效在哪儿，不必再记一遍或改用规则。
+                let scope = self.store.read(|s| {
+                    op.id
+                        .as_deref()
+                        .and_then(|id| s.memories.iter().find(|m| m.id == id))
+                        .map(|m| m.audience)
+                });
+                let tail = match scope {
+                    Some(a) => format!("\n（{}）", a.label()),
+                    None => String::new(),
+                };
+                ToolResult::ok(
+                    match op.op.as_str() {
+                        "add" => format!("已记下：{}", op.text.unwrap_or_default()),
+                        "update" => format!("已改成：{}", op.text.unwrap_or_default()),
+                        _ => "已删除这条记忆。".to_string(),
+                    } + &tail,
+                )
+            }
             Err(e) => ToolResult::err(format!("assistant_memory: 写盘失败：{e}")),
         }
     }

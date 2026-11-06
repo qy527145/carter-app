@@ -1091,10 +1091,20 @@ export type AssistantTicket = {
   ignored?: boolean;
 };
 
+/**
+ * 这条记忆由谁遵守。
+ *
+ * `worker` 的会随工单任务书一起发进执行会话 —— 工单读不到这条对话，只有它带得过去。
+ * 用户说「回复钉钉要通俗点」属于这一类。
+ */
+export type AssistantAudience = "assistant" | "worker";
+
 export type AssistantMemory = {
   id: string;
   text: string;
   source: string;
+  /** 缺省是 `assistant`（老数据反序列化出来的都按它）。 */
+  audience?: AssistantAudience;
   created_at: number;
   updated_at: number;
 };
@@ -1137,8 +1147,12 @@ export function getAssistant(): Promise<AssistantView> {
 }
 
 /** 改长期记忆：`text` 为空 = 删掉，`id` 为空 = 新增。 */
-export function saveAssistantMemory(id: string | null, text: string): Promise<void> {
-  return invoke<void>("save_assistant_memory", { id, text });
+export function saveAssistantMemory(
+  id: string | null,
+  text: string,
+  audience?: AssistantAudience,
+): Promise<void> {
+  return invoke<void>("save_assistant_memory", { id, text, audience: audience ?? null });
 }
 
 export function getAssistantEpisode(number: number): Promise<MessageView[]> {

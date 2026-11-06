@@ -50,6 +50,50 @@ pub const SIZE_RATIO: f64 = 0.5;
 /// 一期至少几轮用户输入才值得切 —— 只有一两句的「期」整理出来全是噪音。
 pub const MIN_TURNS: u32 = 2;
 
+/// 一条记忆由谁守。
+///
+/// ## 为什么必须分开
+///
+/// 用户说「回复钉钉消息用通俗点的口吻」，指的是**派出去的工单**该怎么说话；说「跟我
+/// 说话简短点」，指的才是助理对话本身。这两类话在同一个输入框里说出来，但落地的地方
+/// 不一样 —— 工单会话是另开的一条会话，它只读得到 `compose` 拼出的任务书，读不到这里
+/// 的长期记忆。曾经不区分，于是要求「回复通俗些」记进了长期记忆，工单照旧用书面语
+/// 回复外部消息，而用户在面板上看到那条记忆，以为已经生效了。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Audience {
+    /// 只管助理对话：说话的疏密、什么时候别打扰、汇报给成什么样。
+    #[default]
+    Assistant,
+    /// 派出去的工单也要守：干活的口吻、对外发消息的风格、做事的底线。
+    Worker,
+}
+
+impl Audience {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_lowercase().as_str() {
+            "" | "assistant" | "chat" => Some(Self::Assistant),
+            "worker" | "ticket" | "work" => Some(Self::Worker),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Assistant => "assistant",
+            Self::Worker => "worker",
+        }
+    }
+
+    /// 面板与工具回执里的说法。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Assistant => "只管这条对话",
+            Self::Worker => "派出去的工单也遵守",
+        }
+    }
+}
+
 /// 一条长期记忆。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Memory {
@@ -58,6 +102,9 @@ pub struct Memory {
     pub text: String,
     /// 出处：用户哪天说的那句原话（截断）。用户在面板上看它判断这条该不该留。
     pub source: String,
+    /// 这条由谁守。见 [`Audience`]。
+    #[serde(default)]
+    pub audience: Audience,
     pub created_at: u64,
     pub updated_at: u64,
 }
@@ -214,12 +261,18 @@ pub const CONSOLIDATE_SYSTEM: &str = "你在整理一个常驻助理的一段对
    - 一次性的事（「#3 用 A 方案」）不记；已有记忆里有的不重复记；与已有记忆冲突时以用户最新说的为准，改写那一条。\n\
    - 每条写成一句第三人称的话，例如「用户周末不想被打扰，非紧急的汇报留到周一」。\n\
    - source 抄用户的那句原话（可截断）。\n\
+   - audience 判断这条由谁守，这决定它进哪张提示词，选错等于没记：\n\
+     · worker —— 用户说的是**派出去干活时**该怎么做：对外发消息的口吻、处理事情的方式、做事的底线、不许碰什么。\n\
+       例：「回复钉钉消息要用通俗的口吻」「工单做完先别推送」。工单会话读不到这条对话，只有 worker 才带得过去。\n\
+     · assistant —— 用户说的是**跟你说话时**怎么相处：回答长短、什么时候别打扰、汇报得多细。\n\
+       例：「周末别打扰我」「汇报只说结果」。\n\
+     · 拿不准就选 worker —— 它在工单里也读得到，宁可多带一层，也别让要求悄悄失效。\n\
 \n\
 JSON 形状：\n\
 {\"summary\": \"…\",\n\
  \"memory\": [\n\
-   {\"op\": \"add\", \"text\": \"…\", \"source\": \"…\"},\n\
-   {\"op\": \"update\", \"id\": \"已有记忆的 id\", \"text\": \"…\", \"source\": \"…\"},\n\
+   {\"op\": \"add\", \"text\": \"…\", \"source\": \"…\", \"audience\": \"worker\"},\n\
+   {\"op\": \"update\", \"id\": \"已有记忆的 id\", \"text\": \"…\", \"source\": \"…\", \"audience\": \"worker\"},\n\
    {\"op\": \"delete\", \"id\": \"已有记忆的 id\"}\n\
  ]}\n\
 没有要改的记忆时 memory 给空数组。";
@@ -231,7 +284,12 @@ pub fn consolidate_prompt(existing: &[Memory], user: &[String], transcript: &str
         s.push_str("（没有）\n");
     }
     for m in existing {
-        s.push_str(&format!("- [{}] {}\n", m.id, m.text));
+        s.push_str(&format!(
+            "- [{}] {}（{}）\n",
+            m.id,
+            m.text,
+            m.audience.as_str()
+        ));
     }
     if existing.len() >= MAX_MEMORIES {
         s.push_str(&format!(
@@ -265,6 +323,9 @@ pub struct MemoryOp {
     pub id: Option<String>,
     pub text: Option<String>,
     pub source: Option<String>,
+    /// `assistant` | `worker`。缺省按 `worker` 收 —— 见 [`Audience`]：多带一层比
+    /// 悄悄失效强，模型漏填时至少不会让用户在工单那边干等。
+    pub audience: Option<String>,
 }
 
 pub fn parse_consolidated(text: &str) -> Result<Consolidated, String> {
@@ -289,6 +350,12 @@ pub fn apply_ops(memories: &mut Vec<Memory>, ops: &[MemoryOp], user: &[String], 
     for (i, op) in ops.iter().enumerate() {
         let text = op.text.as_deref().map(str::trim).filter(|t| !t.is_empty());
         let source = op.source.as_deref().map(str::trim).unwrap_or("");
+        // 模型没说或说了个不认识的词时按 `Worker` 收（见 [`MemoryOp::audience`]）。
+        let audience = op
+            .audience
+            .as_deref()
+            .and_then(Audience::parse)
+            .unwrap_or(Audience::Worker);
         match op.op.as_str() {
             "add" => {
                 let Some(text) = text else { continue };
@@ -299,6 +366,7 @@ pub fn apply_ops(memories: &mut Vec<Memory>, ops: &[MemoryOp], user: &[String], 
                     id: format!("mem_{now}_{i}"),
                     text: text.to_string(),
                     source: format!("{} · {}", day_of(now), clip(source, 120)),
+                    audience,
                     created_at: now,
                     updated_at: now,
                 });
@@ -314,6 +382,10 @@ pub fn apply_ops(memories: &mut Vec<Memory>, ops: &[MemoryOp], user: &[String], 
                 if let Some(m) = memories.iter_mut().find(|m| m.id == id) {
                     m.text = text.to_string();
                     m.source = format!("{} · {}", day_of(now), clip(source, 120));
+                    // 模型没给 audience 时保留原来那个：改个措辞不该顺手把归属也改了。
+                    if let Some(a) = op.audience.as_deref().and_then(Audience::parse) {
+                        m.audience = a;
+                    }
                     m.updated_at = now;
                     changed += 1;
                 }
@@ -337,15 +409,23 @@ pub fn apply_ops(memories: &mut Vec<Memory>, ops: &[MemoryOp], user: &[String], 
 }
 
 /// 系统提示里的「长期记忆」与「往期纪要」两节。
+///
+/// 两类记忆都列出来（`Worker` 那些标一句「工单也遵守」）：助理得知道自己转达给工单的
+/// 要求已经生效了，否则它会再记一条、或者改用规则再说一遍。
 pub fn segment(memories: &[Memory], episodes: &[Episode]) -> String {
     let mut s = String::from(
-        "## 长期记忆\n\n用户说过的偏好与约定。用户说「记住……」时用 assistant_memory 记下；与它冲突时以用户最新说的为准并改掉那一条。\n\n",
+        "## 长期记忆\n\n用户说过的偏好与约定。用户说「记住……」时用 assistant_memory 记下；与它冲突时以用户最新说的为准并改掉那一条。\n\
+         标了「工单也遵守」的，派出去干活的会话同样读得到。\n\n",
     );
     if memories.is_empty() {
         s.push_str("（还没有）\n");
     }
     for m in memories {
-        s.push_str(&format!("- {}（{}）\n", m.text, m.id));
+        let tag = match m.audience {
+            Audience::Assistant => "",
+            Audience::Worker => "，工单也遵守",
+        };
+        s.push_str(&format!("- {}（{}{tag}）\n", m.text, m.id));
     }
     s.push_str("\n## 往期纪要\n\n");
     if episodes.is_empty() {
@@ -368,6 +448,25 @@ pub fn segment(memories: &[Memory], episodes: &[Episode]) -> String {
         }
         s.push_str("\n更早的原话与细节在往期存档里，用 assistant_recall 按关键词查。\n");
     }
+    s
+}
+
+/// 派出去的工单要读的那一段。
+///
+/// 工单会话是另开的一条会话，读不到这条对话的任何东西 —— 它只拿到 `compose` 拼出的任务书
+/// （见 `runtime.rs`）。所以用户说的「对外发消息用通俗口吻」这类话必须由这里带过去，
+/// 否则就只剩长期记忆里那一条，用户看得见、工单看不见。
+pub fn worker_segment(memories: &[Memory]) -> String {
+    let mut s = String::from("## 用户定过的规矩\n\n");
+    let mut any = false;
+    for m in memories.iter().filter(|m| m.audience == Audience::Worker) {
+        s.push_str(&format!("- {}\n", m.text));
+        any = true;
+    }
+    if !any {
+        return String::new();
+    }
+    s.push_str("\n这些是用户亲口说的长期要求，与上面的工作约定同样有效；冲突时以这里为准。\n");
     s
 }
 
@@ -559,6 +658,7 @@ mod tests {
                 id: Some(mem[0].id.clone()),
                 text: Some("用户周末完全不想被打扰".into()),
                 source: Some("以后周末别打扰我".into()),
+                audience: None,
             },
             MemoryOp {
                 op: "delete".into(),
@@ -623,5 +723,107 @@ mod tests {
         assert!(!s.contains("纪要1："));
         assert!(s.contains(&format!("纪要{}", RECENT_EPISODES + 3)));
         assert!(segment(&[], &[]).contains("这是第一期"));
+    }
+
+    /// 用户说「回复钉钉要通俗点」时落的是 `worker`：工单会话读不到这条对话，
+    /// 只有 worker 才随任务书带过去。这条测试盯的就是那次踩过的坑。
+    #[test]
+    fn a_worker_memory_reaches_the_ticket_brief_but_an_assistant_one_does_not() {
+        let user = vec![
+            "以后回复钉钉消息用通俗点的口吻，别写公文".to_string(),
+            "跟我说话简短点".to_string(),
+        ];
+        let mut mem = Vec::new();
+        let ops = vec![
+            MemoryOp {
+                op: "add".into(),
+                id: None,
+                text: Some("用户要求回复钉钉消息时用通俗的口吻".into()),
+                source: Some("以后回复钉钉消息用通俗点的口吻".into()),
+                audience: Some("worker".into()),
+            },
+            MemoryOp {
+                op: "add".into(),
+                id: None,
+                text: Some("用户希望回答简短".into()),
+                source: Some("跟我说话简短点".into()),
+                audience: Some("assistant".into()),
+            },
+        ];
+        assert_eq!(apply_ops(&mut mem, &ops, &user, 1), 2);
+
+        let w = worker_segment(&mem);
+        assert!(w.contains("通俗"), "工单要读到这条：{w}");
+        assert!(!w.contains("简短"), "只管对话的那条不该进工单：{w}");
+
+        // 助理自己那边两条都能看到（得知道自己已经转达过了），worker 那条带标记。
+        let s = segment(&mem, &[]);
+        assert!(s.contains("通俗") && s.contains("简短"));
+        assert!(s.contains("工单也遵守"), "{s}");
+    }
+
+    /// 一条 worker 记忆都没有时，工单任务书里不该多出一个空标题。
+    #[test]
+    fn no_worker_memory_means_no_extra_section() {
+        assert!(worker_segment(&[]).is_empty());
+        let only_chat = vec![Memory {
+            id: "mem_1".into(),
+            text: "用户希望回答简短".into(),
+            source: "x".into(),
+            audience: Audience::Assistant,
+            created_at: 0,
+            updated_at: 0,
+        }];
+        assert!(worker_segment(&only_chat).is_empty());
+    }
+
+    /// 模型漏填或填了个不认识的词时按 `worker` 收：多带一层，总比让要求悄悄失效强。
+    #[test]
+    fn a_missing_audience_falls_back_to_worker_but_an_update_keeps_the_old_one() {
+        let user = vec!["以后回复钉钉要通俗".to_string()];
+        let mut mem = Vec::new();
+        let ops = vec![MemoryOp {
+            op: "add".into(),
+            id: None,
+            text: Some("用户要求回复钉钉时通俗".into()),
+            source: Some("以后回复钉钉要通俗".into()),
+            audience: None,
+        }];
+        assert_eq!(apply_ops(&mut mem, &ops, &user, 1), 1);
+        assert_eq!(mem[0].audience, Audience::Worker);
+
+        // 显式改成只管对话。
+        let ops = vec![MemoryOp {
+            op: "update".into(),
+            id: Some(mem[0].id.clone()),
+            text: Some("用户要求回复钉钉时通俗".into()),
+            source: Some("以后回复钉钉要通俗".into()),
+            audience: Some("assistant".into()),
+        }];
+        assert_eq!(apply_ops(&mut mem, &ops, &user, 2), 1);
+        assert_eq!(mem[0].audience, Audience::Assistant);
+
+        // 只改措辞、没提 audience：归属保持原样，不该被顺手改回 worker。
+        let ops = vec![MemoryOp {
+            op: "update".into(),
+            id: Some(mem[0].id.clone()),
+            text: Some("用户要求回复钉钉时口语化".into()),
+            source: Some("以后回复钉钉要通俗".into()),
+            audience: None,
+        }];
+        assert_eq!(apply_ops(&mut mem, &ops, &user, 3), 1);
+        assert_eq!(mem[0].audience, Audience::Assistant, "改措辞不动归属");
+        assert_eq!(mem[0].text, "用户要求回复钉钉时口语化");
+    }
+
+    /// 老数据里没有 audience 字段，反序列化出来按「只管对话」—— 与改动前的行为一致。
+    #[test]
+    fn old_memories_without_an_audience_still_load() {
+        let json = r#"{"id":"mem_1","text":"用户周末别打扰","source":"x",
+                       "created_at":1,"updated_at":1}"#;
+        let m: Memory = serde_json::from_str(json).unwrap();
+        assert_eq!(m.audience, Audience::Assistant);
+        assert_eq!(Audience::parse("WORKER"), Some(Audience::Worker));
+        assert_eq!(Audience::parse("nonsense"), None);
     }
 }

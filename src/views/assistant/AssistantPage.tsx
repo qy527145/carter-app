@@ -47,6 +47,7 @@ import {
 } from "../../components/ui/Panel";
 import { Select } from "../../components/ui/Select";
 import {
+  type AssistantAudience,
   type AssistantDecision,
   type AssistantEpisode,
   type AssistantMemory,
@@ -928,10 +929,11 @@ function MemorySection({
 }) {
   const [adding, setAdding] = useState(false);
   const [draft, setDraft] = useState("");
+  const [scope, setScope] = useState<AssistantAudience>("assistant");
   const add = () => {
     const t = draft.trim();
     if (!t) return;
-    saveAssistantMemory(null, t)
+    saveAssistantMemory(null, t, scope)
       .then(() => {
         setDraft("");
         setAdding(false);
@@ -951,6 +953,9 @@ function MemorySection({
       <p className="mb-2 text-[11px] text-dim">
         助理对话每天（或空闲几小时后）整理成一期：原话进往期存档，只把你说过的偏好与约定记在这里，
         每轮都会带给模型。也可以在对话里直接说「记住……」。
+        <br />
+        标了「工单也遵守」的，还会随任务书发给派出去干活的会话 —— 工单是另开的会话，
+        看不到这里的内容，「对外发消息用什么口吻」这类要求必须标成它才生效。
       </p>
       {adding && (
         <div className="mb-2 flex gap-2">
@@ -963,6 +968,12 @@ function MemorySection({
               if (e.key === "Enter") add();
               if (e.key === "Escape") setAdding(false);
             }}
+          />
+          <Select
+            className="w-44 shrink-0"
+            value={scope}
+            options={AUDIENCE_OPTIONS}
+            onChange={(v) => setScope(v as AssistantAudience)}
           />
           <Button size="sm" variant="primary" disabled={!draft.trim()} onClick={add}>
             保存
@@ -993,10 +1004,22 @@ function MemorySection({
   );
 }
 
+/**
+ * 「这条记忆由谁遵守」。与后端 `memory::Audience` 一一对应。
+ *
+ * 这个开关不是装饰：工单会话是另开的会话，读不到长期记忆，只有 `worker` 才随任务书带过去。
+ * 用户曾经在这里看到「回复钉钉要通俗点」已经记下了，工单却照旧用书面语，就是因为没有它。
+ */
+const AUDIENCE_OPTIONS = [
+  { value: "assistant", label: "只管这条对话", hint: "回答长短、何时别打扰" },
+  { value: "worker", label: "工单也遵守", hint: "对外发消息的口吻、做事方式" },
+];
+
 function MemoryRow({ m }: { m: AssistantMemory }) {
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState(m.text);
   const [confirm, setConfirm] = useState(false);
+  const audience = m.audience ?? "assistant";
   const save = () => {
     const t = text.trim();
     if (!t || t === m.text) {
@@ -1027,8 +1050,26 @@ function MemoryRow({ m }: { m: AssistantMemory }) {
         ) : (
           <div className="text-sm text-ink">{m.text}</div>
         )}
-        <div className="mt-0.5 truncate text-[11px] text-dim" title={m.source}>
-          {m.source}
+        <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-dim">
+          <button
+            type="button"
+            title="切换这条记忆由谁遵守"
+            className={`shrink-0 rounded px-1 py-0.5 transition-colors hover:bg-ink/[0.06] ${
+              audience === "worker" ? "text-accent" : ""
+            }`}
+            onClick={() =>
+              saveAssistantMemory(
+                m.id,
+                m.text,
+                audience === "worker" ? "assistant" : "worker",
+              ).catch(toastError)
+            }
+          >
+            {AUDIENCE_OPTIONS.find((o) => o.value === audience)?.label ?? audience}
+          </button>
+          <span className="truncate" title={m.source}>
+            {m.source}
+          </span>
         </div>
       </div>
       <span className="flex shrink-0 gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">

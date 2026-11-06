@@ -910,8 +910,9 @@ fn save_assistant_memory(
     shell: State<'_, Arc<AppShell>>,
     id: Option<String>,
     text: String,
+    audience: Option<String>,
 ) -> Result<(), String> {
-    assistant::save_memory(shell.inner(), id, text)
+    assistant::save_memory(shell.inner(), id, text, audience)
 }
 
 /// 往期存档里第 `number` 期的原始对话（面板上展开那一期时看）。
