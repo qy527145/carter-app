@@ -207,6 +207,38 @@ fn remap_at(path: &Path, f: impl Fn(u32) -> Option<u32>) -> Result<(), String> {
     write(path, &Stored { turns })
 }
 
+/// 按「第几轮」重排一次，修正历史遗留的轮次号错位。
+///
+/// 曾经有一版 `run_one_turn` 把「含这一轮」的个数当成了这一轮的号（少减一），
+/// 于是第 0 轮之后每轮的键都大了一号：界面拿消息上的号去查时刻查不到，汇报卡
+/// 上挂的工单归属（`ReportTag`）也跟着落到不存在的轮次上 —— 卡片就没有了
+/// 「打开工单对话」和回答框。记录写下去之后不会再自己对齐，只能在这里修。
+///
+/// 只有在**条目数恰好等于这一期的用户轮数**时才动：时刻是一条一轮、按轮次升序
+/// 存的，条目数对得上就说明一条不缺，顺序重排 0..n 就是对的。对不上（时间线功能
+/// 上线前的老会话、压缩吃掉过轮次的会话）说明缺的那一轮说不清，宁可不碰 ——
+/// 排错比不排更糟。
+pub fn realign(session_id: &str, turns: usize) -> Result<(), String> {
+    if ephemeral(session_id) {
+        return Ok(());
+    }
+    realign_at(&file_for(session_id), turns)
+}
+
+fn realign_at(path: &Path, turns: usize) -> Result<(), String> {
+    let stored = read(path);
+    if stored.turns.len() != turns || stored.turns.keys().copied().eq(0..turns as u32) {
+        return Ok(());
+    }
+    let turns = stored
+        .turns
+        .into_values()
+        .enumerate()
+        .map(|(i, e)| (i as u32, e))
+        .collect();
+    write(path, &Stored { turns })
+}
+
 /// fork 出来的新会话继承时刻。`keep_before` = 只留轮次号小于它的那些
 /// （分叉点之后的对话已经不在这条新会话里了）。
 pub fn copy(from: &str, to: &str, keep_before: Option<u32>) -> Result<(), String> {
@@ -373,6 +405,45 @@ mod tests {
         let empty = dir.join("c.json");
         copy_between(&dir.join("nope.json"), &empty, None).unwrap();
         assert!(!empty.exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 轮次号整体错了一号（老版本 `run_one_turn` 少减一）时按顺序扶正；对得上、
+    /// 或条目数与轮数对不上的，一律不动。
+    #[test]
+    fn realigning_fixes_the_off_by_one_keys() {
+        let dir = tmp_dir("realign");
+        let path = dir.join("s.json");
+        let tag = ReportTag {
+            ticket_id: "ticket_1".into(),
+            session_id: None,
+            ask: true,
+        };
+        // 这一期两轮：0 号正常，第 1 轮被记成了 2。
+        started_at(&path, 0, 100, None).unwrap();
+        started_at(&path, 2, 200, Some(tag.clone())).unwrap();
+        realign_at(&path, 2).unwrap();
+        let got = load_from(&path);
+        assert_eq!(got.iter().map(|t| t.turn).collect::<Vec<_>>(), vec![0, 1]);
+        assert_eq!(
+            got[1].report.as_ref(),
+            Some(&tag),
+            "归属要跟着这一轮一起挪过去"
+        );
+
+        // 已经对得上：不重写文件（时刻原样）。
+        let before = std::fs::read_to_string(&path).unwrap();
+        realign_at(&path, 2).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+
+        // 条目数与轮数对不上：缺的是哪一轮说不清，不动。
+        realign_at(&path, 3).unwrap();
+        assert_eq!(load_from(&path)[1].turn, 1);
+
+        // 没有文件时什么都不做，不报错、不建文件。
+        let none = dir.join("nope.json");
+        assert!(realign_at(&none, 1).is_ok());
+        assert!(!none.exists());
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -257,7 +257,13 @@ pub fn start_session(shell: Arc<AppShell>, opts: SessionOptions) -> carter::Resu
             // 会让重启后的第一轮与历史里的第一轮撞号，报文面板上一个筛选条件就套住
             // 了两条不相干的请求。压缩过的会话这里会数小（早期消息已被摘要替换），
             // 那是压缩本身的固有损失，与这里无关。
-            t.user_turns = crate::view::user_turn_count(&t.messages);
+            let turns = crate::view::user_turn_count(&t.messages);
+            t.user_turns = turns;
+            // 老版本记的时刻可能整体错了一号（见 `timeline::realign`）。轮数当场
+            // 数得出来，顺手把那条会话的键理顺；汇报卡的工单归属认的就是这些键。
+            if let Err(e) = crate::timeline::realign(&entry.meta.id, turns as usize) {
+                tracing::warn!(error = %e, "修正轮次号错位失败");
+            }
             (t, m, true)
         }
         None => {
@@ -1770,11 +1776,16 @@ impl Runner {
         self.ctx.handle.cancel.reset();
         let mut cancelled = false;
         let activity_before = self.activity.load(Ordering::Relaxed);
-        // 这一轮的用户轮号：carter 的 `run_turn` 一进去就把它加一，抓包 `meta.turn`、
-        // 界面上的「第 N 轮」都按加过之后的那个数。这里进来时历史里还没有这一轮
-        // （`run_sequence` 已经 append 了，但 `user_turns` 要到请求前才加），
-        // 所以用「历史里数出来的」那个数。
-        let user_turn = crate::view::user_turn_count(&self.thread.lock().messages);
+        // 这一轮的用户轮号。`run_sequence` / `drive_goal` 进来之前已经把这一轮的
+        // 用户消息 append 进历史了，所以「历史里数出来的」是**含这一轮**的个数，
+        // 这一轮的号是它减一 —— 与 `view::to_views` 给消息打上的号、`timeline` 里
+        // 的键必须是同一个数，否则界面拿消息的号去查时刻会查空（汇报卡的工单归属
+        // 就是这么丢的）。
+        //
+        // 数大了还会一路带偏：轮末整份换回 `self.thread` 时 `user_turns` 也跟着换，
+        // 之后 `run_sequence` / `record_only` 按它记轮次号，从此每一轮都多一号。
+        let user_turn =
+            crate::view::user_turn_count(&self.thread.lock().messages).saturating_sub(1);
         self.turn_usage = carter::provider::Usage::default();
         self.compact_at = 0;
 
@@ -1782,8 +1793,8 @@ impl Runner {
         // 拷贝，轮末（以及被中断时）再整体换回去。几秒级的摘要请求在这期间拿别的
         // 历史算它的，两边互不阻塞。
         //
-        // 拷贝上的 `user_turns` 先按「这一轮已经算上」拨好：`run_turn` 原本在进循环
-        // 之前就加一，轮末再把这件事收掉（`settle_history` 之后整体换回去）。
+        // 拷贝上的 `user_turns` 是「含这一轮」的轮数 —— 这一轮跑完之后它就该是
+        // 这个值，轮末整份换回去时 `self.thread` 也就对上了。
         let mut thread: Thread = thread_copy(&self.thread.lock());
         thread.user_turns = user_turn.saturating_add(1);
         // **不设「一轮里最多调用几次模型」的上限**：什么时候不再要工具，由模型自己
