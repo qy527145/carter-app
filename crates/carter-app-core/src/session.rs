@@ -1815,9 +1815,33 @@ impl Runner {
                             wire,
                         };
                         // 让出历史：自动压缩、断口自愈要在这几秒里动它。
-                        provider_call(&*provider, req, &cancel, &close)
-                            .await
-                            .map(Canceled::Stream)
+                        //
+                        // 等第一个字的这几秒里也要听命令通道：停止 / 插队都在这里
+                        // 到达，不读的话这一轮要等上游开口才停得下来。
+                        let mut call =
+                            std::pin::pin!(provider_call(&*provider, req, &cancel, &close));
+                        loop {
+                            tokio::select! {
+                                biased;
+                                out = &mut call => break out,
+                                cmd = self.cmd_rx.recv() => match cmd {
+                                    Some(cmd) => handle_live_command(
+                                        cmd,
+                                        &self.ctx,
+                                        &mut self.queued,
+                                        &mut self.goal,
+                                        &mut self.changes,
+                                        self.changes_turn,
+                                    ),
+                                    None => {
+                                        break Err(carter::CarterError::Config(
+                                            "会话已结束".into(),
+                                        ));
+                                    }
+                                },
+                            }
+                        }
+                        .map(Canceled::Stream)
                     }
                     Err(e) => Err(carter::CarterError::Config(e)),
                 };
@@ -1830,7 +1854,15 @@ impl Runner {
                         continue;
                     }
                     Err(e) => {
-                        outcome = Some(carter::agent::TurnOutcome::Error(e.to_string()));
+                        // 用户点的「停止」会让 `provider_call` 回报「已取消」——
+                        // 那是取消，不是错误，别在界面上弹一条红字。
+                        if self.ctx.handle.cancel.is_cancelled() {
+                            cancelled = true;
+                            self.ctx.handle.cancel.reset();
+                            outcome = Some(carter::agent::TurnOutcome::Cancelled);
+                        } else {
+                            outcome = Some(carter::agent::TurnOutcome::Error(e.to_string()));
+                        }
                         break;
                     }
                 }
@@ -1858,6 +1890,29 @@ impl Runner {
                         _ = cancel.cancelled() => {
                             cancelled = true;
                             None
+                        }
+                        // 生成中到达的命令。没有这一支的话，「停止 / 插队 / 中断这条
+                        // 命令 / 转后台」都要等这一轮跑完才被读到 —— 界面上就是
+                        // 「点了按钮什么都没发生」。
+                        cmd = self.cmd_rx.recv() => {
+                            match cmd {
+                                Some(cmd) => {
+                                    handle_live_command(
+                                        cmd,
+                                        &self.ctx,
+                                        &mut self.queued,
+                                        &mut self.goal,
+                                        &mut self.changes,
+                                        self.changes_turn,
+                                    );
+                                    continue;
+                                }
+                                // 通道关了 = 句柄都没了，按关会话收尾。
+                                None => {
+                                    cancelled = true;
+                                    None
+                                }
+                            }
                         }
                         ev = futures::StreamExt::next(&mut stream) => ev,
                     };
@@ -2024,7 +2079,33 @@ impl Runner {
                         });
                     }
                     let mut took = Vec::with_capacity(batch.len());
-                    while let Some((r, ms)) = futures::StreamExt::next(&mut futs).await {
+                    loop {
+                        // 工具一跑就是几分钟（`brew install`、整套测试），这期间
+                        // 命令通道得有人读 —— 「中断 / 转后台」就是冲着这时候来的。
+                        let next = futures::StreamExt::next(&mut futs);
+                        tokio::pin!(next);
+                        let item = loop {
+                            tokio::select! {
+                                biased;
+                                item = &mut next => break item,
+                                cmd = self.cmd_rx.recv() => match cmd {
+                                    Some(cmd) => handle_live_command(
+                                        cmd,
+                                        &self.ctx,
+                                        &mut self.queued,
+                                        &mut self.goal,
+                                        &mut self.changes,
+                                        self.changes_turn,
+                                    ),
+                                    None => break None,
+                                },
+                            }
+                        };
+                        let Some((r, ms)) = item else {
+                            // 命令通道关了 = 会话正在结束，这一批不再收。
+                            cancelled = true;
+                            break;
+                        };
                         results.push(r);
                         took.push(ms);
                     }
@@ -2043,7 +2124,30 @@ impl Runner {
                             running: self.ctx.running.clone(),
                             tools: &tools,
                         };
-                        let r = run_one_call(&cx, call).await;
+                        // 同上：跑的可能是几分钟的命令，期间要能读到「中断 / 转后台」。
+                        let mut fut = std::pin::pin!(run_one_call(&cx, call));
+                        let r = loop {
+                            tokio::select! {
+                                biased;
+                                r = &mut fut => break r,
+                                cmd = self.cmd_rx.recv() => match cmd {
+                                    Some(cmd) => handle_live_command(
+                                        cmd,
+                                        &self.ctx,
+                                        &mut self.queued,
+                                        &mut self.goal,
+                                        &mut self.changes,
+                                        self.changes_turn,
+                                    ),
+                                    None => {
+                                        cancelled = true;
+                                        break carter::tools::ToolResult::err(
+                                            "会话已结束，命令没有执行完。",
+                                        );
+                                    }
+                                },
+                            }
+                        };
                         self.finish_one_call(call, &r, started.elapsed().as_millis() as u64);
                         results.push(r);
                     }
@@ -3023,6 +3127,85 @@ fn drop_queued(queue: &mut VecDeque<Command>, id: u64) {
     queue.retain(|c| !matches!(c, Command::SendPrompt { id: Some(q), .. } if *q == id));
 }
 
+/// 一轮**正在跑**时到达的命令：立刻生效的当场处理，其余进 `queued` 等这一轮跑完。
+///
+/// 读命令通道的地方有三个（等模型首字、读流、跑工具），它们都在 `run_one_turn`
+/// 里，而那时 `self.ctx` 正被工具调用的 `CallCtx` 借着 —— 所以这里做成自由函数、
+/// 只拿互不重叠的几个字段，而不是 `&mut Runner` 的方法。
+///
+/// **少了这套即时处理会出现什么**：用户点「转后台」之后，命令要等这一轮（以及
+/// 那条命令）跑完才被读到；那时 `call_id` 早就失效了，`RunningTools::apply` 找不到
+/// 它 —— 界面上就是「点了没反应」。停止、插队同样是这个道理。
+fn handle_live_command(
+    cmd: Command,
+    ctx: &SessionCtx,
+    queued: &mut VecDeque<Command>,
+    goal: &mut Option<Goal>,
+    changes: &mut Option<ChangeWatch>,
+    changes_turn: u32,
+) {
+    match cmd {
+        // 停止整轮：只置取消标记，流与工具都在听它，这一轮自己收拾。
+        Command::Cancel => ctx.handle.cancel.set(),
+        // 生成中也能发消息：默认排队，勾了「插队」就中断本轮、排到队首。
+        Command::SendPrompt {
+            text,
+            id,
+            interject,
+        } => {
+            let cmd = Command::SendPrompt {
+                text,
+                id,
+                interject: false,
+            };
+            if interject {
+                ctx.handle.cancel.set();
+                queued.push_front(cmd);
+            } else {
+                queued.push_back(cmd);
+            }
+        }
+        Command::PromotePrompt { id } => {
+            promote(queued, id);
+            ctx.handle.cancel.set();
+        }
+        Command::DropPrompt { id } => drop_queued(queued, id),
+        // 单条工具调用的「中断 / 转后台」。立刻打到那条命令上，不影响这一轮本身 ——
+        // 工具会把结果回灌给模型，模型接着往下走。
+        Command::ToolAction { call_id, action } => {
+            // 找不到说明它刚好跑完了。不是错误，静默即可 —— 用户点按钮与命令结束
+            // 本来就可能撞在同一毫秒。
+            ctx.running.apply(&call_id, action);
+        }
+        Command::AnswerForm { id, answers } => {
+            ctx.handle.asks.answer(id, answers);
+        }
+        // `/goal pause` 必须立刻生效：否则一条正在自动继续的长任务要等整串跑完
+        // 才停得下来，而用户按暂停正是因为不想再等了。
+        Command::Goal { action } => {
+            let mut next = goal.clone();
+            apply_goal_action(&mut next, &ctx.handle.id, &ctx.shell, action);
+            *goal = next;
+        }
+        // 清空也要立刻生效：起点就是**正在跑的这一轮**，监听器重建一个 —— 新基线、
+        // 空清单，这一轮清空之前动过的文件不再算。
+        Command::ClearChanges => {
+            if let Err(e) = crate::changes::clear(&ctx.handle.id, changes_turn) {
+                tracing::warn!("清空变更记录失败：{e}");
+            }
+            *changes = ChangeWatch::start(&ctx.cwd, &ctx.settings.changes_ignore);
+            emit(
+                &ctx.shell,
+                &ctx.handle.id,
+                SessionEvent::ChangesCleared {
+                    since: changes_turn,
+                },
+            );
+        }
+        other => queued.push_back(other),
+    }
+}
+
 /// 展开输入框里的 `/命令` 与 `@文件`。
 ///
 /// 返回 `(展开后的文本, 给用户看的说明)`。说明只在真的发生了展开时才给 ——
@@ -3617,5 +3800,213 @@ mod no_turn_cap {
             !body.contains("config.agent.max_turns"),
             "run_one_turn 里不该再有模型调用次数上限"
         );
+    }
+}
+
+#[cfg(test)]
+mod live_commands {
+    use super::*;
+    use crate::protocol::ToolActionKind;
+
+    /// 一条能调 [`handle_live_command`] 的最小会话上下文：不碰网络、不建工具池。
+    fn live_ctx() -> SessionCtx {
+        struct Quiet;
+        #[async_trait::async_trait]
+        impl carter::provider::LlmProvider for Quiet {
+            async fn stream(
+                &self,
+                _req: carter::provider::ChatRequest,
+            ) -> carter::Result<carter::provider::EventStream> {
+                unreachable!("这条测试不发请求")
+            }
+        }
+
+        let dir = std::env::temp_dir();
+        let model = carter::registry::ModelInfo {
+            key: "k".into(),
+            provider: "p".into(),
+            api_name: "m".into(),
+            context_window: 100_000,
+            max_output_tokens: 8_000,
+            tokenizer: "cl100k".into(),
+            capabilities: vec![],
+            pricing: carter::registry::Pricing {
+                input: 0.0,
+                output: 0.0,
+                cache_write: None,
+                cache_read: None,
+            },
+            default_reasoning: None,
+        };
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        let handle = SessionHandle::new(
+            "live-cmd-test".into(),
+            dir.clone(),
+            model.clone(),
+            None,
+            cmd_tx,
+        );
+        SessionCtx {
+            shell: AppShell::new(Config::default()),
+            handle: handle.clone(),
+            model,
+            provider: Arc::new(Quiet),
+            config: Arc::new(Config::default()),
+            settings: AppSettings::default(),
+            resumed: false,
+            cwd: dir.clone(),
+            unsupported_server_tools: Vec::new(),
+            capture: None,
+            include_task: false,
+            fast: None,
+            fast_ref: None,
+            shells: handle.background.clone(),
+            shell_cwd: crate::tools::bash::ShellCwd::new(dir),
+            running: crate::tools::control::RunningTools::new(),
+        }
+    }
+
+    fn prompt(id: u64, interject: bool) -> Command {
+        Command::SendPrompt {
+            text: format!("m{id}"),
+            id: Some(id),
+            interject,
+        }
+    }
+
+    fn ids(q: &VecDeque<Command>) -> Vec<Option<u64>> {
+        q.iter()
+            .map(|c| match c {
+                Command::SendPrompt { id, .. } => *id,
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 这一条守的就是「界面上点『转后台』没反应」：在**一轮正在跑**的时候把命令
+    /// 送进 `handle_live_command`，它必须当场打到那条正在执行的工具调用上。
+    #[tokio::test]
+    async fn a_tool_action_mid_turn_reaches_the_running_call() {
+        let ctx = live_ctx();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        let running = ctx.running.clone();
+        let task = tokio::spawn(async move {
+            running
+                .scope("call_1", async move {
+                    let control = crate::tools::control::current().expect("scope 里应有控制句柄");
+                    tx.send(()).ok();
+                    control.backgrounded().await;
+                    control.call_id().to_string()
+                })
+                .await
+        });
+
+        // 等工具真的注册进去，再按按钮 —— 与界面上那条命令跑起来之后才出现按钮一样。
+        rx.await.unwrap();
+        let mut queued = VecDeque::new();
+        let (mut goal, mut changes) = (None, None);
+        handle_live_command(
+            Command::ToolAction {
+                call_id: "call_1".into(),
+                action: ToolActionKind::Background,
+            },
+            &ctx,
+            &mut queued,
+            &mut goal,
+            &mut changes,
+            0,
+        );
+
+        assert_eq!(task.await.unwrap(), "call_1", "按钮要打到正在跑的那一条上");
+        assert!(queued.is_empty(), "工具操作不该进排队");
+    }
+
+    /// 找不到对应调用的按钮不算错误：用户点下去与命令结束可能撞在同一毫秒。
+    #[test]
+    fn a_tool_action_for_a_finished_call_is_dropped_quietly() {
+        let ctx = live_ctx();
+        let mut queued = VecDeque::new();
+        let (mut goal, mut changes) = (None, None);
+        handle_live_command(
+            Command::ToolAction {
+                call_id: "never-existed".into(),
+                action: ToolActionKind::Interrupt,
+            },
+            &ctx,
+            &mut queued,
+            &mut goal,
+            &mut changes,
+            0,
+        );
+        assert!(queued.is_empty());
+    }
+
+    /// 生成中点「停止」要立刻断流（置取消标记），不能等这一轮跑完。
+    #[test]
+    fn cancel_mid_turn_sets_the_token_immediately() {
+        let ctx = live_ctx();
+        assert!(!ctx.handle.cancel.is_cancelled());
+        let mut queued = VecDeque::new();
+        let (mut goal, mut changes) = (None, None);
+        handle_live_command(
+            Command::Cancel,
+            &ctx,
+            &mut queued,
+            &mut goal,
+            &mut changes,
+            0,
+        );
+        assert!(ctx.handle.cancel.is_cancelled());
+        assert!(queued.is_empty(), "取消不是一条要排队的消息");
+    }
+
+    /// 插队 = 中断本轮 + 排到队首；普通发送只是排队。
+    #[test]
+    fn interjecting_cancels_and_jumps_the_queue() {
+        let ctx = live_ctx();
+        let mut queued = VecDeque::from(vec![prompt(1, false)]);
+        let (mut goal, mut changes) = (None, None);
+
+        handle_live_command(
+            prompt(2, true),
+            &ctx,
+            &mut queued,
+            &mut goal,
+            &mut changes,
+            0,
+        );
+        assert_eq!(ids(&queued), vec![Some(2), Some(1)]);
+        assert!(ctx.handle.cancel.is_cancelled());
+
+        ctx.handle.cancel.reset();
+        let mut queued = VecDeque::from(vec![prompt(1, false)]);
+        handle_live_command(
+            prompt(3, false),
+            &ctx,
+            &mut queued,
+            &mut goal,
+            &mut changes,
+            0,
+        );
+        assert_eq!(ids(&queued), vec![Some(1), Some(3)]);
+        assert!(!ctx.handle.cancel.is_cancelled(), "普通发送不该打断这一轮");
+    }
+
+    /// 其它命令（压缩、开新一期…）照旧排队，等这一轮跑完再处理。
+    #[test]
+    fn everything_else_waits_for_the_turn_to_end() {
+        let ctx = live_ctx();
+        let mut queued = VecDeque::new();
+        let (mut goal, mut changes) = (None, None);
+        handle_live_command(
+            Command::Compact,
+            &ctx,
+            &mut queued,
+            &mut goal,
+            &mut changes,
+            0,
+        );
+        assert!(matches!(queued.front(), Some(Command::Compact)));
     }
 }
