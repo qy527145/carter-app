@@ -19,17 +19,14 @@
 //!
 //! ## 关思考怎么表达
 //!
-//! 各家关思考的写法不一样，有的渠道对不认识的字段直接 400。所以分成两层：
+//! **不管什么渠道、什么模型，标题请求都要关思考。** 不按厂商或模型名判断：模板建的
+//! 渠道 `kind` 只写线协议名（DeepSeek 也是 `openai_chat`），中转站更认不出背后是谁，
+//! 而且挑哪个模型起标题是用户的事，我们猜「它不是推理模型」只会猜漏。
 //!
-//! 1. **厂商自己的开关**（[`THINKING_SWITCHES`]）：按渠道种类写该厂商官方文档里的
-//!    「别思考」字段。按厂商写、不按模型写 —— 挑哪一个模型起标题是用户的事，
-//!    我们不该因为「以为它不是推理模型」就少关一次。
-//! 2. **`reasoning_effort: "none"`**（[`NO_THINKING_KINDS`] 白名单）：OpenAI 系
-//!    渠道常见的开关，但**只在实测过的渠道上发** —— 不认它的厂商可能因为多一个
-//!    字段直接 400，那就把本来能用的标题弄坏了。
-//!
-//! 万一渠道挂着某厂商的 kind 却不认那套开关（中转、自建），[`SwitchOff`] 会去掉
-//! 字段把**同一个请求**原样重发一次。
+//! 能决定写法的只有线协议，见 [`switch_steps`]。Chat Completions 没有统一写法，就把
+//! 各家的字段一起发；严格的渠道会因为不认识的字段 400，[`SwitchOff`] 再逐个单独试。
+//! 所有写法都被拒时才不带字段发一次 —— 有些模型根本不接受这类参数（比如不支持
+//! `reasoning_effort` 的非推理模型），它们本来就不思考，不该因此丢掉标题。
 //!
 //! ## 失败要说话
 //!
@@ -48,97 +45,71 @@ const MAX_ATTEMPTS: u32 = 3;
 /// 第 n 次重试前等多久（毫秒）。
 const BACKOFF_MS: [u64; 2] = [800, 2_000];
 
-/// 官方接口的渠道 kind —— 请求体的形状是公开且稳定的，按厂商写开关是安全的。
-const ANTHROPIC_KINDS: &[&str] = &["anthropic", "claude"];
-const OPENAI_KINDS: &[&str] = &["openai"];
-const DEEPSEEK_KINDS: &[&str] = &["deepseek"];
-const GEMINI_KINDS: &[&str] = &["gemini", "google"];
-const QWEN_KINDS: &[&str] = &["qwen", "dashscope"];
-const GLM_KINDS: &[&str] = &["glm", "zhipu", "bigmodel"];
-const KIMI_KINDS: &[&str] = &["kimi", "moonshot"];
-const DOUBAO_KINDS: &[&str] = &["doubao", "volcengine", "ark"];
-const MINIMAX_KINDS: &[&str] = &["minimax"];
-
 /// 一组关思考字段：`(请求体里的键, JSON 字面量或普通字符串)`。
 type SwitchFields = &'static [(&'static str, &'static str)];
 
-/// 「别思考」在各家请求体里的写法。
-///
-/// 不在这张表里的渠道（`custom` / 中转 / 完全没见过的 kind）一个字都不加 ——
-/// 请求体的形状我们不知道，乱加字段比多等几秒更糟。
-const THINKING_SWITCHES: &[(&[&str], SwitchFields)] = &[
-    (ANTHROPIC_KINDS, &[("thinking", r#"{"type":"disabled"}"#)]),
-    (OPENAI_KINDS, &[("reasoning_effort", "none")]),
-    (DEEPSEEK_KINDS, &[("thinking", r#"{"type":"disabled"}"#)]),
-    (
-        GEMINI_KINDS,
-        &[("thinkingConfig", r#"{"thinkingBudget":0}"#)],
-    ),
-    (QWEN_KINDS, &[("enable_thinking", "false")]),
-    (GLM_KINDS, &[("thinking", r#"{"type":"disabled"}"#)]),
-    (KIMI_KINDS, &[("thinking", r#"{"type":"disabled"}"#)]),
-    (DOUBAO_KINDS, &[("thinking", r#"{"type":"disabled"}"#)]),
-    (MINIMAX_KINDS, &[("thinking", r#"{"type":"disabled"}"#)]),
+const THINKING_DISABLED: &str = r#"{"type":"disabled"}"#;
+
+const ANTHROPIC_STEPS: &[SwitchFields] = &[&[("thinking", THINKING_DISABLED)]];
+
+const RESPONSES_STEPS: &[SwitchFields] = &[&[("reasoning", r#"{"effort":"none"}"#)]];
+
+/// Chat Completions 各家的写法：`thinking`（DeepSeek、GLM、Kimi、豆包等）、
+/// `reasoning_effort`（OpenAI、DeepSeek、Gemini 兼容端点等）、`enable_thinking`（千问）。
+const CHAT_STEPS: &[SwitchFields] = &[
+    &[
+        ("thinking", THINKING_DISABLED),
+        ("reasoning_effort", "none"),
+        ("enable_thinking", "false"),
+    ],
+    &[("reasoning_effort", "none")],
+    &[("thinking", THINKING_DISABLED)],
+    &[("enable_thinking", "false")],
 ];
 
-/// 认 `reasoning_effort: "none"` 的渠道 kind。
+/// 这个渠道关思考的写法，按顺序试。
 ///
-/// 判据只有一个：拿真实报文试过，关掉思考之后标题能出、且请求没被拒。
-/// 目前只有 DeepSeek 试过（`kind = "deepseek"`）。
-///
-/// 与 [`THINKING_SWITCHES`] 分开：那里每一条都是该厂商官方文档里的字段，这里是
-/// 「额外再补一个常见开关」—— 后者没有文档背书，所以仍然只发给试过的渠道。
-const NO_THINKING_KINDS: &[&str] = &["deepseek"];
-
-/// 这个渠道关思考的 `reasoning_effort` 参数是不是被验证过。
-pub fn supports_no_thinking(kind: &str) -> bool {
-    let kind = kind.trim().to_ascii_lowercase();
-    NO_THINKING_KINDS.contains(&kind.as_str())
-}
-
-/// 这个渠道关思考用哪些字段（`None` = 这个渠道我们不碰请求体）。
-pub fn thinking_switches(kind: &str) -> Option<&'static [(&'static str, &'static str)]> {
-    let kind = kind.trim().to_ascii_lowercase();
-    THINKING_SWITCHES
-        .iter()
-        .find(|(kinds, _)| kinds.contains(&kind.as_str()))
-        .map(|(_, fields)| *fields)
-}
-
-/// 这一次请求要额外带上的关思考字段：厂商自己的写法 + 白名单渠道的
-/// `reasoning_effort`。
-fn extra_fields(kind: &str) -> Vec<(&'static str, &'static str)> {
-    let mut fields = thinking_switches(kind).unwrap_or(&[]).to_vec();
-    if supports_no_thinking(kind) && !fields.iter().any(|(k, _)| *k == "reasoning_effort") {
-        fields.push(("reasoning_effort", "none"));
+/// 协议由 carter 从 `kind` 解析（认别名、未知值归到 Chat Completions），这里不再维护
+/// 一份映射，所以任何 `kind` 都有写法。
+pub fn switch_steps(kind: &str) -> &'static [SwitchFields] {
+    let config = carter::config::ProviderConfig {
+        kind: kind.to_string(),
+        ..Default::default()
+    };
+    let protocol = config.protocol();
+    match protocol.as_str() {
+        llm_adapt_core::ProtocolId::ANTHROPIC => ANTHROPIC_STEPS,
+        llm_adapt_core::ProtocolId::OPENAI_RESPONSES => RESPONSES_STEPS,
+        _ => CHAT_STEPS,
     }
-    fields
 }
 
-/// 给 provider 套一层：请求里多带几个「别思考」字段；渠道不认这些字段时，
-/// 去掉它们把**同一个请求**原样重发一次。
+/// 给 provider 套一层：请求里带上「别思考」字段；渠道不认这种写法就换下一种，
+/// 都不认才去掉字段把**同一个请求**原样发一次。
 ///
 /// 只包标题这一次调用 —— 主对话是要思考的，那个走原来的 provider。
-///
-/// 加字段与去字段必须在**同一层**：分成两个包装器的话，外层摘掉的只是它自己那份
-/// 请求副本，内层在每次调用时都会把字段重新加回去，重发等于没改。
 pub struct SwitchOff {
     inner: Arc<dyn LlmProvider>,
-    fields: Vec<(&'static str, serde_json::Value)>,
+    steps: Vec<Vec<(&'static str, serde_json::Value)>>,
 }
 
 impl SwitchOff {
-    pub fn new(inner: Arc<dyn LlmProvider>, fields: &[(&'static str, &'static str)]) -> Self {
-        let fields = fields
+    pub fn new(inner: Arc<dyn LlmProvider>, steps: &[SwitchFields]) -> Self {
+        let steps = steps
             .iter()
-            .map(|(k, v)| {
-                // 值可能是 JSON 字面量（`{"type":"disabled"}`），也可能是普通字符串。
-                let value = serde_json::from_str(v)
-                    .unwrap_or_else(|_| serde_json::Value::String(v.to_string()));
-                (*k, value)
+            .map(|fields| {
+                fields
+                    .iter()
+                    .map(|(k, v)| {
+                        // 值可能是 JSON 字面量（`{"type":"disabled"}`），也可能是普通字符串。
+                        let value = serde_json::from_str(v)
+                            .unwrap_or_else(|_| serde_json::Value::String(v.to_string()));
+                        (*k, value)
+                    })
+                    .collect()
             })
             .collect();
-        Self { inner, fields }
+        Self { inner, steps }
     }
 }
 
@@ -148,19 +119,23 @@ impl LlmProvider for SwitchOff {
         // 用 `extra` 而不是 IR 的 `thinking` 字段：IR 里那个是「用多少思考」，
         // 表达不了「一点都不要」，而且 chat completions 的编码器根本不读它。
         // `extra` 是原样并进请求体的通道 —— 这正是它存在的理由。
-        let without = req.clone();
-        let mut with = req;
-        for (key, value) in &self.fields {
-            with.wire.extra.insert((*key).into(), value.clone());
-        }
-        match self.inner.stream(with).await {
-            // 只有「请求本身不被接受」才值得去掉字段再试。空输出 / 超时 / 限流
-            // 之类去掉字段也没用，原样交回给上层的重试逻辑。
-            Err(carter::CarterError::Llm(ref le)) if is_rejected(le) => {
-                self.inner.stream(without).await
+        for fields in &self.steps {
+            let mut with = req.clone();
+            for (key, value) in fields {
+                with.wire.extra.insert((*key).into(), value.clone());
             }
-            other => other,
+            match self.inner.stream(with).await {
+                // 只有「请求本身不被接受」才值得换写法。空输出 / 超时 / 限流之类
+                // 换了也没用，原样交回给上层的重试逻辑。
+                Err(carter::CarterError::Llm(ref le)) if is_rejected(le) => {}
+                other => return other,
+            }
         }
+        tracing::warn!(
+            model = %req.wire.model,
+            "渠道拒绝了所有关思考的写法，标题请求不带这些字段重发"
+        );
+        self.inner.stream(req).await
     }
 }
 
@@ -177,7 +152,7 @@ pub struct Outcome {
 /// 生成会话标题 —— **总会**返回一个可用的标题。
 ///
 /// `kind` 是渠道种类（`config.provider_for(model.provider).kind`）——
-/// 它决定要不要关思考、怎么关，见模块文档。`session_id` 让起标题的请求也带上
+/// 它决定用哪种线协议的写法关思考，见模块文档。`session_id` 让起标题的请求也带上
 /// 会话 id，网关靠它把这次请求归进同一条对话。
 ///
 /// 重试：可重试的错误（限流、网络、超时、5xx）与空标题按指数退避重来；
@@ -190,12 +165,7 @@ pub async fn generate(
     model: &ModelInfo,
     kind: &str,
 ) -> Outcome {
-    let fields = extra_fields(kind);
-    let provider: Arc<dyn LlmProvider> = if fields.is_empty() {
-        provider
-    } else {
-        Arc::new(SwitchOff::new(provider, &fields))
-    };
+    let provider: Arc<dyn LlmProvider> = Arc::new(SwitchOff::new(provider, switch_steps(kind)));
 
     let mut attempts = 1;
     for attempt in 0..MAX_ATTEMPTS {
@@ -426,7 +396,7 @@ mod tests {
     #[tokio::test]
     async fn the_wrapper_adds_the_fields_and_changes_nothing_else() {
         let inner = Counting::new();
-        let wrapped = SwitchOff::new(inner.clone(), thinking_switches("deepseek").unwrap());
+        let wrapped = SwitchOff::new(inner.clone(), switch_steps("anthropic"));
         let mut req = request();
         req.wire.max_tokens = Some(32);
         let _ = wrapped.stream(req).await;
@@ -441,128 +411,121 @@ mod tests {
         assert_eq!(seen.wire.messages.len(), 1, "消息不能被改动");
     }
 
-    /// 渠道拒了带开关的请求：去掉开关**把同一个请求**再发一次。
+    /// 只接受某几个字段的渠道：记下每次请求，带了 `banned` 里的字段就 400。
+    struct Strict {
+        banned: &'static [&'static str],
+        seen: Mutex<Vec<ChatRequest>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for Strict {
+        async fn stream(&self, req: ChatRequest) -> carter::Result<EventStream> {
+            let rejected = self.banned.iter().any(|k| req.wire.extra.contains_key(*k));
+            self.seen.lock().unwrap().push(req);
+            if rejected {
+                return Err(bad_request());
+            }
+            Ok(text_stream("工具功能一览"))
+        }
+    }
+
+    fn strict(banned: &'static [&'static str]) -> Arc<Strict> {
+        Arc::new(Strict {
+            banned,
+            seen: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// 严格的渠道不认合并的写法时，要落到它认的那一种上 —— 而不是直接放弃关思考。
+    #[tokio::test]
+    async fn the_wrapper_falls_through_to_the_form_the_channel_accepts() {
+        let inner = strict(&["thinking", "enable_thinking"]);
+        let wrapped = SwitchOff::new(inner.clone(), switch_steps("openai_chat"));
+        let _ = wrapped.stream(request()).await;
+
+        let seen = inner.seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        let last = &seen[1].wire.extra;
+        assert_eq!(last.len(), 1);
+        assert_eq!(last["reasoning_effort"], serde_json::json!("none"));
+    }
+
+    /// 所有写法都被拒：去掉字段把**同一个请求**再发一次。
     ///
     /// 其余字段（`max_tokens`、消息）在重发时也要原样 —— 重发不是「另发一个空请求」。
     #[tokio::test]
-    async fn the_wrapper_retries_without_switches_when_rejected() {
-        struct RejectsSwitch {
-            seen: Mutex<Vec<ChatRequest>>,
-        }
-        #[async_trait::async_trait]
-        impl LlmProvider for RejectsSwitch {
-            async fn stream(&self, req: ChatRequest) -> carter::Result<EventStream> {
-                let rejected = req.wire.extra.contains_key("thinking");
-                self.seen.lock().unwrap().push(req);
-                if rejected {
-                    return Err(bad_request());
-                }
-                Ok(text_stream("工具功能一览"))
-            }
-        }
-        let inner = Arc::new(RejectsSwitch {
-            seen: Mutex::new(Vec::new()),
-        });
-        let wrapped = SwitchOff::new(inner.clone(), thinking_switches("anthropic").unwrap());
+    async fn the_wrapper_drops_the_fields_when_every_form_is_rejected() {
+        let inner = strict(&["thinking", "reasoning_effort", "enable_thinking"]);
+        let wrapped = SwitchOff::new(inner.clone(), switch_steps("openai_chat"));
         let mut req = request();
         req.wire.max_tokens = Some(32);
         let _ = wrapped.stream(req).await;
 
         let seen = inner.seen.lock().unwrap();
-        assert_eq!(seen.len(), 2, "被拒后应当重发一次");
-        assert!(seen[0].wire.extra.contains_key("thinking"));
-        assert!(seen[1].wire.extra.is_empty(), "重发时开关要摘掉");
-        assert_eq!(seen[1].wire.max_tokens, Some(32), "其余字段原样");
-        assert_eq!(seen[1].wire.messages.len(), 1);
+        assert_eq!(seen.len(), CHAT_STEPS.len() + 1);
+        let last = seen.last().unwrap();
+        assert!(last.wire.extra.is_empty(), "最后一次不带字段");
+        assert_eq!(last.wire.max_tokens, Some(32), "其余字段原样");
+        assert_eq!(last.wire.messages.len(), 1);
     }
 
-    /// 白名单只认实测过的渠道，其余一律不加 `reasoning_effort`。
-    ///
-    /// 这条测试挡的是「顺手给所有渠道都加上」—— 不认这个字段的厂商会直接 400，
-    /// 那等于把本来能用的标题弄坏（Ollama 之类对未知字段很严）。
-    #[test]
-    fn only_verified_kinds_get_the_effort_field() {
-        assert!(supports_no_thinking("deepseek"));
-        assert!(
-            supports_no_thinking("DeepSeek "),
-            "大小写与空格不该影响判断"
-        );
-        for other in ["anthropic", "openai", "ollama", "gemini", "groq", "custom"] {
-            assert!(
-                !supports_no_thinking(other),
-                "{other} 没实测过，不该发这个字段"
-            );
-        }
+    /// 限流之类不是「不认字段」，不能拿来换写法：那会把一次限流放大成好几个请求。
+    #[tokio::test]
+    async fn the_wrapper_only_changes_form_on_rejection() {
+        let inner = flaky(u32::MAX, rate_limited);
+        let wrapped = SwitchOff::new(inner.clone(), switch_steps("openai_chat"));
+        assert!(wrapped.stream(request()).await.is_err());
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 1);
     }
 
-    /// 关思考 = 写厂商自己的开关（不是「以为它是推理模型才关」）：
-    /// 挑哪一个模型起标题是用户的事，标题不该被思考吃掉。
-    #[test]
-    fn known_vendors_always_get_their_switch() {
+    /// 不管什么渠道、什么模型，第一次发出去的请求都带着关思考的字段。
+    #[tokio::test]
+    async fn every_channel_and_model_turns_thinking_off() {
         for kind in [
             "anthropic",
             "claude",
+            "openai_responses",
+            "openai_chat",
+            "OpenAI_Chat ",
             "openai",
+            "openai_compat",
+            "custom",
             "deepseek",
             "gemini",
-            "google",
-            "qwen",
-            "dashscope",
-            "glm",
-            "zhipu",
-            "bigmodel",
-            "kimi",
-            "moonshot",
-            "doubao",
-            "volcengine",
-            "ark",
-            "minimax",
+            "ollama",
+            "groq",
+            "",
+            "中转",
         ] {
-            assert!(thinking_switches(kind).is_some(), "{kind} 应当有关思考开关");
-        }
-        assert!(
-            thinking_switches("Anthropic").is_some(),
-            "大小写不该影响判断"
-        );
-        for kind in ["custom", "ollama", "groq", "", "中转"] {
-            assert!(
-                thinking_switches(kind).is_none(),
-                "{kind} 不认识它的请求体，不该乱加字段"
-            );
+            for api_name in ["deepseek-flash", "gpt-4o-mini", "some-unknown-model"] {
+                let p = Counting::new();
+                let mut m = model();
+                m.api_name = api_name.to_string();
+                let out = generate("你好", "s", p.clone(), &m, kind).await;
+                assert!(!out.degraded);
+                let seen = p.last.lock().unwrap().take().expect("请求应到达渠道");
+                assert!(!seen.wire.extra.is_empty(), "{kind} / {api_name} 没关思考");
+            }
         }
     }
 
-    /// 总入口给不同渠道套的开关：厂商自己的写法，外加（实测过的）`reasoning_effort`。
+    /// 写法跟着线协议走，且字段确实落进了发出去的请求体。
     #[tokio::test]
-    async fn generate_lines_up_the_switches_by_vendor() {
-        async fn seen_fields(kind: &str) -> Vec<String> {
-            let p = Counting::new();
-            let out = generate("你好", "s", p.clone(), &model(), kind).await;
-            assert!(!out.degraded);
-            let mut keys: Vec<String> = p
-                .last
-                .lock()
-                .unwrap()
-                .as_ref()
-                .expect("请求应到达渠道")
-                .wire
-                .extra
-                .keys()
-                .cloned()
-                .collect();
-            keys.sort();
-            keys
-        }
-        assert_eq!(seen_fields("anthropic").await, vec!["thinking"]);
-        assert_eq!(
-            seen_fields("deepseek").await,
-            vec!["reasoning_effort", "thinking"],
-            "只有实测过的渠道才多补一个 reasoning_effort"
-        );
-        assert!(
-            seen_fields("custom").await.is_empty(),
-            "不认识的渠道一个字段都不加"
-        );
+    async fn the_form_follows_the_wire_protocol() {
+        assert_eq!(switch_steps("anthropic"), ANTHROPIC_STEPS);
+        assert_eq!(switch_steps("openai_responses"), RESPONSES_STEPS);
+        assert_eq!(switch_steps("openai_chat"), CHAT_STEPS);
+        assert_eq!(switch_steps("deepseek"), CHAT_STEPS);
+
+        let p = Counting::new();
+        let out = generate("你好", "s", p.clone(), &model(), "openai_chat").await;
+        assert!(!out.degraded);
+        let seen = p.last.lock().unwrap().take().expect("请求应到达渠道");
+        let body = llm_adapt_core::protocol::oai_chat::build_body(&seen.wire).unwrap();
+        assert_eq!(body["thinking"], serde_json::json!({"type": "disabled"}));
+        assert_eq!(body["reasoning_effort"], serde_json::json!("none"));
+        assert_eq!(body["enable_thinking"], serde_json::json!(false));
+        assert_eq!(body["max_tokens"], serde_json::json!(32));
     }
 
     /// 可重试的错误要重试，重试成功就拿到真标题。

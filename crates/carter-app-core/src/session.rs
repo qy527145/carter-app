@@ -1527,7 +1527,7 @@ impl Runner {
             // 没配副模型（或它解析不出来）：用主模型起标题，也好过没有标题。
             None => (self.ctx.provider.clone(), self.ctx.model.clone()),
         };
-        // 渠道种类决定要不要关思考（见 `title.rs`：推理模型会把 32 个 token
+        // 渠道种类决定用哪种写法关思考（见 `title.rs`：推理模型会把 32 个 token
         // 全花在思考上，正文一个字都不留）。副模型可能挂在另一个渠道上，所以取
         // **它自己那个** kind。
         let kind = self.ctx.config.provider_for(&model.provider).kind;
