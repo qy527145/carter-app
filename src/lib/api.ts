@@ -561,6 +561,13 @@ export type ReportTag = {
   session_id?: string | null;
   /** 这条在等用户回答（只有它给回答框）；事后记的一笔（已答复、已结束……）为 false。 */
   ask: boolean;
+  /**
+   * 这条是**派单**（「派了一张工单去做这件事」），不是汇报。
+   *
+   * 界面据此换个图标：助理对话是用户唯一的入口，派出去干活的每一张工单都得在这里
+   * 留一条点得过去的记录，不能只有出事时才浮上来。
+   */
+  dispatch?: boolean;
 };
 
 export type CreatedSession = {

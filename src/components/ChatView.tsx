@@ -63,7 +63,7 @@ import {
   rename,
   retryReply,
 } from "../lib/sessionOps";
-import { ticketMarkTitle } from "../lib/ticketUi";
+import { TICKET_STATUS_LABEL, ticketMarkTitle } from "../lib/ticketUi";
 import { TOAST_MS, toastError } from "../lib/toast";
 import { historyToTurns, type Item, type Turn, useStore } from "../store";
 import { AskForm } from "./AskForm";
@@ -1240,11 +1240,20 @@ function ReportTurn({
     tag?.ask && latest && ticket && TICKET_WAITING.includes(ticket.status) && !ticket.ignored;
   // 候选已经画成按钮了，正文里那行给模型看的「候选：」不再重复。
   if (answerable && ticket.options?.length) body = body.replace(/\n?候选：.*$/, "").trim();
+  // 派单是一条「我派了谁去做」，不是「出事了」。图标与语气都该轻一格：助理对话是
+  // 用户唯一的入口，干活的记录也该在这里排成一条线，而不是只在报错时浮上来。
+  const dispatch = tag?.dispatch === true;
   return (
     <div className="rounded-xl border border-edge bg-card px-3.5 py-2.5">
-      <div className="flex items-center gap-1.5 text-xs font-medium text-tone-blue">
+      <div
+        className={`flex items-center gap-1.5 text-xs font-medium ${
+          dispatch ? "text-dim" : "text-tone-blue"
+        }`}
+      >
         {mark === EVENT_MARK ? (
           <Radar size={12} className="shrink-0" />
+        ) : dispatch ? (
+          <ListChecks size={12} className="shrink-0" />
         ) : (
           <Megaphone size={12} className="shrink-0" />
         )}
@@ -1258,13 +1267,14 @@ function ReportTurn({
             打开工单对话
           </button>
         ) : ticket ? (
-          // 工单还没开工（排队中 / 已结束）：没有对话可开。说清楚，别让人对着
-          // 一条汇报找「按钮去哪了」。
+          // 工单还没有对话可开：排队中（还没开工），或者已经结束了（会话收掉了）。
+          // 按它此刻的状态说，别一律写「排队中」。它开工之后这张卡会自己长出按钮来 ——
+          // 这里订阅着 store 里的工单，`session_id` 一出现就重渲染。
           <span
-            title="这张工单还没有执行会话：排队中，或者只是被记了一笔"
+            title="这张工单还没有执行会话，开工之后这里会出现「打开工单对话」"
             className="ml-auto shrink-0 px-1.5 py-0.5 text-[11px] text-dim/70"
           >
-            尚无执行会话
+            {TICKET_STATUS_LABEL[ticket.status]}
           </span>
         ) : null}
       </div>

@@ -740,7 +740,18 @@ function SourceEditor({
 
 function RulesSection({ settings }: { settings: AssistantSettings }) {
   const [editing, setEditing] = useState(false);
+  const [busy, setBusy] = useState(false);
   const enabled = settings.rules.filter((r) => r.enabled);
+  // 同时跑几张是可以直接在这儿改的：它是用户最常调的那一个，藏进「编辑」弹窗里
+  // 只为了改一个数字，不合适。改大之后排队的会立刻开工（后端 `launch_queued`）。
+  const setMax = (n: number) => {
+    const v = Math.max(1, Math.min(8, n));
+    if (v === settings.max_running) return;
+    setBusy(true);
+    saveAssistantSettings({ ...settings, max_running: v })
+      .catch(toastError)
+      .finally(() => setBusy(false));
+  };
   return (
     <Section
       title="接单规则"
@@ -767,9 +778,25 @@ function RulesSection({ settings }: { settings: AssistantSettings }) {
               <div className="mt-0.5 text-xs leading-relaxed text-dim">{r.instruction}</div>
             </Card>
           ))}
-          <div className="px-1 text-[11px] text-dim">
-            {enabled.length} 条启用 · 同时最多 {settings.max_running} 张工单在跑 ·{" "}
-            {settings.mode === "auto" ? "命中就开工" : "只记录「本来会接」，等你批准"}
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 px-1 text-[11px] text-dim">
+            <span>{enabled.length} 条启用</span>
+            <span className="text-dim/40">·</span>
+            <span className="flex items-center gap-1">
+              同时最多
+              <input
+                type="number"
+                min={1}
+                max={8}
+                value={settings.max_running}
+                disabled={busy}
+                aria-label="同时最多跑几张工单"
+                onChange={(e) => setMax(Number(e.target.value))}
+                className="w-10 rounded bg-ink/[0.06] px-1 py-0.5 text-center tabular-nums text-ink outline-none focus:ring-1 focus:ring-tone-blue/40"
+              />
+              张工单在跑
+            </span>
+            <span className="text-dim/40">·</span>
+            <span>{settings.mode === "auto" ? "命中就开工" : "只记录「本来会接」，等你批准"}</span>
           </div>
         </div>
       )}

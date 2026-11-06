@@ -62,6 +62,12 @@ pub struct ReportTag {
     /// （已答复、已结束、已忽略、工单来信）。界面只给前者回答框。
     #[serde(default)]
     pub ask: bool,
+    /// 这条是**派单**（「派了一张工单去做这件事」），不是汇报。
+    ///
+    /// 界面据此把卡片画在派出去的那一刻，而不是等它跑完才出现：助理对话是用户
+    /// 的唯一入口，中途那些「我派了谁去做」也得在那儿看得见、点得过去。
+    #[serde(default)]
+    pub dispatch: bool,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -418,6 +424,7 @@ mod tests {
             ticket_id: "ticket_1".into(),
             session_id: None,
             ask: true,
+            dispatch: false,
         };
         // 这一期两轮：0 号正常，第 1 轮被记成了 2。
         started_at(&path, 0, 100, None).unwrap();
@@ -456,6 +463,7 @@ mod tests {
             ticket_id: "ticket_1".into(),
             session_id: Some("1-abcd-w".into()),
             ask: true,
+            dispatch: false,
         };
         started_at(&path, 0, 100, None).unwrap();
         started_at(&path, 1, 200, Some(tag.clone())).unwrap();

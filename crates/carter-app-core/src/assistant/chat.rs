@@ -209,6 +209,15 @@ pub fn push_report(shell: &Arc<AppShell>, t: &Ticket) -> bool {
     record(shell, report_text(t), Some(ask_tag(t)))
 }
 
+/// 派出去一张工单：在助理对话里留一条可跳转的记录。
+///
+/// 三个开单点都调它 —— 用户亲口交代的（`assistant_dispatch`）、观察源命中规则自动
+/// 开的（`assess`）、批准了「本来会接」的（`approve`）。助理对话是用户唯一的入口，
+/// 不能只有「要人处理」的那些才浮上来：活正在干的时候，他也得知道有谁在干。
+pub fn push_dispatch(shell: &Arc<AppShell>, t: &Ticket, by_person: bool) -> bool {
+    record(shell, dispatch_text(t, by_person), Some(dispatch_tag(t)))
+}
+
 /// 「本来会接」的提议还没有工单，不挂归属。
 pub fn push_proposal(shell: &Arc<AppShell>, d: &Decision) -> bool {
     record(shell, proposal_text(d), None)
@@ -220,6 +229,7 @@ pub fn tag(t: &Ticket) -> ReportTag {
         ticket_id: t.id.clone(),
         session_id: t.session_id.clone(),
         ask: false,
+        dispatch: false,
     }
 }
 
@@ -229,6 +239,42 @@ pub fn ask_tag(t: &Ticket) -> ReportTag {
         ask: true,
         ..tag(t)
     }
+}
+
+/// 派单那一刻记的那条：绑工单，但既不是提问也不是「事后记的一笔」。
+///
+/// 助理对话是用户唯一的入口 —— 派出去干活的每一张工单，不管是谁派出去的（用户
+/// 亲口交代的、观察源命中规则自动开的、批准了「本来会接」的），都得在这儿留一条
+/// 看得见、点得过去的记录。否则用户得自己去面板里翻「进行中」才知道有活在做。
+pub fn dispatch_tag(t: &Ticket) -> ReportTag {
+    ReportTag {
+        dispatch: true,
+        ..tag(t)
+    }
+}
+
+/// 派单时记进助理对话的那段话。
+///
+/// **不写编号。** 编号是模型之间的地址（`send_message(to="#3")`、`assistant_ticket_act`
+/// 都按它找），它出现在派单工具的结果里就够了 —— 那段是折叠的工具卡，只有模型看。
+/// 用户看到的这一条是「派了件什么事、在哪儿做、什么时候回来」。
+pub fn dispatch_text(t: &Ticket, by_person: bool) -> String {
+    let who = if by_person {
+        "按你说的".to_string()
+    } else if t.rule.is_empty() {
+        String::new()
+    } else {
+        format!("依据规则「{}」", t.rule)
+    };
+    let head = if who.is_empty() {
+        format!("{REPORT_MARK}已派单 · {}\n", t.title)
+    } else {
+        format!("{REPORT_MARK}已派单 · {}（{who}）\n", t.title)
+    };
+    format!(
+        "{head}在 {} 里做。做完、卡住、要拍板时会汇报回这条对话。",
+        t.cwd
+    )
 }
 
 /// 面板上的「开新一期」：之前的对话不再进上下文，只留纪要与记忆（见 `Command::NewEpisode`）。
@@ -320,6 +366,37 @@ mod tests {
         assert!(text.contains("知道了，不用再催。"));
     }
 
+    /// 派单那条：绑工单、能跳转，但**不给回答框**；正文里不出现编号。
+    ///
+    /// 编号是模型之间的地址（`send_message(to="#3")`），它出现在工具结果里就够了 ——
+    /// 用户看到的是「派了件什么事、在哪儿做、什么时候回来」。
+    #[test]
+    fn a_dispatch_record_is_jumpable_but_not_answered_and_carries_no_number() {
+        let mut s = super::super::State::default();
+        let id = s.assign_ticket("/tmp", "修登录", "x");
+        let t = s.ticket(&id).unwrap().clone();
+
+        let tag = dispatch_tag(&t);
+        assert_eq!(tag.ticket_id, id);
+        assert!(tag.dispatch, "界面靠它换个图标");
+        assert!(!tag.ask, "派单不是提问，不该长回答框");
+
+        let text = dispatch_text(&t, true);
+        assert!(
+            text.starts_with(&format!("{REPORT_MARK}已派单 · 修登录")),
+            "{text}"
+        );
+        assert!(text.contains("按你说的"), "{text}");
+        assert!(!text.contains('#'), "给人看的这条不该带编号：{text}");
+        assert!(!text.contains("send_message"), "{text}");
+
+        // 观察源/规则派出去的那种：写明依据。
+        let mut t2 = t.clone();
+        t2.rule = "修 CI".into();
+        let text = dispatch_text(&t2, false);
+        assert!(text.contains("依据规则「修 CI」"), "{text}");
+    }
+
     /// 跳转只认记录时挂的归属：正文里写什么编号都不算；提问优先于事后记的一笔。
     #[test]
     fn report_turns_follow_the_tags_not_the_text() {
@@ -335,6 +412,7 @@ mod tests {
                 ticket_id: id.into(),
                 session_id: Some(format!("{id}-w")),
                 ask,
+                dispatch: false,
             })
         };
         let times = vec![

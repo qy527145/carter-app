@@ -277,6 +277,9 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
             ConfigKind::RuleSave,
             ConfigKind::RuleDelete,
             ConfigKind::Mode,
+            // 面板上的其余配置（同时跑几张、工作约定、两个模型）也能在对话里改：
+            // 用户希望只跟助理打交道，不该被赶回设置页自己点。
+            ConfigKind::Settings,
         ] {
             push(
                 Arc::new(AssistantConfigTool::new(store.clone(), kind)),

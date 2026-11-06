@@ -225,6 +225,13 @@ pub async fn assess(shell: &Arc<AppShell>, source: &Source, events: Vec<String>)
                 let opened = shell
                     .assistant
                     .with(|s| s.open_ticket(source, &rule, &title, &task, events.clone()));
+                // 观察源命中的也要在对话里留一条：「有活开始干了」。助理对话是用户
+                // 唯一的入口，只有出事时才浮上来的话，他会以为助理一直闲着。
+                if let Ok(id) = &opened
+                    && let Some(t) = shell.assistant.read(|s| s.ticket(id).cloned())
+                {
+                    super::chat::push_dispatch(shell, &t, false);
+                }
                 d.ticket_id = opened.ok();
             } else {
                 d.verdict = Verdict::WouldAccept;
@@ -587,6 +594,10 @@ pub async fn approve(shell: &Arc<AppShell>, decision_id: &str) -> Result<String,
         }
         Ok(id)
     })??;
+    // 批准了「本来会接」= 真的开工了，对话里也留一条可跳转的记录。
+    if let Some(t) = shell.assistant.read(|s| s.ticket(&id).cloned()) {
+        super::chat::push_dispatch(shell, &t, false);
+    }
     changed(shell);
     launch_queued(shell).await;
     Ok(id)

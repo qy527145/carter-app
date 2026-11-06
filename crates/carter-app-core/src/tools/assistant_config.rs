@@ -35,6 +35,8 @@ pub enum Kind {
     RuleSave,
     RuleDelete,
     Mode,
+    /// 面板上的其余配置：同时跑几张、工作约定、两个模型。
+    Settings,
 }
 
 pub struct AssistantConfigTool {
@@ -101,6 +103,7 @@ impl Tool for AssistantConfigTool {
             Kind::RuleSave => "assistant_rule_save",
             Kind::RuleDelete => "assistant_rule_delete",
             Kind::Mode => "assistant_mode",
+            Kind::Settings => "assistant_settings",
         }
     }
 
@@ -125,6 +128,13 @@ impl Tool for AssistantConfigTool {
                  - mode = auto：命中规则就开工；\n\
                  - paused = true/false：暂停 / 恢复（暂停时不再检查观察源，也不开工）。\n\
                  切到 auto 之前先确认用户明确要求过 —— 那是让它自己动起来的开关。"
+            }
+            Kind::Settings => {
+                "改助理的其余配置。面板上能改的都在这里，用户不必自己跑到设置页去点。\n\
+                 - max_running：同时最多跑几张工单（1~8）。改大之后排队的那几张会立刻开工；\n\
+                 - scope：工作约定，每张工单的执行对话都会读到的一段话（做到什么程度停、怎么交付）；\n\
+                 - eval_model / work_model：评估用与执行用的模型（`渠道/显示名`，空 = 默认）。\n\
+                 只改用户明确要求的那个字段，没提的不要动。"
             }
         }
     }
@@ -166,6 +176,18 @@ impl Tool for AssistantConfigTool {
                 "properties": {
                     "mode": { "type": "string", "enum": ["observe", "auto"], "description": "接单模式" },
                     "paused": { "type": "boolean", "description": "暂停 / 恢复" }
+                }
+            }),
+            Kind::Settings => json!({
+                "type": "object",
+                "properties": {
+                    "max_running": {
+                        "type": "integer",
+                        "description": "同时最多跑几张工单（1 ~ 8）。用户说「一次多干几件」「别同时开那么多」时改它"
+                    },
+                    "scope": { "type": "string", "description": "工作约定：每张工单的执行对话都会读到的一段话" },
+                    "eval_model": { "type": "string", "description": "评估用的模型（`渠道/显示名`）；传空字符串 = 用默认" },
+                    "work_model": { "type": "string", "description": "执行工单用的模型（`渠道/显示名`）；传空字符串 = 用默认" }
                 }
             }),
         }
@@ -287,6 +309,61 @@ impl Tool for AssistantConfigTool {
                         ))
                     }
                     Err(e) => ToolResult::err(format!("assistant_mode: 写盘失败：{e}")),
+                }
+            }
+            Kind::Settings => {
+                // 只改用户明确提到的那个字段：`args` 里没有的就不动，不能用默认值
+                // 把面板上刚设好的东西盖回去。
+                let max = args.get("max_running").and_then(Value::as_i64);
+                let scope = args
+                    .get("scope")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty());
+                // 模型/约定：给了空字符串就是「清掉、用默认」，所以这里不能像别处那样
+                // 把空值当作「没给」。
+                let model_arg = |key: &str| -> Option<Option<String>> {
+                    args.get(key).and_then(Value::as_str).map(|s| {
+                        let s = s.trim();
+                        (!s.is_empty()).then(|| s.to_string())
+                    })
+                };
+                let eval_model = model_arg("eval_model");
+                let work_model = model_arg("work_model");
+                if max.is_none() && scope.is_none() && eval_model.is_none() && work_model.is_none()
+                {
+                    return ToolResult::err(
+                        "assistant_settings: 至少给一个要改的字段（max_running / scope / eval_model / work_model）",
+                    );
+                }
+                if let Some(n) = max
+                    && !(1..=8).contains(&n)
+                {
+                    return ToolResult::err("assistant_settings: max_running 只能是 1 到 8");
+                }
+                match self.store.with(|s| {
+                    if let Some(n) = max {
+                        s.settings.max_running = n as u32;
+                    }
+                    if let Some(v) = scope {
+                        s.settings.scope = v.to_string();
+                    }
+                    if let Some(v) = eval_model {
+                        s.settings.eval_model = v;
+                    }
+                    if let Some(v) = work_model {
+                        s.settings.work_model = v;
+                    }
+                }) {
+                    Ok(()) => {
+                        let now = self.store.read(|s| s.settings.clone());
+                        let mut parts = vec![format!("同时最多 {} 张工单", now.max_running)];
+                        if scope.is_some() {
+                            parts.push("工作约定已更新".into());
+                        }
+                        ToolResult::ok(format!("已设置：{}。", parts.join("，")))
+                    }
+                    Err(e) => ToolResult::err(format!("assistant_settings: 写盘失败：{e}")),
                 }
             }
         }
@@ -447,5 +524,40 @@ mod tests {
         assert!(st.read(|s| s.settings.mode == Mode::Auto && s.settings.paused));
         assert!(!tool.execute(json!({})).await.ok, "什么都不给要报错");
         assert!(!tool.execute(json!({"mode": "yolo"})).await.ok);
+    }
+
+    /// 同时跑几张、工作约定、两个模型都能在对话里改 —— 用户希望只跟助理打交道，
+    /// 不该被赶回设置页自己点。只改提到的那个字段，没提的不许动。
+    #[tokio::test]
+    async fn the_rest_of_the_panel_settings_can_be_changed_from_the_chat() {
+        let st = store();
+        let tool = AssistantConfigTool::new(st.clone(), Kind::Settings);
+        assert!(!tool.execute(json!({})).await.ok, "什么都不给要报错");
+
+        let r = tool.execute(json!({"max_running": 4})).await;
+        assert!(r.ok, "{}", r.content);
+        assert_eq!(st.read(|s| s.settings.max_running), 4);
+        // 没提到的字段保持原样。
+        assert_eq!(
+            st.read(|s| s.settings.scope.clone()),
+            crate::assistant::DEFAULT_SCOPE
+        );
+
+        assert!(
+            !tool.execute(json!({"max_running": 99})).await.ok,
+            "上限之外的要拒"
+        );
+        assert_eq!(st.read(|s| s.settings.max_running), 4, "拒掉的不许写进去");
+
+        let r = tool
+            .execute(json!({"scope": "改完跑一次测试再汇报", "eval_model": ""}))
+            .await;
+        assert!(r.ok, "{}", r.content);
+        assert_eq!(
+            st.read(|s| s.settings.scope.clone()),
+            "改完跑一次测试再汇报"
+        );
+        // 空字符串 = 清掉、用默认，而不是「没给」。
+        assert_eq!(st.read(|s| s.settings.eval_model.clone()), None);
     }
 }

@@ -445,30 +445,43 @@ impl AssistantTicketTool {
             }
             picked.push((title, task, cwd));
         }
+        // 只开单、只取 id：`push_dispatch` 要读同一份 store，在 `with` 的闭包里
+        // 再进去就是同一把锁重入。
         let opened = self.shell.assistant.with(|s| {
             picked
                 .iter()
-                .map(|(title, task, cwd)| {
-                    let id = s.assign_ticket(cwd, title, task);
-                    s.ticket(&id).map(|t| t.label()).unwrap_or(id)
-                })
-                .collect::<Vec<_>>()
+                .map(|(title, task, cwd)| s.assign_ticket(cwd, title, task))
+                .collect::<Vec<String>>()
         });
-        let labels = match opened {
+        let ids = match opened {
             Ok(v) => v,
             Err(e) => return ToolResult::err(format!("assistant_dispatch: 写盘失败：{e}")),
         };
+        let tickets: Vec<crate::assistant::Ticket> = self
+            .shell
+            .assistant
+            .read(|s| ids.iter().filter_map(|id| s.ticket(id).cloned()).collect());
+        // 派单当场就在对话里留一条可跳转的记录：用户是在这里交代的事情，
+        // 「派给谁去做了」也该在这里看得见，而不是等它跑完才浮上来。
+        for t in &tickets {
+            crate::assistant::chat::push_dispatch(&self.shell, t, true);
+        }
         self.shell.emit(crate::protocol::AppEvent::AssistantChanged);
         launch_queued(&self.shell).await;
         let (paused, max) = self
             .shell
             .assistant
             .read(|s| (s.settings.paused, s.settings.max_running));
-        let mut out = format!("已派出 {} 张工单：{}。", labels.len(), labels.join("、"));
+        // 回给模型的话里只写标题：用户要的是「派了哪几件事」，编号是内部实现。
+        // 模型之后要给某张工单补话，用标题就行 —— `resolve` 认标题、编号、id 三种。
+        let titles: Vec<String> = tickets.iter().map(|t| format!("「{}」", t.title)).collect();
+        let mut out = format!("已派出 {} 张工单：{}。", titles.len(), titles.join("、"));
         if paused {
             out.push_str("助理现在**已暂停**，工单都在排队，恢复后才开工 —— 告诉用户。");
         } else {
-            out.push_str(&format!("同时最多跑 {max} 张，其余排队。"));
+            out.push_str(&format!(
+                "同时最多跑 {max} 张（数量可以在面板或对话里改），其余排队。"
+            ));
         }
         out.push_str("做完或要拍板时会汇报回这里；不要轮询，告诉用户派了什么就结束这一轮。");
         ToolResult::ok(out)
