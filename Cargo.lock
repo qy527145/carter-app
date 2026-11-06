@@ -583,9 +583,7 @@ dependencies = [
 
 [[package]]
 name = "carter"
-version = "0.1.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7a0228b3e62e3588521140067048fd4c5c39dfe494f5bed60ab1f8c58d6f6fe"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "arboard",
@@ -655,7 +653,6 @@ dependencies = [
  "libc",
  "llm_adapt_core",
  "notify",
- "parking_lot",
  "reqwest 0.13.5",
  "serde",
  "serde_json",

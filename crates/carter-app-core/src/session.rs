@@ -14,11 +14,12 @@
 //!
 //! 正文增量（`TextDelta` / `ThinkingDelta` / `TextEnd`）与工具卡片一样，在产生的那
 //! 一刻直接 `emit`：它们必须与工具事件走**同一条同步路径**，否则「先这段字、后这张
-//! 工具卡」的顺序会在异步转发里被打乱。另外还有一条**并行的**记录：`live`（见
-//! `shell.rs` 的 `LiveLog`），给切走再回来的窗口补画面用 —— 它不是界面收字的主路径。
+//! 工具卡」的顺序会在异步转发里被打乱。工具卡片同样不走队列 ——
+//! [`crate::tools::record::ToolTx`] 是个同步回调。另外还有一条**并行的**记录：
+//! `live`（见 `shell.rs` 的 `LiveLog`），给切走再回来的窗口补画面用 —— 它不是界面
+//! 收字的主路径。
 //!
-//! 转发任务只剩工具与提问两条来源（`forward_events`），负责把工具事件与 `ask_user`
-//! 的 oneshot 发送端接起来。
+//! 转发任务只剩一条来源（`forward_events`）：`ask_user` 的 oneshot 发送端。
 //!
 //! ## 长任务目标（`/goal`）住在哪
 //!
@@ -117,7 +118,7 @@ pub struct StartedSession {
     ///
     /// 与 `goal` 同理：事件不回放，而用户切走再回来（接上后台那条）时拿到的是这里，
     /// 不是一次 `todo_updated` —— 不带上的话底栏那条进度就是空的，明明还在干活。
-    /// 每次工具调用落地时由 `run_one_call` 直接更新句柄上那份（不经过事件流）。
+    /// 每次工具调用落地时由 `TxSink` 直接更新句柄上那份（不经过历史快照）。
     pub todos: Vec<TodoView>,
     /// 这一轮里**已经跑完**的工具（结果已定）。工具事件不回放，切走页面再回来时
     /// 那些卡片只剩 `live` 里一条没有结果的记录 —— 看起来像还卡着。接回时一并带上，
@@ -372,7 +373,7 @@ pub fn start_session(shell: Arc<AppShell>, opts: SessionOptions) -> carter::Resu
     };
     let runner = Runner {
         ctx,
-        thread: std::sync::Arc::new(parking_lot::Mutex::new(thread)),
+        thread,
         meta,
         cmd_rx,
         tool_tx: None,
@@ -395,9 +396,9 @@ pub fn start_session(shell: Arc<AppShell>, opts: SessionOptions) -> carter::Resu
         changes_turn: 0,
         overhead: 0,
         reported: Arc::default(),
-        compact_at: 0,
-        turn_usage: carter::provider::Usage::default(),
     };
+    // 待办在 `thread` 移进 runner 之前取一份：续接时底栏要直接显示已有的那份。
+    let thread_todos = runner.thread.todos.clone();
     tokio::spawn(runner.run());
     let changes = crate::changes::load(&handle.id);
     let changes_since = crate::changes::since(&handle.id);
@@ -414,7 +415,9 @@ pub fn start_session(shell: Arc<AppShell>, opts: SessionOptions) -> carter::Resu
         running: false,
         live: Vec::new(),
         pending_ask: None,
-        todos: Vec::new(),
+        // 会话文件里记着待办（carter 的 `RecordKind::Todo`），续接时直接带上 ——
+        // 事件不回放，不在这里给的话底栏那条进度要等到下一次 `todo_write` 才有。
+        todos: thread_todos.iter().map(todo_view).collect(),
         finished_tools: Vec::new(),
         // 新起的 runner 手里还没有后台命令（续接一条**还在跑**的会话走的是
         // `attach_session`，那条路会带回真正在跑的那些）。
@@ -478,7 +481,7 @@ pub(crate) fn start_side(w: SideWiring, id: String, parent_id: String) -> Arc<Se
     let runner = Runner {
         meta: side_meta(&handle),
         ctx,
-        thread: std::sync::Arc::new(parking_lot::Mutex::new(w.thread)),
+        thread: w.thread,
         cmd_rx,
         tool_tx: None,
         ask_tx: None,
@@ -498,8 +501,6 @@ pub(crate) fn start_side(w: SideWiring, id: String, parent_id: String) -> Arc<Se
         changes_turn: 0,
         overhead: 0,
         reported: Arc::default(),
-        compact_at: 0,
-        turn_usage: carter::provider::Usage::default(),
     };
     tokio::spawn(runner.run());
     handle
@@ -723,24 +724,26 @@ struct TurnResult {
     used_tools: bool,
     /// 用户在这一轮里点过「停止」。
     user_cancelled: bool,
+    /// 这一轮开始时历史里有几轮（含这一轮自己）。carter 中途压缩过的话，轮末靠它重排。
+    turns_before: u32,
+    /// carter 在这一轮**中途**自己压缩过时的摘要档位（见 [`Runner::after_turn`]）。
+    mid_compact: Option<String>,
 }
 
 struct Runner {
     ctx: SessionCtx,
-    /// 这份历史。多包一层是为了让自动压缩能在**后台**跑：carter 的 `compact` 要
-    /// `&mut Thread`，而它要发请求、要几秒 —— 等在会话任务上，一串自动继续的每轮
-    /// 之间就都白等一次（见 [`Runner::spawn_compaction`]）。
+    /// 这份历史。会话任务**独占**它（`carter::agent::run_turn` 要 `&mut Thread`
+    /// 一整轮攥着），别处要看进展走 [`SessionHandle::history`] 那份快照。
     ///
-    /// 换一份历史走 [`Runner::swap_thread`]：会话任务自己从不拿这把锁，读的是
-    /// 公开的 `ArcSwap`，所以后台攥着写锁的那几秒里，会话任务照常读写历史。
-    thread: std::sync::Arc<parking_lot::Mutex<Thread>>,
+    /// 曾经包在 `Arc<Mutex<..>>` 里，为的是让自动压缩跑到后台。代价是压缩与这一轮
+    /// 各改各的历史：压缩把结果写回共享那份，轮末又把整份换回去，压缩白做。现在
+    /// 压缩在轮末**就地**做（见 [`Runner::compact`]）。
+    thread: Thread,
     meta: session::SessionMeta,
     cmd_rx: mpsc::UnboundedReceiver<Command>,
-    /// 两条事件通道的发送端（工具卡片、工具发起的提问）。接收端在 `forward_events`
-    /// 任务手里，所以这里存 `None` 就表示「还没建」—— 见 [`Runner::run`]。
-    ///
-    /// 正文增量不走这里：它们直接 `emit`（见模块文档）。
-    tool_tx: Option<mpsc::UnboundedSender<ToolEvent>>,
+    /// 工具卡片的出口（**同步**调用，与正文增量同一条时间线，见 [`ToolTx`]）。
+    tool_tx: Option<crate::tools::record::ToolTx>,
+    /// 工具发起的提问：接收端在 `forward_events` 任务手里。`None` = 还没建。
     ask_tx: Option<mpsc::UnboundedSender<AskRequest>>,
     mcp_tools: Vec<Arc<dyn Tool>>,
     activity: Arc<AtomicU32>,
@@ -774,14 +777,6 @@ struct Runner {
     /// 处理 `StreamChunk::Usage` 那一段）。0 = 还没有
     /// （刚打开 / 刚续接，或历史刚被改写过），这时百分比环回落到估算值。
     reported: Arc<AtomicU64>,
-    /// 这一轮里每个请求上报的「这次请求的完整输入」里最大的一份 —— 自动压缩按它判。
-    ///
-    /// carter 拿 `usage.input_tokens` 比阈值，而开了 prompt caching 之后那只是
-    /// **未命中缓存**的一截：一条 150k 的对话命中 140k 的话它只看见 10k，永远不会压，
-    /// 直到上游报「超出上下文」。这里记的是整个请求的规模。
-    compact_at: u64,
-    /// 这一轮累加的用量（轮末发一次 `turn_usage`）。
-    turn_usage: carter::provider::Usage,
     /// 上面那个监听器对应哪一轮。
     ///
     /// 必须在轮首记下来：`carter::agent::run_turn` 一进去就把 `thread.user_turns`
@@ -800,15 +795,14 @@ impl Runner {
         // 正文增量不在这里：它们与工具卡片要严格保序，所以在产生的那一刻直接
         // `emit`（见模块文档）。工具记录与提问本来就不是 carter 的概念，走各自的
         // 通道由转发任务收口。
-        let (tool_tx, tool_rx) = mpsc::unbounded_channel::<ToolEvent>();
         let (ask_tx, ask_rx) = mpsc::unbounded_channel::<AskRequest>();
-        self.tool_tx = Some(tool_tx);
+        let tx = emit_tool_event(self.ctx.shell.clone(), session_id.clone());
+        self.tool_tx = Some(tx);
         self.ask_tx = Some(ask_tx);
         let forwarder = tokio::spawn(forward_events(
             self.ctx.shell.clone(),
             session_id.clone(),
             self.ctx.handle.asks.clone(),
-            tool_rx,
             ask_rx,
         ));
 
@@ -1002,14 +996,14 @@ impl Runner {
             Command::ToolAction { .. } => {}
             Command::Compact => {
                 self.ctx.refresh();
-                self.compact(false);
+                self.compact(false).await;
             }
             Command::Record { text, report } => self.record_only(text, report),
             Command::NewEpisode => self.close_episode(true).await,
             // 空闲时才走到这里（生成中收到的排队等这一轮跑完），所以下一轮的号
             // 就是 `user_turns` —— 起点从它开始，已经跑完的轮次都算「清空之前」。
             Command::ClearChanges => {
-                let since = self.thread.lock().user_turns;
+                let since = self.thread.user_turns;
                 if let Err(e) = crate::changes::clear(&self.ctx.handle.id, since) {
                     tracing::warn!("清空变更记录失败：{e}");
                 }
@@ -1035,7 +1029,7 @@ impl Runner {
         let git = self.meta.git.clone();
         // 上一轮可能有悬空的 tool_use；回退前先收口，免得把断口留在截断点之前。
         self.settle_history();
-        let stored = match crate::history::retract_turn(&mut self.thread.lock(), turn) {
+        let stored = match crate::history::retract_turn(&mut self.thread, turn) {
             Ok(t) => t,
             Err(e) => {
                 self.error(&e);
@@ -1056,9 +1050,7 @@ impl Runner {
         if let Err(e) = crate::timeline::retract(&self.ctx.handle.id, turn) {
             tracing::warn!("回退时刻记录失败：{e}");
         }
-        self.ctx
-            .handle
-            .publish_history(&self.thread.lock().messages);
+        self.ctx.handle.publish_history(&self.thread.messages);
         self.emit(SessionEvent::TurnRetracted { turn });
         // `echo` 一律给 `None`：这一轮的用户气泡界面上已经有了，`TurnRetracted`
         // 刚刚交代过它 —— 再带一次 `prompt` 会多画一条。
@@ -1074,7 +1066,7 @@ impl Runner {
     async fn retry_reply(&mut self, turn: u32) {
         let git = self.meta.git.clone();
         self.settle_history();
-        if let Err(e) = crate::history::rewind_reply(&mut self.thread.lock(), turn) {
+        if let Err(e) = crate::history::rewind_reply(&mut self.thread, turn) {
             self.error(&e);
             return;
         }
@@ -1091,11 +1083,9 @@ impl Runner {
         if let Err(e) = crate::timeline::retract(&id, turn + 1) {
             tracing::warn!("回退时刻记录失败：{e}");
         }
-        self.ctx
-            .handle
-            .publish_history(&self.thread.lock().messages);
+        self.ctx.handle.publish_history(&self.thread.messages);
         self.emit(SessionEvent::HistoryReplaced {
-            history: crate::view::to_views(&self.thread.lock().messages),
+            history: crate::view::to_views(&self.thread.messages),
             prompts: crate::prompts::load(&id),
             changes: crate::changes::load(&id),
             changes_since: crate::changes::since(&id),
@@ -1119,7 +1109,7 @@ impl Runner {
         self.settle_history();
         self.finish_changes(result.used_tools).await;
         self.emit_turn_ended(turn, &result);
-        self.after_turn(&result);
+        self.after_turn(&result).await;
         self.drive_goal(result, git).await;
         self.last_message_at = Some(crate::protocol::now_ms());
         self.emit(SessionEvent::Idle);
@@ -1134,12 +1124,10 @@ impl Runner {
     /// `report` 跟着这一轮存进 `timeline`，并随 `turn_started` 发给界面。
     fn record_only(&mut self, text: String, report: Option<crate::timeline::ReportTag>) {
         self.settle_history();
-        self.thread.lock().append_user(text.clone());
-        let turn = self.thread.lock().user_turns;
-        self.thread.lock().user_turns = turn.saturating_add(1);
-        self.ctx
-            .handle
-            .publish_history(&self.thread.lock().messages);
+        self.thread.append_user(text.clone());
+        let turn = self.thread.user_turns;
+        self.thread.user_turns = turn.saturating_add(1);
+        self.ctx.handle.publish_history(&self.thread.messages);
         let started_at = crate::protocol::now_ms();
         if let Err(e) =
             crate::timeline::started_tagged(&self.ctx.handle.id, turn, started_at, report.clone())
@@ -1181,7 +1169,7 @@ impl Runner {
         if self.ctx.handle.id != crate::assistant::CHAT_SESSION_ID {
             return;
         }
-        if self.thread.lock().messages.is_empty() {
+        if self.thread.messages.is_empty() {
             if force {
                 self.notice("这一期还没有对话，不用切");
             }
@@ -1193,7 +1181,7 @@ impl Runner {
             .read(|s| s.episodes.last().map(|e| e.ended_at))
             .unwrap_or(self.meta.created_at);
         let last_at = self.last_message_at.unwrap_or(now);
-        let turns = crate::view::user_turn_count(&self.thread.lock().messages);
+        let turns = crate::view::user_turn_count(&self.thread.messages);
         let used = self.history_tokens() + self.overhead;
         let window = u64::from(self.ctx.model.context_window);
         let why = if force {
@@ -1205,7 +1193,7 @@ impl Runner {
             why
         };
         self.settle_history();
-        let messages = self.thread.lock().messages.clone();
+        let messages = self.thread.messages.clone();
         let number = store.read(|s| s.episodes.last().map_or(1, |e| e.number + 1));
         let dir = memory::archive_dir();
         if let Err(e) = memory::save_archive(&dir, number, &messages) {
@@ -1261,23 +1249,21 @@ impl Runner {
             return;
         }
 
-        if let Some(rec) = self.thread.lock().recorder() {
+        if let Some(rec) = self.thread.recorder() {
             rec.record(carter::session::RecordKind::Compacted {
                 tier: "episode".into(),
                 messages: Vec::new(),
             });
         }
-        self.thread.lock().messages.clear();
-        self.thread.lock().user_turns = 0;
-        self.thread.lock().turns = 0;
+        self.thread.messages.clear();
+        self.thread.user_turns = 0;
+        self.thread.turns = 0;
         let id = self.ctx.handle.id.clone();
         crate::prompts::remove(&id);
         crate::changes::remove(&id);
         crate::timeline::remove(&id);
         self.forget_reported();
-        self.ctx
-            .handle
-            .publish_history(&self.thread.lock().messages);
+        self.ctx.handle.publish_history(&self.thread.messages);
         self.emit(SessionEvent::HistoryReplaced {
             history: Vec::new(),
             prompts: Vec::new(),
@@ -1385,8 +1371,8 @@ impl Runner {
         // **必须在追加这条用户消息之前补上** —— 补在它之后，普通用户消息就会
         // 插在 tool_use 与 tool_result 中间，那仍然是一份非法历史。
         self.settle_history();
-        let turn_start = self.thread.lock().messages.len();
-        self.thread.lock().append_user(text.clone());
+        let turn_start = self.thread.messages.len();
+        self.thread.append_user(text.clone());
         // 标题在这一刻并行去生成，**不挡这一轮**（见 [`Runner::spawn_title`]）。
         // 放在 append 之后：carter 的 Recorder 是惰性建文件的，第一条消息落盘
         // 才让会话文件存在，而写标题要往那个文件里追加。
@@ -1396,16 +1382,13 @@ impl Runner {
         }
         // 轮次开头也发布一次：这一轮可能很长，侧边聊天在这期间至少要能看到
         // 「用户提了什么要求」（之后的进展由 `live` 补上）。
-        self.ctx
-            .handle
-            .publish_history(&self.thread.lock().messages);
+        self.ctx.handle.publish_history(&self.thread.messages);
         self.begin_changes();
         // 用户**打的原文**按轮存一份：会话文件里是展开后的正文（`@文件` 的内容
         // 也可能在里面），拿它回填「编辑」框等于把整份文件摊在输入框里。
         // 自动继续推起来的那一轮没有原文（`echo` 是 `None`），本来也不给它编辑。
         if let Some(raw) = echo.as_deref()
-            && let Err(e) =
-                crate::prompts::record(&self.ctx.handle.id, self.thread.lock().user_turns, raw)
+            && let Err(e) = crate::prompts::record(&self.ctx.handle.id, self.thread.user_turns, raw)
         {
             tracing::warn!("记录用户原文失败：{e}");
         }
@@ -1414,7 +1397,7 @@ impl Runner {
         // 轮次号在**进 run_turn 之前**记下：carter 的 `run_turn` 一进去就把
         // `thread.user_turns` 加一（见 `changes_turn` 的同一段说明），轮末再读就成了
         // 下一轮的号 —— 完成时刻会被记到下一轮上，这一轮的回答永远等不到它。
-        let turn = self.thread.lock().user_turns;
+        let turn = self.thread.user_turns;
         let started_at = crate::protocol::now_ms();
         // 时间按轮落盘：切走再回来、重启之后显示的还是当时的那个数，而不是
         // 「重开会话的时刻」。老会话没有这份记录，界面就不显示时间。
@@ -1439,7 +1422,7 @@ impl Runner {
         // 一收到 `turn_ended` 就开始处理收尾（判「没汇报」、发通知、排下一轮），
         // 而压缩要发模型请求、要几秒。按源顺序处理事件的监听者会被它拖住，
         // 那几秒里什么都干不了；排进去的新消息还会因为这条会话还「忙」而多等一层。
-        self.after_turn(&result);
+        self.after_turn(&result).await;
         if !result.failed
             && !result.user_cancelled
             && let Some(raw) = raw.as_deref()
@@ -1477,7 +1460,7 @@ impl Runner {
     /// 这里补发一对 `tool_started` / `tool_finished` 把它画完整，否则界面显示的
     /// 历史与磁盘上的历史会不一样（下次打开时才突然多出一张卡）。
     fn settle_history(&mut self) {
-        let repaired = crate::history::repair_dangling_tool_uses(&mut self.thread.lock());
+        let repaired = crate::history::repair_dangling_tool_uses(&mut self.thread);
         if repaired.is_empty() {
             return;
         }
@@ -1494,9 +1477,7 @@ impl Runner {
                 elapsed_ms: 0,
             });
         }
-        self.ctx
-            .handle
-            .publish_history(&self.thread.lock().messages);
+        self.ctx.handle.publish_history(&self.thread.messages);
     }
 
     /// 首轮之后并行生成会话标题。
@@ -1521,7 +1502,7 @@ impl Runner {
     /// 顺带发一条提示 —— 不弹错误条，只在对话里一行字。
     fn spawn_title(&mut self, first_prompt: &str) {
         // 侧边会话没有 recorder（不落盘），也就没有「列表里那一行」要起名。
-        let Some(recorder) = self.thread.lock().recorder() else {
+        let Some(recorder) = self.thread.recorder() else {
             return;
         };
         // 与 carter CLI 同一个函数（`generate_title`）：3-6 词中文、取首行、去引号。
@@ -1592,7 +1573,7 @@ impl Runner {
         {
             return;
         }
-        let guard = self.thread.lock();
+        let guard = &self.thread;
         let turn = guard.messages.get(turn_start..).unwrap_or_default();
         // 模型自己已经记过了：同一件事再问一遍是打扰。
         if ms::saved_in(turn) {
@@ -1668,15 +1649,15 @@ impl Runner {
         let is_chat = self.ctx.handle.id == crate::assistant::CHAT_SESSION_ID;
         // 汇报推起来的那一轮只给一个只读工具：汇报里有外部事件的文字，这一轮只该转述。
         // 不能一个都不给 —— 历史里有 tool_use 时，Anthropic 协议要求请求必须声明 tools。
-        let report_turn = crate::assistant::chat::is_report_turn(&self.thread.lock().messages);
+        let report_turn = crate::assistant::chat::is_report_turn(&self.thread.messages);
         if is_chat && report_turn {
-            let mut tools = carter::tools::ToolRegistry::empty();
-            tools.push(Arc::new(
+            let mut bare = carter::tools::ToolRegistry::empty();
+            bare.push(Arc::new(
                 crate::tools::assistant_ticket::AssistantStatusTool::new(
                     self.ctx.shell.assistant.clone(),
                 ),
             ));
-            return tools;
+            return self.recorded(bare);
         }
         // 常驻助理的工单会话：挂上 `assistant_report`；助理在后台推着跑、没人在看时，
         // 不给提问表单（没人回答，这一轮会永远卡住）。用户自己打开会话接着聊时照常给。
@@ -1685,7 +1666,7 @@ impl Runner {
         let unattended = ticket.as_ref().is_some_and(|(_, u)| *u);
         // 助理对话同样可能没人在看（汇报推起来的那一轮）：表单没人答，这一轮卡住，
         // 后面的汇报就全堵在队列里。要问什么直接写在回复里。
-        build_tools(
+        let bare = build_tools(
             ToolBuildArgs {
                 provider: self.ctx.provider.clone(),
                 model: self.ctx.model.clone(),
@@ -1717,7 +1698,59 @@ impl Runner {
                 peers: (self.ctx.include_task && !is_chat).then(|| self.ctx.shell.clone()),
             },
             &self.ctx.settings,
+        );
+        // 主会话这一层统一套记录包装：一次调用只画一张卡，而且编号用**模型给的**
+        // `call_id` —— 界面上的「中断 / 转后台」按它找到那条命令，历史里的卡片也按它
+        // 配对。子 agent 那份快照在 `build_tools` 里已经套过了（它们模型给的编号可能
+        // 跨 agent 重复，所以现编）。
+        self.recorded(bare)
+    }
+
+    /// 把工具池里的每个工具套进 [`crate::tools::record::Recorded`]。
+    fn recorded(&self, bare: carter::tools::ToolRegistry) -> carter::tools::ToolRegistry {
+        wrap_recorded(
+            bare,
+            self.tool_tx.clone().expect("事件通道在 run() 里建好"),
+            self.live(),
+            Some(self.ctx.running.clone()),
+            self.activity.clone(),
         )
+    }
+
+    /// 这一轮的用户说了什么 —— `UserPromptSubmit` 可阻断（拦下就不发请求）。
+    ///
+    /// carter 的 `run_turn` 不管这个 hook（它是宿主自己的「用户提交了一句话」语义），
+    /// 所以放在进 `run_turn` 之前。返回 `None` = 放行。
+    async fn dispatch_prompt_hook(&self, run_opts: &carter::agent::RunOptions) -> Option<String> {
+        if !run_opts.hooks.has(HookEvent::UserPromptSubmit) {
+            return None;
+        }
+        let last = self
+            .thread
+            .messages
+            .last()
+            .map(|m| {
+                m.content
+                    .iter()
+                    .filter_map(|b| match b {
+                        llm_adapt_core::Block::Text { text, .. } => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default();
+        match run_opts
+            .hooks
+            .dispatch(
+                HookEvent::UserPromptSubmit,
+                serde_json::json!({ "prompt": last }),
+            )
+            .await
+        {
+            HookDecision::Block { reason } => Some(reason),
+            _ => None,
+        }
     }
 
     /// 记下「历史之外」每次请求都要带的那部分 token：系统提示 + 工具声明。
@@ -1731,19 +1764,15 @@ impl Runner {
             + carter::tokens::count_text(&specs, tokenizer);
     }
 
-    /// 跑一轮：发请求 → 流式 → 执行工具 → 回灌 → 再发请求，直到模型不再调工具。
+    /// 跑一轮：交给 carter 的 `run_turn`（发请求 → 流式 → 执行工具 → 回灌），
+    /// 期间把界面上那几条「立刻生效」的命令读掉。
     ///
-    /// 工具由**会话任务自己**执行，不走 carter 的 `run_turn` —— 它是「发请求 → 等 →
-    /// 这一批工具全跑完 → 再发请求」的串行流程，工具结果要绕回它那一圈才变成下一次
-    /// 请求：一批工具里只要还有一条没跑完，先跑完的那几条结果就一直扣着，界面上看着
-    /// 就是「工具调用了，但没有再发请求」。合并成一条循环之后，每一条结果落地就立刻
-    /// 发下一次请求。
-    ///
-    /// 请求同样经由 carter 的 provider 发出（协议编解码、流式装配、抓包都不变）。
-    /// 历史那把锁在这一轮里一直握着，只在**等模型**的两处让出去：
-    ///
-    /// * 等模型说第一个字；
-    /// * 等它的下一段话。
+    /// 请求、工具调度、hook（`PreToolUse` / `PostToolUse` / `PostTurn` / `Stop`…）、
+    /// 中途压缩、写前快照都在 carter 那一层 —— 这里**不再自己驱动循环**。曾经为了
+    /// 「一条工具结果落地就发下一次请求」把整套循环搬过来，代价是一堆 carter 的行为
+    /// 要在这里重新实现一遍（中途压缩的判定、todo 落盘与复诵、跨会话来信、检查点…），
+    /// 漏掉哪一样都只在很远的表象上看得出来。而那个目标本身也做不到：协议要求同一条
+    /// assistant 消息里的每个 `tool_use` 都在下一条 user 消息里有 `tool_result`。
     ///
     /// `git` 只有主会话有（侧边会话不重算系统提示），这里收一个 `Option` 是为了
     /// 让两条路共用同一个函数体。
@@ -1756,610 +1785,150 @@ impl Runner {
                 .is_some_and(|g| g.status == GoalStatus::Active),
         );
 
+        let hooks = Arc::new(HookRegistry::from_configs(self.ctx.config.hooks.clone()));
         let tools = self.turn_tools(&system);
         self.measure_overhead(&system, &tools);
-        let tool_specs = if self
-            .ctx
-            .model
-            .supports(&carter::registry::Capability::Tools)
-        {
-            tools.specs()
-        } else {
-            Vec::new()
+        // 这一轮开始时历史里有几轮（**含**这一轮自己 —— 用户消息在 `run_sequence`
+        // 里已经 append 了）。carter 中途压过的话，轮后靠它重排轮次号；与
+        // `TurnRemap` 的口径必须是同一个数。
+        let turns_before = crate::view::user_turn_count(&self.thread.messages);
+
+        // 压缩用副模型：这是「把长历史揉短」的活儿，要的是便宜和快。
+        let fast = self.ctx.fast_model();
+        let compact_model = Some(fast.unwrap_or_else(|| CompactModel {
+            provider: self.ctx.provider.clone(),
+            model: self.ctx.model.clone(),
+        }));
+
+        // 一轮里能调多少次模型由模型自己决定（不再要工具就收尾）。给 carter 一个用不完
+        // 的上限 —— `max_turns` 是它 CLI 里的防失控保险，而工单里「翻几十个文档、逐个
+        // 核对」的活很容易超过 50 次，撞上之后剩下的工具一条都不执行。
+        let mut agent = self.ctx.config.agent.clone();
+        agent.max_turns = u32::MAX;
+
+        let run_opts = carter::agent::RunOptions {
+            show_thinking: true,
+            system,
+            compact_model,
+            hooks,
+            purpose: carter::provider::RequestPurpose::MainTurn,
         };
 
-        // `thread.turns` 在 carter 里兼任「本会话累计的模型调用次数」，这里不用了
-        // （见 `requests_in_turn`），每轮清零只是别让它一直涨。
-        self.thread.lock().turns = 0;
+        // `thread.turns` 在 carter 里是「整个会话累计的模型调用次数」，每轮清零让它
+        // 回到名字上的意思：**一次用户输入**内最多几次模型调用。
+        self.thread.turns = 0;
         // 上一轮可能残留了取消标记（用户在流结束后、select 收尾前点的停止）。
-        // 不清的话，这一轮一进去就立刻被判成取消。
         self.ctx.handle.cancel.reset();
-        let mut cancelled = false;
+        let cancel = self.ctx.handle.cancel.clone();
         let activity_before = self.activity.load(Ordering::Relaxed);
-        // 这一轮的用户轮号。`run_sequence` / `drive_goal` 进来之前已经把这一轮的
-        // 用户消息 append 进历史了，所以「历史里数出来的」是**含这一轮**的个数，
-        // 这一轮的号是它减一 —— 与 `view::to_views` 给消息打上的号、`timeline` 里
-        // 的键必须是同一个数，否则界面拿消息的号去查时刻会查空（汇报卡的工单归属
-        // 就是这么丢的）。
-        //
-        // 数大了还会一路带偏：轮末整份换回 `self.thread` 时 `user_turns` 也跟着换，
-        // 之后 `run_sequence` / `record_only` 按它记轮次号，从此每一轮都多一号。
-        let user_turn =
-            crate::view::user_turn_count(&self.thread.lock().messages).saturating_sub(1);
-        self.turn_usage = carter::provider::Usage::default();
-        self.compact_at = 0;
+        let mut user_cancelled = false;
+        let mut closed = false;
 
-        // 本身就是一个 `Thread`：要与自动压缩换进来的那份隔离，这里拿的是一份独立
-        // 拷贝，轮末（以及被中断时）再整体换回去。几秒级的摘要请求在这期间拿别的
-        // 历史算它的，两边互不阻塞。
-        //
-        // 拷贝上的 `user_turns` 是「含这一轮」的轮数 —— 这一轮跑完之后它就该是
-        // 这个值，轮末整份换回去时 `self.thread` 也就对上了。
-        let mut thread: Thread = thread_copy(&self.thread.lock());
-        thread.user_turns = user_turn.saturating_add(1);
-        // **不设「一轮里最多调用几次模型」的上限**：什么时候不再要工具，由模型自己
-        // 决定。carter 的 `max_turns`（默认 50）在它自己的 CLI 里是防失控的保险，但
-        // 一张「翻几十个文档、逐个核对」的工单，50 次往往不够 —— 撞上之后剩下的工具
-        // 全不执行，界面上看起来就是「工具没执行 / 被中断」。真想停下，用户随时可以
-        // 点停止（取消会断流、清理命令）。
-        let mut round = 0u32;
-        let mut outcome: Option<carter::agent::TurnOutcome> = None;
+        // 这一轮用户说了什么 —— `UserPromptSubmit` 可阻断。拦下时照样占掉轮次号：
+        // 那条消息已经进历史了，不占的话之后的轮次号与 `view` 数出来的对不上。
+        let blocked = self.dispatch_prompt_hook(&run_opts).await;
+        // carter 在这一轮**中途**自己压过上下文时，由 sink 记下摘要档位。
+        let mid = Arc::new(std::sync::Mutex::new(None));
+        let outcome = if let Some(reason) = blocked {
+            self.thread.user_turns = self.thread.user_turns.saturating_add(1);
+            Err(carter::CarterError::Config(format!(
+                "被 hook 拦下：{reason}"
+            )))
+        } else {
+            let mut sink = TxSink {
+                shell: self.ctx.shell.clone(),
+                session_id: self.ctx.handle.id.clone(),
+                live: self.live(),
+                todos: self.ctx.handle.todos.clone(),
+                mid: mid.clone(),
+            };
+            let tap = ContextTap {
+                inner: self.ctx.provider.clone(),
+                shell: self.ctx.shell.clone(),
+                session_id: self.ctx.handle.id.clone(),
+                window: self.ctx.model.context_window,
+                reported: self.reported.clone(),
+            };
+            // 包一层收件箱：这一轮里每次工具返回都顺手把新到的信送进去。
+            let turn = crate::peers::scope(
+                self.ctx.handle.inbox.clone(),
+                carter::agent::run_turn(
+                    &mut self.thread,
+                    &tap,
+                    &self.ctx.model,
+                    &agent,
+                    &run_opts,
+                    &tools,
+                    &mut sink,
+                    &cancel,
+                ),
+            );
+            tokio::pin!(turn);
 
-        while outcome.is_none() {
-            round += 1;
-
-            // ── 发请求（历史锁在这一段让出去）──────────────────────
-            let stream = {
-                let wire = self.wire_for(&thread, &system, tool_specs.clone(), user_turn, round);
-                let message_count = wire.messages.len();
-                let provider = Arc::clone(&self.ctx.provider);
-                let cancel = self.ctx.handle.cancel.clone();
-                // 等第一个字的这段时间里也要听「关会话」：不然关掉之后要等上游开口
-                // 才轮得到下面那段流循环，`close_session` 就一直等不到 runner 退出。
-                let close = self.ctx.handle.close.clone();
-                // 报告/接手工具白名单在请求装配时定好，见 `Runner::turn_tools`。
-                let out = match self.before_request(round - 1, message_count).await {
-                    Ok(RequestGate::Compact) => Ok(Canceled::Compact),
-                    Ok(RequestGate::Send) => {
-                        let req = carter::provider::ChatRequest {
-                            protocol: None, // 交给渠道默认协议
-                            wire,
-                        };
-                        // 让出历史：自动压缩、断口自愈要在这几秒里动它。
-                        //
-                        // 等第一个字的这几秒里也要听命令通道：停止 / 插队都在这里
-                        // 到达，不读的话这一轮要等上游开口才停得下来。
-                        let mut call =
-                            std::pin::pin!(provider_call(&*provider, req, &cancel, &close));
-                        loop {
-                            tokio::select! {
-                                biased;
-                                out = &mut call => break out,
-                                cmd = self.cmd_rx.recv() => match cmd {
-                                    Some(cmd) => handle_live_command(
-                                        cmd,
-                                        &self.ctx,
-                                        &mut self.queued,
-                                        &mut self.goal,
-                                        &mut self.changes,
-                                        self.changes_turn,
-                                    ),
-                                    None => {
-                                        break Err(carter::CarterError::Config(
-                                            "会话已结束".into(),
-                                        ));
-                                    }
-                                },
-                            }
+            let out = loop {
+                tokio::select! {
+                    out = &mut turn => break out,
+                    // 生成中能**立刻**生效的命令；其余进队列，这一轮跑完再处理。
+                    cmd = self.cmd_rx.recv() => match cmd {
+                        Some(cmd) => {
+                            user_cancelled |= handle_live_command(
+                                cmd,
+                                &self.ctx,
+                                &mut self.queued,
+                                &mut self.goal,
+                                &mut self.changes,
+                                self.changes_turn,
+                            );
                         }
-                        .map(Canceled::Stream)
-                    }
-                    Err(e) => Err(carter::CarterError::Config(e)),
-                };
-                match out {
-                    Ok(Canceled::Stream(s)) => s,
-                    Ok(Canceled::Compact) => {
-                        // 这一圈先压，压完再来发请求（不推进 round）。
-                        round -= 1;
-                        self.compact(false);
-                        continue;
-                    }
-                    Err(e) => {
-                        // 用户点的「停止」会让 `provider_call` 回报「已取消」——
-                        // 那是取消，不是错误，别在界面上弹一条红字。
-                        if self.ctx.handle.cancel.is_cancelled() {
-                            cancelled = true;
-                            self.ctx.handle.cancel.reset();
-                            outcome = Some(carter::agent::TurnOutcome::Cancelled);
-                        } else {
-                            outcome = Some(carter::agent::TurnOutcome::Error(e.to_string()));
+                        // 命令通道关了 = 句柄都没了，按关会话收尾。
+                        None => {
+                            closed = true;
+                            cancel.set();
                         }
-                        break;
+                    },
+                    // 关会话（换走时空闲就关、应用退出）要立刻断流。
+                    //
+                    // **只响应一次**（`!closed`）：`close` 置位之后 `cancelled()` 每次都
+                    // 立即就绪，不加这道闸的话 select 每圈都选中它，一个 worker 线程被
+                    // 忙转占满，而 carter 收到第一次取消就 `reset()` 了。
+                    _ = self.ctx.handle.close.cancelled(), if !closed => {
+                        closed = true;
+                        cancel.set();
                     }
                 }
             };
+            out.map(|(o, _)| o)
+        };
 
-            // ── 流（每段之间让出历史锁）──────────────────────────
-            let mut stream: carter::provider::EventStream = stream;
-            let mut asm = carter::provider::BlockAssembler::new();
-            let mut stop_reason = carter::provider::FinishReason::Stop;
-            let mut had_text = false;
-            // 界面那边还有一段没封口的正文（见下面 `BlockStop` 那一支）。
-            let mut text_open = false;
-            let mut stream_err: Option<String> = None;
-            let mut seen_usage = carter::provider::Usage::default();
-            loop {
-                let ev = {
-                    let cancel = self.ctx.handle.cancel.clone();
-                    let close = self.ctx.handle.close.clone();
-                    let ev = tokio::select! {
-                        biased;
-                        // 关会话（换走时空闲就关、应用退出）也要立刻断流。以前这里
-                        // 只听取消：关会话时流不会被断开，runner 要等上游自己说完才退，
-                        // `close_session` 一直等不到它 —— 关完也接不上。
-                        _ = close.cancelled() => None,
-                        _ = cancel.cancelled() => {
-                            cancelled = true;
-                            None
-                        }
-                        // 生成中到达的命令。没有这一支的话，「停止 / 插队 / 中断这条
-                        // 命令 / 转后台」都要等这一轮跑完才被读到 —— 界面上就是
-                        // 「点了按钮什么都没发生」。
-                        cmd = self.cmd_rx.recv() => {
-                            match cmd {
-                                Some(cmd) => {
-                                    handle_live_command(
-                                        cmd,
-                                        &self.ctx,
-                                        &mut self.queued,
-                                        &mut self.goal,
-                                        &mut self.changes,
-                                        self.changes_turn,
-                                    );
-                                    continue;
-                                }
-                                // 通道关了 = 句柄都没了，按关会话收尾。
-                                None => {
-                                    cancelled = true;
-                                    None
-                                }
-                            }
-                        }
-                        ev = futures::StreamExt::next(&mut stream) => ev,
-                    };
-                    ev
-                };
-                let Some(ev) = ev else {
-                    break;
-                };
-                match ev {
-                    Ok(ev) => {
-                        asm.push(&ev);
-                        match &ev {
-                            // 正文增量：一边攒进「进行中」快照（切走再回来时补画面），
-                            // 一边**立刻**发给界面。这条不能只记 live 里 —— 那只是给
-                            // 重新接上来的窗口用的，正在看着的窗口收不到就等于回答空白。
-                            carter::provider::StreamChunk::TextDelta { text, .. } => {
-                                self.ctx.handle.live.text(text);
-                                self.emit(SessionEvent::TextDelta { text: text.clone() });
-                                had_text = true;
-                                text_open = true;
-                            }
-                            // 思考增量照发，界面按「显示思考」的设置决定画不画。
-                            // 签名分片不展示给用户（对模型有用，对人没意义），
-                            // 但空的那几片也不算「说过话」。
-                            carter::provider::StreamChunk::ThinkingDelta { text, .. }
-                                if !text.is_empty() =>
-                            {
-                                self.emit(SessionEvent::ThinkingDelta { text: text.clone() });
-                                had_text = true;
-                            }
-                            // 一段正文收尾：让界面把这一条 text item 封口，后面的增量
-                            // 另起一段（「正文 → 思考 → 正文」才不会粘成一块）。
-                            carter::provider::StreamChunk::BlockStop { .. } if text_open => {
-                                self.emit(SessionEvent::TextEnd);
-                                text_open = false;
-                            }
-                            carter::provider::StreamChunk::Finish { reason } => {
-                                stop_reason = reason.clone();
-                            }
-                            carter::provider::StreamChunk::Error { error } => {
-                                // 厂商在流里报的错：告知用户，但不当致命错误 ——
-                                // 已经生成的内容照常收尾。
-                                self.notice(&format!("[stream] {error}"));
-                            }
-                            // 输入框旁那个占用环：主对话请求看上游回报的完整输入
-                            // （含缓存命中与写入）+ 输出 —— 输出会进历史，下一次
-                            // 请求就要带上它。
-                            carter::provider::StreamChunk::Usage { usage } => {
-                                // 一帧只报一部分（Claude 的 `message_start` 报输入、
-                                // `message_delta` 报输出），按非零覆盖合并 —— 直接拿
-                                // 这一帧算，输出那帧会把输入盖成 0。
-                                seen_usage.merge_non_zero(usage);
-                                let used = u64::from(seen_usage.total_input_billed())
-                                    + u64::from(seen_usage.output_tokens);
-                                if used > 0 {
-                                    self.reported.store(used, Ordering::Relaxed);
-                                    let ctx = context_view(
-                                        used,
-                                        self.ctx.model.context_window,
-                                        &self.ctx.config.agent,
-                                    );
-                                    self.emit(SessionEvent::Context(ctx));
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    Err(e) => {
-                        stream_err = Some(e.to_string());
-                        break;
-                    }
-                }
-            }
-            drop(stream);
-            // 流断在半段正文上（被取消、或上游没发 `content_block_stop`）：界面那边
-            // 也要把这条封口，否则下一段的字会接着这一条往下写。
-            if text_open {
-                self.emit(SessionEvent::TextEnd);
-            }
-            let usage = asm.usage().clone();
-            let blocks = asm.into_blocks();
-            if let Some(e) = stream_err {
-                outcome = Some(carter::agent::TurnOutcome::Error(e));
-                break;
-            }
-            if had_text {
-                self.ctx.handle.live.text("\n");
-            }
-
-            let calls = carter::provider::ToolCall::collect(&blocks);
-            if !blocks.is_empty() {
-                // 回灌：**一条** assistant 消息，块顺序原样保留（思考 → 文本 →
-                // 工具调用）。拆成「文本一条 + 工具调用一条」会丢掉顺序，
-                // Anthropic 会因此拒绝后续请求。
-                thread.append(llm_adapt_core::WireMessage::new(
-                    llm_adapt_core::Role::Assistant,
-                    blocks,
-                ));
-            }
-            // 用量每一圈都计一次（一轮里可能有好几个请求）。
-            self.turn_usage.add(&usage);
-            // 自动压缩按「这次请求的完整规模」判：输入（含缓存命中与写入）+ 输出
-            // （输出下一轮就要带上）。与 carter 的 `usage.input_tokens` 不是一回事，
-            // 见 `Runner::compact_at`。
-            let scale = u64::from(usage.total_input_billed()) + u64::from(usage.output_tokens);
-            self.compact_at = self.compact_at.max(scale);
-            if cancelled {
-                self.ctx.handle.cancel.reset();
-                outcome = Some(carter::agent::TurnOutcome::Cancelled);
-                break;
-            }
-            if calls.is_empty() {
-                outcome = Some(match stop_reason {
-                    carter::provider::FinishReason::Length => carter::agent::TurnOutcome::Limit,
-                    _ => carter::agent::TurnOutcome::Assistant,
-                });
-                break;
-            }
-
-            // ── 工具 ───────────────────────────────────────────────
-            // 同一个回复里的几条工具按 carter 的老规矩跑：
-            //
-            // * 连着几条「并发安全」的（读文件、grep、skill、todo…）一起跑，按原顺序
-            //   收结果 —— 这些是模型一口气要看好几样东西，串着跑只是白等；
-            // * 遇到会动外部世界的（bash、写文件、子 agent、MCP）就切开，一条一条跑。
-            //
-            // 不管哪一批，**整批结果一起写回历史**，再发下一次请求：一半结果回灌给
-            // 模型、另一半还在路上，模型那边看到的历史就是残缺的。这一批跑完之前
-            // 界面一直是「生成中」（`busy` 到 `idle` 之间），用户看到的就是它在干活。
-            for batch in batches(&calls) {
-                if self.ctx.handle.cancel.is_cancelled() || self.ctx.handle.close.is_cancelled() {
-                    cancelled = true;
-                    break;
-                }
-                let mut results = Vec::with_capacity(batch.len());
-                if batch.len() > 1 {
-                    // 界面「开始」先全部发出，再一起跑：用户一眼看得到在并发干什么。
-                    for call in &batch {
-                        if let Some(live) = &self.live() {
-                            live.tool_started(&call.id, &call.name, &call.args);
-                        }
-                        self.emit(SessionEvent::ToolStarted {
-                            call_id: call.id.clone(),
-                            name: call.name.clone(),
-                            args: call.args.clone(),
-                        });
-                    }
-                    // 结果按原顺序收回来。每条各记各的耗时（卡片上「用时 1.2s」）。
-                    let mut futs = futures::stream::FuturesOrdered::new();
-                    for call in &batch {
-                        let cx = CallCtx {
-                            shell: &self.ctx.shell,
-                            session_id: &self.ctx.handle.id,
-                            live: None,
-                            tx: self.tool_tx.clone().expect("事件通道在 run() 里建好"),
-                            activity: self.activity.clone(),
-                            running: self.ctx.running.clone(),
-                            tools: &tools,
-                        };
-                        futs.push_back(async move {
-                            let started = std::time::Instant::now();
-                            let r = run_one_call(&cx, call).await;
-                            (r, started.elapsed().as_millis() as u64)
-                        });
-                    }
-                    let mut took = Vec::with_capacity(batch.len());
-                    loop {
-                        // 工具一跑就是几分钟（`brew install`、整套测试），这期间
-                        // 命令通道得有人读 —— 「中断 / 转后台」就是冲着这时候来的。
-                        let next = futures::StreamExt::next(&mut futs);
-                        tokio::pin!(next);
-                        let item = loop {
-                            tokio::select! {
-                                biased;
-                                item = &mut next => break item,
-                                cmd = self.cmd_rx.recv() => match cmd {
-                                    Some(cmd) => handle_live_command(
-                                        cmd,
-                                        &self.ctx,
-                                        &mut self.queued,
-                                        &mut self.goal,
-                                        &mut self.changes,
-                                        self.changes_turn,
-                                    ),
-                                    None => break None,
-                                },
-                            }
-                        };
-                        let Some((r, ms)) = item else {
-                            // 命令通道关了 = 会话正在结束，这一批不再收。
-                            cancelled = true;
-                            break;
-                        };
-                        results.push(r);
-                        took.push(ms);
-                    }
-                    for ((call, r), ms) in batch.iter().zip(results.iter()).zip(took) {
-                        self.finish_one_call(call, r, ms);
-                    }
-                } else {
-                    for call in &batch {
-                        let started = std::time::Instant::now();
-                        let cx = CallCtx {
-                            shell: &self.ctx.shell,
-                            session_id: &self.ctx.handle.id,
-                            live: self.live(),
-                            tx: self.tool_tx.clone().expect("事件通道在 run() 里建好"),
-                            activity: self.activity.clone(),
-                            running: self.ctx.running.clone(),
-                            tools: &tools,
-                        };
-                        // 同上：跑的可能是几分钟的命令，期间要能读到「中断 / 转后台」。
-                        let mut fut = std::pin::pin!(run_one_call(&cx, call));
-                        let r = loop {
-                            tokio::select! {
-                                biased;
-                                r = &mut fut => break r,
-                                cmd = self.cmd_rx.recv() => match cmd {
-                                    Some(cmd) => handle_live_command(
-                                        cmd,
-                                        &self.ctx,
-                                        &mut self.queued,
-                                        &mut self.goal,
-                                        &mut self.changes,
-                                        self.changes_turn,
-                                    ),
-                                    None => {
-                                        cancelled = true;
-                                        break carter::tools::ToolResult::err(
-                                            "会话已结束，命令没有执行完。",
-                                        );
-                                    }
-                                },
-                            }
-                        };
-                        self.finish_one_call(call, &r, started.elapsed().as_millis() as u64);
-                        results.push(r);
-                    }
-                }
-                for (call, result) in batch.iter().zip(results.iter()) {
-                    thread.append(llm_adapt_core::WireMessage::new(
-                        llm_adapt_core::Role::User,
-                        vec![llm_adapt_core::Block::ToolResult {
-                            tool_use_id: call.id.clone(),
-                            content: carter::provider::ToolResultContent::Text {
-                                text: result.to_model_string(),
-                            },
-                            is_error: !result.ok,
-                            cache: None,
-                        }],
-                    ));
-                }
-                // 历史快照顺手刷新一次：侧边聊天在这几分钟里要能看到进展。
-                self.ctx.handle.publish_history(&thread.messages);
-            }
-            if cancelled || self.ctx.handle.close.is_cancelled() {
-                self.ctx.handle.cancel.reset();
-                outcome = Some(carter::agent::TurnOutcome::Cancelled);
-                break;
-            }
-        }
-        *self.thread.lock() = thread;
-
-        // 历史快照：侧边聊天靠它拿父会话的上下文。**在每一轮之后都发布**
-        // （同时清空 `live` —— 这一轮的进展已经进了快照）。
-        self.ctx
-            .handle
-            .publish_history(&self.thread.lock().messages);
-        self.emit(SessionEvent::TurnUsage {
-            usage: UsageView::from(&self.turn_usage),
-            cost: carter::cost::compute(&self.turn_usage, &self.ctx.model.pricing),
-            model: self.ctx.model.api_name.clone(),
-        });
+        self.ctx.handle.publish_history(&self.thread.messages);
 
         let used_tools = self.activity.load(Ordering::Relaxed) > activity_before;
         // 「失败」的几种来源，对自动继续是同一件事：**别接着推**。
-        // 尤其是 `Limit` —— 模型输出被截断时，接着推只会再撞一次。
-        let outcome = outcome.unwrap_or(carter::agent::TurnOutcome::Cancelled);
         let failed = match &outcome {
-            carter::agent::TurnOutcome::Error(e) => {
-                self.error(e);
-                true
-            }
+            Err(_) => true,
             // 被中断：用户自己点的停止不算失败（那条规则在 `decide_after_turn` 里
             // 优先级更高）；自己断的（关会话等）算，免得在这儿打转。
-            carter::agent::TurnOutcome::Cancelled => !cancelled,
-            // 现在只剩「输出被截断」一种来源：一轮里的模型调用次数不再设上限，
-            // 模型不再要工具时自然会收尾。
-            carter::agent::TurnOutcome::Limit => true,
-            carter::agent::TurnOutcome::Assistant => false,
+            Ok(carter::agent::TurnOutcome::Cancelled) => !user_cancelled,
+            // 只剩「输出被截断」会走到这里（轮数不设限了）。
+            Ok(carter::agent::TurnOutcome::Limit) => true,
+            Ok(carter::agent::TurnOutcome::Error(_)) => true,
+            Ok(carter::agent::TurnOutcome::Assistant) => false,
         };
+        if let Err(e) = &outcome {
+            // 关会话造成的断流不是错误；用户点了停止也一样（取消之后上游那次请求
+            // 常以「已取消」收场，当成错误弹出来会让人以为「停止」弄坏了什么）。
+            if !closed && !user_cancelled {
+                self.error(&format!("{e}"));
+            }
+        }
+        let mid_compact = mid.lock().ok().and_then(|mut t| t.take());
         TurnResult {
             failed,
-            user_cancelled: cancelled,
             used_tools,
+            user_cancelled,
+            turns_before,
+            mid_compact,
         }
-    }
-
-    /// 一次模型请求：先把历史拼成请求，再发出去、等它说第一个字（历史锁在调用方
-    /// 那边放掉）。返回 `None` = 发出之前就被叫停了。
-    /// 这一圈是不是该先压缩：上一次请求的规模超过了线（见 [`Runner::compact_at`]）。
-    fn mid_compaction_needed(&self) -> bool {
-        over_threshold(
-            self.compact_at,
-            self.ctx.model.context_window,
-            &self.ctx.config.agent,
-        )
-    }
-
-    /// 请求发出前那一串 hook：`PreTurn` 观察、`PreCompact` 可阻断。
-    ///
-    /// 与 carter `run_turn` 循环顶上那一段同形：每一圈都发一次 `PreTurn`；需要压缩时
-    /// 一条工具结果落地之后界面那边要做的两件事：发「结束」卡片、记 todo。
-    ///
-    /// 与 `run_one_call` 开头的「开始」配对。并发批里「开始」在跑之前统一发、
-    /// 结果按序回来之后才逐条收，所以这一半放在批的收尾，不进 `run_one_call`。
-    fn finish_one_call(
-        &self,
-        call: &carter::provider::ToolCall,
-        result: &carter::tools::ToolResult,
-        elapsed_ms: u64,
-    ) {
-        let shown = crate::tools::record::cap(&result.content);
-        if let Some(live) = &self.live() {
-            live.tool_finished(&call.id, &result.content);
-        }
-        self.emit(SessionEvent::ToolFinished {
-            call_id: call.id.clone(),
-            ok: result.ok,
-            content: shown,
-            elapsed_ms,
-        });
-        if call.name == "todo_write"
-            && result.ok
-            && let Ok(todos) = carter::tools::parse_todos(&call.args)
-        {
-            self.ctx.handle.todos.store(Arc::new(todos.clone()));
-            self.emit(SessionEvent::TodoUpdated {
-                todos: todos.iter().map(todo_view).collect(),
-            });
-        }
-    }
-
-    /// 先问 `PreCompact`，被拦下就当这一圈不用压、照常发请求。
-    async fn before_request(
-        &mut self,
-        round: u32,
-        message_count: usize,
-    ) -> Result<RequestGate, String> {
-        let hooks = HookRegistry::from_configs(self.ctx.config.hooks.clone());
-        if round == 0 {
-            // 这一轮的第一句话：`UserPromptSubmit` 可阻断（拦下就不发）。
-            let last = self.thread.lock().messages.last().map(|m| {
-                m.content
-                    .iter()
-                    .filter_map(|b| match b {
-                        llm_adapt_core::Block::Text { text, .. } => Some(text.clone()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            });
-            if let HookDecision::Block { reason } = hooks
-                .dispatch(
-                    HookEvent::UserPromptSubmit,
-                    serde_json::json!({ "prompt": last.unwrap_or_default() }),
-                )
-                .await
-            {
-                return Err(format!("被 hook 拦下：{reason}"));
-            }
-        }
-        hooks
-            .emit(
-                HookEvent::PreTurn,
-                serde_json::json!({ "round": round, "message_count": message_count }),
-            )
-            .await;
-        if !self.mid_compaction_needed() {
-            return Ok(RequestGate::Send);
-        }
-        let pre = hooks
-            .dispatch(
-                HookEvent::PreCompact,
-                serde_json::json!({ "message_count": message_count }),
-            )
-            .await;
-        Ok(match pre {
-            HookDecision::Block { reason } => {
-                self.notice(&format!("[compact] skipped by hook: {reason}"));
-                RequestGate::Send
-            }
-            _ => RequestGate::Compact,
-        })
-    }
-
-    fn wire_for(
-        &self,
-        thread: &Thread,
-        system: &[String],
-        tool_specs: Vec<carter::provider::ToolSpec>,
-        user_turn: u32,
-        round: u32,
-    ) -> carter::provider::WireRequest {
-        // 历史 clone 之后接 todo 复诵：复诵写进历史的话，下一轮请求里就会多出一个
-        // 「带正文的 user 消息」，轮次号、界面上的气泡全乱。
-        let mut messages = thread.messages.clone();
-        if !thread.todos.is_empty() {
-            messages.push(llm_adapt_core::WireMessage::user_text(render_todos(
-                &thread.todos,
-            )));
-        }
-        let mut wire = carter::provider::WireRequest::new(self.ctx.model.api_name.clone());
-        wire.stream = true;
-        wire.system = system
-            .iter()
-            .map(|s| llm_adapt_core::Block::text(s.clone()))
-            .collect();
-        wire.messages = messages;
-        wire.tools = tool_specs;
-        wire.max_tokens = self.ctx.config.agent.max_output_tokens;
-        wire.thinking = self
-            .ctx
-            .model
-            .default_reasoning
-            .as_ref()
-            .and_then(thinking_for);
-        // 抓包时靠这个把 HTTP 请求对回「哪条对话的哪一轮」。不上 wire。
-        wire.meta = carter::provider::RequestMeta {
-            session_id: thread.session_id.clone(),
-            agent_id: thread.agent_id.clone(),
-            turn: user_turn,
-            round,
-            purpose: carter::provider::RequestPurpose::MainTurn,
-        };
-        wire
     }
 
     /// 一轮跑完后按目标状态决定要不要接着推。
@@ -2420,13 +1989,11 @@ impl Runner {
 
                     // 这条消息会进历史（会话文件里也留一份，resume 后模型看得到自己
                     // 被推过；界面把它渲染成「自动继续」的分隔条而不是用户气泡）。
-                    self.thread.lock().append_user(goal::CONTINUE_PROMPT);
-                    self.ctx
-                        .handle
-                        .publish_history(&self.thread.lock().messages);
+                    self.thread.append_user(goal::CONTINUE_PROMPT);
+                    self.ctx.handle.publish_history(&self.thread.messages);
                     self.begin_changes();
                     // 同 `run_sequence`：`user_turns` 在进 `run_turn` 之后就被加一了。
-                    let turn = self.thread.lock().user_turns;
+                    let turn = self.thread.user_turns;
                     let started_at = crate::protocol::now_ms();
                     if let Err(e) = crate::timeline::started(&self.ctx.handle.id, turn, started_at)
                     {
@@ -2447,9 +2014,7 @@ impl Runner {
                     if self.ctx.handle.close.is_cancelled() {
                         return;
                     }
-                    // 自动压缩丢给后台（见 `run_goal_loop`）：串在这一串里的话，每轮之间
-                    // 都要白等一次摘要。
-                    self.spawn_compaction(&result);
+                    self.after_turn(&result).await;
                     if self.ctx.handle.close.is_cancelled() {
                         return;
                     }
@@ -2460,28 +2025,20 @@ impl Runner {
 
     /// 一轮收尾时的上下文管理：发一次最新的占用；超线了就自动压缩。
     ///
-    /// 自己判而不是全交给 carter 的原因：carter 拿 `usage.input_tokens` 比阈值，而开了
-    /// prompt caching 之后那只是**未命中缓存**的一截 —— 一条 150k 的对话命中 140k 的话
-    /// 它只看见 10k，永远不会压，直到上游报「超出上下文」。这里用的是整个请求的估算
-    /// 规模，与界面上的百分比同一个数。
-    fn after_turn(&mut self, result: &TurnResult) {
-        let ctx = self.context_view();
-        self.emit(SessionEvent::Context(ctx));
-        if ctx.auto && ctx.threshold > 0 && ctx.used > ctx.threshold && !result.user_cancelled {
-            self.compact(true);
+    /// 先处理 carter 在这一轮**中途**自己做的那次压缩：它换掉的是更早那段历史，
+    /// 轮次号、用户原文、变更清单、时刻记录都得跟着重排，界面也要整个重建一次
+    /// （见 [`Runner::apply_compaction`]）。
+    async fn after_turn(&mut self, result: &TurnResult) {
+        if let Some(tier) = result.mid_compact.clone() {
+            // carter 中途压完的历史已经在手上了，压之前多大已经量不到 —— 用此刻的
+            // 估算当「之后」那一半，界面上那两个数只影响提示语的措辞。
+            let now = self.history_tokens();
+            self.apply_compaction(result.turns_before, now, tier, true);
         }
-    }
-
-    /// 自动继续那一串里的轮末处理。
-    ///
-    /// 与 [`Runner::after_turn`] 同一份逻辑，只差自动压缩：这里把它**丢给后台**。
-    /// 串在这串里等的话，一条一直开着的自动继续（上下文又一直在线上方）每一轮之间
-    /// 都要白等一次摘要请求。
-    fn spawn_compaction(&mut self, result: &TurnResult) {
         let ctx = self.context_view();
         self.emit(SessionEvent::Context(ctx));
         if ctx.auto && ctx.threshold > 0 && ctx.used > ctx.threshold && !result.user_cancelled {
-            self.compact(true);
+            self.compact(true).await;
         }
     }
 
@@ -2490,12 +2047,16 @@ impl Runner {
     /// 两条路用同一个 carter 函数，差别只在目标值：自动压缩的目标是触发线（折叠旧工具
     /// 输出就够的话不必摘要），手动压缩的目标是 0（用户明说了要压，一定走到摘要）。
     ///
-    /// 摘要请求要几秒，跑在后台：会话任务照常读命令、接着跑。用户发起的 `/compact`
-    /// 也一样 —— 界面上一进来就是转圈，压完了单独发 `compacted` 把对话重建。
-    fn compact(&mut self, auto: bool) {
+    /// **就地跑，不丢后台**：历史归会话任务独占（见 [`Runner::thread`]），后台那份
+    /// 改完也没人接得住。摘要要几秒，这几秒里仍然读命令通道，停止 / 插队 / 作答都
+    /// 照常送达；按了停止则**这一轮的下一次请求**不再发（压缩本身跑完，历史才不会
+    /// 停在半截）。
+    async fn compact(&mut self, auto: bool) {
         // 带着断口去摘要的话，摘要请求本身就会被上游拒掉。
         self.settle_history();
         let before = self.history_tokens();
+        // 与 `TurnRemap` 同一口径：历史里数出来的轮数。
+        let turns_before = crate::view::user_turn_count(&self.thread.messages);
         self.emit(SessionEvent::CompactStarted { auto });
 
         let fast = self.ctx.fast_model();
@@ -2509,109 +2070,120 @@ impl Runner {
             0
         }
         .saturating_sub(self.overhead);
-        let thread = std::sync::Arc::clone(&self.thread);
-        let tokenizer = self.ctx.model.tokenizer.clone();
-        let window = self.ctx.model.context_window;
-        let agent = self.ctx.config.agent.clone();
-        let overhead = self.overhead;
-        let id = self.ctx.handle.id.clone();
-        let shell = self.ctx.shell.clone();
-        let reported = self.reported.clone();
 
-        tokio::spawn(async move {
-            let mut sink = CompactSink::default();
-            let cut = thread.lock().messages.len();
-            // 摘一份**拷贝**出去，锁立刻放掉：摘要那几秒里历史照样能读写。
-            let Ok(mut chunk) = tokio::task::spawn_blocking({
-                let thread = std::sync::Arc::clone(&thread);
-                move || extract_thread(&thread, cut)
-            })
-            .await
-            else {
-                return;
-            };
-            let res = carter::agent::context::compact(
-                &mut chunk,
+        let mut sink = CompactSink::default();
+        let cancel = self.ctx.handle.cancel.clone();
+        let mut stopped = false;
+        let mut closed = false;
+        let res = {
+            let compact = carter::agent::context::compact(
+                &mut self.thread,
                 &*cm.provider,
                 &cm.model,
                 target,
                 &mut sink,
-            )
-            .await;
-            match (res, sink.tier) {
-                (Err(e), _) => emit(
-                    &shell,
-                    &id,
-                    SessionEvent::Error {
-                        message: format!("压缩上下文失败：{e}"),
+            );
+            tokio::pin!(compact);
+            loop {
+                tokio::select! {
+                    r = &mut compact => break r,
+                    cmd = self.cmd_rx.recv() => match cmd {
+                        Some(cmd) => {
+                            stopped |= handle_live_command(
+                                cmd,
+                                &self.ctx,
+                                &mut self.queued,
+                                &mut self.goal,
+                                &mut self.changes,
+                                self.changes_turn,
+                            );
+                        }
+                        None => {
+                            closed = true;
+                            break Err(carter::CarterError::Config("会话已结束".into()));
+                        }
                     },
-                ),
-                (Ok(()), Some(tier)) => {
-                    let (messages, after, remap) = splice_thread(&thread, cut, &chunk, &tokenizer);
-                    thread.lock().user_turns = remap.after();
-                    if !remap.is_identity() {
-                        if let Err(e) = crate::prompts::remap(&id, |t| remap.map(t)) {
-                            tracing::warn!("压缩后重排用户原文失败：{e}");
-                        }
-                        if let Err(e) = crate::changes::remap(&id, &remap) {
-                            tracing::warn!("压缩后重排变更记录失败：{e}");
-                        }
-                        if let Err(e) = crate::timeline::remap(&id, |t| remap.map(t)) {
-                            tracing::warn!("压缩后重排时刻记录失败：{e}");
-                        }
+                    _ = self.ctx.handle.close.cancelled(), if !closed => {
+                        closed = true;
+                        break Err(carter::CarterError::Config("会话已结束".into()));
                     }
-                    if let Some(h) = shell.session(&id) {
-                        h.publish_history(&messages);
-                    }
-                    reported.store(0, Ordering::Relaxed);
-                    emit(
-                        &shell,
-                        &id,
-                        SessionEvent::Compacted {
-                            history: crate::view::to_views(&messages),
-                            prompts: crate::prompts::load(&id),
-                            changes: crate::changes::load(&id),
-                            changes_since: crate::changes::since(&id),
-                            times: crate::timeline::load(&id),
-                            before,
-                            after,
-                            tier,
-                            auto,
-                        },
-                    );
-                }
-                (Ok(()), None) => {
-                    // 没摘要成：要么折叠旧工具输出就够了（自动压缩），要么历史太短切不出
-                    // 中段，要么摘要请求失败（carter 已降级成只折叠）。三种都要说清。
-                    let (messages, after, _) = splice_thread(&thread, cut, &chunk, &tokenizer);
-                    if let Some(h) = shell.session(&id) {
-                        h.publish_history(&messages);
-                    }
-                    reported.store(0, Ordering::Relaxed);
-                    emit(
-                        &shell,
-                        &id,
-                        SessionEvent::Context(context_view(after + overhead, window, &agent)),
-                    );
-                    let msg = if let Some(why) = sink.failures.last() {
-                        format!(
-                            "摘要没生成出来（{why}），只折叠了较早的工具输出：~{before} → ~{after} tokens"
-                        )
-                    } else if after < before {
-                        format!("已折叠较早的工具输出：~{before} → ~{after} tokens")
-                    } else {
-                        "对话还很短，没有可以压缩的内容".to_string()
-                    };
-                    emit(&shell, &id, SessionEvent::Notice { message: msg });
                 }
             }
+        };
+        // 取消标记在这一段里被消费掉了，下一轮不要一进去就判成取消。
+        if stopped || cancel.is_cancelled() {
+            cancel.reset();
+        }
+        if closed {
+            return;
+        }
+        let after = self.history_tokens();
+        self.forget_reported();
+
+        match (res, sink.tier) {
+            (Err(e), _) => self.error(&format!("压缩上下文失败：{e}")),
+            (Ok(()), Some(tier)) => {
+                self.apply_compaction(turns_before, before, tier, auto);
+            }
+            (Ok(()), None) => {
+                // 没摘要成：要么折叠旧工具输出就够了（自动压缩），要么历史太短切不出
+                // 中段，要么摘要请求失败（carter 已降级成只折叠）。三种都要说清。
+                self.ctx.handle.publish_history(&self.thread.messages);
+                let msg = if let Some(why) = sink.failures.last() {
+                    format!(
+                        "摘要没生成出来（{why}），只折叠了较早的工具输出：~{before} → ~{after} tokens"
+                    )
+                } else if after < before {
+                    format!("已折叠较早的工具输出：~{before} → ~{after} tokens")
+                } else {
+                    "对话还很短，没有可以压缩的内容".to_string()
+                };
+                self.notice(&msg);
+            }
+        }
+        self.emit_context();
+    }
+
+    /// 摘要压缩之后的善后：轮次号重排（历史、用户原文、变更清单、时刻四处一致），
+    /// 发布新历史，让界面整个重建。
+    ///
+    /// `turns_before` 是压缩**之前**的轮数 —— `TurnRemap` 靠它把旧号映到新号，
+    /// 被摘要吃掉的那几轮映不到（`None`）。
+    fn apply_compaction(&mut self, turns_before: u32, before: u64, tier: String, auto: bool) {
+        let remap = crate::history::TurnRemap::new(turns_before, &self.thread.messages);
+        self.thread.user_turns = remap.after();
+        let id = self.ctx.handle.id.clone();
+        if !remap.is_identity() {
+            if let Err(e) = crate::prompts::remap(&id, |t| remap.map(t)) {
+                tracing::warn!("压缩后重排用户原文失败：{e}");
+            }
+            if let Err(e) = crate::changes::remap(&id, &remap) {
+                tracing::warn!("压缩后重排变更记录失败：{e}");
+            }
+            if let Err(e) = crate::timeline::remap(&id, |t| remap.map(t)) {
+                tracing::warn!("压缩后重排时刻记录失败：{e}");
+            }
+        }
+        self.ctx.handle.publish_history(&self.thread.messages);
+        self.forget_reported();
+        let after = self.history_tokens();
+        self.emit(SessionEvent::Compacted {
+            history: crate::view::to_views(&self.thread.messages),
+            prompts: crate::prompts::load(&id),
+            changes: crate::changes::load(&id),
+            changes_since: crate::changes::since(&id),
+            times: crate::timeline::load(&id),
+            before,
+            after,
+            tier,
+            auto,
         });
     }
 
     /// 历史消息部分的估算 token 数。
     fn history_tokens(&self) -> u64 {
         carter::agent::context::estimate_tokens_for(
-            &self.thread.lock().messages,
+            &self.thread.messages,
             &self.ctx.model.tokenizer,
         )
     }
@@ -2648,7 +2220,7 @@ impl Runner {
     fn begin_changes(&mut self) {
         // 上一轮理论上已经收走了；真剩下来也别把两轮的变更混在一起。
         self.changes = None;
-        self.changes_turn = self.thread.lock().user_turns;
+        self.changes_turn = self.thread.user_turns;
         self.changes = ChangeWatch::start(&self.ctx.cwd, &self.ctx.settings.changes_ignore);
     }
 
@@ -2715,10 +2287,7 @@ impl Runner {
                 // 每次工具调用：一轮里建三个任务改两个状态是**一件事**，应该是一条
                 // 提交。侧边聊天不碰团队数据（它没挂 `team` 工具），提交是空转。
                 if self.ctx.include_task {
-                    crate::team::git::commit_turn_if_team(
-                        &self.ctx.cwd,
-                        self.thread.lock().user_turns,
-                    );
+                    crate::team::git::commit_turn_if_team(&self.ctx.cwd, self.thread.user_turns);
                 }
             }
             _ => {}
@@ -2737,271 +2306,6 @@ impl Runner {
             message: message.to_string(),
         });
     }
-}
-
-/// 从会话历史里摘出前 `cut` 条，做成一份独立的历史交给摘要用
-/// （见 [`Runner::compact`]）。
-///
-/// 单独同一条历史跑摘要的话，那几秒里会话任务就什么都做不了；而锁卫兵又不能跨
-/// `.await`。所以原地摘一份拷贝出去，摘要跑在拷贝上（`cut` 这个切口记着，
-/// 回来时只把它前面那段换掉）。
-fn extract_thread(thread: &Arc<parking_lot::Mutex<Thread>>, cut: usize) -> Thread {
-    let mut second = Thread::default();
-    {
-        let t = thread.lock();
-        second.session_id = t.session_id.clone();
-        second.agent_id = t.agent_id.clone();
-        second.user_turns = t.user_turns;
-        second.messages = t.messages[..cut.min(t.messages.len())].to_vec();
-    }
-    // 带着断口去摘要的话，摘要请求本身就会被上游拒掉。
-    crate::history::repair_dangling_tool_uses(&mut second);
-    second
-}
-
-/// 把摘好的那段接回会话历史：`cut` 之前换成摘要结果，之后（这几秒里新加的）
-/// 原样接在后面。返回新历史与它的估算 token 数。
-fn splice_thread(
-    thread: &Arc<parking_lot::Mutex<Thread>>,
-    cut: usize,
-    chunk: &Thread,
-    tokenizer: &str,
-) -> (
-    Vec<llm_adapt_core::WireMessage>,
-    u64,
-    crate::history::TurnRemap,
-) {
-    let mut t = thread.lock();
-    let turns_before = crate::view::user_turn_count(&t.messages);
-    let mut next = chunk.messages.clone();
-    next.extend_from_slice(&t.messages[cut.min(t.messages.len())..]);
-    t.messages = next;
-    let messages = t.messages.clone();
-    drop(t);
-    let after = carter::agent::context::estimate_tokens_for(&messages, tokenizer);
-    let remap = crate::history::TurnRemap::new(turns_before, &messages);
-    (messages, after, remap)
-}
-
-/// 一轮收尾时按「这一轮实际规模的峰值」决定要不要自动压缩。
-///
-/// 就是 `after_turn` / `spawn_compaction` 里那句条件：超线了就压。抽出来是为了
-/// 读得清「线在哪」：阈值是 `context_window × compact_threshold_ratio`，与界面上的
-/// 百分比环同一个口径。
-fn over_threshold(used: u64, window: u32, agent: &carter::config::AgentConfig) -> bool {
-    let threshold = (window as f64 * agent.compact_threshold_ratio) as u64;
-    agent.compact_enabled && threshold > 0 && used > threshold
-}
-
-/// 历史里的 todo → 复诵文本（请求时临时追加在历史末尾，不进会话文件）。
-///
-/// 与 carter `run_turn` 里那份逐字一致：复诵推在最近注意力区，模型才不会做着做着
-/// 忘了自己列过的待办；而它**不进 history**，否则下一轮就多出一条带正文的 user
-/// 消息 —— 轮次号、界面上的气泡全跟着错。
-fn render_todos(todos: &[carter::tools::TodoItem]) -> String {
-    use carter::tools::TodoStatus;
-    let mut out = String::from("当前待办（持续推进，完成即更新状态）：\n");
-    for t in todos {
-        match t.status {
-            TodoStatus::Completed => out.push_str(&format!("[x] {}\n", t.content)),
-            // 进行中用 active_form 复诵当前动作。
-            TodoStatus::InProgress => out.push_str(&format!("[~] {}\n", t.active_form)),
-            TodoStatus::Pending => out.push_str(&format!("[ ] {}\n", t.content)),
-        }
-    }
-    out
-}
-
-/// 推理强度 → IR 的思考配置。`None` 表示**不发**思考参数。
-///
-/// 与 carter `turn.rs` 里那份一致（它是私有的）：同时填 `effort` 与
-/// `budget_tokens`，两家协议各取自己认得的那半。
-fn thinking_for(
-    effort: &carter::registry::ReasoningEffort,
-) -> Option<carter::provider::ThinkingConfig> {
-    use carter::registry::ReasoningEffort;
-    let effort_str = |s: &str| carter::provider::ThinkingConfig {
-        budget_tokens: None,
-        effort: Some(s.to_string()),
-    };
-    Some(match effort {
-        ReasoningEffort::None => return None,
-        ReasoningEffort::Low => effort_str("low"),
-        ReasoningEffort::Medium => effort_str("medium"),
-        ReasoningEffort::High => effort_str("high"),
-        ReasoningEffort::XHigh => effort_str("xhigh"),
-        ReasoningEffort::Max => effort_str("max"),
-        ReasoningEffort::Budget(n) => carter::provider::ThinkingConfig {
-            budget_tokens: Some(*n),
-            effort: None,
-        },
-    })
-}
-
-/// 把一轮里的工具调用按「能不能一起跑」切批，保持原顺序。
-///
-/// 与 carter 的切法一致（见 `carter::tools::is_concurrent_safe`）：连着几条只读 /
-/// 幂等的合成一批并发跑；碰到会动外部世界的一条就自己成一批、串行跑。批与批之间
-/// 每次都要把整批结果写回历史再发请求 —— 一条慢命令不会拖住别的批，但同一批里
-/// 先跑完的也不会被单独扣着（它们本来就该一起回灌）。
-fn batches(calls: &[carter::provider::ToolCall]) -> Vec<Vec<&carter::provider::ToolCall>> {
-    let mut out: Vec<Vec<&carter::provider::ToolCall>> = Vec::new();
-    for call in calls {
-        match out.last_mut() {
-            Some(last)
-                if carter::tools::is_concurrent_safe(&call.name)
-                    && carter::tools::is_concurrent_safe(&last[0].name) =>
-            {
-                last.push(call)
-            }
-            _ => out.push(vec![call]),
-        }
-    }
-    out
-}
-
-/// 发请求之前那一步该怎么走。
-enum RequestGate {
-    /// 照常发。
-    Send,
-    /// 先压一次上下文，压完再发。
-    Compact,
-}
-
-/// 一个请求走完 `provider_call` 之后的两种结果。
-enum Canceled {
-    /// 等到了流。
-    Stream(carter::provider::EventStream),
-    /// hook 说先压缩。
-    Compact,
-}
-
-/// 复制一份历史。与自动压缩换进来的那份隔离：两边各算各的，轮末再整体换回去。
-///
-/// `Thread` 不实现 `Clone`（那儿只有一份），但它的字段都是公开的。
-///
-/// **recorder 必须一起带过来**：这一轮里写进历史的助手消息与工具结果都是往这份
-/// 拷贝上 `append` 的，而落盘就发生在 `append` 里。漏了它，这一轮的模型回复与
-/// 工具结果只活在内存里，轮末整份换回 `self.thread` 之后连原线程的 recorder 也
-/// 跟着没了 —— 第二条消息起连会话文件都不再增长。共用同一个 `Arc<Recorder>` 是
-/// 安全的：它内部有锁（见 `spawn_title` 里手动追加标题那条路）。
-fn thread_copy(t: &Thread) -> Thread {
-    let mut out = Thread::default();
-    out.session_id = t.session_id.clone();
-    out.agent_id = t.agent_id.clone();
-    out.messages = t.messages.clone();
-    out.turns = t.turns;
-    out.user_turns = t.user_turns;
-    out.todos = t.todos.clone();
-    if let Some(rec) = t.recorder() {
-        out.set_recorder(rec);
-    }
-    out
-}
-
-/// 一次模型请求：发出去，等它说第一个字。
-///
-/// 单独一个函数是为了让历史那把锁**不在**这里：调用方先放锁再调它，回来再取；
-/// 锁卫兵不是 `Send`，跟着 future 跑的话整个会话任务都塞不进 `tokio::spawn`。
-///
-/// 第一个事件也在这里等：段一旦开始变化，后面就是纯 IO。
-async fn provider_call(
-    provider: &dyn carter::provider::LlmProvider,
-    req: carter::provider::ChatRequest,
-    cancel: &carter::agent::CancelToken,
-    close: &carter::agent::CancelToken,
-) -> carter::Result<carter::provider::EventStream> {
-    let mut fut = Box::pin(provider.stream(req));
-    let mut stream = tokio::select! {
-        biased;
-        _ = close.cancelled() => return Err(carter::CarterError::Config("会话已关闭".into())),
-        _ = cancel.cancelled() => return Err(carter::CarterError::Config("已取消".into())),
-        res = &mut fut => res?,
-    };
-    let first = tokio::select! {
-        biased;
-        _ = close.cancelled() => return Err(carter::CarterError::Config("会话已关闭".into())),
-        _ = cancel.cancelled() => {
-            return Err(carter::CarterError::Config("已取消".into()));
-        }
-        ev = futures::StreamExt::next(&mut stream) => ev,
-    };
-    Ok(match first {
-        Some(ev) => {
-            let head = futures::stream::once(async move { ev });
-            Box::pin(futures::StreamExt::chain(head, stream))
-        }
-        None => Box::pin(futures::stream::empty()),
-    })
-}
-
-/// 跑一条工具调用要用到的那点会话状态（见 [`run_one_call`]）。
-struct CallCtx<'a> {
-    shell: &'a Arc<AppShell>,
-    session_id: &'a str,
-    /// `None` = 并发批（那批的「开始」在派发前统一发过，不再逐条记）。
-    live: Option<Arc<crate::shell::LiveLog>>,
-    /// 工具里的子 agent 等事件往这里送。
-    tx: mpsc::UnboundedSender<ToolEvent>,
-    activity: Arc<AtomicU32>,
-    running: Arc<crate::tools::control::RunningTools>,
-    tools: &'a carter::tools::ToolRegistry,
-}
-
-/// 执行一条工具调用，把结果交给调用方 —— 「开始」那张卡片也在这里发。
-///
-/// 界面那两张卡片用**模型给的** `call_id` 发：`carter::tools::Tool` 的
-/// `execute` 拿不到调用编号，我们自己发、自己配对（见 `tools/record.rs` 的
-/// `Recorded::with_call_id`），界面上的「中断 / 转后台」才找得到这条命令。
-///
-/// 「结束」那张不在这里：并发批里要等整批结果按序回来再一起发（见
-/// [`Runner::finish_one_call`]）。
-async fn run_one_call(
-    cx: &CallCtx<'_>,
-    call: &carter::provider::ToolCall,
-) -> carter::tools::ToolResult {
-    let (shell, session_id, live, tools) = (cx.shell, cx.session_id, &cx.live, cx.tools);
-    if let Some(live) = &live {
-        live.tool_started(&call.id, &call.name, &call.args);
-    }
-    emit(
-        shell,
-        session_id,
-        SessionEvent::ToolStarted {
-            call_id: call.id.clone(),
-            name: call.name.clone(),
-            args: call.args.clone(),
-        },
-    );
-    let mut result = match tools.tools().iter().find(|t| t.name() == call.name) {
-        Some(inner) => {
-            // 工具池里是**裸工具**（见 `tools::build_tools` 的文档），`Recorded` 只在
-            // 这一层套、且只套一层：编号由外面给（`ToolCall.id`），启动 / 结果两张
-            // 卡片也由外面配对 —— 这里只要「结果落到界面」这一件事：子 agent 的进度
-            // 事件走同一条通道。再套一层的话内层会自己编号并发第二张卡。
-            let recorded: Arc<dyn carter::tools::Tool> = Arc::new(
-                crate::tools::record::Recorded::new(
-                    inner.clone(),
-                    cx.tx.clone(),
-                    Arc::new(std::sync::atomic::AtomicU64::new(0)),
-                    cx.activity.clone(),
-                )
-                .with_live(live.clone())
-                .with_running(Some(cx.running.clone()))
-                .with_call_id(Some(call.id.clone())),
-            );
-            recorded.execute(call.args.clone()).await
-        }
-        // 与 carter 的 `dispatch` 一致：找不到工具也回一个结构化 err，让模型改用别的。
-        None => carter::tools::ToolResult::err(format!("unknown tool: {}", call.name)),
-    };
-    // 这一轮进行中到的跨会话来信，搭这条结果送进模型（见 `peers.rs`）。界面卡片上
-    // 也照样带着 —— 模型看到了什么，用户就该看到什么。
-    //
-    // 卡片本身（「结束」与 todo）由调用方发，见 `Runner::finish_one_call`：并发批里
-    // 结果是按序统一收的。
-    crate::peers::drain_into(&mut result.content);
-    result
 }
 
 /// 把目标落盘并广播给界面。
@@ -3147,6 +2451,9 @@ fn drop_queued(queue: &mut VecDeque<Command>, id: u64) {
 /// **少了这套即时处理会出现什么**：用户点「转后台」之后，命令要等这一轮（以及
 /// 那条命令）跑完才被读到；那时 `call_id` 早就失效了，`RunningTools::apply` 找不到
 /// 它 —— 界面上就是「点了没反应」。停止、插队同样是这个道理。
+///
+/// 返回 `true` = 这条命令是用户在要求停下这一轮（停止 / 插队 / 把排队消息提到最前）。
+/// 调用方靠它区分「用户主动停」与「会话被关掉」—— 前者不该报成失败（见 `run_one_turn`）。
 fn handle_live_command(
     cmd: Command,
     ctx: &SessionCtx,
@@ -3154,10 +2461,13 @@ fn handle_live_command(
     goal: &mut Option<Goal>,
     changes: &mut Option<ChangeWatch>,
     changes_turn: u32,
-) {
+) -> bool {
     match cmd {
         // 停止整轮：只置取消标记，流与工具都在听它，这一轮自己收拾。
-        Command::Cancel => ctx.handle.cancel.set(),
+        Command::Cancel => {
+            ctx.handle.cancel.set();
+            return true;
+        }
         // 生成中也能发消息：默认排队，勾了「插队」就中断本轮、排到队首。
         Command::SendPrompt {
             text,
@@ -3172,13 +2482,14 @@ fn handle_live_command(
             if interject {
                 ctx.handle.cancel.set();
                 queued.push_front(cmd);
-            } else {
-                queued.push_back(cmd);
+                return true;
             }
+            queued.push_back(cmd);
         }
         Command::PromotePrompt { id } => {
             promote(queued, id);
             ctx.handle.cancel.set();
+            return true;
         }
         Command::DropPrompt { id } => drop_queued(queued, id),
         // 单条工具调用的「中断 / 转后台」。立刻打到那条命令上，不影响这一轮本身 ——
@@ -3204,7 +2515,11 @@ fn handle_live_command(
             if let Err(e) = crate::changes::clear(&ctx.handle.id, changes_turn) {
                 tracing::warn!("清空变更记录失败：{e}");
             }
-            *changes = ChangeWatch::start(&ctx.cwd, &ctx.settings.changes_ignore);
+            // 只有正在记这一轮时才重建监听器 —— 空闲时没有可清的那一份，凭空起一个
+            // 只会在下一次轮首被丢掉。
+            if changes.is_some() {
+                *changes = ChangeWatch::start(&ctx.cwd, &ctx.settings.changes_ignore);
+            }
             emit(
                 &ctx.shell,
                 &ctx.handle.id,
@@ -3215,6 +2530,7 @@ fn handle_live_command(
         }
         other => queued.push_back(other),
     }
+    false
 }
 
 /// 展开输入框里的 `/命令` 与 `@文件`。
@@ -3354,10 +2670,8 @@ async fn forward_events(
     shell: Arc<AppShell>,
     session_id: String,
     asks: Arc<AskRegistry>,
-    mut tool_rx: mpsc::UnboundedReceiver<ToolEvent>,
     mut ask_rx: mpsc::UnboundedReceiver<AskRequest>,
 ) {
-    let mut tool_open = true;
     let mut ask_open = true;
 
     let send = |shell: &AppShell, event: SessionEvent| {
@@ -3367,28 +2681,8 @@ async fn forward_events(
         });
     };
 
-    while tool_open || ask_open {
+    while ask_open {
         tokio::select! {
-            ev = tool_rx.recv(), if tool_open => match ev {
-                Some(ToolEvent::Started { call_id, name, args }) => {
-                    send(&shell, SessionEvent::ToolStarted { call_id, name, args });
-                }
-                Some(ToolEvent::Finished { call_id, ok, content, elapsed_ms }) => {
-                    send(
-                        &shell,
-                        SessionEvent::ToolFinished {
-                            call_id,
-                            ok,
-                            content,
-                            elapsed_ms,
-                        },
-                    );
-                }
-                Some(ToolEvent::Agent { call_id, agents }) => {
-                    send(&shell, SessionEvent::AgentProgress { call_id, agents });
-                }
-                None => tool_open = false,
-            },
             req = ask_rx.recv(), if ask_open => match req {
                 Some(AskRequest::Questions { id, questions, reply }) => {
                     // 发送端存住：前端要跨一次进程边界才回得来，而 oneshot 只能发一次。
@@ -3398,6 +2692,200 @@ async fn forward_events(
                 None => ask_open = false,
             },
         }
+    }
+}
+
+/// 给工具池里的每个工具套一层记录包装（完整参数与结果 → 界面）。
+///
+/// 主会话用它（编号取模型给的 `call_id`，见 [`crate::tools::record::Recorded`]）。
+/// 抽成自由函数是为了能直接测「一次调用只画一张卡」。
+fn wrap_recorded(
+    bare: carter::tools::ToolRegistry,
+    tx: crate::tools::record::ToolTx,
+    live: Option<Arc<crate::shell::LiveLog>>,
+    running: Option<Arc<crate::tools::control::RunningTools>>,
+    activity: Arc<AtomicU32>,
+) -> carter::tools::ToolRegistry {
+    let seq = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let mut out = carter::tools::ToolRegistry::empty();
+    for t in bare.tools() {
+        out.push(Arc::new(
+            crate::tools::record::Recorded::new(
+                t.clone(),
+                tx.clone(),
+                seq.clone(),
+                activity.clone(),
+            )
+            .with_live(live.clone())
+            .with_running(running.clone())
+            .with_model_call_id(),
+        ));
+    }
+    out
+}
+
+/// 工具卡片 → IPC 事件。**同步**：与正文增量走同一条时间线，顺序才不会反过来。
+fn emit_tool_event(shell: Arc<AppShell>, session_id: String) -> crate::tools::record::ToolTx {
+    Arc::new(move |ev| {
+        let event = match ev {
+            ToolEvent::Started {
+                call_id,
+                name,
+                args,
+            } => SessionEvent::ToolStarted {
+                call_id,
+                name,
+                args,
+            },
+            ToolEvent::Finished {
+                call_id,
+                ok,
+                content,
+                elapsed_ms,
+            } => SessionEvent::ToolFinished {
+                call_id,
+                ok,
+                content,
+                elapsed_ms,
+            },
+            ToolEvent::Agent { call_id, agents } => SessionEvent::AgentProgress { call_id, agents },
+        };
+        shell.emit(AppEvent::Session {
+            session_id: session_id.clone(),
+            event,
+        });
+    })
+}
+
+/// carter `run_turn` 的渲染出口 → IPC 事件。
+///
+/// 工具卡片不从这里走：那一路是 [`crate::tools::record::Recorded`] 发的（带完整的
+/// 参数与结果），carter 那两条只有截断的预览。
+struct TxSink {
+    shell: Arc<AppShell>,
+    session_id: String,
+    /// 进行中那一轮的记录，见 `shell.rs::LiveLog`。
+    live: Option<Arc<crate::shell::LiveLog>>,
+    /// 待办落在这里（`thread.todos` 由 carter 自己维护并复诵给模型）。
+    todos: Arc<arc_swap::ArcSwap<Vec<carter::tools::TodoItem>>>,
+    /// carter 在一轮**中途**自己压缩过时的摘要档位（见 [`Runner::after_turn`]）。
+    mid: Arc<std::sync::Mutex<Option<String>>>,
+}
+
+impl UiSink for TxSink {
+    fn emit(&mut self, ev: UiEvent) {
+        let event = match ev {
+            UiEvent::AssistantTextDelta(text) => {
+                if let Some(live) = &self.live {
+                    live.text(&text);
+                }
+                SessionEvent::TextDelta { text }
+            }
+            UiEvent::ThinkingDelta(text) => SessionEvent::ThinkingDelta { text },
+            UiEvent::AssistantTextEnd => {
+                // 一轮里的每个文本 / 思考块结束时都会来一次。`live` 里几段之间补个
+                // 空行，切走再回来时读起来才不像连成一句。
+                if let Some(live) = &self.live {
+                    live.text("\n");
+                }
+                SessionEvent::TextEnd
+            }
+            UiEvent::TodoUpdated(todos) => {
+                self.todos.store(Arc::new(todos.clone()));
+                SessionEvent::TodoUpdated {
+                    todos: todos.iter().map(todo_view).collect(),
+                }
+            }
+            UiEvent::TurnUsage { usage, cost, model } => SessionEvent::TurnUsage {
+                usage: UsageView::from(&usage),
+                cost,
+                model,
+            },
+            UiEvent::Notice(msg) => {
+                // carter 的压缩过程日志（英文、按档逐条）不往界面送：摘要成了的话
+                // 轮后会有一条 `compacted` 事件把对话整个重建。失败的那几句照常送。
+                if let Some(tier) = summary_tier(&msg) {
+                    if let Ok(mut slot) = self.mid.lock() {
+                        *slot = Some(tier);
+                    }
+                    return;
+                }
+                if msg.starts_with("[compact] L0") || msg.starts_with("[compact] L1") {
+                    return;
+                }
+                SessionEvent::Notice { message: msg }
+            }
+            UiEvent::Divider(label) => SessionEvent::Notice { message: label },
+            UiEvent::ModelChanged(model) => SessionEvent::Notice {
+                message: format!("模型：{model}"),
+            },
+            // 下面这些由我们自己发（标题、历史回放），或已被顶掉的实现接管。
+            UiEvent::Title(_)
+            | UiEvent::ReplayHistory(_)
+            | UiEvent::Idle
+            | UiEvent::ToolCallStarted { .. }
+            | UiEvent::ToolResult { .. }
+            | UiEvent::AskUser { .. } => return,
+        };
+        self.shell.emit(AppEvent::Session {
+            session_id: self.session_id.clone(),
+            event,
+        });
+    }
+}
+
+/// 套在主模型 provider 外面：**每次主对话请求**收到上游的 usage 就刷新一次百分比环。
+///
+/// 一轮里工具回灌会让模型被调好几次，只在轮末刷新的话，一条长任务跑上十几分钟环
+/// 都纹丝不动；carter 的 `TurnUsage` 又是整轮累加的，拿它算占用会越算越大 ——
+/// 所以在流上直接看每一次请求自己的 usage。
+///
+/// 只套主对话：压缩走 `compact_model`、子 agent 走它们自己的线程，它们的 usage
+/// 不会把环带歪。
+struct ContextTap {
+    inner: Arc<dyn carter::provider::LlmProvider>,
+    shell: Arc<AppShell>,
+    session_id: String,
+    window: u32,
+    reported: Arc<AtomicU64>,
+}
+
+#[async_trait::async_trait]
+impl carter::provider::LlmProvider for ContextTap {
+    async fn stream(
+        &self,
+        req: carter::provider::ChatRequest,
+    ) -> carter::Result<carter::provider::EventStream> {
+        use carter::provider::{RequestPurpose, StreamChunk, Usage};
+        use futures::StreamExt;
+
+        let stream = self.inner.stream(req.clone()).await?;
+        if req.wire.meta.purpose != RequestPurpose::MainTurn {
+            return Ok(stream);
+        }
+        let shell = self.shell.clone();
+        let session_id = self.session_id.clone();
+        let window = self.window;
+        let reported = self.reported.clone();
+        // 用量常被拆成几帧下发（Claude 的 `message_start` 给输入、`message_delta`
+        // 给输出），按非零覆盖合并，每来一帧就按合并后的数刷新。
+        let mut usage = Usage::default();
+        Ok(Box::pin(stream.map(move |chunk| {
+            if let Ok(StreamChunk::Usage { usage: u }) = &chunk {
+                usage.merge_non_zero(u);
+                let used = u64::from(usage.total_input_billed()) + u64::from(usage.output_tokens);
+                if used > 0 {
+                    reported.store(used, Ordering::Relaxed);
+                    let config = shell.config.load();
+                    emit(
+                        &shell,
+                        &session_id,
+                        SessionEvent::Context(context_view(used, window, &config.agent)),
+                    );
+                }
+            }
+            chunk
+        })))
     }
 }
 
@@ -3531,34 +3019,6 @@ mod live_close {
 mod tests {
     use super::*;
 
-    /// 一轮里写进历史的助手消息与工具结果，都是往 `thread_copy` 那份拷贝上 `append`
-    /// 的 —— 落盘发生在 `append` 里。拷贝丢了 recorder，「回答不显示」就有了第二半：
-    /// 界面上看不到，切走再回来也读不到，会话文件里只剩用户那几句话。
-    #[test]
-    fn a_thread_copy_can_still_persist() {
-        let dir = std::env::temp_dir().join(format!(
-            "carter-app-thread-copy-{}-{}",
-            std::process::id(),
-            crate::protocol::now_ms()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("s.jsonl");
-
-        let mut original = Thread::default();
-        original.set_recorder(Arc::new(carter::session::Recorder::open(&path).unwrap()));
-        let mut copy = thread_copy(&original);
-        assert!(copy.recorder().is_some(), "拷贝要带着 recorder");
-
-        copy.append(llm_adapt_core::WireMessage::user_text("写在拷贝上"));
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            text.contains("写在拷贝上"),
-            "拷贝上的 append 必须落盘：{text}"
-        );
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
     /// 同步上下文里调用 `start_session` 必须拿到一句能读懂的错，而不是 panic。
     ///
     /// 这条守的是一个真实踩过的坑：Tauri 的**同步**命令跑在主线程上、没有 tokio
@@ -3635,163 +3095,52 @@ mod tests {
         std::fs::remove_dir_all(&mine).unwrap();
     }
 
-    /// 一次工具调用只能画**一张**卡。
+    /// 一次工具调用只能画**一张**卡，编号用模型给的那个。
     ///
-    /// 守的是「明明只调了一次，界面上却有两行一模一样的 `bash`」那个 bug：工具池里的
-    /// 工具是裸的，`Recorded` 只在派发这一层套。两边都套的话，外层用模型的 `call_id`
-    /// 发一张、内层用现编的 `t0` 再发一张，两张还都能拿到结果、都打勾。
+    /// 守的是「明明只调了一次，界面上却有两行一模一样的 `bash`」那个 bug：工具池与
+    /// 回调层各套一层 `Recorded` 的话，同一句命令会画两张卡，一张用模型的 `call_id`、
+    /// 一张用现编的号，两张还都能拿到结果、都打勾。主会话只在 `wrap_recorded` 这一处
+    /// 套（`build_tools` 返回的是裸工具），所以这里数一遍就够。
     #[tokio::test]
     async fn one_dispatch_draws_exactly_one_card() {
-        use carter::provider::{ChatRequest, EventStream, LlmProvider, ToolCall};
-
-        // 这条测试不发请求，provider 只用来把工具池装配起来。
-        struct Quiet;
+        struct Echo;
         #[async_trait::async_trait]
-        impl LlmProvider for Quiet {
-            async fn stream(&self, _req: ChatRequest) -> carter::Result<EventStream> {
-                unreachable!("装配工具池不该发请求")
+        impl Tool for Echo {
+            fn name(&self) -> &str {
+                "bash"
+            }
+            fn description(&self) -> &str {
+                "echo"
+            }
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            async fn execute(&self, _args: serde_json::Value) -> carter::tools::ToolResult {
+                carter::tools::ToolResult::ok("ok")
             }
         }
 
-        let shell = AppShell::new(Config::default());
-        let mut events = shell.subscribe();
+        let mut bare = carter::tools::ToolRegistry::empty();
+        bare.push(Arc::new(Echo));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let sink: crate::tools::record::ToolTx = Arc::new(move |ev| {
+            let _ = tx.send(ev);
+        });
+        let pool = wrap_recorded(bare, sink, None, None, Arc::new(AtomicU32::new(0)));
+        assert_eq!(pool.tools().len(), 1, "一个工具只该被套一层");
+        let _ = pool.dispatch("bash", serde_json::json!({})).await;
 
-        let dir = std::env::temp_dir().join(format!(
-            "carter-app-dispatch-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("a.txt"), "hi").unwrap();
-
-        let (tx, mut tool_rx) = mpsc::unbounded_channel();
-        let activity = Arc::new(AtomicU32::new(0));
-        let running = crate::tools::control::RunningTools::new();
-        let registry = build_tools(
-            ToolBuildArgs {
-                provider: Arc::new(Quiet),
-                model: ModelInfo {
-                    key: "k".into(),
-                    provider: "p".into(),
-                    api_name: "m".into(),
-                    context_window: 100_000,
-                    max_output_tokens: 8_000,
-                    tokenizer: "cl100k".into(),
-                    capabilities: vec![],
-                    pricing: carter::registry::Pricing {
-                        input: 0.0,
-                        output: 0.0,
-                        cache_write: None,
-                        cache_read: None,
-                    },
-                    default_reasoning: None,
-                },
-                agent_cfg: Default::default(),
-                base_system: String::new(),
-                cancel: carter::agent::CancelToken::new(),
-                mcp_tools: Vec::new(),
-                cwd: dir.clone(),
-                skills_enabled: false,
-                tool_tx: tx.clone(),
-                ask_tx: None,
-                include_task: false,
-                shells: None,
-                session_id: "test".into(),
-                shell_cwd: None,
-                running: Some(running.clone()),
-                goal_signal: Arc::new(GoalSignal::default()),
-                schedules: crate::schedules::ScheduleStore::open(dir.join("schedules.json")),
-                activity: activity.clone(),
-                live: None,
-                assistant: None,
-                assistant_chat: None,
-                peers: None,
-            },
-            &AppSettings::default(),
-        );
-
-        let cx = CallCtx {
-            shell: &shell,
-            session_id: "test",
-            live: None,
-            tx,
-            activity: activity.clone(),
-            running,
-            tools: &registry,
-        };
-        let call = ToolCall {
-            id: "call_from_model".into(),
-            name: "read_file".into(),
-            args: serde_json::json!({ "path": dir.join("a.txt") }),
-        };
-        run_one_call(&cx, &call).await;
-
-        // 卡片的两个来源都要数：派发层直接 `emit` 的，以及 `Recorded` 经通道交给
-        // `forward_events` 的（后者在真实应用里会被翻成同一个事件）。
         let mut started = Vec::new();
-        while let Ok(ev) = events.try_recv() {
-            if let AppEvent::Session {
-                event: SessionEvent::ToolStarted { call_id, .. },
-                ..
-            } = ev
-            {
-                started.push(call_id);
+        let mut finished = 0;
+        while let Ok(ev) = rx.try_recv() {
+            match ev {
+                ToolEvent::Started { call_id, .. } => started.push(call_id),
+                ToolEvent::Finished { .. } => finished += 1,
+                ToolEvent::Agent { .. } => {}
             }
         }
-        while let Ok(ev) = tool_rx.try_recv() {
-            if let ToolEvent::Started { call_id, .. } = ev {
-                started.push(call_id);
-            }
-        }
-        assert_eq!(
-            started,
-            vec!["call_from_model".to_string()],
-            "一次调用只该发一张卡，编号用模型给的那个"
-        );
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-}
-
-#[cfg(test)]
-mod batch_tests {
-    use super::*;
-    use serde_json::json;
-
-    fn call(id: &str, name: &str) -> carter::provider::ToolCall {
-        carter::provider::ToolCall {
-            id: id.into(),
-            name: name.into(),
-            args: json!({}),
-        }
-    }
-
-    /// 同一个回复里的几条工具：连着的只读调用合成一批并发跑，动外部世界的那条自己
-    /// 一批 —— 与 carter 的调度一致，但结果仍然按模型给的顺序回灌。
-    #[test]
-    fn only_consecutive_safe_calls_share_a_batch() {
-        let calls = vec![
-            call("1", "read_file"),
-            call("2", "grep"),
-            call("3", "bash"),
-            call("4", "read_file"),
-        ];
-        let groups: Vec<Vec<&str>> = batches(&calls)
-            .into_iter()
-            .map(|b| b.iter().map(|c| c.id.as_str()).collect())
-            .collect();
-        assert_eq!(groups, vec![vec!["1", "2"], vec!["3"], vec!["4"]]);
-    }
-
-    /// 一条独立的工具自己成批（串行跑）。
-    #[test]
-    fn a_lone_unsafe_call_is_its_own_batch() {
-        let calls = vec![call("1", "bash")];
-        assert_eq!(batches(&calls).len(), 1);
-        assert_eq!(batches(&calls)[0].len(), 1);
+        assert_eq!(started.len(), 1, "一次调用只该画一张卡：{started:?}");
+        assert_eq!(finished, 1);
     }
 }
 
@@ -3799,21 +3148,26 @@ mod batch_tests {
 mod no_turn_cap {
     /// 一轮里能调多少次模型，不该由配置拍脑袋定：翻几十个文档的工单很容易超过
     /// carter 默认的 50，撞上之后剩下的工具一条都不执行。
+    ///
+    /// 现在不再自己驱动循环，这条守的是「交给 carter 的上限被抬掉了」。
     #[test]
     fn the_running_loop_has_no_model_call_cap() {
         let src = include_str!("session.rs");
         let body = src
             .split("async fn run_one_turn(")
             .nth(1)
-            .and_then(|s| s.split("fn finish_one_call(").next())
+            .and_then(|s| s.split("async fn drive_goal(").next())
             .expect("找得到 run_one_turn");
         assert!(
-            !body.contains("config.agent.max_turns"),
-            "run_one_turn 里不该再有模型调用次数上限"
+            body.contains("agent.max_turns = u32::MAX"),
+            "交给 carter 的 agent 配置必须把轮数上限抬掉"
+        );
+        assert!(
+            !body.contains("self.ctx.config.agent.max_turns"),
+            "run_one_turn 里不该读配置里的上限"
         );
     }
 }
-
 #[cfg(test)]
 mod live_commands {
     use super::*;
@@ -3917,7 +3271,7 @@ mod live_commands {
         rx.await.unwrap();
         let mut queued = VecDeque::new();
         let (mut goal, mut changes) = (None, None);
-        handle_live_command(
+        let cancellable = handle_live_command(
             Command::ToolAction {
                 call_id: "call_1".into(),
                 action: ToolActionKind::Background,
@@ -3930,6 +3284,7 @@ mod live_commands {
         );
 
         assert_eq!(task.await.unwrap(), "call_1", "按钮要打到正在跑的那一条上");
+        assert!(!cancellable, "工具操作不是「停下这一轮」");
         assert!(queued.is_empty(), "工具操作不该进排队");
     }
 
@@ -3960,7 +3315,7 @@ mod live_commands {
         assert!(!ctx.handle.cancel.is_cancelled());
         let mut queued = VecDeque::new();
         let (mut goal, mut changes) = (None, None);
-        handle_live_command(
+        let cancellable = handle_live_command(
             Command::Cancel,
             &ctx,
             &mut queued,
@@ -3968,6 +3323,7 @@ mod live_commands {
             &mut changes,
             0,
         );
+        assert!(cancellable, "停止是「停下这一轮」");
         assert!(ctx.handle.cancel.is_cancelled());
         assert!(queued.is_empty(), "取消不是一条要排队的消息");
     }
@@ -3979,7 +3335,7 @@ mod live_commands {
         let mut queued = VecDeque::from(vec![prompt(1, false)]);
         let (mut goal, mut changes) = (None, None);
 
-        handle_live_command(
+        let cancellable = handle_live_command(
             prompt(2, true),
             &ctx,
             &mut queued,
@@ -3987,12 +3343,13 @@ mod live_commands {
             &mut changes,
             0,
         );
+        assert!(cancellable, "插队要打断这一轮");
         assert_eq!(ids(&queued), vec![Some(2), Some(1)]);
         assert!(ctx.handle.cancel.is_cancelled());
 
         ctx.handle.cancel.reset();
         let mut queued = VecDeque::from(vec![prompt(1, false)]);
-        handle_live_command(
+        let cancellable = handle_live_command(
             prompt(3, false),
             &ctx,
             &mut queued,
@@ -4000,6 +3357,7 @@ mod live_commands {
             &mut changes,
             0,
         );
+        assert!(!cancellable, "普通发送不该打断这一轮");
         assert_eq!(ids(&queued), vec![Some(1), Some(3)]);
         assert!(!ctx.handle.cancel.is_cancelled(), "普通发送不该打断这一轮");
     }
@@ -4019,5 +3377,221 @@ mod live_commands {
             0,
         );
         assert!(matches!(queued.front(), Some(Command::Compact)));
+    }
+}
+
+#[cfg(test)]
+mod live_turn {
+    //! 一轮**真的在跑**的时候，界面上的命令要当场生效。
+    //!
+    //! 这里驱动的是完整的 `run_one_turn`（内部就是 carter 的 `run_turn`），只是不走
+    //! `run_sequence` —— 于是不碰标题、`prompts/`、`timeline/` 这些落盘的东西，测试
+    //! 可以随便跑，也不会在用户机器上留下文件。
+    //!
+    //! 守的是「点『转后台』没反应」：那条命令必须打到正在跑的工具调用上，工具立刻
+    //! 返回 `shell_id` 而不是等满整条命令。
+
+    use super::*;
+    use carter::provider::{ChatRequest, EventStream, FinishReason, StreamChunk};
+    use std::time::Duration;
+
+    /// 第一次请求：让模型调 `bash` 跑一条很久的命令。第二次：说一句话收尾。
+    struct Scripted(std::sync::atomic::AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl carter::provider::LlmProvider for Scripted {
+        async fn stream(&self, _req: ChatRequest) -> carter::Result<EventStream> {
+            use std::sync::atomic::Ordering;
+            let n = self.0.fetch_add(1, Ordering::SeqCst);
+            let chunks: Vec<carter::Result<StreamChunk>> = if n == 0 {
+                vec![
+                    Ok(StreamChunk::ToolCallDelta {
+                        index: 0,
+                        id: "call_from_model".into(),
+                        name_delta: Some("bash".into()),
+                        arguments_delta: Some(
+                            serde_json::json!({ "command": "sleep 60", "timeout": 120 })
+                                .to_string(),
+                        ),
+                    }),
+                    Ok(StreamChunk::Finish {
+                        reason: FinishReason::ToolCall,
+                    }),
+                ]
+            } else {
+                vec![
+                    Ok(StreamChunk::text("好了")),
+                    Ok(StreamChunk::Finish {
+                        reason: FinishReason::Stop,
+                    }),
+                ]
+            };
+            Ok(Box::pin(futures::stream::iter(chunks)))
+        }
+    }
+
+    fn model() -> ModelInfo {
+        ModelInfo {
+            key: "k".into(),
+            provider: "p".into(),
+            api_name: "m".into(),
+            context_window: 100_000,
+            max_output_tokens: 8_000,
+            tokenizer: "cl100k".into(),
+            capabilities: vec![carter::registry::Capability::Tools],
+            pricing: carter::registry::Pricing {
+                input: 0.0,
+                output: 0.0,
+                cache_write: None,
+                cache_read: None,
+            },
+            default_reasoning: None,
+        }
+    }
+
+    /// 等一条事件，超时就失败 —— 卡住的测试要自己说清卡在哪一步。
+    async fn wait_for(
+        events: &mut tokio::sync::broadcast::Receiver<AppEvent>,
+        what: &str,
+        mut hit: impl FnMut(&SessionEvent) -> bool,
+    ) -> SessionEvent {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let ev = tokio::time::timeout(left, events.recv())
+                .await
+                .unwrap_or_else(|_| panic!("等「{what}」超时"))
+                .expect("事件通道关了");
+            if let AppEvent::Session { event, .. } = ev
+                && hit(&event)
+            {
+                return event;
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_background_action_reaches_the_command_running_inside_the_turn() {
+        use std::sync::atomic::AtomicU32;
+
+        let dir = std::env::temp_dir().join(format!(
+            "carter-app-live-turn-{}-{}",
+            std::process::id(),
+            crate::protocol::now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let shell = AppShell::new(Config::default());
+        let mut events = shell.subscribe();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let m = model();
+        let handle = SessionHandle::new(
+            "live-turn-test".into(),
+            dir.clone(),
+            m.clone(),
+            None,
+            cmd_tx,
+        );
+
+        let ctx = SessionCtx {
+            shell: shell.clone(),
+            handle: handle.clone(),
+            model: m.clone(),
+            provider: Arc::new(Scripted(std::sync::atomic::AtomicUsize::new(0))),
+            config: Arc::new(Config::default()),
+            settings: AppSettings::default(),
+            resumed: false,
+            cwd: dir.clone(),
+            unsupported_server_tools: Vec::new(),
+            capture: None,
+            include_task: false,
+            fast: None,
+            fast_ref: None,
+            shells: handle.background.clone(),
+            shell_cwd: crate::tools::bash::ShellCwd::new(dir.clone()),
+            running: crate::tools::control::RunningTools::new(),
+        };
+        let mut thread = Thread::new_empty();
+        thread.append_user("跑一条很久的命令");
+        let meta = session::SessionMeta {
+            id: handle.id.clone(),
+            format_version: session::CURRENT_FORMAT_VERSION,
+            parent_id: None,
+            forked_from: None,
+            cwd: dir.to_string_lossy().to_string(),
+            git: None,
+            title: Some("测试".into()),
+            carter_version: env!("CARGO_PKG_VERSION").to_string(),
+            model: m.key.clone(),
+            created_at: crate::protocol::now_ms(),
+        };
+        let mut runner = Runner {
+            ctx,
+            thread,
+            meta,
+            cmd_rx,
+            tool_tx: Some(emit_tool_event(shell.clone(), handle.id.clone())),
+            ask_tx: None,
+            mcp_tools: Vec::new(),
+            activity: Arc::new(AtomicU32::new(0)),
+            goal_signal: Arc::new(GoalSignal::default()),
+            goal: None,
+            downgraded_goal: false,
+            queued: VecDeque::new(),
+            // 固定系统提示：不去读用户机器上的 `~/.carter/system.md` / 技能目录。
+            fixed_system: Some(vec!["测试系统提示".into()]),
+            title_pending: false,
+            title_seed: None,
+            last_message_at: None,
+            changes: None,
+            changes_turn: 0,
+            overhead: 0,
+            reported: Arc::default(),
+        };
+
+        let turn = tokio::spawn(async move { runner.run_one_turn(None).await });
+
+        // 工具卡片上的编号必须是**模型给的**那个 —— 界面靠它把按钮送回后端。
+        let started = wait_for(&mut events, "工具开始", |e| {
+            matches!(e, SessionEvent::ToolStarted { .. })
+        })
+        .await;
+        let SessionEvent::ToolStarted { call_id, name, .. } = started else {
+            unreachable!()
+        };
+        assert_eq!(name, "bash");
+        assert_eq!(call_id, "call_from_model", "卡片编号要用模型给的那个");
+
+        // 界面上就是这一刻点「转后台」。
+        assert!(handle.send(Command::ToolAction {
+            call_id: call_id.clone(),
+            action: crate::protocol::ToolActionKind::Background,
+        }));
+
+        let finished = wait_for(&mut events, "工具结束", |e| {
+            matches!(e, SessionEvent::ToolFinished { .. })
+        })
+        .await;
+        let SessionEvent::ToolFinished {
+            call_id: done_id,
+            content,
+            ..
+        } = finished
+        else {
+            unreachable!()
+        };
+        assert_eq!(done_id, call_id);
+        assert!(content.contains("shell_id="), "应当转成后台：{content}");
+
+        // 这一轮照常收尾（模型拿到了结果、说了最后一句话）。
+        let result = tokio::time::timeout(Duration::from_secs(30), turn)
+            .await
+            .expect("转后台之后这一轮应当立刻收尾")
+            .unwrap();
+        assert!(!result.failed, "转后台不该把这一轮弄失败");
+        assert!(result.used_tools);
+
+        handle.background.kill_all();
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

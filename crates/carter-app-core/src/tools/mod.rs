@@ -44,9 +44,10 @@
 //!
 //! ## 记录包装
 //!
-//! 每个工具外面再包一层 [`record::Recorded`]，把**完整的参数与结果**送给界面。
+//! 每个工具外面包一层 [`record::Recorded`]，把**完整的参数与结果**送给界面。
 //! carter 的 `UiEvent` 只给截断的预览 —— 数据不够，界面上就只能给所有工具画同一种
-//! 卡片。这是「工具看起来都一样」的根因。
+//! 卡片。这是「工具看起来都一样」的根因。主会话的包装在 `session.rs::turn_tools`
+//! 里统一做（那里还知道用模型给的 `call_id`）；子 agent 的快照在这里套。
 //!
 //! ## 这份开关只影响本应用
 //!
@@ -98,7 +99,7 @@ use cwd::CwdScoped;
 use goal_update::GoalUpdateTool;
 use grep::EmbeddedGrep;
 use multi_skill::MultiRootSkill;
-use record::{Recorded, ToolEvent};
+use record::{Recorded, ToolTx};
 use schedule::ScheduleTool;
 
 /// 装配工具池需要的一整套东西。
@@ -115,8 +116,8 @@ pub struct ToolBuildArgs {
     /// 会话的工作目录。bash 会在这个目录里跑。
     pub cwd: std::path::PathBuf,
     pub skills_enabled: bool,
-    /// 工具事件（完整参数与结果）的出口。
-    pub tool_tx: mpsc::UnboundedSender<ToolEvent>,
+    /// 工具事件（完整参数与结果）的出口。同步调用，见 [`ToolTx`]。
+    pub tool_tx: ToolTx,
     /// 提问请求的出口。`None` = 不给这个会话注册 `ask_user_question`。
     pub ask_tx: Option<mpsc::UnboundedSender<AskRequest>>,
     /// 是否挂上 `agent`（派生子 agent 的入口）。侧边聊天不挂。
@@ -226,10 +227,10 @@ pub fn substitute_with(
 /// `agent` 拿到的是「此刻已有的工具」的快照，所以子 agent 那里没有 `agent`
 /// 自身 —— 这个顺序就是递归守卫。
 ///
-/// 池子里放的是**裸工具**，不套 `Recorded`：发卡片是派发那一层的事（会话自己派发
-/// 时编号现成，见 `session.rs::run_one_call` 的 `with_call_id`）。在这里先套一层，
-/// 派发时会被再套一层 —— 同一次调用发两张卡，一张用模型的 `call_id`、一张用这里
-/// 现编的号，界面上看着就是「明明只调了一次，却画了两张」。
+/// 池子里放的是**裸工具**，不套 `Recorded`：主会话那一层由 `session.rs::turn_tools`
+/// 统一套上（编号用模型给的 `call_id`，界面上的「中断 / 转后台」才找得到那条命令）。
+/// 在这里先套一层的话，派发时会被再套一层 —— 同一次调用画两张卡，一张用模型的
+/// `call_id`、一张用这里现编的号。
 pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry {
     let ToolBuildArgs {
         provider,
@@ -359,9 +360,9 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
     // 一次 status = completed 就能把父会话的目标标完成，而这种错不报错，只会让长任务
     // 悄悄停下）。这个快照必须在挂 `goal_update` **之前**取。
     //
-    // 只有这里套 `Recorded`：子 agent 跑的是 carter 的 `run_turn`，没有会话派发那一层
-    // （见 `session.rs::run_one_call`），不套的话它们敲的命令在界面上一步都看不到。
-    // 编号按到达次序现编 —— 子 agent 的调用没有界面侧的 `call_id`。
+    // 子 agent 的调用直接在 carter 的 `run_turn` 里派发，没有主会话那层统一包装
+    // （见 `session.rs::turn_tools`），这里给它们套上，否则它们敲的命令在界面上一步
+    // 都看不到。编号按到达次序现编 —— 几个子 agent 模型给的编号可能重复。
     let snapshot: Vec<Arc<dyn Tool>> = tools
         .tools()
         .iter()

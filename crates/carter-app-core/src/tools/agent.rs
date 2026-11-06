@@ -68,7 +68,7 @@ pub struct AgentTool {
     /// 子 agent 的工具池（已换实现、已过开关、不含 `agent` / `goal_update`）。
     tools: Vec<Arc<dyn Tool>>,
     /// 进度事件的出口。
-    tx: tokio::sync::mpsc::UnboundedSender<ToolEvent>,
+    tx: crate::tools::record::ToolTx,
     /// 子 agent 的调用计数（runner 的空转检测要用），与主工具池同一个计数。
     activity: Arc<AtomicU32>,
     seq: Arc<AtomicU64>,
@@ -83,7 +83,7 @@ impl AgentTool {
         base_system: String,
         parent_cancel: CancelToken,
         tools: Vec<Arc<dyn Tool>>,
-        tx: tokio::sync::mpsc::UnboundedSender<ToolEvent>,
+        tx: crate::tools::record::ToolTx,
         activity: Arc<AtomicU32>,
     ) -> Self {
         Self {
@@ -243,7 +243,7 @@ impl Tool for AgentTool {
         // 整表快照，不是增量：并发写时增量很容易次序错乱，而这张表只有几条。
         let publish = |runs: &Arc<Mutex<Vec<AgentRun>>>| {
             let snapshot = runs.lock().map(|v| v.clone()).unwrap_or_default();
-            let _ = self.tx.send(ToolEvent::Agent {
+            (self.tx)(ToolEvent::Agent {
                 call_id: call_id.clone(),
                 agents: snapshot,
             });
@@ -437,7 +437,7 @@ async fn run_one(
 struct ProgressSink {
     runs: Arc<Mutex<Vec<AgentRun>>>,
     index: usize,
-    tx: tokio::sync::mpsc::UnboundedSender<ToolEvent>,
+    tx: crate::tools::record::ToolTx,
     call_id: String,
     steps: u32,
     buf: String,
@@ -458,7 +458,7 @@ impl ProgressSink {
     /// 推一次整表快照。
     fn publish(&self) {
         let snapshot = self.runs.lock().map(|v| v.clone()).unwrap_or_default();
-        let _ = self.tx.send(ToolEvent::Agent {
+        (self.tx)(ToolEvent::Agent {
             call_id: self.call_id.clone(),
             agents: snapshot,
         });
@@ -587,7 +587,10 @@ mod tests {
     fn tool(
         provider: Arc<dyn LlmProvider>,
     ) -> (AgentTool, tokio::sync::mpsc::UnboundedReceiver<ToolEvent>) {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (raw, rx) = tokio::sync::mpsc::unbounded_channel();
+        let tx: crate::tools::record::ToolTx = std::sync::Arc::new(move |ev| {
+            let _ = raw.send(ev);
+        });
         let model = carter::registry::ModelInfo {
             key: "k".into(),
             provider: "p".into(),

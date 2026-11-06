@@ -31,7 +31,6 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Instant;
 
 use serde_json::Value;
-use tokio::sync::mpsc;
 
 use carter::tools::{Tool, ToolResult};
 
@@ -62,6 +61,13 @@ pub enum ToolEvent {
     },
 }
 
+/// 工具事件送到哪去。
+///
+/// **同步**调用，而不是走 mpsc 再转一手：正文增量（`text_delta`）是产生那一刻直接
+/// `emit` 的，工具卡片要是绕一条异步通道，转发那一拍就可能让「先这段字、后这张
+/// 工具卡」的顺序反过来 —— 同一条时间线上两条路必须同序。
+pub type ToolTx = Arc<dyn Fn(ToolEvent) + Send + Sync>;
+
 /// 结果正文的上限。
 ///
 /// bash 的结果本身可以到 30 KB，全量塞进 IPC 再存进前端 store，一个长会话下来
@@ -71,7 +77,7 @@ const MAX_RESULT: usize = 16 * 1024;
 
 pub struct Recorded {
     inner: Arc<dyn Tool>,
-    tx: mpsc::UnboundedSender<ToolEvent>,
+    tx: ToolTx,
     seq: Arc<AtomicU64>,
     /// 会话级的调用计数。runner 在一轮前后各读一次，用来判断「这一轮模型到底
     /// 动没动手」—— 长任务目标下的空转检测靠它（见 `goal.rs::decide_after_turn`）。
@@ -84,18 +90,20 @@ pub struct Recorded {
     live: Option<Arc<LiveLog>>,
     /// 正在跑的工具表。界面按 `call_id` 对单条命令做「中断 / 转后台」。
     running: Option<Arc<RunningTools>>,
-    /// 会话已经分配好了 `call_id`（见 [`Runner::run_one_call`]）。
+    /// 编号用模型给的那个（`ToolCall.id`），拿不到才现编。
     ///
-    /// carter 的 `Tool` trait 只拿得到参数、拿不到调用编号，所以它每次自己编一个。
-    /// 会话自己派发时编号在外面（`ToolCall.id`），启动、结果两张卡片都按它配对 ——
-    /// 包装层不能另编一个，否则界面上的「中断」找不到那条命令。
-    call_id: Option<String>,
+    /// carter 的 `Tool` trait 只拿得到参数、拿不到调用编号，所以默认这里自己发号。
+    /// 但界面上的「中断 / 转后台」是按 `call_id` 找到那条命令的，而历史里的卡片编号
+    /// 是模型给的 —— 两边对不上时，重开一次会话就再也点不动。carter 现在把这次调用的
+    /// 编号放进了 task-local（`current_call_id`），主会话据此对齐；子 agent 仍然现编
+    /// （它们模型给的编号跨 agent 可能重复）。
+    model_call_id: bool,
 }
 
 impl Recorded {
     pub fn new(
         inner: Arc<dyn Tool>,
-        tx: mpsc::UnboundedSender<ToolEvent>,
+        tx: ToolTx,
         seq: Arc<AtomicU64>,
         activity: Arc<AtomicU32>,
     ) -> Self {
@@ -106,13 +114,13 @@ impl Recorded {
             activity,
             live: None,
             running: None,
-            call_id: None,
+            model_call_id: false,
         }
     }
 
-    /// 这次调用的编号由外面给定（会话的 `run_one_call` 会先报「开始」）。
-    pub fn with_call_id(mut self, call_id: Option<String>) -> Self {
-        self.call_id = call_id;
+    /// 编号用模型给的那个（见 [`Recorded::model_call_id`] 字段的说明）。
+    pub fn with_model_call_id(mut self) -> Self {
+        self.model_call_id = true;
         self
     }
 
@@ -158,27 +166,23 @@ impl Tool for Recorded {
     }
 
     async fn execute(&self, args: Value) -> ToolResult {
-        let ours = self.call_id.is_some();
         let call_id = self
-            .call_id
-            .clone()
+            .model_call_id
+            .then(carter::agent::current_call_id)
+            .flatten()
             .unwrap_or_else(|| format!("t{}", self.seq.fetch_add(1, Ordering::Relaxed)));
         let started = Instant::now();
         self.activity.fetch_add(1, Ordering::Relaxed);
 
-        // 外面给了编号：启动与结果两张卡片由调用方配对发出（见 `session.rs` 的
-        // `run_one_call`），这里不再重复。
-        if !ours {
-            if let Some(live) = &self.live {
-                live.tool_started(&call_id, self.inner.name(), &args);
-            }
-            // 先发「开始」再执行：长时间跑的命令（构建、测试）应当立刻在界面上出现。
-            let _ = self.tx.send(ToolEvent::Started {
-                call_id: call_id.clone(),
-                name: self.inner.name().to_string(),
-                args: args.clone(),
-            });
+        if let Some(live) = &self.live {
+            live.tool_started(&call_id, self.inner.name(), &args);
         }
+        // 先发「开始」再执行：长时间跑的命令（构建、测试）应当立刻在界面上出现。
+        (self.tx)(ToolEvent::Started {
+            call_id: call_id.clone(),
+            name: self.inner.name().to_string(),
+            args: args.clone(),
+        });
 
         // 把这次调用的控制句柄放进 task-local，工具（`bash`）执行时才能读到
         // 「用户按了中断 / 转后台」。包装层是唯一知道 `call_id` 的地方 —— 界面
@@ -190,14 +194,11 @@ impl Tool for Recorded {
         // 这一轮进行中到的跨会话来信，搭这条结果送进去（见 `peers.rs`）。界面卡片上
         // 也照样带着 —— 模型看到了什么，用户就该看到什么。
         crate::peers::drain_into(&mut res.content);
-        if ours {
-            return res;
-        }
         if let Some(live) = &self.live {
             live.tool_finished(&call_id, &res.content);
         }
 
-        let _ = self.tx.send(ToolEvent::Finished {
+        (self.tx)(ToolEvent::Finished {
             call_id,
             ok: res.ok,
             content: cap(&res.content),
@@ -212,6 +213,7 @@ impl Tool for Recorded {
 mod tests {
     use super::*;
     use serde_json::json;
+    use tokio::sync::mpsc;
 
     struct Echo(&'static str);
 
@@ -236,8 +238,17 @@ mod tests {
         Arc::new(AtomicU32::new(0))
     }
 
-    fn recorded(name: &'static str) -> (Arc<dyn Tool>, mpsc::UnboundedReceiver<ToolEvent>) {
+    /// 事件出口打成同步签名，测试照旧用一条通道观察。
+    fn channel() -> (ToolTx, mpsc::UnboundedReceiver<ToolEvent>) {
         let (tx, rx) = mpsc::unbounded_channel();
+        let tx: ToolTx = Arc::new(move |ev| {
+            let _ = tx.send(ev);
+        });
+        (tx, rx)
+    }
+
+    fn recorded(name: &'static str) -> (Arc<dyn Tool>, mpsc::UnboundedReceiver<ToolEvent>) {
+        let (tx, rx) = channel();
         let t: Arc<dyn Tool> = Arc::new(Recorded::new(
             Arc::new(Echo(name)),
             tx,
@@ -294,7 +305,7 @@ mod tests {
     /// 超长结果要截断并**明说**截断了 —— 悄悄丢一半解析起来会得到错误结论。
     #[tokio::test]
     async fn oversized_results_are_capped_with_a_visible_marker() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = channel();
         struct Big;
         #[async_trait::async_trait]
         impl Tool for Big {
@@ -332,7 +343,7 @@ mod tests {
     /// 靠「上一条请求」配对在并发下必错。
     #[tokio::test]
     async fn concurrent_calls_get_distinct_ids() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = channel();
         let seq = Arc::new(AtomicU64::new(0));
         let act = activity();
         let mk = |name: &'static str| -> Arc<dyn Tool> {

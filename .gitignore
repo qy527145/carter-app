@@ -30,3 +30,6 @@ dist-ssr/
 *.log
 logs/
 .DS_Store
+
+# 本地开发用的 carter 路径覆盖（见 `.cargo/config.toml`），不进仓库
+/.cargo/config.toml
