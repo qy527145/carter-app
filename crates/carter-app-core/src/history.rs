@@ -305,7 +305,7 @@ pub fn truncate_before_turn(thread: &mut Thread, turn: u32) -> Result<(), String
 ///
 /// ## 返回的是「已经展开过的」原文
 ///
-/// 历史里存的是展开 `/命令`、`@文件` 之后的正文（见 `session.rs::expand_input`）。
+/// 历史里存的是展开 `/命令`、`@文件` 之后的正文（见 `session/helpers.rs::expand_input`）。
 /// 所以重跑时**不能再过一次展开** —— 否则文件内容会被再贴一遍，两遍之后就很难看。
 /// 调用方拿到什么就原样重发。
 ///

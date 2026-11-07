@@ -73,7 +73,7 @@ pub enum Command {
     /// 等它跑完（可能好几分钟）才能说下一句。
     ///
     /// `text` 里可以带 `/命令`、`@文件`、`[img:...]` —— 展开在会话侧做，
-    /// 见 `session.rs::expand_input`。
+    /// 见 `session/helpers.rs::expand_input`。
     SendPrompt {
         text: String,
         /// 前端给这条消息编的号。`turn_started` 会原样带回，界面据此把
@@ -475,7 +475,7 @@ pub enum SessionEvent {
 ///
 /// `used` 以**最近一次主对话请求**上游回报的 usage 为准：完整输入（未命中 + 缓存读写）
 /// 加这次的输出 —— 输出会进历史，下一次请求就要带上它。每次主对话请求收到 usage
-/// 就刷新一次（见 `session.rs::ContextTap`），压缩 / 摘要请求不算。
+/// 就刷新一次（见 `session/sinks.rs::ContextTap`），压缩 / 摘要请求不算。
 ///
 /// 还没有回报时（刚打开、刚压缩完、刚回退）才退回估算：历史 + 系统提示 + 工具声明，
 /// 按模型的 tokenizer 数。

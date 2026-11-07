@@ -8,7 +8,7 @@
 //!   没开」就只剩一条转瞬即逝的系统通知。
 //! - 界面切走时不关它，切回来复用同一个任务（[`open`]）。关掉重开会打断正在说的话。
 //!
-//! 配置工具、工单工具与当前状态段在 `session.rs` / `tools/mod.rs` 里按 `CHAT_SESSION_ID` 挂上。
+//! 配置工具、工单工具与当前状态段在 `session/turn.rs` / `tools/mod.rs` 里按 `CHAT_SESSION_ID` 挂上。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -100,7 +100,7 @@ pub fn open(shell: &Arc<AppShell>, model: Option<String>) -> Result<StartedSessi
 /// 这一轮是不是汇报推起来的（最后一条用户输入带汇报标记）。
 ///
 /// 汇报里有外部事件的文字。原型的规矩是配置「never on observed content」，提示词拦不
-/// 住的事不能只靠提示词，所以这一轮只给一个只读工具（见 `session.rs::turn_tools`）。
+/// 住的事不能只靠提示词，所以这一轮只给一个只读工具（见 `session/turn.rs::turn_tools`）。
 pub fn is_report_turn(messages: &[llm_adapt_core::WireMessage]) -> bool {
     messages
         .iter()

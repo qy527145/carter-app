@@ -118,7 +118,7 @@ pub fn start_side_session(shell: Arc<AppShell>, parent_id: &str) -> Result<Start
     let id = side_id();
     let thread = side_thread(&id);
     // 系统提示的固定部分在这里算一次（见 [`side_system`] 的注释）；
-    // 主对话那一段每轮现拼，见 `session.rs::run_one_turn`。
+    // 主对话那一段每轮现拼，见 `session/turn.rs::run_one_turn`。
     let system = side_system(&config, &AppSettings::load(), &cwd, &model);
 
     let handle = start_side(

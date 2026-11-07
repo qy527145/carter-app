@@ -16,7 +16,8 @@
       "!src-tauri/*.svg",
       "!**/*.md",
       "!**/.github/workflows/release.yml",
-      "!crates/carter-app-core/data/models-snapshot.json"
+      "!crates/carter-app-core/data/models-snapshot.json",
+      "!.archify"
     ]
   },
   "formatter": {

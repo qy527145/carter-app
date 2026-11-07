@@ -9,7 +9,7 @@
 | `crates/carter-app-core/`   | 应用核心：会话编排、事件桥、状态根。**不依赖 Tauri**，能脱离 webview 测 |
 | `src-tauri/`                | 薄薄一层：`#[tauri::command]` + 事件转发 + 托盘                       |
 | `src/`                      | React 19 + Vite 8 + Tailwind v4 前端                                 |
-| `src/lib/api.ts`            | **唯一**调用 `invoke` 的地方：类型化命令与事件名                     |
+| `src/lib/api.ts` + `api/`   | **唯一**调用 `invoke` 的地方：按领域分文件，`api.ts` 只做再导出      |
 | `src-tauri/capabilities/`   | 前端可调用的权限清单                                                 |
 | `scripts/`                  | `bun run` 背后的辅助脚本（init / sandbox / build / logs / upgrade / clean） |
 
@@ -31,8 +31,8 @@ bun run upgrade patch  # 三处版本号一起改，并提交 + 打 tag
 ## 规则
 
 1. **业务逻辑进 `carter-app-core`**，`src-tauri` 只做取参数、转调、把错误转成字符串。
-2. **新增命令**：`src-tauri/src/lib.rs` 写命令 → 在 `generate_handler!` 注册 →
-   在 `src/lib/api.ts` 补类型化封装。组件里不要直接 `invoke("...")`。
+2. **新增命令**：在 `src-tauri/src/commands/<领域>.rs` 写命令 → 在 `lib.rs` 的 `generate_handler!` 注册 →
+   在 `src/lib/api/<领域>.ts` 补类型化封装。组件里不要直接 `invoke("...")`。
 3. **跨语言类型手写并保持同步**：Rust 结构体字段与 `api.ts` 里的 interface 一一对应，改动时两边同改。
    事件名 `carter://event` 两边各有一份常量，改名必须同步。
 4. **新增插件**：`Cargo.toml` + `package.json` 两边装 → `lib.rs` 注册 → `capabilities/default.json` 授权。

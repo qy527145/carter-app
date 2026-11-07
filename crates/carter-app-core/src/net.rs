@@ -722,7 +722,9 @@ mod tests {
             .collect();
         // Windows 的环境变量名大小写不敏感：`https_proxy` 与 `HTTPS_PROXY` 写的是
         // 同一个键，`get_envs()` 只会剩最后一条。所以按「大小写不敏感」查一遍。
-        let proxy = vars.iter().find(|(k, _)| k.eq_ignore_ascii_case("https_proxy"));
+        let proxy = vars
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("https_proxy"));
         assert_eq!(
             proxy.map(|(_, v)| v.as_str()),
             Some("http://127.0.0.1:7897")

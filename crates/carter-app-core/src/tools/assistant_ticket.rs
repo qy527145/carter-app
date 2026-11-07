@@ -379,7 +379,7 @@ impl Tool for AssistantRecallTool {
     }
 }
 
-/// 只读地看一眼现状。汇报推起来的那一轮只有它，见 `session.rs::turn_tools`。
+/// 只读地看一眼现状。汇报推起来的那一轮只有它，见 `session/turn.rs::turn_tools`。
 pub struct AssistantStatusTool {
     store: Arc<AssistantStore>,
 }

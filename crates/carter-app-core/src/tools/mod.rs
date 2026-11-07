@@ -46,7 +46,7 @@
 //!
 //! 每个工具外面包一层 [`record::Recorded`]，把**完整的参数与结果**送给界面。
 //! carter 的 `UiEvent` 只给截断的预览 —— 数据不够，界面上就只能给所有工具画同一种
-//! 卡片。这是「工具看起来都一样」的根因。主会话的包装在 `session.rs::turn_tools`
+//! 卡片。这是「工具看起来都一样」的根因。主会话的包装在 `session/turn.rs::turn_tools`
 //! 里统一做（那里还知道用模型给的 `call_id`）；子 agent 的快照在这里套。
 //!
 //! ## 这份开关只影响本应用
@@ -227,7 +227,7 @@ pub fn substitute_with(
 /// `agent` 拿到的是「此刻已有的工具」的快照，所以子 agent 那里没有 `agent`
 /// 自身 —— 这个顺序就是递归守卫。
 ///
-/// 池子里放的是**裸工具**，不套 `Recorded`：主会话那一层由 `session.rs::turn_tools`
+/// 池子里放的是**裸工具**，不套 `Recorded`：主会话那一层由 `session/turn.rs::turn_tools`
 /// 统一套上（编号用模型给的 `call_id`，界面上的「中断 / 转后台」才找得到那条命令）。
 /// 在这里先套一层的话，派发时会被再套一层 —— 同一次调用画两张卡，一张用模型的
 /// `call_id`、一张用这里现编的号。
@@ -364,7 +364,7 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
     // 悄悄停下）。这个快照必须在挂 `goal_update` **之前**取。
     //
     // 子 agent 的调用直接在 carter 的 `run_turn` 里派发，没有主会话那层统一包装
-    // （见 `session.rs::turn_tools`），这里给它们套上，否则它们敲的命令在界面上一步
+    // （见 `session/turn.rs::turn_tools`），这里给它们套上，否则它们敲的命令在界面上一步
     // 都看不到。编号按到达次序现编 —— 几个子 agent 模型给的编号可能重复。
     let snapshot: Vec<Arc<dyn Tool>> = tools
         .tools()

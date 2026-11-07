@@ -26,6 +26,9 @@ dist-ssr/
 .idea/
 *.sw?
 
+# 生成的架构图 / 文档产物（不进仓库）
+/.archify/
+
 # Misc
 *.log
 logs/
