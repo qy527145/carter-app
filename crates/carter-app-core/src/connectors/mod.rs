@@ -38,6 +38,8 @@
 //! 就得真的停下 —— 不然 `dws` 还在后台等着回调，下一次点「登录」会和它抢同一个
 //! 127.0.0.1 端口。所以子进程 `setsid` 自成一组，取消时整组杀掉。
 
+pub mod bun;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -130,9 +132,10 @@ pub static VENDORS: &[Vendor] = &[
         blurb: "日历、任务、通讯录、消息、云文档、多维表格、邮箱、审批与会议纪要。底层是飞书官方的 lark-cli 与内置的 lark-suite 技能。",
         cli: "lark-cli",
         skill: "lark-suite",
-        // 官方推荐 npm 分发；二进制由 npm 包的 postinstall 下载。
-        install_unix: "npm install -g @larksuite/cli",
-        install_windows: "npm install -g @larksuite/cli",
+        // 官方推荐 npm 分发；二进制由 npm 包的 postinstall 下载。写成 bun 是在
+        // 运行时按探测结果改写的（见 `bun::rewrite`）：没有 bun 就退回 npm。
+        install_unix: "bun install -g @larksuite/cli",
+        install_windows: "bun install -g @larksuite/cli",
         docs: "https://github.com/larksuite/cli",
         // lark-cli 没有 `version` 子命令，只认 `--version`。
         version_args: &["--version"],
@@ -303,11 +306,21 @@ pub fn user_bin_dirs() -> Vec<PathBuf> {
         // mail-cli 的 cargo-dist 安装脚本落在 CARGO_HOME/bin。
         v.push(home.join(".cargo").join("bin"));
     }
+    // bun 的全局 bin：`bun install -g` 把可执行文件放这儿，而从 Finder / 开始菜单
+    // 启动的 GUI 进程 PATH 里通常没有它。
+    if let Some(home) = crate::paths::home_dir() {
+        v.push(home.join(".bun").join("bin"));
+    }
     // npm 全局 bin（lark-cli）：从 Finder 启动的 GUI 进程 PATH 里常常没有这些目录。
     #[cfg(not(windows))]
     {
         v.push(PathBuf::from("/opt/homebrew/bin"));
         v.push(PathBuf::from("/usr/local/bin"));
+    }
+    // Windows 上 npm 的全局 bin 是 `%APPDATA%\npm`。
+    #[cfg(windows)]
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        v.push(PathBuf::from(appdata).join("npm"));
     }
     v
 }
@@ -715,6 +728,23 @@ pub fn install_command(v: &Vendor) -> String {
     }
 }
 
+/// 这条安装命令是交给包管理器跑的吗（`npm install …` / `bun install …`）。
+fn uses_package_manager(command: &str) -> bool {
+    let c = command.trim_start();
+    c.starts_with("npm ") || c.starts_with("bun ")
+}
+
+/// 把安装命令里的包管理器换成探测到的那个（bun 优先，没有就 npm）。
+///
+/// 两个包管理器都没找到时**不报错**：命令行里要装的也可能是 curl / powershell
+/// 脚本（钉钉、邮件就是），那些不需要 npm。
+pub fn rewrite_with_package_manager(command: &str) -> Result<String, String> {
+    match bun::detect() {
+        Some(pm) => Ok(bun::rewrite(command, &pm)),
+        None => Ok(command.to_string()),
+    }
+}
+
 /// 跑官方安装脚本。输出实时推给界面（下载几十 MB，静默几分钟是最难受的）。
 ///
 /// 安装脚本里的地址是各家写死的 GitHub 地址，国内经常连不上。这里按当前网络
@@ -726,9 +756,33 @@ pub async fn install_cli(shell: &AppShell, id: &str) -> Result<(), String> {
         return Err(format!("没有 `{id}` 这个连接器"));
     };
     let env = child_env().await;
-    let command = crate::net::rewrite_github_urls(&install_command(v), env.github.as_deref());
+    let command_x = install_command(v);
+    // 这条命令要靠包管理器装的话，先确保本机有一份 bun（没有就下下来）——
+    // 用户点的是「安装 CLI」，不该因为「你还没装 node / bun」半路停下。
+    let raw = if uses_package_manager(&command_x) {
+        shell.emit(AppEvent::ConnectorOutput {
+            vendor: v.id.to_string(),
+            line: "准备包管理器（bun）…".into(),
+        });
+        let _ = bun::ensure(|msg| {
+            shell.emit(AppEvent::ConnectorOutput {
+                vendor: v.id.to_string(),
+                line: msg.to_string(),
+            });
+        })
+        .await;
+        rewrite_with_package_manager(&command_x)?
+    } else {
+        rewrite_with_package_manager(&command_x)?
+    };
+    let command = crate::net::rewrite_github_urls(&raw, env.github.as_deref());
     let mut cmd = tokio::process::Command::new(install_shell_program());
     cmd.arg(install_shell_flag()).arg(command);
+    // 走 npm 的包（飞书没有 bun 时）：把国内源塞给这次安装。用户的
+    // `~/.npmrc` 或环境变量配过就不动（企业私有源不能被顶掉）。
+    for (k, val) in bun::env_overrides(env.proxy.is_none() && env.github.is_some()) {
+        cmd.env(k, val);
+    }
     let status = run_streamed(shell, v, cmd, Duration::from_secs(600), false).await?;
     if !status.success() {
         return Err(format!("安装失败（退出码 {:?}）", status.code()));

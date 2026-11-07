@@ -447,7 +447,9 @@ mod tests {
             .unwrap()
             .block_on(tool.execute(json!({"pattern": "needle"})));
         assert!(r.ok, "{}", r.content);
-        assert!(r.content.contains("src/a.rs:1:needle"), "{}", r.content);
+        // 输出用的是本平台的路径分隔符：Windows 上是 `src.rs`。
+        let line = format!("src{}a.rs:1:needle", std::path::MAIN_SEPARATOR);
+        assert!(r.content.contains(&line), "{}", r.content);
     }
 
     #[test]
@@ -466,7 +468,8 @@ mod tests {
         );
         assert!(r.ok, "{}", r.content);
         // 目录搜索：路径相对于会话 cwd，而不是绝对路径。
-        assert!(r.content.contains("src/main.rs:2:"), "{}", r.content);
+        let line = format!("src{}main.rs:2:", std::path::MAIN_SEPARATOR);
+        assert!(r.content.contains(&line), "{}", r.content);
         assert!(!r.content.contains(d.to_str().unwrap()), "不该出现绝对路径");
     }
 

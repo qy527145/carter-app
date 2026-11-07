@@ -142,6 +142,9 @@ impl NetPrefs {
 const GITHUB_UPSTREAM: &str = "https://github.com/";
 const RAW_UPSTREAM: &str = "https://raw.githubusercontent.com/";
 const CODELOAD_UPSTREAM: &str = "https://codeload.github.com/";
+/// Release 信息走的是 API 接口。它也经常整段不通（比 `github.com` 更彻底），
+/// 而更新检查恰恰是**启动时**最显眼的一次联网 —— 漏掉它等于每次都等官方超时。
+const API_UPSTREAM: &str = "https://api.github.com/";
 
 fn push_once(out: &mut Vec<String>, url: &str) {
     if !out.iter().any(|u| u == url) {
@@ -151,9 +154,14 @@ fn push_once(out: &mut Vec<String>, url: &str) {
 
 /// 这个地址能不能被加速站代理（GitHub 的几类下载地址）。
 pub fn is_github(url: &str) -> bool {
-    [GITHUB_UPSTREAM, RAW_UPSTREAM, CODELOAD_UPSTREAM]
-        .iter()
-        .any(|p| url.starts_with(p))
+    [
+        GITHUB_UPSTREAM,
+        RAW_UPSTREAM,
+        CODELOAD_UPSTREAM,
+        API_UPSTREAM,
+    ]
+    .iter()
+    .any(|p| url.starts_with(p))
 }
 
 /// 把一个 GitHub 地址套到加速站前缀下。非 GitHub 地址原样返回 —— 加速站只
@@ -220,29 +228,60 @@ pub async fn get_first(
     cancel: Cancel<'_>,
     progress: Progress<'_>,
 ) -> Result<Fetched, String> {
-    let urls = prefs.candidates(base);
+    let mut urls = prefs.candidates(base);
     if urls.is_empty() {
         return Err("没有可用的下载源".into());
+    }
+    // 「上次成功的源排到最前面」：同一个进程里查更新 → 下安装包是连着来的，
+    // 那条路已经证明可达，就不该再让官方源先超时一次。
+    if let Some(last) = last_good(base.first().copied().unwrap_or(""))
+        && let Some(i) = urls.iter().position(|u| *u == last)
+    {
+        let hit = urls.remove(i);
+        urls.insert(0, hit);
     }
     // 整轮上限：单个源的超时之和可能很长，用户已经等够了就收。
     let deadline = Instant::now() + ROUND_TIMEOUT.max(timeout);
     let client = client(prefs, timeout)?;
-    let mut failed = Vec::new();
-    for url in urls {
-        if let Some(c) = cancel
-            && c.load(std::sync::atomic::Ordering::SeqCst)
-        {
+    let mut failed: Vec<SourceFailure> = Vec::new();
+
+    // 第一轮：**并发**抢响应头，谁先回 2xx 就用谁。
+    //
+    // 为什么不是「按顺序一个个试」：一个整段不通的源要等满 `timeout` 才轮到下一个，
+    // 官方 + 三个镜像就是四倍。而这里要的只是「有没有一份能拿到」，四路请求的
+    // 响应头谁也不比谁贵 —— 并发发出，第一个回来的赢，其余立刻丢掉（连接上的
+    // 直接取消，不读 body）。
+    //
+    // 第二轮才流式读 body：并发读四份 body 会重复下载几十 MB，进度回调也说不清
+    // 「这是哪一份的进度」。
+    while !urls.is_empty() {
+        if cancelled(cancel) {
             return Err("已取消".into());
         }
         if Instant::now() >= deadline {
-            failed.push(SourceFailure {
-                source: source_label(&url),
-                error: "整体超时，没再试后面的源".into(),
-            });
+            for url in &urls {
+                failed.push(SourceFailure {
+                    source: source_label(url),
+                    error: "整体超时，没再试后面的源".into(),
+                });
+            }
             break;
         }
-        match fetch_one(&client, &url, cancel, progress).await {
+
+        let (winner, reasons) = race_headers(&client, &urls, cancel).await;
+        let (url, res) = match winner {
+            Some(w) => w,
+            None => {
+                // 全军覆没：把每个源各自的失败原因记下来，错误提示才有用。
+                failed.extend(reasons);
+                break;
+            }
+        };
+        let i = urls.iter().position(|u| *u == url).unwrap_or(0);
+        urls.remove(i);
+        match drain(res, cancel, progress).await {
             Ok(bytes) => {
+                remember_good(base.first().copied().unwrap_or(""), &url);
                 return Ok(Fetched {
                     source: url,
                     bytes,
@@ -250,6 +289,7 @@ pub async fn get_first(
                 });
             }
             Err(e) if e == CANCELLED => return Err("已取消".into()),
+            // 头都回来了、body 却断了：换下一个源（已经排掉了这一个）。
             Err(e) => failed.push(SourceFailure {
                 source: source_label(&url),
                 error: e,
@@ -259,41 +299,107 @@ pub async fn get_first(
     Err(format_failures(&failed))
 }
 
+fn cancelled(cancel: Cancel<'_>) -> bool {
+    cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::SeqCst))
+}
+
+/// 同时向所有候选要响应头，返回**第一个**回 2xx 的那一份，以及其它源的失败原因。
+///
+/// 抢占失败只是「这次别人更快」，**赢了之后**那些失败原因就不用报了（调用方只
+/// 在全部失败时才拿它们拼错误提示）。成功的那一份立刻返回，其余请求随 `set`
+/// 一起被丢掉 —— 连接上直接取消，不读 body。
+async fn race_headers(
+    client: &reqwest::Client,
+    urls: &[String],
+    cancel: Cancel<'_>,
+) -> (Option<(String, reqwest::Response)>, Vec<SourceFailure>) {
+    use futures::StreamExt;
+
+    let mut set = futures::stream::FuturesUnordered::new();
+    for url in urls {
+        let client = client.clone();
+        let url = url.clone();
+        set.push(async move {
+            let res = client
+                .get(&url)
+                .header("user-agent", "carter-app")
+                .send()
+                .await
+                .map_err(|e| (url.clone(), network_error(&e)))?;
+            let status = res.status();
+            if status.is_success() {
+                Ok((url, res))
+            } else {
+                Err((url, format!("HTTP {}", status.as_u16())))
+            }
+        });
+    }
+    let mut reasons = Vec::new();
+    while let Some(done) = set.next().await {
+        if cancelled(cancel) {
+            return (None, reasons);
+        }
+        match done {
+            Ok(win) => return (Some(win), reasons),
+            // 完成顺序与 `urls` 的下标**不对应**（先失败的不一定是列表里第一个），
+            // 所以失败原因由任务自己带着源地址回来。
+            Err((url, e)) => reasons.push(SourceFailure {
+                source: source_label(&url),
+                error: e,
+            }),
+        }
+    }
+    (None, reasons)
+}
+
+/// 把 `reqwest` 的错误翻成一句人看得懂的话（界面上就是这么显示的）。
+fn network_error(e: &reqwest::Error) -> String {
+    if e.is_timeout() {
+        "连接超时".to_string()
+    } else if e.is_connect() {
+        "连不上".to_string()
+    } else {
+        e.to_string()
+    }
+}
+
+/// 上次成功的源，按「这组候选的第一个地址」分组存。
+///
+/// 按组而不是全局一个：模型的几个地址与更新安装包的地址互不相关，串着用会把
+/// 一个源的成功套到另一组上（比如 jsDelivr 上取到过文件，于是拿它去下 Release）。
+fn last_good_cache() -> &'static Mutex<HashMap<String, String>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn last_good(key: &str) -> Option<String> {
+    last_good_cache()
+        .lock()
+        .ok()
+        .and_then(|m| m.get(key).cloned())
+}
+
+fn remember_good(key: &str, url: &str) {
+    if let Ok(mut m) = last_good_cache().lock() {
+        m.insert(key.to_string(), url.to_string());
+    }
+}
+
 const CANCELLED: &str = "__cancelled__";
 
-async fn fetch_one(
-    client: &reqwest::Client,
-    url: &str,
+/// 读干一份响应体。进度按读到的字节回调。
+async fn drain(
+    res: reqwest::Response,
     cancel: Cancel<'_>,
     progress: Progress<'_>,
 ) -> Result<Vec<u8>, String> {
     use futures::StreamExt;
 
-    let res = client
-        .get(url)
-        .header("user-agent", "carter-app")
-        .send()
-        .await
-        .map_err(|e| {
-            if e.is_timeout() {
-                "连接超时".to_string()
-            } else if e.is_connect() {
-                "连不上".to_string()
-            } else {
-                e.to_string()
-            }
-        })?;
-    let status = res.status();
-    if !status.is_success() {
-        return Err(format!("HTTP {}", status.as_u16()));
-    }
     let total = res.content_length();
     let mut out = Vec::with_capacity(total.unwrap_or(0) as usize);
     let mut stream = res.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        if let Some(c) = cancel
-            && c.load(std::sync::atomic::Ordering::SeqCst)
-        {
+        if cancelled(cancel) {
             return Err(CANCELLED.into());
         }
         let chunk = chunk.map_err(|e| e.to_string())?;
@@ -380,29 +486,45 @@ pub async fn probe_child_env(prefs: &NetPrefs) -> ChildEnv {
     };
     let client = client(prefs, Duration::from_secs(3)).ok();
     if let Some(client) = client {
-        for accel in GITHUB_ACCELS {
-            let root = if accel.is_empty() {
-                "https://github.com"
-            } else {
-                accel.trim_end_matches('/')
-            };
-            // 探测的只是「这个站首页能不能回 200」，不碰任何具体仓库。
-            if let Ok(res) = client.get(root).send().await
-                && res.status().is_success()
-            {
-                env.github = if accel.is_empty() {
-                    None
-                } else {
-                    Some(accel.to_string())
-                };
-                break;
-            }
-        }
+        env.github = probe_accel(&client).await;
     }
     if let Ok(mut cache) = probe_cache().lock() {
         *cache = Some((Instant::now(), prefs.clone(), env.clone()));
     }
     env
+}
+
+/// 并发探测各加速站，返回**优先级最高**的那个可达前缀。
+///
+/// 并发而不是按顺序：官方 + 三个镜像串着探，整段不通时要等 4 × 3 秒，而这一步
+/// 卡在「点安装」的第一步。并发之后最长只等一个探测超时；结果是「能回的那个里
+/// 排最前的」，与串行探的顺序语义一致（官方可达就仍然直连）。
+async fn probe_accel(client: &reqwest::Client) -> Option<String> {
+    let probes = GITHUB_ACCELS.iter().map(|accel| {
+        let client = client.clone();
+        let accel = *accel;
+        let root = if accel.is_empty() {
+            "https://github.com".to_string()
+        } else {
+            accel.trim_end_matches('/').to_string()
+        };
+        async move {
+            // 探测的只是「这个站首页能不能回 200」，不碰任何具体仓库。
+            let ok = client
+                .get(&root)
+                .send()
+                .await
+                .is_ok_and(|res| res.status().is_success());
+            (accel, ok)
+        }
+    });
+    let results = futures::future::join_all(probes).await;
+    for (accel, ok) in results {
+        if ok {
+            return (!accel.is_empty()).then(|| accel.to_string());
+        }
+    }
+    None
 }
 
 /// 把加速 / 代理写进一条将要执行的外部命令。
@@ -446,7 +568,7 @@ pub fn rewrite_github_urls(command: &str, github: Option<&str>) -> String {
     };
     let mut out = String::with_capacity(command.len() + 32);
     let mut rest = command;
-    while let Some((at, _)) = [GITHUB_UPSTREAM, RAW_UPSTREAM]
+    while let Some((at, _)) = [GITHUB_UPSTREAM, RAW_UPSTREAM, API_UPSTREAM]
         .iter()
         .filter_map(|p| rest.find(p).map(|i| (i, *p)))
         .min_by_key(|(i, _)| *i)
@@ -598,12 +720,11 @@ mod tests {
             .get_envs()
             .filter_map(|(k, v)| Some((k.to_str()?.to_string(), v?.to_str()?.to_string())))
             .collect();
+        // Windows 的环境变量名大小写不敏感：`https_proxy` 与 `HTTPS_PROXY` 写的是
+        // 同一个键，`get_envs()` 只会剩最后一条。所以按「大小写不敏感」查一遍。
+        let proxy = vars.iter().find(|(k, _)| k.eq_ignore_ascii_case("https_proxy"));
         assert_eq!(
-            vars.get("HTTPS_PROXY").map(String::as_str),
-            Some("http://127.0.0.1:7897")
-        );
-        assert_eq!(
-            vars.get("https_proxy").map(String::as_str),
+            proxy.map(|(_, v)| v.as_str()),
             Some("http://127.0.0.1:7897")
         );
         assert_eq!(

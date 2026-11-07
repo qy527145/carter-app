@@ -244,7 +244,10 @@ fn discover_at(root: &Path) -> Vec<SkillMeta> {
     };
     let mut out = Vec::new();
     for entry in entries.flatten() {
-        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+        // `file_type()` 报的是**链接本身**（符号链接 / Windows 目录联接是
+        // 「不是目录」），于是把技能目录软链进来的用户永远看不到它。
+        // `is_dir()` 会跟随链接，失效链接自然为 false。
+        if !entry.path().is_dir() {
             continue;
         }
         let Ok(raw) = std::fs::read_to_string(entry.path().join("SKILL.md")) else {
@@ -678,6 +681,18 @@ fn sibling_dir(scan: &Scan, dir: &Path, kind: RootKind) -> Option<(PathBuf, Root
     Some((other.clone(), kind))
 }
 
+/// 删一个技能目录：是链接就只摘链接本身，别顺着它把目标目录删了。
+///
+/// `remove_dir_all` 在符号链接上的行为按平台而不同（Unix 上直接失败、Windows
+/// 上某些情况会跟进去），而用户软链进来的技能很可能指向别处正在用的目录。
+fn remove_skill_dir(p: &Path) -> Result<(), String> {
+    let link = std::fs::symlink_metadata(p).map_err(|e| format!("删除失败：{e}"))?;
+    if link.file_type().is_symlink() {
+        return std::fs::remove_file(p).map_err(|e| format!("删除链接失败：{e}"));
+    }
+    std::fs::remove_dir_all(p).map_err(|e| format!("删除失败：{e}"))
+}
+
 /// 删除技能（目录整个删掉，不可恢复）。**只删项目级 / 用户级的**。
 ///
 /// `source` 指到哪个根就删哪个根 —— 同名的技能可能在项目与用户两处都有，按名字猜
@@ -696,14 +711,14 @@ pub fn delete(scan: &Scan, name: &str, source: Option<&str>) -> Result<(), Strin
         }
         let p = dir.join(name);
         if p.is_dir() {
-            return std::fs::remove_dir_all(&p).map_err(|e| format!("删除失败：{e}"));
+            return remove_skill_dir(&p);
         }
         return Err(format!("`{}` 里找不到技能 `{name}`", dir.display()));
     }
     for (dir, _) in scan.writable_roots() {
         let p = dir.join(name);
         if p.is_dir() {
-            return std::fs::remove_dir_all(&p).map_err(|e| format!("删除失败：{e}"));
+            return remove_skill_dir(&p);
         }
     }
     // 只存在于外部路径。说清它在哪、以及该怎么办，比一句「找不到技能」有用得多。
@@ -848,7 +863,9 @@ fn count_subdirs(dir: &Path) -> usize {
     };
     entries
         .flatten()
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        // 与 `discover_at` 同一口径：跟随符号链接 / 目录联接，
+        // 否则「子目录 N」会比技能数少，看着像扫描出了错。
+        .filter(|e| e.path().is_dir())
         .count()
 }
 
@@ -1785,6 +1802,67 @@ mod tests {
 
         unsafe { std::env::remove_var("CARTER_HOME") };
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// 符号链接 / 目录联接里的技能也要扫得到 —— 用户常把技能目录软链进扫描根。
+    ///
+    /// Windows 上建目录链接需要开发者模式或管理员权限，建不了就跳过（不是功能坏了）。
+    #[test]
+    fn symlinked_skill_directories_are_discovered() {
+        let f = Fixture::new("symlink");
+        let target = f.dir.join("elsewhere").join("linked-skill");
+        write_skill(target.parent().unwrap(), "linked-skill", "软链进来的");
+        if !scan_create_link(&target, &f.local().join("linked-skill")) {
+            // Windows 上建目录链接要开发者模式 / 管理员权限，建不了就跳过。
+            f.cleanup();
+            return;
+        }
+
+        let scan = f.scan(&[], &[]);
+        let metas = union_metas(&scan);
+        assert_eq!(names(&metas), vec!["linked-skill"]);
+        assert_eq!(metas[0].description, "软链进来的");
+        assert_eq!(
+            find_body(&scan, "linked-skill").unwrap().trim(),
+            "软链进来的 的正文"
+        );
+        // 子目录计数也要跟随链接，否则界面上「子目录 0 / 技能 1」自相矛盾。
+        assert!(roots(&scan).iter().any(|r| r.subdirs >= 1));
+        f.cleanup();
+    }
+
+    /// 软链进来的技能用 `delete` 删掉时只能摘链接，目标目录必须原样还在 ——
+    /// 那是用户别处在用的目录。
+    #[test]
+    fn deleting_a_symlinked_skill_keeps_its_target() {
+        let f = Fixture::new("symlink-del");
+        let target = f.dir.join("elsewhere").join("linked-skill");
+        write_skill(target.parent().unwrap(), "linked-skill", "别处");
+        if !scan_create_link(&target, &f.local().join("linked-skill")) {
+            f.cleanup();
+            return;
+        }
+        let scan = f.scan(&[], &[]);
+        delete(&scan, "linked-skill", None).unwrap();
+        assert!(!f.local().join("linked-skill").exists(), "链接该被摘掉");
+        assert!(target.join("SKILL.md").is_file(), "目标目录不能动");
+        f.cleanup();
+    }
+
+    /// 建目录链接。返回 `false` 表示这台机器没权限（Windows 非开发者模式）。
+    fn scan_create_link(target: &Path, link: &Path) -> bool {
+        if let Some(parent) = link.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, link).is_ok()
+        }
+        #[cfg(windows)]
+        {
+            // `symlink_dir` 需要开发者模式 / 管理员；失败就当作「跳过」。
+            std::os::windows::fs::symlink_dir(target, link).is_ok()
+        }
     }
 
     fn draft(name: &str) -> SkillDraft {

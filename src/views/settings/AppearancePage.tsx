@@ -109,9 +109,9 @@ export function AppearancePage() {
             <div className="flex-1">
               <div className="text-sm text-ink">GitHub 加速站</div>
               <div className="mt-0.5 text-[11px] leading-relaxed text-dim">
-                连不上 GitHub 的网络里，连接器安装 / 团队同步会被重定向到国内的加速站
-                （gh-proxy.com、ghproxy.net、ghfast.top，按顺序试）。能直连的机器开着也不亏：
-                官方地址总是第一个试。
+                连不上 GitHub 的网络里，更新检查、连接器安装、团队同步会被重定向到国内的
+                加速站（gh-proxy.com、ghproxy.net、ghfast.top）。多个源同时抢，谁先回响应 就用谁 ——
+                官方源慢的时候不会再干等它超时；能直连的机器优先走官方。
               </div>
             </div>
             <Switch

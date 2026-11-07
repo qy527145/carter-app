@@ -1,6 +1,6 @@
 # AGENTS.md
 
-给 AI Agent 和人类协作者的工程约定。产品说明看 README，这里只写「怎么改这个仓库」。
+给 AI Agent 和人类协作者的工程约定。产品说明看 README，这里只写「怎么改这个仓库」。**改代码前先看 [CODE_MAP.md](CODE_MAP.md)**。
 
 ## 结构
 
