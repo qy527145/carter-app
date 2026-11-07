@@ -132,7 +132,7 @@ impl Runner {
     ///
     /// 只在用户亲自打字的主会话里做：侧边聊天、助理对话、工单会话里的话不是
     /// 「用户对这个项目的长期要求」，后两者还常常没人在看，弹了也没人点。
-    pub(super) fn spawn_memory_suggest(&mut self, user_text: &str, turn_start: usize) {
+    pub(super) fn spawn_memory_suggest(&mut self, user_text: &str, turn: u32, turn_start: usize) {
         use crate::memory_suggest as ms;
         if self.fixed_system.is_some()
             || self.ctx.handle.id == crate::assistant::CHAT_SESSION_ID
@@ -144,12 +144,13 @@ impl Runner {
             return;
         }
         let guard = &self.thread;
-        let turn = guard.messages.get(turn_start..).unwrap_or_default();
+        // 这一段是「这一轮说了什么」，与上面传进来的轮次号 `turn` 不是一回事。
+        let messages = guard.messages.get(turn_start..).unwrap_or_default();
         // 模型自己已经记过了：同一件事再问一遍是打扰。
-        if ms::saved_in(turn) {
+        if ms::saved_in(messages) {
             return;
         }
-        let reply = ms::reply_text(turn);
+        let reply = ms::reply_text(messages);
         let model = self.ctx.fast_model().unwrap_or_else(|| CompactModel {
             provider: self.ctx.provider.clone(),
             model: self.ctx.model.clone(),
@@ -163,6 +164,7 @@ impl Runner {
                 &*model.provider,
                 &model.model,
                 &session_id,
+                turn,
                 &user_text,
                 &reply,
                 &existing,

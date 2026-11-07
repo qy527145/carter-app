@@ -26,7 +26,8 @@ use serde::{Deserialize, Serialize};
 use futures::StreamExt;
 
 use carter::provider::{
-    Block, ChatRequest, LlmProvider, RequestMeta, Role, StreamChunk, WireMessage, WireRequest,
+    Block, ChatRequest, LlmProvider, RequestMeta, RequestPurpose, Role, StreamChunk, WireMessage,
+    WireRequest,
 };
 use carter::registry::ModelInfo;
 
@@ -222,10 +223,15 @@ pub fn parse(text: &str) -> Result<Vec<MemoryCandidate>, String> {
 }
 
 /// 问一次副模型，拿回候选。`existing` 是当前生效的记忆全文（拿来去重）。
+///
+/// `turn` 是这次建议**针对哪一轮用户输入**。抓包面板按轮分组，不带的话它会落在
+/// 第 0 轮 —— 会话跑到第 7 轮时，列表里凭空多出一条「第 0 轮」的请求，还把那一组
+/// 拆成两段（分组按「同轮连续」切）。
 pub async fn suggest(
     provider: &dyn LlmProvider,
     model: &ModelInfo,
     session_id: &str,
+    turn: u32,
     user_text: &str,
     reply: &str,
     existing: &str,
@@ -237,6 +243,11 @@ pub async fn suggest(
     // 带上会话 id：网关靠它把这次请求归进同一条对话。
     wire.meta = RequestMeta {
         session_id: Some(session_id.to_string()),
+        turn,
+        round: 0,
+        // 与主对话同用途：它确实是「一轮对话的附带调用」，而且 `RequestPurpose`
+        // 没有更贴切的变体（见 llm_adapt_core 的枚举）。
+        purpose: RequestPurpose::MainTurn,
         ..Default::default()
     };
     let req = ChatRequest {

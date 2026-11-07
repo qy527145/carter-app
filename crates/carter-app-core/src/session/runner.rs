@@ -712,7 +712,7 @@ impl Runner {
             && !result.user_cancelled
             && let Some(raw) = raw.as_deref()
         {
-            self.spawn_memory_suggest(raw, turn_start);
+            self.spawn_memory_suggest(raw, turn, turn_start);
         }
         self.drive_goal(result, git).await;
         self.last_message_at = Some(crate::protocol::now_ms());

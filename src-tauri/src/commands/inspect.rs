@@ -65,22 +65,14 @@ pub(crate) fn list_exchanges(
     shell: State<'_, Arc<AppShell>>,
     session_id: String,
 ) -> Vec<ExchangeSummary> {
-    // 已完成的走摘要缓存（不重复解析几 MB 的帧）、进行中的还在内存里，两者都要。
-    // 先取进行中的快照：一条交换恰好在两次读取之间收尾时，它可能同时出现两处 ——
-    // 按 id 去重。
-    let active = shell.capture.active_briefs(&session_id);
-    let active_ids: std::collections::HashSet<&str> =
-        active.iter().map(|r| r.id.as_str()).collect();
-    let mut list: Vec<ExchangeSummary> = shell
+    // 排序、合并进行中、去重都在 `CaptureStore::listing` 里 —— 那是业务口径，
+    // 命令层只做投影。
+    shell
         .capture
-        .briefs(&session_id)
+        .listing(&session_id)
         .iter()
-        .filter(|r| !active_ids.contains(r.id.as_str()))
-        .map(|r| summarize(r, false))
-        .collect();
-    // 进行中的排在最后：它们是「此刻正在发生」的，位置不该被完成顺序挤走。
-    list.extend(active.iter().map(|r| summarize(r, true)));
-    list
+        .map(|(r, in_flight)| summarize(r, *in_flight))
+        .collect()
 }
 
 /// 取一条交换的**完整**原始报文。

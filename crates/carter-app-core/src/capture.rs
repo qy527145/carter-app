@@ -29,6 +29,10 @@ use serde::{Deserialize, Serialize};
 pub struct ExchangeRecord {
     pub id: String,
     pub ts: u64,
+    /// 发起顺序（进程内单调）。`ts` 只到毫秒，并发请求会撞同一个数；
+    /// 列表按「发起先后」排时用它做同毫秒的次序。老记录里没有（当作 0）。
+    #[serde(default)]
+    pub seq: u64,
     /// 归属：哪条对话的哪一轮。没有会话（一次性调用）时为 None。
     pub meta: Option<llm_adapt_core::RequestMeta>,
 
@@ -84,6 +88,8 @@ pub struct ExchangeRecord {
 pub struct ExchangeBrief {
     pub id: String,
     pub ts: u64,
+    /// 发起顺序，与 [`ExchangeRecord::seq`] 同一个数。
+    pub seq: u64,
     pub meta: Option<llm_adapt_core::RequestMeta>,
     pub method: String,
     pub url: String,
@@ -101,6 +107,7 @@ impl ExchangeRecord {
         ExchangeBrief {
             id: self.id.clone(),
             ts: self.ts,
+            seq: self.seq,
             meta: self.meta.clone(),
             method: self.method.clone(),
             url: self.url.clone(),
@@ -136,6 +143,19 @@ struct Route {
     model: Option<String>,
 }
 
+/// id 的前缀：启动毫秒 × 1000 + 进程内实例序号。
+///
+/// 只用启动时刻不够 —— 同一毫秒里建两个仓库（测试里模拟「重启」就是这种情形，
+/// 应用里也有「关掉再开」的路径）会拿到同一个前缀，id 又撞回一起。低三位留给
+/// 实例序号，撞车余地只剩「同一毫秒建 1000 个仓库」，那已经不现实了。
+fn boot_token() -> u64 {
+    static N: AtomicU64 = AtomicU64::new(0);
+    let n = N.fetch_add(1, Ordering::Relaxed) % 1000;
+    crate::protocol::now_ms()
+        .saturating_mul(1000)
+        .saturating_add(n)
+}
+
 /// 按会话分文件的报文仓库。
 pub struct CaptureStore {
     root: PathBuf,
@@ -150,6 +170,10 @@ pub struct CaptureStore {
     /// 全局递增序号。同样因为会同时存在多个钩子：各自从 0 数，id 会撞车，
     /// 而界面拿 id 来选中一条报文。
     seq: AtomicU64,
+    /// 本仓库的 id 前缀（见 [`boot_token`]）。id 要带上它：`seq` 每次启动从 0 数，
+    /// 而抓包文件是按会话**追加**的 —— 不带的话重启后新写的 `x0` 与上次的 `x0`
+    /// 同名，界面按 id 选中会打开另一条，列表的行也会被 React 当成同一条复用。
+    boot: u64,
     /// 各会话已完成交换的摘要，首次查询时从文件建一次、之后随收尾增量追加。
     briefs: Mutex<HashMap<String, Vec<ExchangeBrief>>>,
 }
@@ -160,6 +184,7 @@ impl CaptureStore {
             root,
             pending: Mutex::new(HashMap::new()),
             seq: AtomicU64::new(0),
+            boot: boot_token(),
             briefs: Mutex::new(HashMap::new()),
         }
     }
@@ -201,14 +226,27 @@ impl CaptureStore {
         }
     }
 
-    /// 某个会话的全部交换，按时间顺序。
+    /// 某个会话的全部交换，按写入（收尾）顺序。
+    ///
+    /// 老版本的 id 是进程内序号（`x0`、`x1`…），重启后从 0 重数，同一个文件里
+    /// 会出现重复 id。文件顺序是稳定的，所以按出现顺序给后几条补个后缀 ——
+    /// 视图里的 id 唯一了，`briefs()` 与 `get()` 也就指向同一条。
     pub fn load(&self, session_id: &str) -> Vec<ExchangeRecord> {
         let Ok(raw) = std::fs::read_to_string(self.path_for(session_id)) else {
             return Vec::new();
         };
+        let mut seen: HashMap<String, u32> = HashMap::new();
         raw.lines()
             .filter(|l| !l.trim().is_empty())
-            .filter_map(|l| serde_json::from_str(l).ok())
+            .filter_map(|l| serde_json::from_str::<ExchangeRecord>(l).ok())
+            .map(|mut r| {
+                let n = seen.entry(r.id.clone()).or_insert(0);
+                *n += 1;
+                if *n > 1 {
+                    r.id = format!("{}#{}", r.id, n);
+                }
+                r
+            })
             .collect()
     }
 
@@ -265,6 +303,34 @@ impl CaptureStore {
         items.into_iter().map(|(_, brief)| brief).collect()
     }
 
+    /// 列表要的那份视图：已完成的 + 进行中的，按**发起顺序**排好。
+    ///
+    /// 不能直接用 [`CaptureStore::briefs`] 的顺序：记录是响应收尾时才追加的，
+    /// 文件里是**完成顺序** —— 先发出去的长请求会排在后发的短请求后面，起标题、
+    /// 记忆建议这类旁路请求则会插进主对话中间，看起来像「顺序乱了」。发起时刻
+    /// （`ts`）在请求发出的那一刻就定了，所以排序键用它；同毫秒的并发靠 `seq`。
+    ///
+    /// 进行中也并进来按同一把尺子排，而不是钉在末尾：一条还在流的请求插在
+    /// 它发起的位置上，收尾之后原地不动，列表不会跳。
+    ///
+    /// 返回 `(摘要, 是否进行中)`。
+    pub fn listing(&self, session_id: &str) -> Vec<(ExchangeBrief, bool)> {
+        let active = self.active_briefs(session_id);
+        let active_ids: std::collections::HashSet<String> =
+            active.iter().map(|b| b.id.clone()).collect();
+        let mut out: Vec<(ExchangeBrief, bool)> = self
+            .briefs(session_id)
+            .into_iter()
+            // 一条交换恰好在两次读取之间收尾时会同时出现在两处 —— 按 id 去重，
+            // 留进行中那份（它还带着最新的帧数）。
+            .filter(|b| !active_ids.contains(&b.id))
+            .map(|b| (b, false))
+            .collect();
+        out.extend(active.into_iter().map(|b| (b, true)));
+        out.sort_by_key(|(b, _)| (b.ts, b.seq));
+        out
+    }
+
     /// 配对键：关联标签 + URL。
     ///
     /// 不用顺序配对：钩子会同时服务并发请求（并行子 agent），「上一条请求」那种
@@ -287,8 +353,9 @@ impl CaptureStore {
             .as_ref()
             .and_then(|c| serde_json::from_value(c.clone()).ok());
         let rec = ExchangeRecord {
-            id: format!("x{seq}"),
+            id: format!("x{}-{seq}", self.boot),
             ts: crate::protocol::now_ms(),
+            seq,
             meta,
             method: format!("{:?}", req.method),
             url: req.url.clone(),
@@ -648,6 +715,114 @@ mod tests {
         assert_eq!(by_url["https://api.example/a"].status, Some(200));
         assert_eq!(by_url["https://api.example/b"].status, Some(500));
         assert_eq!(by_url["https://api.example/a"].response_body, "A");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 列表按**发起**顺序排，而不是完成顺序。
+    ///
+    /// 记录是响应收尾时追加文件的：先发出去的长请求会被后发的短请求挤到后面，
+    /// 起标题、记忆建议这类旁路请求也会插进主对话中间 —— 界面上就是「顺序乱了」。
+    #[test]
+    fn listing_is_ordered_by_start_not_completion() {
+        let (store, dir) = tmp_store();
+        let hook = CaptureHook::new(store.clone());
+        let first = req("https://api.example/long", Some("s1"));
+        let second = req("https://api.example/short", Some("s1"));
+        hook.before_request(&first);
+        hook.before_request(&second);
+        // 后发的先收尾。
+        hook.after_raw_response(
+            &second,
+            &RawHttpResponse {
+                status: 200,
+                headers: vec![],
+                body: Bytes::from_static(b"B"),
+            },
+        );
+        hook.after_raw_response(
+            &first,
+            &RawHttpResponse {
+                status: 200,
+                headers: vec![],
+                body: Bytes::from_static(b"A"),
+            },
+        );
+
+        let urls: Vec<String> = store
+            .listing("s1")
+            .into_iter()
+            .map(|(b, _)| b.url)
+            .collect();
+        assert_eq!(
+            urls,
+            ["https://api.example/long", "https://api.example/short"]
+        );
+
+        // 进行中的也按发起位置插入，不钉在末尾。
+        let third = req("https://api.example/running", Some("s1"));
+        hook.before_request(&third);
+        let rows = store.listing("s1");
+        assert_eq!(rows.len(), 3);
+        assert!(rows[2].1, "进行中的应标成 in_flight");
+        assert_eq!(rows[2].0.url, "https://api.example/running");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// id 要跨进程重启唯一：抓包文件是按会话累积的，`seq` 每次从 0 数就会撞车。
+    #[test]
+    fn ids_stay_unique_when_the_store_reopens() {
+        let (_, dir) = tmp_store();
+        let r = req("https://api.example/a", Some("s1"));
+
+        let mut ids = Vec::new();
+        for _ in 0..2 {
+            // 模拟应用重启：同一个目录、新的仓库、序号从 0 重新数。
+            let store = Arc::new(CaptureStore::open(dir.clone()));
+            let hook = CaptureHook::new(store.clone());
+            hook.before_request(&r);
+            hook.on_stream_end(&r);
+            ids.push(store.load("s1").last().unwrap().id.clone());
+        }
+        assert_ne!(ids[0], ids[1], "重启后新写的记录不能用上次的 id");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 老版本留下的重复 id（同一个文件里两次 `x0`）读取时要归一：后出现的补后缀，
+    /// 且 `get` 按后缀只能取到那一条。
+    #[test]
+    fn duplicated_ids_in_old_files_are_disambiguated_on_load() {
+        let (store, dir) = tmp_store();
+        let mut rec = ExchangeRecord {
+            id: "x0".into(),
+            ts: crate::protocol::now_ms(),
+            seq: 0,
+            meta: None,
+            method: "POST".into(),
+            url: "https://api.example/a".into(),
+            protocol: None,
+            channel: None,
+            model: None,
+            request_headers: Vec::new(),
+            request_body: "first".into(),
+            status: Some(200),
+            response_headers: Vec::new(),
+            response_body: String::new(),
+            stream_frames: Vec::new(),
+            stream_error: None,
+            ttfb_ms: None,
+            total_ms: Some(1),
+        };
+        store.append("s1", &rec);
+        rec.ts += 1;
+        rec.request_body = "second".into();
+        store.append("s1", &rec);
+
+        let recs = store.load("s1");
+        assert_eq!(recs.len(), 2);
+        assert_eq!(recs[0].id, "x0");
+        assert_eq!(recs[1].id, "x0#2", "后出现的重复 id 要补后缀");
+        assert_eq!(store.get("s1", "x0").unwrap().request_body, "first");
+        assert_eq!(store.get("s1", "x0#2").unwrap().request_body, "second");
         let _ = std::fs::remove_dir_all(dir);
     }
 

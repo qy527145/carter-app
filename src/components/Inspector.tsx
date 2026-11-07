@@ -370,7 +370,11 @@ export function Inspector() {
     const main = ofTurn.filter((s) => s.purpose === null || s.purpose === "main_turn");
     const pool = main.length > 0 ? main : ofTurn;
     autoPick.current = false;
-    setSelected(pool[pool.length - 1].id);
+    // 取**轮次最大**的那次调用，而不是列表里最后一条：记忆建议这类旁路请求也标
+    // 成 main_turn，只是 round 恒为 0；按位置取会选中它而不是产出这条回答的请求。
+    // 队列按发起顺序排好，同 round 时后者胜出。
+    const last = pool.reduce((a, b) => ((b.round ?? -1) >= (a.round ?? -1) ? b : a));
+    setSelected(last.id);
   }, [list, turn]);
 
   // 选中某条时取完整记录。

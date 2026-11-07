@@ -438,6 +438,7 @@ mod tests {
         ExchangeRecord {
             id: "x0".into(),
             ts: now_ms(),
+            seq: 0,
             meta: None,
             method: "POST".into(),
             url: "https://api.deepseek.com/v1/chat/completions".into(),
