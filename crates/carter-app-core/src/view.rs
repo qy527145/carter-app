@@ -98,10 +98,13 @@ pub fn user_turn_count(messages: &[WireMessage]) -> u32 {
 ///
 /// 公开给 `history.rs`：重试要把历史回退到某一轮之前，靠同一个判据数轮次 ——
 /// 两边用两套判据的话，界面上的「第 N 轮」与回退点迟早对不上。
+///
+/// 插话（`steer.rs`）也是带正文的 user 消息，但它是一轮**中途**送进去的，不开新的一轮 ——
+/// carter 的 `user_turns` 一次 `run_turn` 只加一，这里要与它同一个数。
 pub fn is_turn_start(msg: &WireMessage) -> bool {
     msg.role == Role::User
         && msg.content.iter().any(|b| match b {
-            Block::Text { text, .. } => !text.trim().is_empty(),
+            Block::Text { text, .. } => !text.trim().is_empty() && !crate::steer::is_steer(text),
             _ => false,
         })
 }
@@ -253,6 +256,22 @@ mod tests {
         let views = to_views(&[msg, user("问题")]);
         assert_eq!(views[0].turn, None);
         assert_eq!(views[1].turn, Some(0));
+    }
+
+    /// 一轮中途的插话属于这一轮，不开新的一轮。
+    #[test]
+    fn a_steer_belongs_to_the_running_turn() {
+        let views = to_views(&[
+            user("第一轮"),
+            assistant("看看"),
+            tool_results(),
+            user(&crate::steer::wrap("顺便跑测试")),
+            assistant("好"),
+            user("第二轮"),
+        ]);
+        assert_eq!(views[3].turn, Some(0));
+        assert_eq!(views[4].turn, Some(0));
+        assert_eq!(views[5].turn, Some(1));
     }
 
     /// 空白的用户消息（压缩摘要之类）不算一轮。

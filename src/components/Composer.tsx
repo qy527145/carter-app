@@ -802,7 +802,7 @@ export function Composer() {
                         : contexts.length > 0
                           ? "想补充点什么？也可以直接按 Enter 交给卡特"
                           : busy
-                            ? "可以接着说：Enter 排队，⌘/Ctrl+Enter 插队"
+                            ? "可以接着说：Enter 补充，⌘/Ctrl+Enter 打断并先处理"
                             : sessionId === ops.ASSISTANT_CHAT_ID
                               ? "告诉助理要盯什么、什么事可以替你做，或回答它的问题"
                               : "输入消息   / 命令   @ 引用文件/目录   可直接粘贴图片"
@@ -820,7 +820,7 @@ export function Composer() {
             <span className="flex-1" />
             <ContextRing />
             {/* 停止和发送共用一个位置，互斥出现：生成中且输入框是空的 → 停止；
-                一旦打了字 → 变回发送（排队，⌘/Ctrl+Enter 插队）。
+                一旦打了字 → 变回发送（插话，⌘/Ctrl+Enter 插队）。
                 两个按钮并排时停止很容易被忽略，也容易点错。 */}
             {busy && !canSend ? (
               <button
@@ -834,7 +834,7 @@ export function Composer() {
               <button
                 onClick={() => send(false)}
                 disabled={!canSend}
-                title={busy ? "排队发送（⌘/Ctrl+Enter 插队）" : "发送"}
+                title={busy ? "补充给模型，下一次请求带上（⌘/Ctrl+Enter 打断并先处理）" : "发送"}
                 className="rounded-full bg-accent p-2 text-[var(--accent-contrast)] transition-opacity hover:opacity-90 disabled:opacity-30"
               >
                 <Send size={14} />
@@ -872,7 +872,7 @@ function QueueStrip({ queued, sessionId }: { queued: QueuedPrompt[]; sessionId: 
     <div className="border-b border-edge/70 px-3.5 py-2">
       <div className="mb-1 flex items-center gap-1.5 text-[10px] text-dim">
         <ListOrdered size={11} />
-        排队中 {waiting.length} 条 · 这一轮结束后依次发送
+        待发送 {waiting.length} 条 · 下一次请求时带给模型
       </div>
       <ul className="space-y-0.5">
         {waiting.map((q) => (

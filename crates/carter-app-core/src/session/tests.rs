@@ -421,7 +421,106 @@ mod live_commands {
         assert!(queued.is_empty(), "取消不是一条要排队的消息");
     }
 
-    /// 插队 = 中断本轮 + 排到队首；普通发送只是排队。
+    fn steered(ctx: &SessionCtx) -> Vec<(u64, String)> {
+        ctx.handle
+            .steer
+            .drain()
+            .into_iter()
+            .map(|p| (p.id, p.raw))
+            .collect()
+    }
+
+    /// `run_turn` 跑着时，用户发的消息作为插话等下一次请求带走 —— 不排到轮末，也不打断。
+    #[test]
+    pub(super) fn a_prompt_mid_turn_steers_the_next_request() {
+        let ctx = live_ctx();
+        ctx.handle.steer.set_open(true);
+        let mut queued = VecDeque::new();
+        let (mut goal, mut changes) = (None, None);
+        let cancellable = handle_live_command(
+            prompt(1, false),
+            &ctx,
+            &mut queued,
+            &mut goal,
+            &mut changes,
+            0,
+        );
+        assert!(!cancellable, "插话不打断这一轮");
+        assert!(queued.is_empty(), "插话不进轮末的队列");
+        assert!(!ctx.handle.cancel.is_cancelled());
+        let pending = ctx.handle.steer.drain();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].raw, "m1", "界面显示的是原文");
+        assert!(crate::steer::is_steer(&pending[0].text), "发给模型的带抬头");
+    }
+
+    /// 没编号的（系统送进来的）、没有 `run_turn` 在跑时（压缩中）到的，照旧排到轮末。
+    #[test]
+    pub(super) fn system_prompts_and_closed_doors_still_queue() {
+        let ctx = live_ctx();
+        let mut queued = VecDeque::new();
+        let (mut goal, mut changes) = (None, None);
+        let system = Command::SendPrompt {
+            text: "【后台命令】结束了".into(),
+            id: None,
+            interject: false,
+        };
+        ctx.handle.steer.set_open(true);
+        handle_live_command(system, &ctx, &mut queued, &mut goal, &mut changes, 0);
+        ctx.handle.steer.set_open(false);
+        handle_live_command(
+            prompt(2, false),
+            &ctx,
+            &mut queued,
+            &mut goal,
+            &mut changes,
+            0,
+        );
+        assert_eq!(ids(&queued), vec![None, Some(2)]);
+        assert!(steered(&ctx).is_empty());
+    }
+
+    /// 插话还没被带走时：撤回就删掉；提到最前 = 停下这一轮，它作为下一轮先跑。
+    #[test]
+    pub(super) fn a_pending_steer_can_be_dropped_or_promoted() {
+        let ctx = live_ctx();
+        ctx.handle.steer.set_open(true);
+        let mut queued = VecDeque::from(vec![prompt(9, false)]);
+        let (mut goal, mut changes) = (None, None);
+        for id in [1, 2, 3] {
+            handle_live_command(
+                prompt(id, false),
+                &ctx,
+                &mut queued,
+                &mut goal,
+                &mut changes,
+                0,
+            );
+        }
+        handle_live_command(
+            Command::DropPrompt { id: 2 },
+            &ctx,
+            &mut queued,
+            &mut goal,
+            &mut changes,
+            0,
+        );
+        let stop = handle_live_command(
+            Command::PromotePrompt { id: 3 },
+            &ctx,
+            &mut queued,
+            &mut goal,
+            &mut changes,
+            0,
+        );
+        assert!(stop, "提到最前要停下这一轮");
+        assert!(ctx.handle.cancel.is_cancelled());
+        // 提的那条最先，其余插话按原顺序跟着，之前就排着的在最后。
+        assert_eq!(ids(&queued), vec![Some(3), Some(1), Some(9)]);
+        assert!(steered(&ctx).is_empty());
+    }
+
+    /// 插队 = 中断本轮 + 排到队首；还没带走的插话跟在它后面。
     #[test]
     pub(super) fn interjecting_cancels_and_jumps_the_queue() {
         let ctx = live_ctx();
@@ -440,19 +539,31 @@ mod live_commands {
         assert_eq!(ids(&queued), vec![Some(2), Some(1)]);
         assert!(ctx.handle.cancel.is_cancelled());
 
+        // 已经有插话在等：插队那条最先，插话按原顺序跟着，之前就排着的在最后。
         ctx.handle.cancel.reset();
+        ctx.handle.steer.set_open(true);
         let mut queued = VecDeque::from(vec![prompt(1, false)]);
-        let cancellable = handle_live_command(
-            prompt(3, false),
+        for id in [3, 4] {
+            handle_live_command(
+                prompt(id, false),
+                &ctx,
+                &mut queued,
+                &mut goal,
+                &mut changes,
+                0,
+            );
+        }
+        assert!(!ctx.handle.cancel.is_cancelled(), "普通发送不该打断这一轮");
+        handle_live_command(
+            prompt(5, true),
             &ctx,
             &mut queued,
             &mut goal,
             &mut changes,
             0,
         );
-        assert!(!cancellable, "普通发送不该打断这一轮");
-        assert_eq!(ids(&queued), vec![Some(1), Some(3)]);
-        assert!(!ctx.handle.cancel.is_cancelled(), "普通发送不该打断这一轮");
+        assert_eq!(ids(&queued), vec![Some(5), Some(3), Some(4), Some(1)]);
+        assert!(steered(&ctx).is_empty());
     }
 
     /// 其它命令（压缩、开新一期…）照旧排队，等这一轮跑完再处理。
@@ -489,12 +600,18 @@ mod live_turn {
     use std::time::Duration;
 
     /// 第一次请求：让模型调 `bash` 跑一条很久的命令。第二次：说一句话收尾。
-    struct Scripted(std::sync::atomic::AtomicUsize);
+    /// 每次请求的消息都记下来，供断言「哪句话在哪一次请求里」。
+    #[derive(Default)]
+    struct Scripted(
+        std::sync::atomic::AtomicUsize,
+        std::sync::Mutex<Vec<Vec<carter::provider::WireMessage>>>,
+    );
 
     #[async_trait::async_trait]
     impl carter::provider::LlmProvider for Scripted {
-        async fn stream(&self, _req: ChatRequest) -> carter::Result<EventStream> {
+        async fn stream(&self, req: ChatRequest) -> carter::Result<EventStream> {
             use std::sync::atomic::Ordering;
+            self.1.lock().unwrap().push(req.wire.messages.clone());
             let n = self.0.fetch_add(1, Ordering::SeqCst);
             let chunks: Vec<carter::Result<StreamChunk>> = if n == 0 {
                 vec![
@@ -563,34 +680,38 @@ mod live_turn {
         }
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    pub(super) async fn a_background_action_reaches_the_command_running_inside_the_turn() {
+    struct Fixture {
+        runner: Runner,
+        handle: Arc<SessionHandle>,
+        events: tokio::sync::broadcast::Receiver<AppEvent>,
+        provider: Arc<Scripted>,
+        dir: std::path::PathBuf,
+    }
+
+    /// 一条会话：历史里一句「跑一条很久的命令」，模型第一下就调 `sleep 60`。
+    fn fixture(tag: &str) -> Fixture {
         use std::sync::atomic::AtomicU32;
 
         let dir = std::env::temp_dir().join(format!(
-            "carter-app-live-turn-{}-{}",
+            "carter-app-{tag}-{}-{}",
             std::process::id(),
             crate::protocol::now_ms()
         ));
         std::fs::create_dir_all(&dir).unwrap();
 
         let shell = AppShell::new(Config::default());
-        let mut events = shell.subscribe();
+        let events = shell.subscribe();
+        let provider = Arc::new(Scripted::default());
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let m = model();
-        let handle = SessionHandle::new(
-            "live-turn-test".into(),
-            dir.clone(),
-            m.clone(),
-            None,
-            cmd_tx,
-        );
+        let handle =
+            SessionHandle::new(format!("{tag}-test"), dir.clone(), m.clone(), None, cmd_tx);
 
         let ctx = SessionCtx {
             shell: shell.clone(),
             handle: handle.clone(),
             model: m.clone(),
-            provider: Arc::new(Scripted(std::sync::atomic::AtomicUsize::new(0))),
+            provider: provider.clone(),
             config: Arc::new(Config::default()),
             settings: AppSettings::default(),
             resumed: false,
@@ -618,7 +739,7 @@ mod live_turn {
             model: m.key.clone(),
             created_at: crate::protocol::now_ms(),
         };
-        let mut runner = Runner {
+        let runner = Runner {
             ctx,
             thread,
             meta,
@@ -641,7 +762,24 @@ mod live_turn {
             overhead: 0,
             reported: Arc::default(),
         };
+        Fixture {
+            runner,
+            handle,
+            events,
+            provider,
+            dir,
+        }
+    }
 
+    #[tokio::test(flavor = "multi_thread")]
+    pub(super) async fn a_background_action_reaches_the_command_running_inside_the_turn() {
+        let Fixture {
+            mut runner,
+            handle,
+            mut events,
+            dir,
+            ..
+        } = fixture("live-turn");
         let turn = tokio::spawn(async move { runner.run_one_turn(None).await });
 
         // 工具卡片上的编号必须是**模型给的**那个 —— 界面靠它把按钮送回后端。
@@ -683,6 +821,84 @@ mod live_turn {
             .unwrap();
         assert!(!result.failed, "转后台不该把这一轮弄失败");
         assert!(result.used_tools);
+
+        handle.background.kill_all();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 工具还在跑时用户发了一句：工具结果回灌的**那一次**请求就带上它，不等这一轮结束；
+    /// 它进了历史但不算新的一轮，界面收到 `prompt_injected`。
+    #[tokio::test(flavor = "multi_thread")]
+    pub(super) async fn a_prompt_sent_mid_turn_rides_the_next_request() {
+        let Fixture {
+            mut runner,
+            handle,
+            mut events,
+            provider,
+            dir,
+        } = fixture("steer-turn");
+        let turn = tokio::spawn(async move {
+            let r = runner.run_one_turn(None).await;
+            (r, runner)
+        });
+
+        let started = wait_for(&mut events, "工具开始", |e| {
+            matches!(e, SessionEvent::ToolStarted { .. })
+        })
+        .await;
+        let SessionEvent::ToolStarted { call_id, .. } = started else {
+            unreachable!()
+        };
+        // 工具跑着的时候说一句，再让工具收尾（转后台立刻返回）。
+        assert!(handle.send(Command::SendPrompt {
+            text: "顺便把测试也跑一下".into(),
+            id: Some(7),
+            interject: false,
+        }));
+        // 命令通道是会话任务在 select 里读的：等它真的进了插话队列再放工具走，
+        // 否则工具可能先返回、下一次请求在插话到之前就发出去了。
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while handle.steer.drain_peek_len() == 0 {
+            assert!(tokio::time::Instant::now() < deadline, "插话没进队列");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(handle.send(Command::ToolAction {
+            call_id,
+            action: crate::protocol::ToolActionKind::Background,
+        }));
+
+        let injected = wait_for(&mut events, "插话送达", |e| {
+            matches!(e, SessionEvent::PromptInjected { .. })
+        })
+        .await;
+        let SessionEvent::PromptInjected { prompt_id, prompt } = injected else {
+            unreachable!()
+        };
+        assert_eq!(prompt_id, 7);
+        assert_eq!(prompt, "顺便把测试也跑一下", "界面拿到的是原文");
+
+        let (result, runner) = tokio::time::timeout(Duration::from_secs(30), turn)
+            .await
+            .expect("这一轮应当收尾")
+            .unwrap();
+        assert!(!result.failed);
+
+        let reqs = provider.1.lock().unwrap().clone();
+        assert_eq!(
+            reqs.len(),
+            2,
+            "插话搭工具结果那一次请求走，不多发也不另起一轮"
+        );
+        let last = reqs[1].last().unwrap();
+        assert!(
+            last.concat_text().ends_with("顺便把测试也跑一下"),
+            "第二次请求的最后一条就是插话：{:?}",
+            last.concat_text()
+        );
+        assert!(crate::steer::is_steer(&last.concat_text()));
+        // 进了历史、但不算新的一轮。
+        assert_eq!(crate::view::user_turn_count(&runner.thread.messages), 1);
+        assert!(runner.queued.is_empty(), "已经送达的不该再排到轮末");
 
         handle.background.kill_all();
         std::fs::remove_dir_all(&dir).ok();

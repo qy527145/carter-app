@@ -46,6 +46,7 @@ carter / llm_adapt_core     底层的 agent 循环、工具、会话、协议编
 | `session/compact.rs` | 压缩与上下文占用 |
 | `session/events.rs` | 文件变更监听、事件发射、轮末钩子 |
 | `session/helpers.rs` | 自由函数：目标落盘、插队 / 撤回、输入展开、续接 |
+| `steer.rs` | 插话：一轮进行中用户补的话，下一次请求就带给模型（carter 的 `RunOptions.steer`） |
 | `session/sinks.rs` | carter 的渲染出口 → IPC（`TxSink` / `ContextTap` / `CompactSink`） |
 | `sessions.rs` | 对话管理：列举、重命名、fork、删除、搜索、导出 |
 | `shell.rs` | 应用状态根 `AppShell`：配置、会话表、事件广播 |

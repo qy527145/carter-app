@@ -398,6 +398,8 @@ async fn run_one(
         compact_model: None,
         hooks: Arc::new(carter::hooks::HookRegistry::default()),
         purpose: RequestPurpose::Subagent,
+        // 子 agent 只听派它的那个模型的，用户的插话归主对话。
+        steer: None,
     };
 
     let mut thread = Thread::new_empty();

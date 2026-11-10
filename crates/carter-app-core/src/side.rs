@@ -202,6 +202,9 @@ fn render_context(history: &[WireMessage], live: &[LiveItem]) -> String {
                 LiveItem::Text(t) => {
                     s.push_str(&format!("助手：{}\n", t.trim()));
                 }
+                LiveItem::User(t) => {
+                    s.push_str(&format!("用户（插话）：{}\n", t.trim()));
+                }
                 LiveItem::Tool {
                     name, args, result, ..
                 } => {

@@ -137,6 +137,8 @@ pub struct SessionHandle {
     /// 别的会话发来的信（见 `peers.rs`）。放在句柄上而不走命令通道：正在跑的那一轮
     /// 要在工具返回时就能取走它，命令通道那时是会话任务自己在读。
     pub inbox: Arc<crate::peers::Inbox>,
+    /// 一轮进行中用户补的话，等下一次请求带走（见 `steer.rs`）。与 `inbox` 同理放在句柄上。
+    pub steer: Arc<crate::steer::SteerQueue>,
     /// 这条会话的后台命令表（`bash` 的 `run_in_background`）。
     ///
     /// 放在句柄上而不是只放在会话任务里：界面切走再切回来时，要能立刻知道
@@ -170,6 +172,7 @@ impl SessionHandle {
             attached: std::sync::atomic::AtomicBool::new(false),
             clock_skew_ms: std::sync::atomic::AtomicU64::new(0),
             inbox: Arc::default(),
+            steer: Arc::default(),
             background: crate::tools::background::BackgroundShells::new(),
             cmd_tx,
         })
@@ -194,6 +197,8 @@ impl SessionHandle {
 pub enum LiveItem {
     /// 模型的正文（流式增量拼起来的）。
     Text(String),
+    /// 这一轮中途用户插的话（原文，见 `steer.rs`）。
+    User(String),
     Tool {
         call_id: String,
         name: String,
@@ -227,6 +232,14 @@ impl LiveLog {
             Some(LiveItem::Text(t)) => t.push_str(delta),
             _ => live.push(LiveItem::Text(delta.to_string())),
         }
+    }
+
+    /// 记一条插话。之后的正文另起一段，不接在插话前面那段后头。
+    pub fn user(&self, text: &str) {
+        self.0
+            .lock()
+            .unwrap()
+            .push(LiveItem::User(text.to_string()));
     }
 
     pub fn tool_started(&self, call_id: &str, name: &str, args: &serde_json::Value) {

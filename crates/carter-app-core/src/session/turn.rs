@@ -397,6 +397,13 @@ impl Runner {
             compact_model,
             hooks,
             purpose: carter::provider::RequestPurpose::MainTurn,
+            // 一轮进行中用户补的话，下一次请求就带上（见 `steer.rs`）。
+            steer: Some(Arc::new(crate::steer::TurnSteer {
+                queue: self.ctx.handle.steer.clone(),
+                shell: self.ctx.shell.clone(),
+                session_id: self.ctx.handle.id.clone(),
+                live: self.live(),
+            })),
         };
 
         // `thread.turns` 在 carter 里是「整个会话累计的模型调用次数」，每轮清零让它
@@ -449,6 +456,13 @@ impl Runner {
                 ),
             );
             tokio::pin!(turn);
+            // 开门：这之后到的用户消息走插话，不再排到轮末。
+            // 配了 `UserPromptSubmit` 的不开：那个 hook 能拦下用户的话，而它只在一轮
+            // 开头跑，插话会绕过去 —— 这种配置下照旧排到轮末，每句都过一遍 hook。
+            self.ctx
+                .handle
+                .steer
+                .set_open(!run_opts.hooks.has(HookEvent::UserPromptSubmit));
 
             let out = loop {
                 tokio::select! {
@@ -482,6 +496,9 @@ impl Runner {
                     }
                 }
             };
+            // 关门，没被取走的退回队首作为下一轮（见 `steer.rs`）。
+            self.ctx.handle.steer.set_open(false);
+            unsteer(&self.ctx, &mut self.queued);
             out.map(|(o, _)| o)
         };
 

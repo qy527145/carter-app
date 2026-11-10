@@ -117,6 +117,7 @@ export type ToolUsageView = {
 
 export type LiveView =
   | { kind: "text"; text: string }
+  | { kind: "user"; text: string }
   | { kind: "tool"; call_id: string; name: string; args: string; result: string | null };
 
 /** 侧边聊天（`/btw`）：继承主会话上下文、不落盘、关掉即丢。 */

@@ -40,6 +40,11 @@ export type SessionEvent =
       report?: ReportTag | null;
     }
   /**
+   * 一轮进行中用户补的话，这一次请求就带给模型了。不开新的一轮：气泡画在这一轮
+   * 已经产出的内容后面。`prompt_id` 用来把它从待发条摘掉。
+   */
+  | { type: "prompt_injected"; prompt_id: number; prompt: string }
+  /**
    * 一轮跑完了（回答已经有了，或这一轮失败/被中断）。
    *
    * 与 `idle` 分开：长任务目标会在一轮结束之后立刻推起下一轮，整条自动继续链

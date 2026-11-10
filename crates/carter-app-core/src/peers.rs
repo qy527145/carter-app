@@ -945,6 +945,9 @@ pub fn transcript(shell: &AppShell, me: &str, to: &str, turns: usize) -> Result<
                 crate::shell::LiveItem::Text(t) => {
                     out.push_str(&format!("\n{}", head(t.trim(), 1_500)))
                 }
+                crate::shell::LiveItem::User(t) => {
+                    out.push_str(&format!("\n（用户插话：{}）", head(t.trim(), 500)))
+                }
                 crate::shell::LiveItem::Tool { name, result, .. } => out.push_str(&format!(
                     "\n  （{name}{}）",
                     if result.is_none() { "，还在跑" } else { "" }

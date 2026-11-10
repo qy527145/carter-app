@@ -55,3 +55,7 @@ lto = true
 opt-level = 3
 panic = "abort"
 strip = true
+
+# TEMP: 本地联调 carter 插话接口，发布 carter 0.1.10 后删除。
+[patch.crates-io]
+carter = { path = "../carter" }

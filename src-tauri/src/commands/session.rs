@@ -46,6 +46,10 @@ pub(crate) enum LiveView {
     Text {
         text: String,
     },
+    /// 这一轮中途用户插的话（原文）。
+    User {
+        text: String,
+    },
     Tool {
         call_id: String,
         name: String,
@@ -75,6 +79,7 @@ impl CreatedSession {
                 .into_iter()
                 .map(|x| match x {
                     LiveItem::Text(text) => LiveView::Text { text },
+                    LiveItem::User(text) => LiveView::User { text },
                     LiveItem::Tool {
                         call_id,
                         name,

@@ -23,6 +23,7 @@
 //! * [`inspect`] —— 抓到的报文解回 IR，供报文面板按语义渲染。
 //! * [`title`] —— 首轮之后用副模型起会话标题（含「别思考」的那层包装）。
 //! * [`memory_suggest`] —— 轮末从用户的话里提炼候选记忆，交给用户确认后写入。
+//! * [`steer`] —— 插话：一轮进行中用户补的话，在下一次请求里就带给模型。
 //! * [`peers`] —— 跨会话消息：一条会话里的模型给另一条发信、看它说到哪了。
 //! * [`platform`] —— 操作系统与 shell 探测（bash 工具的跨平台基础）。
 //! * [`net`] —— GitHub 加速站、多源下载、子进程的代理 / 加速环境变量。
@@ -56,6 +57,7 @@ pub mod sessions;
 pub mod shell;
 pub mod side;
 pub mod skills;
+pub mod steer;
 pub mod team;
 pub mod templates;
 pub mod timeline;

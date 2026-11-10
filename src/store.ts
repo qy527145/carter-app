@@ -79,7 +79,12 @@ export type Item =
   | { kind: "server"; rawType: string; summary: string }
   | { kind: "image"; mediaType: string; hash: string | null }
   /** 说明文字。`cursor` = 上下文起点（压缩、开新一期），画成一条波浪分隔线。 */
-  | { kind: "note"; text: string; cursor?: boolean };
+  | { kind: "note"; text: string; cursor?: boolean }
+  /**
+   * 这一轮中途用户插的话。放在助手轮**里面**而不是单独一个用户轮：它不开新的一轮，
+   * 拆开的话「重试」按相邻助手轮找这一轮的起点时只能找到后半段。
+   */
+  | { kind: "steer"; text: string };
 
 export type Turn =
   // `turn` 是**这一轮提问**的序号（0 起）。用户气泡本身也要它 —— 回答下面的
@@ -465,6 +470,13 @@ export function reduceConv(c: Conv, e: SessionEvent, sessionId?: string): Partia
         turns: [...c.turns, { role: "assistant", turn: e.turn, items: [] }],
       };
     }
+    case "prompt_injected":
+      return {
+        turns: withAssistant(c.turns, (items) => [
+          ...closeText(items),
+          { kind: "steer", text: e.prompt },
+        ]),
+      };
     case "text_delta":
       return { turns: withAssistant(c.turns, (items) => appendText(items, e.text)) };
     case "thinking_delta":
@@ -690,6 +702,9 @@ const AUTO_CONTINUE_PREFIX = "（自动继续）";
  */
 const SUMMARY_PREFIX = "【历史摘要·";
 
+/** 插话正文的第一行。与后端 `steer::STEER_HEAD` 逐字对应。 */
+const STEER_HEAD = "【插话】用户在这一轮进行中补充的话（不是工具输出）：";
+
 /**
  * 历史消息 → UI 的轮次。
  *
@@ -724,6 +739,17 @@ export function historyToTurns(history: MessageView[], prompts: TurnPrompt[] = [
       // 只在下一轮上打一个记号（见 `AssistantTurn` 里那条分隔线）。
       if (text.startsWith(AUTO_CONTINUE_PREFIX)) {
         pendingAuto = true;
+        continue;
+      }
+      if (text.startsWith(STEER_HEAD)) {
+        // 同一轮的相邻助手轮渲染时会并成一块（`mergeAssistantRuns`），气泡就落在中间。
+        turns.push({
+          role: "assistant",
+          turn: msg.turn,
+          auto: pendingAuto || undefined,
+          items: [{ kind: "steer", text: text.slice(STEER_HEAD.length).trim() }],
+        });
+        pendingAuto = false;
         continue;
       }
       turns.push({
@@ -768,17 +794,17 @@ export function historyToTurns(history: MessageView[], prompts: TurnPrompt[] = [
 function withLive(turns: Turn[], live: LiveView[]): Turn[] {
   if (live.length === 0) return turns;
   // 最后一段正文可能还在写：不收束，后续增量才会接在同一段里。
-  const items: Item[] = live.map((x, i) =>
-    x.kind === "text"
-      ? { kind: "text", text: x.text, closed: i < live.length - 1 }
-      : {
-          kind: "tool",
-          callId: x.call_id,
-          name: x.name,
-          args: parseArgs(x.args),
-          result: x.result === null ? undefined : { ok: true, content: x.result, elapsedMs: 0 },
-        },
-  );
+  const items: Item[] = live.map((x, i) => {
+    if (x.kind === "text") return { kind: "text", text: x.text, closed: i < live.length - 1 };
+    if (x.kind === "user") return { kind: "steer", text: x.text };
+    return {
+      kind: "tool",
+      callId: x.call_id,
+      name: x.name,
+      args: parseArgs(x.args),
+      result: x.result === null ? undefined : { ok: true, content: x.result, elapsedMs: 0 },
+    };
+  });
   const last = turns[turns.length - 1];
   return [...turns, { role: "assistant", turn: last?.turn, items }];
 }
@@ -1110,6 +1136,12 @@ export const useStore = create<Store>((set) => ({
               }
             : convOf(s);
         return { ...reduceConv(conv, e, s.sessionId ?? undefined), queued };
+      }
+      if (e.type === "prompt_injected") {
+        return {
+          ...reduceConv(convOf(s), e, s.sessionId ?? undefined),
+          queued: s.queued.filter((x) => x.id !== e.prompt_id),
+        };
       }
       // `turn_usage` 只带实际请求名（carter 的 `emit_usage` 手上只有它），
       // **不覆盖** `modelRef`：那会让「渠道/显示名」在每轮结束时退回成裸名字。

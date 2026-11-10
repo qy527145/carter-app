@@ -2,7 +2,10 @@ import { Brain, ChevronRight, FileText, LoaderCircle, Wrench } from "lucide-reac
 import { useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { parseContexts } from "../../lib/promptContext";
 import type { Item, Turn } from "../../store";
+import { MessageImages } from "../Composer";
+import { ContextChips } from "../ContextChip";
 import { MarkdownImage, MarkdownLink, MarkdownPre, transformMarkdownUrl } from "../Media";
 import { Glyph, ServerCard, ToolCard } from "../toolcards/ToolCard";
 import { Collapse } from "../ui/Panel";
@@ -256,6 +259,7 @@ export function ProcessGroup({
 type Segment =
   | { kind: "text"; item: Extract<Item, { kind: "text" }> }
   | { kind: "note"; item: Extract<Item, { kind: "note" }> }
+  | { kind: "steer"; item: Extract<Item, { kind: "steer" }> }
   | { kind: "process"; items: Item[] };
 
 export function segmentsOf(items: Item[]): Segment[] {
@@ -267,6 +271,10 @@ export function segmentsOf(items: Item[]): Segment[] {
     }
     if (item.kind === "note") {
       out.push({ kind: "note", item });
+      continue;
+    }
+    if (item.kind === "steer") {
+      out.push({ kind: "steer", item });
       continue;
     }
     const last = out[out.length - 1];
@@ -318,7 +326,26 @@ export function ItemView({
     case "note":
       if (item.cursor) return <CursorLine label={item.text} />;
       return <div className="whitespace-pre-wrap text-xs text-dim">{item.text}</div>;
+    case "steer":
+      return <SteerBubble text={item.text} />;
   }
+}
+
+/** 这一轮中途用户插的话：与用户气泡同样的样子，但没有重试 / 分叉 —— 它不是一轮。 */
+function SteerBubble({ text }: { text: string }) {
+  const { contexts, rest } = useMemo(() => parseContexts(text), [text]);
+  return (
+    <div className="flex justify-end py-1">
+      <div className="max-w-[75%] break-words rounded-2xl bg-bubble px-3.5 py-2 text-sm leading-relaxed text-ink">
+        {contexts.length > 0 && (
+          <div className={rest ? "mb-1.5" : ""}>
+            <ContextChips contexts={contexts} />
+          </div>
+        )}
+        <MessageImages text={rest} />
+      </div>
+    </div>
+  );
 }
 
 /** 一段波浪线（CSS mask 画，颜色跟着文字走）。 */

@@ -72,6 +72,50 @@ pub(super) fn goal_noop_note(action: &GoalCommand, current: Option<&Goal>) -> &'
     }
 }
 
+/// 一轮进行中到的用户消息 → 插话队列（见 `steer.rs`）。展开在这里就做：发出去的时刻
+/// 用户还在看着，`@文件` 读的是此刻的内容，展开失败的说明也该此刻给。
+fn steer_prompt(ctx: &SessionCtx, raw: String, id: u64) {
+    let text = match expand_input(&ctx.cwd, &raw) {
+        Ok((expanded, note)) => {
+            if let Some(message) = note {
+                emit(&ctx.shell, &ctx.handle.id, SessionEvent::Notice { message });
+            }
+            expanded
+        }
+        Err(e) => {
+            emit(
+                &ctx.shell,
+                &ctx.handle.id,
+                SessionEvent::Notice {
+                    message: format!("{e}（已按原文发送）"),
+                },
+            );
+            raw.clone()
+        }
+    };
+    // 用户亲口说话了：这一轮之后再发出去的信，跳数从头数（与 `submit` 同一条规矩）。
+    ctx.handle.inbox.reset_hops();
+    ctx.handle.steer.push(crate::steer::Pending {
+        id,
+        raw,
+        text: crate::steer::wrap(&text),
+    });
+}
+
+/// 还没被取走的插话退回命令队列的**队首**（按原来的先后），作为下一轮跑。
+///
+/// 两种时候要退：这一轮跑完了没再发请求（模型已经在写最后一段话了）；用户要这一轮
+/// 停下（停止 / 插队）—— 这时它们排在插队那一条后面，比之前就排着的那些靠前。
+pub(super) fn unsteer(ctx: &SessionCtx, queued: &mut VecDeque<Command>) {
+    for p in ctx.handle.steer.drain().into_iter().rev() {
+        queued.push_front(Command::SendPrompt {
+            text: p.raw,
+            id: Some(p.id),
+            interject: false,
+        });
+    }
+}
+
 /// 把排队中的某条用户消息提到最前面。
 ///
 /// 只在队列里找 `SendPrompt`：其它命令（换模型、目标操作）没有「下一条用户输入」
@@ -118,30 +162,52 @@ pub(super) fn handle_live_command(
             ctx.handle.cancel.set();
             return true;
         }
-        // 生成中也能发消息：默认排队，勾了「插队」就中断本轮、排到队首。
+        // 生成中也能发消息：用户发的默认作为插话，下一次请求就带上；勾了「插队」就
+        // 中断本轮、排到队首作为新的一轮。没编号的（系统送进来的）与压缩期间到的
+        // （没有正在跑的 `run_turn` 来取）照旧排队。
         Command::SendPrompt {
             text,
             id,
             interject,
         } => {
-            let cmd = Command::SendPrompt {
-                text,
-                id,
-                interject: false,
-            };
             if interject {
                 ctx.handle.cancel.set();
-                queued.push_front(cmd);
+                unsteer(ctx, queued);
+                queued.push_front(Command::SendPrompt {
+                    text,
+                    id,
+                    interject: false,
+                });
                 return true;
             }
-            queued.push_back(cmd);
+            match id {
+                Some(id) if ctx.handle.steer.is_open() => steer_prompt(ctx, text, id),
+                _ => queued.push_back(Command::SendPrompt {
+                    text,
+                    id,
+                    interject: false,
+                }),
+            }
         }
         Command::PromotePrompt { id } => {
-            promote(queued, id);
+            let steered = ctx.handle.steer.remove(id);
+            unsteer(ctx, queued);
+            match steered {
+                Some(p) => queued.push_front(Command::SendPrompt {
+                    text: p.raw,
+                    id: Some(p.id),
+                    interject: false,
+                }),
+                None => promote(queued, id),
+            }
             ctx.handle.cancel.set();
             return true;
         }
-        Command::DropPrompt { id } => drop_queued(queued, id),
+        Command::DropPrompt { id } => {
+            if ctx.handle.steer.remove(id).is_none() {
+                drop_queued(queued, id);
+            }
+        }
         // 单条工具调用的「中断 / 转后台」。立刻打到那条命令上，不影响这一轮本身 ——
         // 工具会把结果回灌给模型，模型接着往下走。
         Command::ToolAction { call_id, action } => {
