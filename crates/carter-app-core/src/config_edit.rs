@@ -276,6 +276,13 @@ pub fn save_provider(doc: &mut DocumentMut, d: &ProviderDraft) -> Result<(), Str
         set_opt_str(mt, "api_name", &m.api_name);
         set_opt_str(mt, "default_reasoning", &m.default_reasoning);
     }
+    // 默认模型还指不到任何模型（首次启动只有空的起步渠道）：指向这次保存的第一个，
+    // 用户配好模型就能直接开聊，不用再去模型页点一次「设为默认」。
+    if let Some(first) = d.models.first()
+        && !default_model_exists(doc)
+    {
+        set_default_model(doc, &format!("{}/{}", d.name, first.name))?;
+    }
     Ok(())
 }
 
@@ -526,6 +533,109 @@ pub fn remove_mcp_server_reload(shell: &crate::shell::AppShell, name: &str) -> R
     let mut doc = load_doc()?;
     remove_mcp_server(&mut doc, name)?;
     apply(shell, &doc)
+}
+
+// ---------------------------------------------------------------------------
+// 首次启动：一个渠道都没有时，给一份起得来的配置
+// ---------------------------------------------------------------------------
+
+/// 起步渠道的名字。
+const STARTER_PROVIDER: &str = "default";
+
+/// 配置里一个渠道都没有时，建一个**空的**起步渠道。返回这次是不是建了。
+///
+/// 没有 `config.toml` 时 carter 退回内置默认 `agent.model = "sonnet"` —— 不带渠道名，
+/// 怎么都解析不了，用户第一眼看到的就是「格式应为 provider/model」的报错，却不知道
+/// 该去哪里配。起步渠道给设置页一个现成的位置：点开它填地址、密钥、模型就能用。
+///
+/// 只写协议，不写地址、密钥、模型，也不设默认模型 —— 这些都不该替用户猜。缺什么由
+/// [`setup_hint`] 说出来，界面据此提示去设置里配；第一次保存带模型的渠道时，默认
+/// 模型自动指过去（见 [`save_provider`]）。
+///
+/// 已经有渠道就一个字都不动 —— 哪怕默认模型写错了，那也是用户自己的配置。
+pub fn ensure_starter() -> Result<bool, String> {
+    let mut doc = load_doc()?;
+    let has_providers = doc
+        .get("providers")
+        .and_then(|i| i.as_table_like())
+        .is_some_and(|t| !t.is_empty());
+    if has_providers {
+        return Ok(false);
+    }
+    save_provider(
+        &mut doc,
+        &ProviderDraft {
+            name: STARTER_PROVIDER.into(),
+            kind: "openai_chat".into(),
+            ..Default::default()
+        },
+    )?;
+    write_and_reload(&doc)?;
+    tracing::info!("配置里没有任何渠道，已建好空的起步渠道");
+    Ok(true)
+}
+
+/// 默认模型（`agent.model`）指得到文档里的一个渠道。判据与 [`model_configured`] 一致。
+fn default_model_exists(doc: &DocumentMut) -> bool {
+    let Some(reference) = doc
+        .get("agent")
+        .and_then(|a| a.get("model"))
+        .and_then(|v| v.as_str())
+    else {
+        return false;
+    };
+    let Some((p, _)) = reference.split_once('/') else {
+        return false;
+    };
+    doc.get("providers").and_then(|t| t.get(p)).is_some()
+}
+
+/// 模型引用指得到一个配置里的渠道。
+///
+/// 指不到的时候开会话必然失败，而 carter 给的报错（「格式应为 provider/model」）
+/// 对没配过模型的人毫无帮助 —— 调用方据此换成「去设置里配」，或者干脆不开。
+///
+/// 只看渠道、不看 `[providers.X.models.Y]`：目录里没有的本地模型不写模型段也能开
+/// （见 `catalog::resolve_provider`），这里不能比它更严。
+pub fn model_configured(config: &carter::config::Config, reference: &str) -> bool {
+    reference
+        .split_once('/')
+        .is_some_and(|(p, _)| config.providers.contains_key(p))
+}
+
+/// 默认模型现在能不能拿来对话；不能的话一句话说清缺什么。界面据此挂「去设置」的提示条。
+///
+/// 只查不联网就知道的：默认模型指不指得到渠道、密钥填没填。密钥对不对，发出去才知道。
+pub fn setup_hint(config: &carter::config::Config) -> Option<String> {
+    let reference = config.agent.model.as_str();
+    let Some((provider, _)) = reference.split_once('/') else {
+        // 首次启动只有空的起步渠道时，`agent.model` 还是 carter 的内置默认 `sonnet`。
+        return Some(if config.providers.values().all(|p| p.models.is_empty()) {
+            "还没有配置任何模型".into()
+        } else {
+            "还没有设置默认模型".into()
+        });
+    };
+    let Some(p) = config.providers.get(provider) else {
+        return Some(format!(
+            "默认模型 `{reference}` 所在的渠道 `{provider}` 不存在"
+        ));
+    };
+    let key = p.api_key.as_deref().unwrap_or_default().trim();
+    // 插值找不到环境变量时原样留下 `${VAR}` —— 那等于没填。
+    let missing = key.is_empty() || key.starts_with("${");
+    if missing && !is_local(p) {
+        return Some(format!("渠道 `{provider}` 还没有填 API Key"));
+    }
+    None
+}
+
+/// 本地端点（Ollama 之类）不用密钥。
+fn is_local(p: &carter::config::ProviderConfig) -> bool {
+    let base = p.to_client_config().map(|c| c.base_url).unwrap_or_default();
+    ["://localhost", "://127.0.0.1", "://[::1]"]
+        .iter()
+        .any(|h| base.contains(h))
 }
 
 // ---------------------------------------------------------------------------
@@ -1038,6 +1148,77 @@ whatever = true
         unsafe { std::env::remove_var("CARTER_HOME") };
         let _ = std::fs::remove_dir_all(dir);
         out
+    }
+
+    /// 首次启动（没有 config.toml）：建一个空的起步渠道，什么都不替用户猜；
+    /// 第一次保存带模型的渠道时默认模型自动指过去，之后不再改它。
+    #[test]
+    fn a_fresh_install_gets_an_empty_starter_provider() {
+        with_temp_home("starter", || {
+            assert!(ensure_starter().unwrap(), "没有配置时应当建起步渠道");
+            let cfg = carter::config::Config::load().unwrap();
+            let p = cfg.providers.get(STARTER_PROVIDER).expect("起步渠道");
+            assert!(p.models.is_empty() && p.api_key.is_none() && p.base_url.is_none());
+            assert!(!model_configured(&cfg, &cfg.agent.model), "还不能开会话");
+            assert_eq!(setup_hint(&cfg).as_deref(), Some("还没有配置任何模型"));
+
+            // 已经有渠道就不再动。
+            assert!(!ensure_starter().unwrap());
+
+            // 用户在起步渠道里配好模型：默认模型自动指过去。
+            let mut doc = load_doc().unwrap();
+            let draft = |name: &str, model: &str| ProviderDraft {
+                name: name.into(),
+                kind: "anthropic".into(),
+                api_key: Some("sk".into()),
+                models: vec![ModelDraft {
+                    name: model.into(),
+                    meta: "anthropic/claude-sonnet-4-5".into(),
+                    api_name: None,
+                    default_reasoning: None,
+                }],
+                rename_from: Some(STARTER_PROVIDER.into()),
+                ..Default::default()
+            };
+            save_provider(&mut doc, &draft("ws", "sonnet")).unwrap();
+            let cfg = write_and_reload(&doc).unwrap();
+            assert_eq!(cfg.agent.model, "ws/sonnet");
+            assert!(model_configured(&cfg, &cfg.agent.model));
+            assert_eq!(setup_hint(&cfg), None);
+
+            // 默认模型已经指得到渠道：再加一个渠道不抢默认。
+            let mut other = draft("other", "opus");
+            other.rename_from = None;
+            save_provider(&mut doc, &other).unwrap();
+            let cfg = write_and_reload(&doc).unwrap();
+            assert_eq!(cfg.agent.model, "ws/sonnet");
+        });
+    }
+
+    #[test]
+    fn setup_hint_names_what_is_missing() {
+        let parse = |s: &str| -> carter::config::Config { toml_edit::de::from_str(s).unwrap() };
+        assert!(setup_hint(&carter::config::Config::default()).is_some());
+        assert!(
+            setup_hint(&parse("[agent]\nmodel = \"ws/x\"\n"))
+                .unwrap()
+                .contains("`ws` 不存在")
+        );
+        let with_key = parse(
+            "[agent]\nmodel = \"ws/x\"\n[providers.ws]\nkind = \"anthropic\"\napi_key = \"sk\"\n",
+        );
+        assert_eq!(setup_hint(&with_key), None);
+        let unresolved = parse(
+            "[agent]\nmodel = \"ws/x\"\n[providers.ws]\nkind = \"anthropic\"\napi_key = \"${NOPE_NOT_SET}\"\n",
+        );
+        assert!(
+            setup_hint(&unresolved).is_some(),
+            "没插值成功的 ${{VAR}} 等于没填"
+        );
+        let local = parse(
+            "[agent]\nmodel = \"o/x\"\n[providers.o]\nkind = \"openai_chat\"\nbase_url = \"http://localhost:11434/v1\"\n",
+        );
+        assert_eq!(setup_hint(&local), None, "本地端点不用密钥");
     }
 
     /// 写回 → `Config::load()` 必须能读回来。这是「界面改的配置对 carter 有效」

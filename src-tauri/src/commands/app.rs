@@ -12,6 +12,8 @@ pub(crate) struct AppInfo {
     default_cwd: String,
     /// 当前配置里的默认模型引用。
     default_model: String,
+    /// 默认模型还不能拿来对话时缺什么（没配模型、没填密钥之类）；能用时是 `None`。
+    setup_hint: Option<String>,
     /// 配置文件位置。设置页要把这条路径显示出来 —— 有些事只能去文件里做。
     config_path: String,
     config_exists: bool,
@@ -34,6 +36,7 @@ pub(crate) fn app_info(shell: State<'_, Arc<AppShell>>) -> AppInfo {
         version: env!("CARGO_PKG_VERSION"),
         default_cwd: default_cwd().to_string_lossy().to_string(),
         default_model: config.agent.model.clone(),
+        setup_hint: config_edit::setup_hint(&config),
         config_path: config_path.to_string_lossy().to_string(),
         config_exists: config_path.exists(),
         models_cache_exists: carter::config::paths::models_cache_path().exists(),

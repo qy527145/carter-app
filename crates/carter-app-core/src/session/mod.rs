@@ -218,6 +218,12 @@ pub fn start_session(shell: Arc<AppShell>, opts: SessionOptions) -> carter::Resu
         .model
         .clone()
         .unwrap_or_else(|| config.agent.model.clone());
+    // 首次启动只有空的起步渠道：carter 的报错（「格式应为 provider/model」）说不清该干什么。
+    if !crate::config_edit::model_configured(&config, &model_ref) {
+        return Err(carter::CarterError::Config(
+            "还没有配置模型，请到「设置 → 渠道」里添加模型".into(),
+        ));
+    }
     // 抓包钩子挂在 provider 上，写进 shell 里那个按会话分文件的仓库。
     let capture_store = shell.capture.clone();
     let capture_hook = Arc::new(crate::capture::CaptureHook::new(capture_store.clone()));

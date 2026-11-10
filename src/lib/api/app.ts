@@ -65,6 +65,8 @@ export type AppInfo = {
   version: string;
   default_cwd: string;
   default_model: string;
+  /** 默认模型还不能拿来对话时缺什么（没配模型、没填密钥之类）；能用时是 `null`。 */
+  setup_hint: string | null;
   /** 配置文件位置 —— 有些事只能去文件里做，界面要把路径写出来。 */
   config_path: string;
   config_exists: boolean;

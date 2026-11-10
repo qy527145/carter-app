@@ -22,6 +22,7 @@ import { useEffect } from "react";
 import { useStore } from "../store";
 import {
   type AppEvent,
+  appInfo,
   EVENT_NAME,
   type ReleaseInfo,
   type SessionEvent,
@@ -122,6 +123,10 @@ export function useAppEvents() {
       if (payload.type === "config_changed") {
         // 配置被界面改过并已热重载。设置页据此重拉数据。
         useStore.getState().bumpConfig();
+        // 应用信息里的默认模型与「还缺什么」也跟着变（填完密钥，提示条就该收起）。
+        void appInfo()
+          .then((info) => useStore.getState().setAppInfo(info))
+          .catch(() => {});
         return;
       }
       if (payload.type === "schedule_fired") {

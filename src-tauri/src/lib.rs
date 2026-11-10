@@ -124,6 +124,11 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             init_logging();
+            // 一个渠道都没有（首次安装）时先建一个空的起步渠道，给设置页一个现成的位置；
+            // 还缺的模型、密钥由界面提示去设置里配。
+            if let Err(e) = carter_app_core::config_edit::ensure_starter() {
+                tracing::warn!(error = %e, "建起步渠道失败");
+            }
             // 配置在启动时读一次。之后每次界面写回都会热重载（`apply_config`）。
             let config = carter::config::Config::load()?;
             let shell = AppShell::new(config);

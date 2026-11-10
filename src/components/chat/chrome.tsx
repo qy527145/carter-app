@@ -8,12 +8,14 @@ import {
   MoreHorizontal,
   Pencil,
   ScanSearch,
+  Settings2,
   Share,
   TriangleAlert,
   X,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { ASSISTANT_CHAT_ID, export_, fork, rename } from "../../lib/sessionOps";
+import { openSettings } from "../../lib/settingsTab";
 import { ticketMarkTitle } from "../../lib/ticketUi";
 import { useStore } from "../../store";
 import { AskForm } from "../AskForm";
@@ -24,7 +26,7 @@ import { MemorySuggestBar } from "../MemorySuggestBar";
 import { ModePill } from "../ModePill";
 import { TeamTodoDock } from "../TeamTodoDock";
 import { UpdateNotice } from "../UpdateNotice";
-import { IconButton } from "../ui/Button";
+import { Button, IconButton } from "../ui/Button";
 import { type MenuEntry, useContextMenu } from "../ui/ContextMenu";
 import { Banner, Collapse } from "../ui/Panel";
 import { ChangesPanel } from "./changes";
@@ -136,6 +138,36 @@ function TodoPanel() {
             ))}
           </div>
         </Collapse>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * 默认模型还不能用（首次启动只有空的起步渠道、没填密钥之类）时的提示条。
+ *
+ * 不可关闭：缺的东西不补上，发出去的每一句都会失败。补上之后后端广播
+ * `config_changed`，应用信息重拉、`setup_hint` 变空，这条自己就收起了。
+ */
+function SetupBanner() {
+  const hint = useStore((s) => s.appInfo?.setup_hint);
+  if (!hint) return null;
+  return (
+    <div className="px-4 pt-3">
+      <div className="mx-auto max-w-3xl">
+        <Banner
+          kind="info"
+          action={
+            <Button size="sm" onClick={() => openSettings("channels")}>
+              去设置
+            </Button>
+          }
+        >
+          <div className="flex items-start gap-2 pt-0.5">
+            <Settings2 size={14} className="icon-optical shrink-0 text-tone-blue" />
+            <span className="break-words">{hint}，请到「设置 → 渠道」里配置模型后再开始对话。</span>
+          </div>
+        </Banner>
       </div>
     </div>
   );
@@ -322,6 +354,7 @@ export function ChatView() {
           放在 `NoticeBanner` 之前 —— 通知条讲的是「这一轮发生了什么」，
           它讲的是「这个应用本身」，后者靠上更像系统级的东西。 */}
       <UpdateNotice />
+      <SetupBanner />
       <NoticeBanner />
       <MessageList />
       <MainChangesPanel />

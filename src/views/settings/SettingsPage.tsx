@@ -22,6 +22,7 @@ import {
   Wrench,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { SETTINGS_TAB_KEY } from "../../lib/settingsTab";
 import { useStore } from "../../store";
 import { AboutPage } from "./AboutPage";
 import { AppearancePage } from "./AppearancePage";
@@ -73,7 +74,7 @@ const GROUPS = [
 
 type TabId = (typeof GROUPS)[number]["tabs"][number]["id"];
 const ALL: TabId[] = GROUPS.flatMap((g) => g.tabs.map((t) => t.id));
-const TAB_KEY = "carter.settings.tab";
+const TAB_KEY = SETTINGS_TAB_KEY;
 
 /** 记住上次停在哪一页：改配置往往是来回几趟，每次都从「渠道」重新点进去很烦。 */
 function readTab(): TabId {
