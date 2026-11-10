@@ -41,7 +41,14 @@ import { dirname, join } from "node:path";
  *
  * ## 国内源
  *
- * 官方 GitHub 优先，失败逐个试加速站。全部失败就停 —— 不拿旧文件糊弄。
+ * 官方 GitHub 优先，失败逐个试加速站。
+ *
+ * ## 打包时自动跑
+ *
+ * `tauri.conf.json` 的 `beforeBuildCommand` 会在每次 `tauri build` 前跑一次
+ * （带 `--best-effort`）：能拉就换成当天的目录，拉不到就打一行警告、**原样保留**
+ * 仓库里那份 —— 发版不该因为网络抖动失败。文件只在全部读完后才写，中途失败不会
+ * 留下半截。
  */
 
 const ROOT = join(import.meta.dir, "..");
@@ -162,9 +169,10 @@ async function listFromTarball(): Promise<{ entries: Entry[]; commit: string; ro
   const tarball = await netFirstRaw(`https://codeload.github.com/${REPO}/tar.gz/${sha}`);
   const dir = await mkdtemp(join(tmpdir(), "models-snapshot-"));
   try {
-    const file = join(dir, "repo.tar.gz");
-    await writeFile(file, tarball);
-    if (Bun.spawnSync({ cmd: ["tar", "-xzf", file, "-C", dir] }).exitCode !== 0) {
+    await writeFile(join(dir, "repo.tar.gz"), tarball);
+    // 必须 cwd + 相对文件名：Windows 上 PATH 里常是 GNU tar（Git Bash 带的），
+    // 它把 `C:\Users\…` 当成 `主机:路径` 的远程写法，报「Cannot connect to C:」。
+    if (Bun.spawnSync({ cmd: ["tar", "-xzf", "repo.tar.gz"], cwd: dir }).exitCode !== 0) {
       throw new Error("解包失败");
     }
     const root = (await readdir(dir)).find((n) => n.startsWith("models.dev-")) ?? dir;
@@ -282,9 +290,24 @@ function toml(text: string, path = "<unknown>"): Toml {
   }
 }
 
-/** 普通文件：raw 按路径取，固定在这个提交上。 */
-function byRaw(e: { path: string }) {
-  return fetchFirst(`${RAW}/${e.path}`, (t) => !/^\s*[{<]/.test(t));
+/**
+ * 普通文件：raw 按路径取，固定在这个提交上。
+ *
+ * raw 不跟随符号链接（它对链接返回的是目标路径那一行文本），而走 GitHub API 列
+ * 目录时清单里只有 `mode = 120000`、没有链接目标（tarball 那条路才有）。所以拿到
+ * 一行 `.toml` 路径就地跟着取 —— 不加这一步，一个符号链接的转售条目就会让整次
+ * 生成失败。
+ */
+async function byRaw(e: { path: string }): Promise<string> {
+  let path = e.path;
+  for (let i = 0; i < 8; i++) {
+    const text = await fetchFirst(`${RAW}/${path}`, (t) => !/^\s*[{<]/.test(t));
+    // 目标路径里可能有冒号（`amazon.nova-lite-v1:0.toml`、`:free`）。
+    const link = /^\s*(?:\.{0,2}\/)?[\w.:/-]+\.toml\s*$/.exec(text);
+    if (!link) return text;
+    path = normalizePath(`${dirname(path)}/${link[0].trim()}`);
+  }
+  throw new Error(`${e.path}：符号链接层数太多`);
 }
 
 /**
@@ -454,16 +477,27 @@ async function main() {
   // （没有 `models` 字段）；界面从 `builtin_snapshot_date()` 读它。
   const generatedAt = new Date().toISOString().slice(0, 10);
   const json = JSON.stringify({ $generated_at: generatedAt, ...sorted });
+  // 旧内容要在覆盖**之前**读，否则永远等于新内容、永远报「无变化」。
+  const old = await readFile(OUT, "utf8").catch(() => "");
   await mkdir(dirname(OUT), { recursive: true });
   await writeFile(OUT, `${json}\n`);
 
-  const old = await readFile(OUT, "utf8").catch(() => "");
   const modelCount = Object.values(sorted).reduce((n, p) => n + Object.keys(p.models).length, 0);
   console.log(
     `已写入 ${OUT}\n  ${Object.keys(sorted).length} 家服务商、${modelCount} 条模型（其中转售商条目 ${resold} 条）\n` +
       `  ${(json.length / 1024 / 1024).toFixed(2)} MB` +
-      (old && old !== `${json}\n` ? "（有变化）" : "（无变化）"),
+      (old === `${json}\n` ? "（无变化）" : "（有变化）"),
   );
 }
 
-await main();
+// `--best-effort`：打包时用。拉不到就保留仓库里那份并正常退出，别为网络抖动
+// 挡住发版；手动跑（`bun run models:snapshot`）仍然失败即报错。
+if (process.argv.includes("--best-effort")) {
+  try {
+    await main();
+  } catch (e) {
+    console.warn(`快照没更新（沿用仓库里那份）：${(e as Error).message}`);
+  }
+} else {
+  await main();
+}

@@ -17,9 +17,9 @@
 //!
 //! 1. [`read_cache`]：文件在就读；不在就先把**编进二进制的快照**写出来再用，
 //!    离线首装也能解析模型；
-//! 2. [`refresh`]：按 [`crate::net`] 的候选源挨个试（官方接口 → 镜像 → 用户
-//!    自己填的），拿到之后验一下形状再落盘；全失败就**不覆盖**旧缓存，界面
-//!    明说是拉取失败还是用的快照。
+//! 2. [`refresh`]：按 [`crate::net`] 的候选源挨个试（官方接口 → 用户自己填的），
+//!    拿到之后验一下形状再落盘；没拿到就**不覆盖**旧缓存，界面明说是拉取失败
+//!    还是用的快照。
 //!
 //! 快照（`data/models-snapshot.json`）由 `scripts/models-snapshot.ts` 从 models.dev
 //! 源仓库生成，字段形状与 `api.json` 一致。
@@ -206,7 +206,7 @@ fn fill(row: &mut ModelRow, info: &ModelInfo) {
 /// 全部模型。顺序：按渠道名，再按配置里的模型名。
 pub fn list(config: &Config) -> Vec<ModelRow> {
     // 缓存读不到不算致命：照样把模型列出来，只是元数据那几栏空着。
-    let cache = fetch::read_cache().map_err(|e| e.to_string());
+    let cache = read_cache().map_err(|e| e.to_string());
     // 展示名要另外拿一份解析好的缓存：`resolve_model` 只认「这条能解析」，而
     // 解析失败的那几行同样需要展示名（界面上的标签不能退回成 `ws/sonnet`）。
     let root = cache.as_ref().ok().and_then(|c| parse_cache(c).ok());
@@ -403,9 +403,10 @@ fn count_models(v: &serde_json::Value) -> usize {
 
 /// 拉一次 models.dev 目录并落盘。
 ///
-/// 源按「官方接口 → 内置镜像 → 用户填的」顺序试，第一个拿到**像目录**的响应就用。
-/// 一个都没成功时**不覆盖**已有缓存，返回内置快照的条数并标记 `builtin` ——
-/// 界面上要说清楚「这次没拉到，用的是快照」，而不是假装刷新成功了。
+/// 源按「官方接口 → 用户填的」顺序试，第一个**拿到像目录的**响应用。
+/// 一份都没拿到（全失败，或者某个源回了 200 却不是目录）时**不覆盖**已有缓存，
+/// 返回内置快照的条数并标记 `builtin` —— 界面上要说清楚「这次没拉到，用的是
+/// 快照」，而不是假装刷新成功了，更不该为一份坏响应把整页拦成错误。
 pub async fn refresh() -> Result<RefreshOutcome, String> {
     let settings = crate::app_settings::AppSettings::load();
     let prefs = settings.net_prefs();
@@ -413,38 +414,15 @@ pub async fn refresh() -> Result<RefreshOutcome, String> {
     let base: Vec<&str> = urls.iter().map(String::as_str).collect();
     let now = crate::protocol::now_ms();
 
-    let res = crate::net::get_first(&prefs, &base, crate::net::SOURCE_TIMEOUT, None, None).await;
-    match res {
-        Ok(fetched) => {
-            let text =
-                String::from_utf8(fetched.bytes).map_err(|_| "目录内容不是 UTF-8".to_string())?;
-            let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
-                format!(
-                    "{} 返回的内容不是目录 JSON：{e}",
-                    crate::net::source_label(&fetched.source)
-                )
-            })?;
-            let count = count_models(&v);
-            if count == 0 {
-                return Err(format!(
-                    "{} 返回的目录里没有任何模型",
-                    crate::net::source_label(&fetched.source)
-                ));
-            }
-            fetch::write_cache(&text).map_err(|e| format!("写缓存失败：{e}"))?;
-            let out = RefreshOutcome {
-                count,
-                source: fetched.source,
-                failed: fetched.failed,
-                fetched_at: now,
-            };
-            record_meta(&out);
-            Ok(out)
-        }
+    let got = crate::net::get_first(&prefs, &base, crate::net::SOURCE_TIMEOUT, None, None)
+        .await
+        .and_then(|fetched| accept(fetched, now));
+    let out = match got {
+        Ok(out) => out,
         Err(e) => {
-            // 全失败：不覆盖旧缓存。没有旧缓存的话把快照铺上，别让界面停在「没有」。
+            // 没拿到好目录：不覆盖旧缓存。没有旧缓存的话把快照铺上，别让界面停在「没有」。
             let _ = read_cache();
-            let out = RefreshOutcome {
+            RefreshOutcome {
                 count: count_models(&serde_json::from_str(BUILTIN_SNAPSHOT).unwrap_or_default()),
                 source: BUILTIN.into(),
                 failed: vec![crate::net::SourceFailure {
@@ -452,11 +430,31 @@ pub async fn refresh() -> Result<RefreshOutcome, String> {
                     error: e,
                 }],
                 fetched_at: now,
-            };
-            record_meta(&out);
-            Ok(out)
+            }
         }
+    };
+    record_meta(&out);
+    Ok(out)
+}
+
+/// 验一次拿到的东西是不是目录。是就落盘，不是就把原因报回去。
+fn accept(fetched: crate::net::Fetched, now: u64) -> Result<RefreshOutcome, String> {
+    let label = crate::net::source_label(&fetched.source);
+    let text =
+        String::from_utf8(fetched.bytes).map_err(|_| format!("{label} 返回的内容不是 UTF-8"))?;
+    let v: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("{label} 返回的内容不是目录 JSON：{e}"))?;
+    let count = count_models(&v);
+    if count == 0 {
+        return Err(format!("{label} 返回的目录里没有任何模型"));
     }
+    fetch::write_cache(&text).map_err(|e| format!("写缓存失败：{e}"))?;
+    Ok(RefreshOutcome {
+        count,
+        source: fetched.source,
+        failed: fetched.failed,
+        fetched_at: now,
+    })
 }
 
 /// 刷新记录：哪一次、从哪个源、几条模型。关于页显示它，也用来判断「缓存是
@@ -573,7 +571,7 @@ fn entries_of(root: &serde_json::Value, provider_id: &str) -> Vec<CatalogEntry> 
 
 /// 某个 models.dev 服务商下的全部模型。缓存里没有这个服务商时返回空表（不是错误）。
 pub fn provider_models(provider_id: &str) -> Result<Vec<CatalogEntry>, String> {
-    let cache = fetch::read_cache().map_err(|e| format!("还没有 models.dev 缓存：{e}"))?;
+    let cache = read_cache().map_err(|e| format!("还没有 models.dev 缓存：{e}"))?;
     Ok(entries_of(&parse_cache(&cache)?, provider_id))
 }
 
@@ -625,7 +623,7 @@ pub fn check_meta(root: &serde_json::Value, meta: &str) -> Result<(), String> {
 /// 保存前校验一组 meta。**还没有缓存时放行** —— 那种情况下查不了，不该挡住保存，
 /// 模型页会把「去刷新元数据」挂在那几行上。
 pub fn check_metas<'a>(metas: impl IntoIterator<Item = &'a str>) -> Result<(), String> {
-    let Ok(cache) = fetch::read_cache() else {
+    let Ok(cache) = read_cache() else {
         return Ok(());
     };
     let root = parse_cache(&cache)?;
@@ -926,7 +924,7 @@ fn match_one(root: &serde_json::Value, index: &Index, name: &str, hint: Option<&
 ///
 /// 没有缓存时**不报错**，每条都返回 `meta: None` —— 界面照常能让人手写 meta。
 pub fn match_metas(names: &[String], hint: Option<&str>) -> Vec<MetaMatch> {
-    let cache = match fetch::read_cache() {
+    let cache = match read_cache() {
         Ok(c) => c,
         Err(_) => {
             return names
@@ -961,7 +959,7 @@ pub fn match_metas(names: &[String], hint: Option<&str>) -> Vec<MetaMatch> {
 /// `服务商/id` 定序（要的是确定性，不是"更相关"）。空查询返回空表 —— 把近万条全
 /// 倒给下拉框没有任何用处。
 pub fn search_models(query: &str, limit: usize) -> Result<Vec<CatalogHit>, String> {
-    let cache = fetch::read_cache().map_err(|e| format!("还没有 models.dev 缓存：{e}"))?;
+    let cache = read_cache().map_err(|e| format!("还没有 models.dev 缓存：{e}"))?;
     Ok(search_in(&parse_cache(&cache)?, query, limit))
 }
 
@@ -1027,7 +1025,7 @@ fn search_in(root: &serde_json::Value, query: &str, limit: usize) -> Vec<Catalog
 /// family 组织（`claude-opus` / `claude-sonnet` / `claude-haiku`），这条规则把 17 个
 /// 快照收敛成用户真正会用的那 3~5 个。
 pub fn recommended_models(provider_id: &str, limit: usize) -> Result<Vec<CatalogEntry>, String> {
-    let cache = fetch::read_cache().map_err(|e| format!("还没有 models.dev 缓存：{e}"))?;
+    let cache = read_cache().map_err(|e| format!("还没有 models.dev 缓存：{e}"))?;
     Ok(recommended_in(&parse_cache(&cache)?, provider_id, limit))
 }
 
@@ -1182,7 +1180,7 @@ fn meta_info_in(root: &serde_json::Value, meta: &str) -> Option<MetaInfo> {
 /// 某个 meta 在目录里查得到吗。查不到是 `None`（不是错误）—— 界面据此把那一行
 /// 标成「未绑定 / 写错了」，而不是让保存时才炸。
 pub fn meta_info(meta: &str) -> Option<MetaInfo> {
-    let cache = fetch::read_cache().ok()?;
+    let cache = read_cache().ok()?;
     let root = parse_cache(&cache).ok()?;
     meta_info_in(&root, meta)
 }
@@ -1191,7 +1189,7 @@ pub fn meta_info(meta: &str) -> Option<MetaInfo> {
 /// 缓存也只读一次、解析一次。
 pub fn meta_infos<'a>(metas: impl IntoIterator<Item = &'a str>) -> Vec<Option<MetaInfo>> {
     let metas: Vec<&str> = metas.into_iter().collect();
-    let root = fetch::read_cache().ok().and_then(|c| parse_cache(&c).ok());
+    let root = read_cache().ok().and_then(|c| parse_cache(&c).ok());
     match root {
         Some(root) => metas.iter().map(|m| meta_info_in(&root, m)).collect(),
         None => metas.iter().map(|_| None).collect(),
@@ -1269,7 +1267,7 @@ pub fn detect_provider(base_url: &str) -> Option<String> {
     let target = endpoint_key(base_url)?;
     // 目录条目里写了 `api` 的（绝大多数）按地址认。目录里那几家官方偏偏没写，
     // 所以下面还有一张手写的域名表 —— 没缓存时也照样认得出。
-    if let Some(root) = fetch::read_cache().ok().and_then(|c| parse_cache(&c).ok())
+    if let Some(root) = read_cache().ok().and_then(|c| parse_cache(&c).ok())
         && let Some(providers) = root.as_object()
     {
         for (pid, p) in providers {

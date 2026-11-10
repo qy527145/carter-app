@@ -3,7 +3,7 @@
 // 单窗口、单会话（一次只跑一个对话）。启动时续接最近一个会话；从侧栏点历史会话
 // 则按 id 打开。换会话一律走「关掉当前的 → 新建/打开」这条路（见 lib/sessionOps）。
 
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 
 import { ChatView } from "./components/ChatView";
 import { Inspector } from "./components/Inspector";
@@ -26,6 +26,7 @@ export default function App() {
   useAppEvents();
 
   // 启动：读应用信息 + 会话列表，然后续接最近一个（没有就新建）。
+  // 还没配模型（首次启动）就先不开会话：开了也是报错，顶部的提示条会引导去设置。
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -39,6 +40,7 @@ export default function App() {
         if (cancelled) return;
         useStore.getState().setSessions(sessions);
 
+        if (info.setup_hint) return;
         const created = await createSession({ resume: sessions.length > 0 });
         if (cancelled) return;
         useStore.getState().beginSession(created);
@@ -53,6 +55,23 @@ export default function App() {
       cancelled = true;
     };
   }, []);
+
+  // 在设置里配好了模型（提示条从有到无）而还没有会话：补开一个，回到对话就能直接说话。
+  // 只认「从有到无」这一下 —— 启动时本来就配好的情况归上面那段管，两边都开会撞车。
+  const setupHint = useStore((s) => s.appInfo?.setup_hint ?? null);
+  const prevHint = useRef<string | null>(null);
+  useEffect(() => {
+    const was = prevHint.current;
+    prevHint.current = setupHint;
+    if (!was || setupHint || useStore.getState().sessionId !== null) return;
+    createSession({ resume: false })
+      .then((created) => {
+        if (useStore.getState().sessionId === null) useStore.getState().beginSession(created);
+      })
+      .catch(() => {
+        /* 配好了也可能还开不出来（模型名写错）—— 点「新对话」时会看到原因 */
+      });
+  }, [setupHint]);
 
   // 主题：跟着设置走。`system` 档还要听系统偏好变化，所以 effect 返回清理函数。
   const theme = useStore((s) => s.settings?.theme);

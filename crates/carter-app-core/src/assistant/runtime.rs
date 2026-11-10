@@ -76,7 +76,14 @@ pub async fn run(shell: Arc<AppShell>) {
     migrate_ticket_titles(&shell);
     tokio::spawn(watch(shell.clone()));
     // 助理对话跟着应用一起起来：汇报随时有地方送，不等用户先点进去。
-    if let Err(e) = super::chat::ensure(&shell) {
+    // 还没配模型（首次启动）就先不开 —— 界面有提示条引导去设置，这里再报一遍只是噪音。
+    let configured = {
+        let config = shell.config.load();
+        crate::config_edit::model_configured(&config, &config.agent.model)
+    };
+    if !configured {
+        tracing::info!("助理：还没有配置模型，助理对话等配好再开");
+    } else if let Err(e) = super::chat::ensure(&shell) {
         tracing::warn!(error = %e, "助理：开不出助理对话");
     }
 

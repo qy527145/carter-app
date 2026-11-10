@@ -49,18 +49,13 @@ fn is_prefix_accel(accel: &str) -> bool {
     accel.is_empty() || !accel.contains("jsdelivr")
 }
 
-/// models.dev 目录的候选源，**按优先级**。空串代表官方。
+/// models.dev 目录的候选源，**按优先级**。
 ///
-/// 镜像取的是 models.dev 源仓库（`anomalyco/models.dev`）里提交好的 `models.json`
-/// —— provider 无关的元数据（上下文、能力、发布日期），正是解析模型要用到的
-/// 那部分，而且只有几十 KB。仓库根目录的 `models.json` 每次合并都会更新，
-/// 加速站再慢也有一份十几分钟内的。
-pub const MODEL_SOURCES: &[&str] = &[
-    "https://models.dev/api.json",
-    "https://gh-proxy.com/https://raw.githubusercontent.com/anomalyco/models.dev/dev/models.json",
-    "https://ghproxy.net/https://raw.githubusercontent.com/anomalyco/models.dev/dev/models.json",
-    "https://ghfast.top/https://raw.githubusercontent.com/anomalyco/models.dev/dev/models.json",
-];
+/// 只有官方接口一条。源仓库里没有 `api.json` 形状的成品 —— 根目录的
+/// `models.json` 是 OpenRouter 的同步产物（`{"data": […]}`），加速站取回来一个
+/// 服务商都数不出来，还常常比官方源先回，赢下抢占后把整次刷新带成「目录里没有
+/// 任何模型」。拿不到就只有内置快照兜底（见 `catalog::read_cache`）。
+pub const MODEL_SOURCES: &[&str] = &["https://models.dev/api.json"];
 
 /// 一次源尝试的超时。模型目录走慢的时候 30 秒能到；到不了的源本来也不该等。
 pub const SOURCE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -674,15 +669,13 @@ mod tests {
     }
 
     #[test]
-    fn model_sources_put_the_official_api_first() {
+    fn model_sources_never_fall_back_to_a_github_mirror() {
+        // 源仓库里没有 `api.json` 形状的成品，根目录 `models.json` 是 OpenRouter
+        // 的 `{"data": […]}`，镜像回来一个服务商都数不出来。
         let prefs = NetPrefs::default();
         let out = prefs.candidates(MODEL_SOURCES);
-        assert_eq!(out[0], "https://models.dev/api.json");
-        assert!(out.len() > 1, "开着加速时要有镜像兜底");
-        assert!(
-            out.iter()
-                .all(|u| !u.contains("gh-proxy.com/https://models.dev"))
-        );
+        assert_eq!(out, vec!["https://models.dev/api.json"]);
+        assert!(out.iter().all(|u| !u.contains("gh-proxy.com")));
     }
 
     #[test]
