@@ -123,6 +123,123 @@ pub fn initialize(project_root: &Path, team_name: Option<&str>) -> Result<InitOu
     })
 }
 
+// ---------------------------------------------------------------------------
+// 修复：从 git 历史找回，或退回重建骨架
+// ---------------------------------------------------------------------------
+
+/// 团队目录里本地缺失、但 `HEAD` 里还留着的文件（相对仓库根，`/` 分隔）。
+///
+/// **只报缺失，不报被改过的。** 恢复的全部目的是「把误删的捡回来」，覆盖用户
+/// 手改过的文件会把一次误删变成一次更难发现的数据丢失。
+pub fn restore_preview(project_root: &Path) -> Result<Vec<String>, String> {
+    if !git::in_repo(project_root) {
+        return Ok(Vec::new());
+    }
+    let repo_root = git::repo_root(project_root)?;
+    let team_rel = team_rel_of(&repo_root, project_root)?;
+    let tracked = git::tracked_under(&repo_root, &team_rel)?;
+    Ok(tracked
+        .into_iter()
+        .filter(|rel| !repo_root.join(rel).exists())
+        .collect())
+}
+
+/// `.carter/` 相对仓库根的路径，**不要求它此刻存在**。
+///
+/// 恢复的场景正是「这个目录被删了」，所以不能把 `project_root.join(DIR)` 交给
+/// [`relative_to`] 去 `canonicalize` 一个不存在的路径 —— 那会退化成未解析的原始
+/// 路径，而 `repo_root` 是 git 给的真实路径，`strip_prefix` 因此对不上（macOS 上
+/// `/var` → `/private/var`，Linux 上 `/tmp` 也常是链接），表现为「目录被误删时
+/// 什么都找不回来」。先解析**存在的**项目根，再拼上目录名。
+fn team_rel_of(repo_root: &Path, project_root: &Path) -> Result<String, String> {
+    let base = std::fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
+    relative_to(repo_root, &base.join(DIR))
+}
+
+/// 把 [`restore_preview`] 列出的文件按 `HEAD` 的版本写回。返回恢复了的路径。
+///
+/// 一次都没有可恢复的东西时返回空列表 —— 那不是失败，`HEAD` 里也没有时（从没提交
+/// 过，或者工作区一直是好的）本来就没什么可找的，调用方据此退回
+/// [`repair_skeleton`]。
+pub fn restore_apply(project_root: &Path) -> Result<Vec<String>, String> {
+    let missing = restore_preview(project_root)?;
+    if missing.is_empty() {
+        return Ok(Vec::new());
+    }
+    let repo_root = git::repo_root(project_root)?;
+    git::restore_from_head(&repo_root, &missing)
+}
+
+/// 只补缺的骨架：目录、`team.json`、`.gitignore`、内置技能。
+///
+/// 与 [initialize] 的差别只在「不 `git init`、不依赖已有身份、照旧不覆盖任何已有
+/// 文件」—— 它服务的是「本来就有团队目录，只是缺了一部分」这种状态，而那正是
+/// 手动删过东西之后的样子。核心仍然复用 [`create_skeleton`]：修复与初始化必须是
+/// 同一份实现，否则两边迟早对「标准结构」有不同理解。
+///
+/// 修完顺手提交一次：骨架的价值在于团队其他人 clone 得到，留在工作区里等于没有。
+pub fn repair_skeleton(project_root: &Path) -> Result<Vec<String>, String> {
+    let mut steps = Vec::new();
+    let root = project_root.join(DIR);
+    // 身份只在真需要写 team.json 时才会用到；拿不到也不该拦住补目录与技能。
+    let identity = git::local_identity(project_root).unwrap_or_else(|_| Identity {
+        name: String::new(),
+        email: String::new(),
+    });
+    create_skeleton(&root, project_root, None, &identity, &mut steps)?;
+
+    if git::in_repo(project_root) {
+        let repo_root = git::repo_root(project_root)?;
+        let team_rel = relative_to(&repo_root, &root)?;
+        git::stage_team(&repo_root, &team_rel)?;
+        if let Some(sha) = git::commit_team(
+            &repo_root,
+            &team_rel,
+            "chore(carter): 补齐团队目录缺失的骨架",
+        )? {
+            steps.push(format!("已提交 {sha}"));
+        }
+    }
+    Ok(steps)
+}
+
+/// 这个项目里 `.carter/` 有没有还没提交的改动。
+///
+/// 团队数据的价值在「别人拉得到」。改完留在工作区里，本机看得见、团队看不见 ——
+/// 界面上值得提醒一句，但不该拦着人干活，所以是警告不是错误。
+pub fn uncommitted(project_root: &Path) -> Vec<String> {
+    if !git::in_repo(project_root) {
+        return Vec::new();
+    }
+    let Ok(repo_root) = git::repo_root(project_root) else {
+        return Vec::new();
+    };
+    let Ok(team_rel) = team_rel_of(&repo_root, project_root) else {
+        return Vec::new();
+    };
+    // `status --porcelain` 每行前两位是状态码，第三位起才是路径。
+    git::status_porcelain(&repo_root)
+        .lines()
+        .filter_map(|line| {
+            let path = line.get(3..)?.trim();
+            let path = path.rsplit(" -> ").next().unwrap_or(path);
+            path.starts_with(&team_rel).then(|| path.to_string())
+        })
+        .collect()
+}
+
+/// 把 `.carter/` 里未提交的改动收成一条提交。返回短 SHA；没有可提交的返回 `None`。
+pub fn commit_pending(project_root: &Path) -> Result<Option<String>, String> {
+    let repo_root = git::repo_root(project_root)?;
+    let team_rel = team_rel_of(&repo_root, project_root)?;
+    git::stage_team(&repo_root, &team_rel)?;
+    git::commit_team(
+        &repo_root,
+        &team_rel,
+        "chore(carter): 提交团队目录里未提交的改动",
+    )
+}
+
 /// 建目录骨架与那些「只补缺、不覆盖」的文件。
 fn create_skeleton(
     root: &Path,
@@ -315,6 +432,51 @@ pub fn create_inbox_source(
     crate::assistant::runtime::save_source(shell, source)
 }
 
+/// 补齐这个项目该有的两条观察源，返回真的补了哪几条（给人看的一句话）。
+///
+/// 为什么需要一个统一入口：这两条源只在「初始化」「配远端」「加入团队」三个时刻
+/// 被建，删掉之后就再没有回来的路径 —— 而它们恰恰是团队同步与消息提醒的全部实现。
+/// 界面上的「恢复」按钮走这里。
+///
+/// `joined` 为假时不建消息源：还没加入团队的人不该收团队消息，那条源对他不成立
+/// （建了也只会一直重复别人的消息）。同步源与是否加入无关，照建。
+pub fn ensure_sources(
+    shell: &std::sync::Arc<crate::shell::AppShell>,
+    project_root: &Path,
+    team_label: &str,
+    joined: bool,
+) -> Result<Vec<String>, String> {
+    let name = |what: &str| format!("{team_label} · {what}");
+    let existing: Vec<String> = shell
+        .assistant
+        .snapshot()
+        .sources
+        .iter()
+        .map(|s| s.command.trim().to_string())
+        .collect();
+
+    let mut done = Vec::new();
+    // 已经在了也要再走一次：`create_*` 会把命令与节奏校正回标准值，这正是「恢复」
+    // 想要的效果（被改过间隔的源也该拉回来）。但只在真的缺、或者值不对时才说
+    // 一句话 —— 全都健康时这个函数应当是安静的。
+    if !existing
+        .iter()
+        .any(|c| c == crate::assistant::source::TEAM_SYNC)
+    {
+        create_sync_source(shell, project_root, team_label)?;
+        done.push(name("团队同步"));
+    }
+    if joined
+        && !existing
+            .iter()
+            .any(|c| c == crate::assistant::source::TEAM_INBOX)
+    {
+        create_inbox_source(shell, project_root, team_label)?;
+        done.push(name("团队消息"));
+    }
+    Ok(done)
+}
+
 /// 旧版本留下的观察源：把命令换掉、把节奏调过来。应用启动时跑一次。
 ///
 /// 为什么需要它：`create_sync_source` 只在「初始化」和「配远端」时被调用，而这两件
@@ -362,6 +524,7 @@ pub fn migrate_sources(shell: &std::sync::Arc<crate::shell::AppShell>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::team::Goal;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -524,5 +687,68 @@ mod tests {
         assert!(ok(".carter/.cache/index.json"), ".cache 要被忽略");
         assert!(!ok(".carter/team.json"), "数据文件不能被忽略");
         assert!(!ok(".carter/goals/g-1/goal.json"));
+    }
+
+    /// 整个 `.carter/` 被误删：从 git 历史原样找回，一个文件都不少。
+    #[test]
+    fn a_deleted_team_dir_is_restored_whole_from_git() {
+        let dir = repo("restore");
+        initialize(&dir, Some("演示团队")).unwrap();
+        // 再建一个目标，确保恢复的不只是骨架。
+        let store = Store::open(dir.join(DIR));
+        let mut goal = Goal::new(
+            "上线 v2",
+            &Identity {
+                name: "测试".into(),
+                email: "t@example.com".into(),
+            },
+        );
+        goal.id = "g-1".into();
+        store.save_goal(&goal).unwrap();
+        git::stage_team(&dir, DIR).unwrap();
+        git::commit_team(&dir, DIR, "加一个目标").unwrap();
+
+        std::fs::remove_dir_all(dir.join(DIR)).unwrap();
+        assert!(dir.join(DIR).join("team.json").is_symlink() || !dir.join(DIR).exists());
+
+        let preview = restore_preview(&dir).unwrap();
+        assert!(
+            preview.iter().any(|p| p.ends_with("g-1/goal.json")),
+            "要能找回目标文件：{preview:?}"
+        );
+
+        let restored = restore_apply(&dir).unwrap();
+        assert_eq!(restored.len(), preview.len());
+        assert!(dir.join(DIR).join("team.json").is_file());
+        let got = Store::open(dir.join(DIR)).goal("g-1").unwrap();
+        assert_eq!(got.title, "上线 v2", "内容要原样回来，不是一副空壳");
+    }
+
+    /// 恢复只动缺失的：改过还没提交的文件保持原样。
+    #[test]
+    fn restore_never_touches_files_that_still_exist() {
+        let dir = repo("restore-partial");
+        initialize(&dir, Some("演示")).unwrap();
+        let meta_path = dir.join(DIR).join("team.json");
+        // 改一份已有的，再删一份别人的。
+        let mut meta = Store::open(dir.join(DIR)).meta().unwrap();
+        meta.description = "我手改的，还没提交".into();
+        Store::open(dir.join(DIR)).save_meta(&meta).unwrap();
+        std::fs::remove_file(dir.join(DIR).join(".gitignore")).unwrap();
+
+        let restored = restore_apply(&dir).unwrap();
+        assert_eq!(restored.len(), 1, "只该找回删掉的那一个：{restored:?}");
+        assert!(restored[0].ends_with(".gitignore"));
+
+        let after = std::fs::read_to_string(&meta_path).unwrap();
+        assert!(after.contains("我手改的"), "改过的 team.json 不能被覆盖");
+    }
+
+    /// git 历史里什么都没有：不报错，交给「补齐骨架」。
+    #[test]
+    fn restore_with_nothing_in_history_is_empty_not_an_error() {
+        let dir = repo("restore-empty");
+        assert!(restore_preview(&dir).unwrap().is_empty());
+        assert!(restore_apply(&dir).unwrap().is_empty());
     }
 }

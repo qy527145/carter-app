@@ -558,6 +558,42 @@ pub fn head(root: &Path) -> Option<String> {
         .filter(|s| !s.trim().is_empty())
 }
 
+/// `HEAD` 在 `rel` 这个路径下记录了哪些文件（相对仓库根，`/` 分隔）。
+///
+/// 团队目录的全部价值是「在 git 里」，所以本地文件被误删之后，`HEAD` 往往还留着
+/// 上一份完整的。有了这份清单才能做「只捡回缺的」—— 重新建一副空骨架会把丢掉的
+/// 目标与任务变成真的丢掉。
+///
+/// `HEAD` 还没有提交（空仓库）时是空列表而不是错误：那种情况下没什么可找回的。
+pub fn tracked_under(root: &Path, rel: &str) -> Result<Vec<String>, String> {
+    if head(root).is_none() {
+        return Ok(Vec::new());
+    }
+    let out = git(root, &["ls-tree", "-r", "--name-only", "HEAD", "--", rel])?;
+    Ok(out
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+/// 把 `paths` 按 `HEAD` 里的版本写回工作区与索引。
+///
+/// **调用方负责只传缺失的文件** —— 这个函数会覆盖已有的内容。团队目录的恢复路径
+/// （[`super::init::restore_apply`]）先比对工作区再挑，就是为了不动用户还没提交的改动。
+///
+/// 逐个恢复而不是一次传一长串：某一个路径在 `HEAD` 里已经没有时（比如刚被别的分支
+/// 改过），一次失败不该让其余文件也回不来。返回真正恢复了的路径。
+pub fn restore_from_head(root: &Path, paths: &[String]) -> Result<Vec<String>, String> {
+    let mut done = Vec::new();
+    for path in paths {
+        git(root, &["checkout", "HEAD", "--", path])?;
+        done.push(path.clone());
+    }
+    Ok(done)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

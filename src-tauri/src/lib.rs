@@ -249,6 +249,8 @@ pub fn run() {
             set_compaction,
             // 团队目录
             team_status,
+            team_health,
+            team_repair,
             team_initialize,
             team_overview,
             team_board_html,

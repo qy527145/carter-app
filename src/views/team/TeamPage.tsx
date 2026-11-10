@@ -21,6 +21,7 @@
 
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
+  Activity,
   ArrowRight,
   Check,
   ChevronDown,
@@ -39,6 +40,7 @@ import {
   RefreshCw,
   Sparkles,
   Target,
+  TriangleAlert,
   UserRound,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -46,10 +48,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   type TeamBoard,
   type TeamGoal,
+  type TeamHealth,
   type TeamOverview,
   type TeamStatus,
   type TeamTask,
   teamBoardHtml,
+  teamHealth,
   teamInitialize,
   teamOverview,
   teamSetRemote,
@@ -77,6 +81,8 @@ import { LogTab, MineTab, markSeen, readSeen, useInbox } from "./MineAndLog";
 import { PeopleProvider, usePeople } from "./people";
 import { IdentityChip, JoinDialog, PersonAvatar } from "./peopleUi";
 import { TaskDrawer } from "./TaskDrawer";
+import { TeamHealthDrawer } from "./TeamHealth";
+import { healthSummary } from "./teamHealthUi";
 
 type Tab = "mine" | "graph" | "board" | "log";
 
@@ -145,6 +151,10 @@ function TeamPageBody({ onReloaded }: { onReloaded: () => void }) {
   const [picked, setPicked] = useState<string | null>(null);
   /** 正在编辑远端地址。`null` = 没打开。 */
   const [remoteDraft, setRemoteDraft] = useState<string | null>(null);
+  /** 就绪状态抽屉。 */
+  const [healthOpen, setHealthOpen] = useState(false);
+  /** header 角标用的那份（只用到计数，不必等全景）。 */
+  const [health, setHealth] = useState<TeamHealth | null>(null);
 
   // 只认最后一次请求的结果：快速换项目时，慢的那个回来不能把新项目的数据盖掉。
   const seq = useRef(0);
@@ -152,6 +162,15 @@ function TeamPageBody({ onReloaded }: { onReloaded: () => void }) {
     if (!cwd) return;
     const mine = ++seq.current;
     setLoading(true);
+    // 就绪状态与全景各走各的：`.carter/` 被删掉时全景会失败，而就绪状态恰恰要
+    // 在那时告诉人「能找回」。所以它不能跟在 `teamOverview` 的成败后面。
+    teamHealth(cwd)
+      .then((h) => {
+        if (mine === seq.current) setHealth(h);
+      })
+      .catch(() => {
+        if (mine === seq.current) setHealth(null);
+      });
     try {
       const next = await teamOverview(cwd);
       if (mine !== seq.current) return;
@@ -347,6 +366,13 @@ function TeamPageBody({ onReloaded }: { onReloaded: () => void }) {
         )}
 
         <div className="ml-auto flex items-center gap-1.5">
+          {cwd && (
+            <HealthChip
+              health={health}
+              onClick={() => setHealthOpen(true)}
+              onJoining={health?.team_root === null && needsInit}
+            />
+          )}
           {data &&
             (data.remote ? (
               <button
@@ -404,7 +430,13 @@ function TeamPageBody({ onReloaded }: { onReloaded: () => void }) {
       {!cwd ? (
         <ChooseProject onPick={setTeamCwd} />
       ) : needsInit ? (
-        <InitPanel onInit={doInit} busy={busy} cwd={cwd} />
+        <InitPanel
+          onInit={doInit}
+          busy={busy}
+          cwd={cwd}
+          recoverable={(health?.checks.find((c) => c.id === "files")?.paths.length ?? 0) > 0}
+          onRecover={() => setHealthOpen(true)}
+        />
       ) : error ? (
         <div className="p-6 text-sm text-danger">{error}</div>
       ) : !data ? (
@@ -518,6 +550,14 @@ function TeamPageBody({ onReloaded }: { onReloaded: () => void }) {
         />
       )}
       {joining && <JoinDialog cwd={cwd} onClose={() => setJoining(false)} />}
+      {healthOpen && cwd && (
+        <TeamHealthDrawer
+          cwd={cwd}
+          onClose={() => setHealthOpen(false)}
+          onRepaired={() => void load()}
+          onConfigureRemote={() => setRemoteDraft(data?.remote ?? "")}
+        />
+      )}
     </div>
   );
 }
@@ -710,7 +750,20 @@ function ChooseProject({ onPick }: { onPick: (cwd: string) => void }) {
 // 初始化
 // ---------------------------------------------------------------------------
 
-function InitPanel({ onInit, busy, cwd }: { onInit: () => void; busy: boolean; cwd: string }) {
+function InitPanel({
+  onInit,
+  busy,
+  cwd,
+  recoverable,
+  onRecover,
+}: {
+  onInit: () => void;
+  busy: boolean;
+  cwd: string;
+  /** git 历史里还有团队目录的痕迹（`.carter/team.json` 等）。 */
+  recoverable: boolean;
+  onRecover: () => void;
+}) {
   return (
     <div className="flex flex-1 items-center justify-center p-8">
       <div className="w-full max-w-lg rounded-2xl bg-card p-6 shadow-soft">
@@ -746,6 +799,16 @@ function InitPanel({ onInit, busy, cwd }: { onInit: () => void; busy: boolean; c
           {busy ? <LoaderCircle size={14} className="animate-spin" /> : <Plus size={14} />}
           初始化团队目录
         </button>
+        {/* 团队目录被误删之后，这一页会退化成「还没初始化」—— 而丢掉的目标与任务
+            很可能还在 git 历史里。这条是那种时候唯一能找回数据的路。 */}
+        {recoverable && (
+          <button
+            onClick={onRecover}
+            className="mt-2 w-full rounded-lg py-1.5 text-xs text-dim transition-colors hover:bg-ink/5 hover:text-ink"
+          >
+            这个项目以前有团队目录？从 git 历史找回
+          </button>
+        )}
       </div>
     </div>
   );
@@ -1211,6 +1274,54 @@ function IconAction({
     >
       {children}
     </button>
+  );
+}
+
+/**
+ * header 上的就绪状态入口。
+ *
+ * 一切正常时是一个安静的图标 —— 这个功能 99% 的时间不该占版面。有东西坏了才
+ * 变成一条橙色药丸带数字，因为那时候它比「配远端」更该被看见：它说的正是
+ * 「你现在看到的团队数据没有在同步」。
+ *
+ * 不受 `data` 保护：`.carter/` 被删之后团队页退化成初始化面板，那时更需要它。
+ */
+function HealthChip({
+  health,
+  onClick,
+  onJoining,
+}: {
+  health: TeamHealth | null;
+  onClick: () => void;
+  /** 还没检查回来（首次载入）。占位一样安静，避免按钮跳动。 */
+  onJoining?: boolean;
+}) {
+  const summary = health ? healthSummary(health.checks) : null;
+  const n = summary?.attention ?? 0;
+  const label = summary?.label ?? "";
+  const tip = onJoining
+    ? "团队就绪状态"
+    : n > 0
+      ? `${label}：点开看看哪里没在工作`
+      : "团队就绪状态：都正常";
+
+  if (n > 0) {
+    return (
+      <button
+        onClick={onClick}
+        title={tip}
+        aria-label={tip}
+        className="flex items-center gap-1 rounded-full bg-tone-orange-soft px-2 py-1 text-[10px] text-tone-orange transition-opacity hover:opacity-80"
+      >
+        <TriangleAlert size={11} />
+        {n}
+      </button>
+    );
+  }
+  return (
+    <IconAction onClick={onClick} title={tip}>
+      <Activity size={13} />
+    </IconAction>
   );
 }
 

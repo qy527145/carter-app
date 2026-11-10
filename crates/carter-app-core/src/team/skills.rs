@@ -42,20 +42,12 @@ pub fn install_builtin(skills_dir: &Path) -> Result<Vec<String>, String> {
     std::fs::create_dir_all(skills_dir).map_err(|e| format!("建技能目录失败：{e}"))?;
     let mut written = Vec::new();
     for (name, body) in BUILTINS {
-        let dir = skills_dir.join(name);
-        let file = dir.join("SKILL.md");
-        let action = match SKILL_VERSIONS.iter().find(|(n, ..)| n == name) {
-            Some((_, version, v1_head)) => skill_action(
-                std::fs::read_to_string(&file).ok().as_deref(),
-                *version,
-                v1_head,
-            ),
-            None if file.is_file() => ScriptAction::Keep,
-            None => ScriptAction::Create,
-        };
+        let action = builtin_action(skills_dir, name);
         if action == ScriptAction::Keep {
             continue;
         }
+        let dir = skills_dir.join(name);
+        let file = dir.join("SKILL.md");
         std::fs::create_dir_all(&dir).map_err(|e| format!("建 {} 失败：{e}", dir.display()))?;
         std::fs::write(&file, body).map_err(|e| format!("写 {} 失败：{e}", file.display()))?;
         written.push(match action {
@@ -64,6 +56,33 @@ pub fn install_builtin(skills_dir: &Path) -> Result<Vec<String>, String> {
         });
     }
     Ok(written)
+}
+
+/// 某一个内置技能现在该做什么（缺 → 建，旧 → 升级，最新 → 不动）。
+fn builtin_action(skills_dir: &Path, name: &str) -> ScriptAction {
+    let file = skills_dir.join(name).join("SKILL.md");
+    match SKILL_VERSIONS.iter().find(|(n, ..)| *n == name) {
+        Some((_, version, v1_head)) => skill_action(
+            std::fs::read_to_string(&file).ok().as_deref(),
+            *version,
+            v1_head,
+        ),
+        None if file.is_file() => ScriptAction::Keep,
+        None => ScriptAction::Create,
+    }
+}
+
+/// 已经落盘的内置技能里，哪些缺失或过期 —— **只读**，什么都不写。
+///
+/// 界面要显示「团队目录少了什么」，这件事必须在不动文件的前提下答得出来；
+/// [`install_builtin`] 是写路径，拿它当探测会让「看一眼状态」变成一次副作用。
+/// 判断与写路径共用 [`builtin_action`]，所以两边不会各说各的。
+pub fn pending_builtin(skills_dir: &Path) -> Vec<String> {
+    BUILTINS
+        .iter()
+        .filter(|(name, _)| builtin_action(skills_dir, name) != ScriptAction::Keep)
+        .map(|(name, _)| (*name).to_string())
+        .collect()
 }
 
 #[derive(Debug, PartialEq, Eq)]

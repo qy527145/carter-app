@@ -353,6 +353,168 @@ pub(crate) fn team_store(cwd: &str) -> Result<carter_app_core::team::Store, Stri
         .ok_or("这个项目还没有初始化团队目录".into())
 }
 
+/// 团队就绪状态：git 仓库 / 团队目录 / 观察源各自还在不在。
+///
+/// 只读。界面在团队页 header 上靠它决定要不要亮一个角标，点开才细看。
+///
+/// 项目根的取法有三档，因为 `.carter/team.json` 被删掉时 `discover` 什么也找不到
+/// —— 而那正是最需要打开这一页的时候：那时得靠仓库根把 git 历史里的团队目录找回来。
+#[tauri::command]
+pub(crate) fn team_health(
+    shell: State<'_, Arc<AppShell>>,
+    cwd: String,
+) -> Result<carter_app_core::team::health::Health, String> {
+    let project_root = resolve_project_root(Path::new(&cwd))?;
+    let label = project_label(&project_root);
+    let sources = project_sources(shell.inner(), &project_root, &label);
+    Ok(carter_app_core::team::health::inspect(
+        &project_root,
+        &sources,
+    ))
+}
+
+/// 一次修复的结果。形状对齐 `InitOutcome`，界面用同一套话术显示。
+#[derive(Serialize)]
+pub(crate) struct RepairOutcome {
+    /// 这次实际做了什么，按顺序。
+    steps: Vec<String>,
+    /// 不致命、但该知道的。
+    warnings: Vec<String>,
+    /// 从 git 历史写回的文件。
+    restored: Vec<String>,
+}
+
+/// 修一项（或全部）。
+///
+/// `scope`：`repo` / `files` / `commit` / `sources` / `all`。
+///
+/// **全部是追加式的**：建仓库、补缺的骨架、提交已有改动、补观察源。没有任何一种
+/// 会删除或覆盖用户的数据 —— 恢复团队目录时也只写回工作区里已经缺失的那些文件。
+#[tauri::command]
+pub(crate) fn team_repair(
+    shell: State<'_, Arc<AppShell>>,
+    cwd: String,
+    scope: String,
+) -> Result<RepairOutcome, String> {
+    use carter_app_core::team::{git, init};
+
+    let project_root = resolve_project_root(Path::new(&cwd))?;
+    let mut out = RepairOutcome {
+        steps: Vec::new(),
+        warnings: Vec::new(),
+        restored: Vec::new(),
+    };
+
+    let want = |kind: &str| scope == "all" || scope == kind;
+    if !want("repo") && !want("files") && !want("commit") && !want("sources") {
+        return Err(format!("不认识的修复项 `{scope}`"));
+    }
+
+    if want("repo") {
+        out.steps.push(git::ensure_repo(&project_root)?);
+    }
+
+    // 先找回、再补缺：HEAD 里有的优先，找不回来的才重建。
+    if want("files") {
+        match init::restore_apply(&project_root) {
+            Ok(restored) if !restored.is_empty() => {
+                out.steps
+                    .push(format!("从 git 历史找回 {} 个文件", restored.len()));
+                out.restored = restored;
+            }
+            Ok(_) => {
+                let steps = init::repair_skeleton(&project_root)?;
+                out.steps.extend(steps);
+                if out.steps.is_empty() {
+                    out.steps.push("团队目录的结构本来就不缺什么".into());
+                }
+            }
+            Err(e) => {
+                out.warnings
+                    .push(format!("从 git 历史找回没成功（{e}），改为补齐骨架"));
+                out.steps.extend(init::repair_skeleton(&project_root)?);
+            }
+        }
+    }
+
+    if want("commit") && git::in_repo(&project_root) {
+        match init::commit_pending(&project_root) {
+            Ok(Some(sha)) => out.steps.push(format!("已提交 {sha}")),
+            Ok(None) => {}
+            Err(e) => out.warnings.push(format!("提交没成功：{e}")),
+        }
+    }
+
+    if want("sources") {
+        let label = project_label(&project_root);
+        // 是否建消息源取决于本机加没加入 —— 没加入就只补同步源。
+        let joined = carter_app_core::team::Store::discover(&project_root)
+            .map(|s| {
+                git::local_identity(&project_root).ok().is_some_and(|i| {
+                    carter_app_core::team::members::load(s.root())
+                        .me(&i)
+                        .is_some()
+                })
+            })
+            .unwrap_or(false);
+        match init::ensure_sources(shell.inner(), &project_root, &label, joined) {
+            Ok(done) if !done.is_empty() => out.steps.push(format!("补回 {}", done.join("、"))),
+            Ok(_) => out.steps.push("两条观察源都在".into()),
+            Err(e) => out.warnings.push(format!("观察源没建成：{e}")),
+        }
+    }
+
+    Ok(out)
+}
+
+/// 这个项目根。三档回退，见 `team_health` 的注释。
+fn resolve_project_root(cwd: &Path) -> Result<std::path::PathBuf, String> {
+    use carter_app_core::team::{Store, git};
+    if let Some(store) = Store::discover(cwd) {
+        return Ok(store.project_root().to_path_buf());
+    }
+    if git::in_repo(cwd) {
+        return git::repo_root(cwd);
+    }
+    if cwd.is_dir() {
+        return Ok(cwd.to_path_buf());
+    }
+    Err(format!("{} 不是一个存在的目录", cwd.display()))
+}
+
+/// 给观察源起名用的标签：团队名优先，其次目录名。
+fn project_label(project_root: &Path) -> String {
+    carter_app_core::team::Store::discover(project_root)
+        .and_then(|s| s.meta().ok())
+        .map(|m| m.name)
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| {
+            project_root
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "项目".into())
+        })
+}
+
+/// 这个项目的观察源。界面上只看得到本项目的，探测也只看这些 —— 别的项目的源
+/// 不该让这里的判断变绿或变红。
+fn project_sources(
+    shell: &Arc<AppShell>,
+    project_root: &Path,
+    label: &str,
+) -> Vec<carter_app_core::assistant::Source> {
+    let _ = label;
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let root = canon(project_root);
+    shell
+        .assistant
+        .snapshot()
+        .sources
+        .into_iter()
+        .filter(|s| canon(Path::new(&s.cwd)) == root)
+        .collect()
+}
+
 /// 团队里有谁、本机是谁、还有谁提交过代码却没加入。
 ///
 /// 「本机是谁」为空时界面弹「加入团队」—— 第一次在这个团队里需要身份时才问，

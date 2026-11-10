@@ -35,6 +35,7 @@
 
 pub mod events;
 pub mod git;
+pub mod health;
 pub mod inbox;
 pub mod init;
 pub mod members;

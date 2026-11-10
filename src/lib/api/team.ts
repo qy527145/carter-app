@@ -40,6 +40,62 @@ export type TeamCounts = {
   dropped: number;
 };
 
+// ---------------------------------------------------------------------------
+// 就绪状态（镜像 `team/health.rs` 与 `commands/team.rs` 的 RepairOutcome）
+// ---------------------------------------------------------------------------
+
+/**
+ * 一项检查的结论。
+ *
+ * `not_applicable` 与 `broken` 必须分开：还没加入团队时「团队消息」那条源本来就
+ * 不该存在，把它报成坏掉会让人去修一件不该修的事。
+ */
+export type TeamCheckState = "ok" | "warn" | "broken" | "not_applicable";
+
+export type TeamCheck = {
+  /** `git` | `dirty` | `remote` | `files` | `joined` | `sync_source` | `inbox_source` */
+  id: string;
+  title: string;
+  state: TeamCheckState;
+  /** 现在的实际情况，一句话，界面上原样显示。 */
+  detail: string;
+  /** 按钮文字。`null` = 这一项没有可点的动作。 */
+  action: string | null;
+  /** `repo` | `files` | `sources` | `commit` | `remote` */
+  action_kind: string | null;
+  /** 仅 `files` 用：会写回哪些文件（相对仓库根）。 */
+  paths: string[];
+};
+
+export type TeamHealth = {
+  project_root: string;
+  /** 团队目录的绝对路径。`.carter/` 不在时是 `null`。 */
+  team_root: string | null;
+  joined: boolean;
+  checks: TeamCheck[];
+};
+
+export type TeamRepairOutcome = {
+  steps: string[];
+  warnings: string[];
+  /** 从 git 历史写回的文件。 */
+  restored: string[];
+};
+
+/** 探一遍这个项目的团队就绪状态。只读，不产生任何副作用。 */
+export function teamHealth(cwd: string): Promise<TeamHealth> {
+  return invoke<TeamHealth>("team_health", { cwd });
+}
+
+/**
+ * 修一项，或全部（`"all"`，不含任何删除动作）。
+ *
+ * `files` 会优先从 git 历史找回缺失的文件，找不回来才补一副空骨架。
+ */
+export function teamRepair(cwd: string, scope: string): Promise<TeamRepairOutcome> {
+  return invoke<TeamRepairOutcome>("team_repair", { cwd, scope });
+}
+
 export type TeamTask = {
   id: string;
   title: string;
