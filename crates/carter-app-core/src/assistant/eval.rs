@@ -34,7 +34,7 @@ use carter::provider::{
 };
 use carter::registry::ModelInfo;
 
-use super::{Settings, State, Ticket, TicketStatus, Verdict};
+use super::{Settings, State, Ticket, Verdict};
 
 /// 评估的回答上限。推理模型先思考再输出、两边共用这一个数（见 `title.rs`），给小了
 /// 正文会被思考吃光。
@@ -52,7 +52,8 @@ const SYSTEM: &str = "\
 要做的方向已经确定，不需要先替用户做设计或产品决定。
 3. 三件事都成立、且恰好一条规则覆盖它，才接单。拿不准就忽略 —— 不要为了凑数接单，也不要追问用户。
 4. 事件明确指向下面「已有工单」里的某一张（同一个 PR、同一个问题、那张工单的后续），就送进那张工单（attach），\
-不要为同一件事再开一张。只是主题相近不算明确指向。
+不要为同一件事再开一张。只是主题相近不算明确指向。这个名单里只有还没结束的工单；\
+同一件事之前开过工单但已经结束、关闭了的，按新事件判断 —— 该做就 accept 开一张新的。
 5. 一批事件最多开一张工单。几行说的是同一件事，合起来算一件。
 
 只回一个 JSON 对象，不要代码块、不要解释：
@@ -113,11 +114,9 @@ pub fn prompt(settings: &Settings, state: &State, source_name: &str, events: &[S
     }
 
     s.push_str("\n## 已有工单\n\n");
-    let mut live: Vec<&Ticket> = state
-        .tickets
-        .iter()
-        .filter(|t| t.status != TicketStatus::Stopped)
-        .collect();
+    // 只列还没结束的。已结束（已完成 / 无需处理 / 已叫停）的列出来，模型就会把新事件
+    // 送进去 —— 而那张工单不会再跑任何东西，事件等于没发生。见 `validate` 的 attach 分支。
+    let mut live: Vec<&Ticket> = state.tickets.iter().filter(|t| !t.status.ended()).collect();
     live.sort_by_key(|t| std::cmp::Reverse(t.updated_at));
     if live.is_empty() {
         s.push_str("（没有）\n");
@@ -187,8 +186,14 @@ pub fn validate(raw: &Raw, settings: &Settings, state: &State) -> Outcome {
             let Some(t) = nonempty(&raw.ticket).and_then(|k| state.find_ticket(&k).cloned()) else {
                 return ignore("说要送进已有工单，但指的那张不存在");
             };
-            if t.status == TicketStatus::Stopped {
-                return ignore("指的那张工单已经被叫停");
+            // 已结束的（已完成 / 无需处理 / 已叫停）一律不收：送进去只会攒在 `pending` 里
+            // 再没有谁去跑它 —— 自动事件不唤醒结束的工单（见 `runtime::deliver`），用户
+            // 看到的是「判定送进工单，然后什么都没发生」。这种情况按新事件重判才是对的。
+            if t.status.ended() {
+                return ignore(&format!(
+                    "指的那张工单已经结束（{}），不能把新事件送进去；该做的事要另开一张",
+                    t.status.label()
+                ));
             }
             Outcome::Attach {
                 ticket_id: t.id,
@@ -201,6 +206,18 @@ pub fn validate(raw: &Raw, settings: &Settings, state: &State) -> Outcome {
             reason: format!("模型回了不认识的决定 `{other}`，按忽略处理：{reason}"),
         },
     }
+}
+
+/// 模型这次是不是把事件指到了一张**已经结束**的工单上。
+///
+/// 用来分辨「降成忽略」是哪一种：提示词里已经不再列结束的工单了，真出现这种回答，
+/// 说明工单是在模型思考的这几秒里被关掉的。那种情况值得带上新状态重判一次 ——
+/// 事件不该因为一个几秒的竞态就悄悄丢掉。见 `runtime::judge`。
+pub fn stale_attach(raw: &Raw, state: &State) -> bool {
+    raw.decision.trim().eq_ignore_ascii_case("attach")
+        && nonempty(&raw.ticket)
+            .and_then(|k| state.find_ticket(&k))
+            .is_some_and(|t| t.status.ended())
 }
 
 /// 解析评估用的模型：设置里指定的 → 副模型 → 默认模型。
@@ -273,7 +290,7 @@ pub async fn ask_with(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::assistant::{Rule, Settings, State};
+    use crate::assistant::{Rule, Settings, State, TicketStatus};
 
     fn settings() -> Settings {
         Settings {
@@ -386,11 +403,21 @@ mod tests {
             Outcome::Ignore { .. }
         ));
 
-        st.ticket_mut(&id).unwrap().status = TicketStatus::Stopped;
-        assert!(
-            matches!(validate(&raw, &settings(), &st), Outcome::Ignore { .. }),
-            "叫停的不收"
-        );
+        // 结束的工单一律不收。用户关掉的工单里再送事件，只会攒着没人跑 —— 界面显示
+        // 「送进工单」，实际什么都没发生。
+        for ended in [
+            TicketStatus::Stopped,
+            TicketStatus::Done,
+            TicketStatus::Dropped,
+        ] {
+            st.ticket_mut(&id).unwrap().status = ended;
+            match validate(&raw, &settings(), &st) {
+                Outcome::Ignore { reason } => {
+                    assert!(reason.contains("已经结束"), "{ended:?}：{reason}")
+                }
+                other => panic!("{ended:?} 不该收：{other:?}"),
+            }
+        }
     }
 
     #[test]
@@ -405,7 +432,7 @@ mod tests {
         }
     }
 
-    /// 停用的规则不给模型看，叫停的工单也不列 —— 看见了就可能被引用。
+    /// 停用的规则不给模型看，结束的工单也不列 —— 看见了就可能被引用。
     #[test]
     fn the_prompt_lists_only_what_may_be_used() {
         let (mut st, id) = state_with_ticket();
@@ -415,9 +442,16 @@ mod tests {
         assert!(p.contains("#1 修主干 CI"));
         assert!(p.contains("- CI failed on main"));
 
-        st.ticket_mut(&id).unwrap().status = TicketStatus::Stopped;
-        let p = prompt(&settings(), &st, "GitHub", &["x".into()]);
-        assert!(!p.contains("#1"));
+        // 三种结束状态都不列：模型只该在**还开着**的工单里挑一个送进去。
+        for ended in [
+            TicketStatus::Stopped,
+            TicketStatus::Done,
+            TicketStatus::Dropped,
+        ] {
+            st.ticket_mut(&id).unwrap().status = ended;
+            let p = prompt(&settings(), &st, "GitHub", &["x".into()]);
+            assert!(!p.contains("#1"), "{ended:?} 不该列：{p}");
+        }
     }
 }
 

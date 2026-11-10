@@ -242,9 +242,6 @@ pub async fn assess(shell: &Arc<AppShell>, source: &Source, events: Vec<String>)
             task,
             reason,
         } => {
-            d.verdict = Verdict::Attach;
-            d.reason = reason;
-            d.ticket_id = Some(ticket_id.clone());
             let mut text = format!(
                 "{}来源「{}」 · 与这张工单相关\n",
                 super::EVENT_MARK,
@@ -256,7 +253,16 @@ pub async fn assess(shell: &Arc<AppShell>, source: &Source, events: Vec<String>)
             if !task.trim().is_empty() {
                 text.push_str(&format!("\n评估的说明：{}", task.trim()));
             }
-            deliver(shell, &ticket_id, text, Wake::Automatic);
+            // `validate` 已经挡掉了结束的工单，但那是拿模型思考**之前**的状态校验的：
+            // 这几秒里用户可能把它关掉、或者在它叫停的那一刻同时到了。收不下就别记成
+            // 「送进工单」—— 那会让界面上显示一件其实没发生的事，事件也就悄悄丢了。
+            if deliver(shell, &ticket_id, text, Wake::Automatic) {
+                d.verdict = Verdict::Attach;
+                d.reason = reason;
+                d.ticket_id = Some(ticket_id.clone());
+            } else {
+                d.reason = format!("要送进去的那张工单已经结束，事件没有送达 —— {reason}");
+            }
         }
     }
     record(shell, d.clone());
@@ -276,13 +282,36 @@ async fn judge(
 ) -> Result<Outcome, String> {
     let config = shell.config.load_full();
     let (provider, model) = eval::resolve(&config, settings.eval_model.as_deref())?;
-    let prompt = eval::prompt(settings, state, &source.name, events);
-    let answer = eval::ask(&*provider, &model, prompt).await?;
+    let answer = eval::ask(
+        &*provider,
+        &model,
+        eval::prompt(settings, state, &source.name, events),
+    )
+    .await?;
     let raw = eval::parse(&answer)?;
     // 用**此刻**的状态校验：模型想的这几秒里，用户可能叫停了它要送进去的那张工单。
-    Ok(shell
-        .assistant
-        .read(|s| eval::validate(&raw, &s.settings, s)))
+    let (stale, outcome) = shell.assistant.read(|s| {
+        (
+            eval::stale_attach(&raw, s),
+            eval::validate(&raw, &s.settings, s),
+        )
+    });
+    // 送去的那张正好在这几秒里被关掉了：带新状态重判一次，而不是把事件降成忽略。
+    // 只重判一次 —— 再撞上就是又有人动过它，那时按忽略处理也不会差。
+    if stale {
+        let now = shell.assistant.snapshot();
+        let answer = eval::ask(
+            &*provider,
+            &model,
+            eval::prompt(&now.settings, &now, &source.name, events),
+        )
+        .await?;
+        let raw = eval::parse(&answer)?;
+        return Ok(shell
+            .assistant
+            .read(|s| eval::validate(&raw, &s.settings, s)));
+    }
+    Ok(outcome)
 }
 
 fn record(shell: &Arc<AppShell>, d: Decision) {
@@ -306,6 +335,10 @@ pub enum Wake {
 }
 
 /// 往工单里送一段话。按工单此刻的状态决定是排队等送、还是唤醒它。
+///
+/// 返回 `false` 表示**没送进去**：工单不存在、已经叫停，或者自动来的事件碰上了已经
+/// 结束的工单。最后一种必须挡住 —— 结束的工单不会再被开工，塞进 `pending` 只是把
+/// 事件悄悄丢掉，而调用方会以为「送进工单」成功了。
 pub fn deliver(shell: &Arc<AppShell>, ticket_id: &str, text: String, wake: Wake) -> bool {
     let ok = shell
         .assistant
@@ -314,6 +347,12 @@ pub fn deliver(shell: &Arc<AppShell>, ticket_id: &str, text: String, wake: Wake)
                 return false;
             };
             if t.status == TicketStatus::Stopped {
+                return false;
+            }
+            // 观察源来的消息不该让一张关掉的工单复活：用户说「看过了」/「不用管了」之后，
+            // 同一件事再有动静应当重新判一次（另开一张），而不是悄悄续上旧的那张。
+            // 用户自己写的（`Wake::Person`）仍然可以把它喊起来，那是用户的决定。
+            if wake == Wake::Automatic && t.status.ended() {
                 return false;
             }
             t.pending.push(text);
@@ -1199,6 +1238,53 @@ mod tests {
                 enabled: true,
             }],
             ..Default::default()
+        }
+    }
+
+    /// 结束的工单收不下自动事件：它不会再开工，塞进 `pending` 等于把事件丢掉。
+    /// 用户自己写的（`Wake::Person`）仍然可以把它喊起来。
+    #[test]
+    fn an_ended_ticket_silently_refuses_automatic_events() {
+        let dir = std::env::temp_dir().join(format!(
+            "carter-deliver-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = super::super::AssistantStore::open(dir.join("assistant.json"));
+        let shell = Arc::new(
+            Arc::into_inner(AppShell::new(carter::config::Config::default()))
+                .unwrap()
+                .with_assistant(store.clone()),
+        );
+        let id = store
+            .with(|s| s.open_ticket(&crate::assistant::tests::source(), "r", "a", "a", vec![]))
+            .unwrap();
+
+        for ended in [TicketStatus::Done, TicketStatus::Dropped] {
+            store
+                .with(|s| {
+                    let t = s.ticket_mut(&id).unwrap();
+                    t.status = ended;
+                    t.pending.clear();
+                })
+                .unwrap();
+            assert!(
+                !deliver(&shell, &id, "新事件".into(), Wake::Automatic),
+                "{ended:?}：自动事件不该送进去"
+            );
+            let t = store.read(|s| s.ticket(&id).cloned()).unwrap();
+            assert!(t.pending.is_empty(), "{ended:?}：不许悄悄攒着");
+            assert_eq!(t.status, ended, "{ended:?}：不许复活");
+
+            assert!(
+                deliver(&shell, &id, "用户问一句".into(), Wake::Person),
+                "{ended:?}：用户自己写的还能叫醒它"
+            );
+            assert_eq!(
+                store.read(|s| s.ticket(&id).map(|t| t.status)).unwrap(),
+                TicketStatus::Queued
+            );
         }
     }
 
