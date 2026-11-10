@@ -30,8 +30,13 @@ tar.xz / zip。
 内网 / 断网时「刷新元数据」会落到编进安装包的快照
 （`crates/carter-app-core/data/models-snapshot.json`）。它由
 `bun run models:snapshot` 从 models.dev 源仓库生成：官方 GitHub 优先，失败自动换
-`gh-proxy.com` / `ghproxy.net` / `ghfast.top`；只收对话模型。`bun run upgrade` 之后
-顺手跑一次再提交，发出去的包才带着当天的目录：
+`gh-proxy.com` / `ghproxy.net` / `ghfast.top`；只收对话模型。
+
+**打包时会自动更新**：`tauri.conf.json` 的 `beforeBuildCommand` 先跑
+`bun run models:snapshot --best-effort` 再构建前端。所以 `bun run build` 与 CI 的
+`tauri build` 都会带上当天的目录；源站全挂时只打一行警告、沿用仓库里那份，不会
+挡住发版。手动重跑（不带 `--best-effort`）失败即报错，用于确认快照到底是旧的还是
+新的：
 
 ```bash
 bun run models:snapshot

@@ -134,7 +134,7 @@ workflow_dispatch —— dist 的 workflow 一次只能挂一种触发器。
 ### 网络
 
 GitHub 连不上时（更新检查、连接器安装、团队同步）会自动改走 `gh-proxy.com` /
-`ghproxy.net` / `ghfast.top` —— 多个源并发抢占，不是串行干等超时。models.dev 目录按「官方接口 → 内置镜像 → 打包快照」的顺序回退，所以
+`ghproxy.net` / `ghfast.top` —— 多个源并发抢占，不是串行干等超时。models.dev 目录只有官方接口这一个在线源，拉不到就回退到打包快照，所以
 离线首装也能直接配模型。这两项都可以在**设置 → 外观 → 网络**里调整，也可以填自己的
 代理。
 

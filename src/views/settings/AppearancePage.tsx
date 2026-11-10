@@ -183,7 +183,7 @@ export function AppearancePage() {
               }}
             />
             <span className="mt-1 block text-[11px] leading-relaxed text-dim">
-              「模型」页刷新元数据时，内置的源（models.dev 官方 + 内置镜像）都失败之后才试这里的。
+              「模型」页刷新元数据时，models.dev 官方接口拿不到才试这里的。
               全部失败时用打包在应用里的快照，离线也能配模型。
             </span>
           </label>
