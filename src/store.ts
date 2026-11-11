@@ -1012,12 +1012,15 @@ export const useStore = create<Store>((set) => ({
   resetBusy: (ids) => set({ busy: Object.fromEntries(ids.map((id) => [id, true as const])) }),
 
   touchSession: (id) =>
-    set((s) => ({
-      sessions: withCurrent(
+    set((s) => {
+      const list = withCurrent(
         s.sessions.map((r) => (r.id === id ? { ...r, updated_at: Date.now() } : r)),
         { id, model: s.modelRef, cwd: s.cwd },
-      ),
-    })),
+      );
+      // 列表按 `updated_at` 倒序排（后端的口径）：只改时间不重排的话，这条会话要等到
+      // 下一次重拉列表才会浮上去 —— 而它此刻正是在用的那条，应该当场到顶。
+      return { sessions: [...list].sort((a, b) => b.updated_at - a.updated_at) };
+    }),
 
   beginSession: (c, opts) =>
     set((s) => ({

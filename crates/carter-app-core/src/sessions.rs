@@ -31,7 +31,8 @@ pub struct SessionRow {
     pub bytes: u64,
     /// 最后一次写入的时间（文件 mtime，epoch 毫秒）。
     ///
-    /// 界面按它给项目排「最近」：续接一条老会话接着聊，`created_at` 不动，只有这个会变。
+    /// 界面按它排「最近」，行上显示的也是它：续接一条老会话接着聊，`created_at` 不动，
+    /// 只有这个会变，而用户心里的「这条会话是什么时候的」说的正是最后一次说话。
     /// 文件还没建出来（读不到 mtime）时退回 `created_at`。
     pub updated_at: u64,
     /// 会话记的工作目录现在还在不在。
@@ -41,14 +42,21 @@ pub struct SessionRow {
     pub cwd_exists: bool,
 }
 
-fn row(entry: &SessionEntry) -> SessionRow {
-    let meta = std::fs::metadata(&entry.path).ok();
-    let updated_at = meta
-        .as_ref()
+/// 会话文件的最后写入时间（epoch 毫秒）。读不到（文件还没建出来）时退回创建时间。
+///
+/// 列表行与搜索结果都要用，且必须是同一个口径 —— 两处显示的时间不一样的话，
+/// 用户会以为那是两种不同的东西。
+fn updated_at_of(entry: &SessionEntry) -> u64 {
+    std::fs::metadata(&entry.path)
+        .ok()
         .and_then(|m| m.modified().ok())
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_millis() as u64)
-        .unwrap_or(entry.meta.created_at);
+        .unwrap_or(entry.meta.created_at)
+}
+
+fn row(entry: &SessionEntry) -> SessionRow {
+    let meta = std::fs::metadata(&entry.path).ok();
     SessionRow {
         id: entry.meta.id.clone(),
         title: entry.meta.title.clone(),
@@ -56,15 +64,20 @@ fn row(entry: &SessionEntry) -> SessionRow {
         cwd: entry.meta.cwd.clone(),
         created_at: entry.meta.created_at,
         forked_from: entry.meta.forked_from.clone(),
-        updated_at,
+        updated_at: updated_at_of(entry),
         bytes: meta.map(|m| m.len()).unwrap_or(0),
         cwd_exists: Path::new(&entry.meta.cwd).is_dir(),
     }
 }
 
 /// 列举会话。`all = false` 只列当前目录，`true` 跨所有项目。
+///
+/// 按**最后一次写入**倒序。carter 那边给的是 `created_at` 倒序，续接一条老会话
+/// 接着聊之后，它会一直钉在创建时的位置上 —— 而用户找的是「我刚才在弄的那个」。
 pub fn list(cwd: &Path, all: bool) -> Vec<SessionRow> {
-    carter::session::list(cwd, all).iter().map(row).collect()
+    let mut rows: Vec<SessionRow> = carter::session::list(cwd, all).iter().map(row).collect();
+    rows.sort_by_key(|r| std::cmp::Reverse(r.updated_at));
+    rows
 }
 
 /// 某个工作目录下全部会话的 id（按会话文件里记的 `cwd` 精确匹配）。
@@ -207,6 +220,8 @@ pub struct SearchHit {
     /// 会话所属目录。搜索是跨项目的，命中列表里得能看出这条属于哪儿。
     pub cwd: String,
     pub created_at: u64,
+    /// 最后写入时间。搜索结果的「新旧」与列表用同一口径。
+    pub updated_at: u64,
     /// 命中的那一小段上下文。
     pub snippet: String,
     /// 这条会话里一共命中多少次。让「哪条会话更相关」有个依据。
@@ -304,16 +319,18 @@ pub fn search(query: &str) -> Vec<SearchHit> {
                 model: entry.meta.model.clone(),
                 cwd: entry.meta.cwd.clone(),
                 created_at: entry.meta.created_at,
+                updated_at: updated_at_of(&entry),
                 snippet: snippet.unwrap_or_default(),
                 matches,
             });
         }
     }
-    // 命中多的排前面，其次新的在前。
+    // 命中多的排前面，同样多的按最后写入时间倒序 —— 与列表同一口径。
     hits.sort_by(|a, b| {
-        b.matches
-            .cmp(&a.matches)
-            .then(b.created_at.cmp(&a.created_at))
+        a.matches
+            .cmp(&b.matches)
+            .reverse()
+            .then(b.updated_at.cmp(&a.updated_at))
     });
     hits
 }

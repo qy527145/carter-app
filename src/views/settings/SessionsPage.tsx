@@ -83,8 +83,8 @@ function SearchResults({
               <Marked text={h.title || "未命名会话"} query={query} />
             </span>
             <Badge tone="blue">{h.matches} 处命中</Badge>
-            <span className="ml-auto shrink-0 text-[11px] text-dim" title={fullTime(h.created_at)}>
-              {relTime(h.created_at)}
+            <span className="ml-auto shrink-0 text-[11px] text-dim" title={fullTime(h.updated_at)}>
+              {relTime(h.updated_at)}
             </span>
           </div>
           <div className="text-xs leading-relaxed text-dim">

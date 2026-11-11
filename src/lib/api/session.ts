@@ -152,6 +152,8 @@ export type SearchHit = {
   model: string;
   cwd: string;
   created_at: number;
+  /** 最后写入时间。与列表同一口径 —— 显示的「多久以前」按它算。 */
+  updated_at: number;
   snippet: string;
   matches: number;
 };

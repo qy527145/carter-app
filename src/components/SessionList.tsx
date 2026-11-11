@@ -283,8 +283,8 @@ function Row({
                 {modelLabel}
               </span>
               <span className="text-dim/50">·</span>
-              <span className="shrink-0" title={fullTime(s.created_at)}>
-                {relTime(s.created_at)}
+              <span className="shrink-0" title={fullTime(s.updated_at)}>
+                {relTime(s.updated_at)}
               </span>
               {s.forked_from && (
                 <span title="由别的会话分叉而来" className="shrink-0">
@@ -367,7 +367,8 @@ export type ProjectGroup = { cwd: string; sessions: SessionRow[] };
  * 当前目录**不**置顶：它通常本来就是最近的那个；不是的时候（打开了一条旧项目里的
  * 老会话），硬顶上去反而打乱了「最近项目」的顺序。当前组靠展开 + 加粗来认。
  *
- * 组内不重排，保持后端给的 created_at 倒序 —— 行上显示的就是创建时间，两者一致。
+ * 组内保持后端给的顺序：后端按 `updated_at` 倒序（最后写过的在前），行上显示的
+ * 也是 `updated_at`，两者一致。
  * 侧栏与「会话」设置页共用 —— 两处分组顺序不一致会让人对不上号。
  */
 export function groupByProject(sessions: SessionRow[]): ProjectGroup[] {
@@ -415,7 +416,7 @@ export function SessionList({
 
   const groups = BUCKETS.map((b) => ({
     label: b,
-    items: sessions.filter((s) => bucketOf(s.created_at) === b),
+    items: sessions.filter((s) => bucketOf(s.updated_at) === b),
   })).filter((g) => g.items.length > 0);
 
   if (groups.length === 0) return null;
