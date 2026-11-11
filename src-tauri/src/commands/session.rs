@@ -258,6 +258,12 @@ pub(crate) async fn list_sessions(all: bool, cwd: Option<String>) -> Vec<Session
     sessions::list(&cwd, all)
 }
 
+/// 此刻正在跑一轮的会话 id。侧栏据此给每条在跑的会话亮「生成中」的点。
+#[tauri::command]
+pub(crate) fn busy_sessions(shell: State<'_, Arc<AppShell>>) -> Vec<String> {
+    shell.busy_sessions()
+}
+
 /// 改标题。走「追加一条 Title 记录」，所以不需要动会话文件其余部分。
 #[tauri::command]
 pub(crate) fn rename_session(session_id: String, title: String) -> Result<(), String> {

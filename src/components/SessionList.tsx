@@ -127,8 +127,9 @@ function Row({
   const [renaming, setRenaming] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const menu = useContextMenu();
-  // 当前这条正在生成：行首给一个呼吸点，切到别处也看得见它还在跑。
-  const running = useStore((st) => active && st.streaming);
+  // 这条正在生成：行首给一个呼吸点。不只看当前打开的那条 —— 切到别处之后它还在
+  // 后台跑，点要留着，跑完再灭（`busy` 由事件维护，见 `lib/events.ts`）。
+  const running = useStore((st) => (active && st.streaming) || st.busy[s.id] === true);
   // 这条会话是不是助理派出去的工单。按 `session_id` 认（工单上记着它的执行会话），
   // 不读标题 —— 工单对话的标题就是普通对话的标题，编号只留在面板那一侧。
   const ticket = useStore((st) => st.assistant?.tickets.find((t) => t.session_id === s.id));

@@ -213,6 +213,14 @@ type Store = Conv & {
   inspectorTurn: number | null;
   // 侧栏 / 底栏用
   sessions: SessionRow[];
+  /**
+   * 此刻正在跑一轮的会话 id（不论是不是当前打开的那条）。
+   *
+   * 侧栏靠它给每条在跑的会话亮「生成中」的点 —— 只看 `streaming` 的话，切走之后
+   * 那条还在后台跑的会话就没了标记。由 `turn_started` / `idle` 事件维护，启动与
+   * 刷新列表时再向后端对一次账（`busy_sessions`）。
+   */
+  busy: Record<string, true>;
   appInfo: AppInfo | null;
   /**
    * 启动后自动检查查到的新版本（`null` = 没有 / 还没查）。
@@ -282,6 +290,10 @@ type Store = Conv & {
   setSettings: (s: AppSettings) => void;
   bumpConfig: () => void;
   setSessions: (s: SessionRow[]) => void;
+  /** 标记某条会话在跑 / 闲下来了。 */
+  setBusy: (id: string, busy: boolean) => void;
+  /** 用后端给的整表覆盖（对账）。 */
+  resetBusy: (ids: string[]) => void;
   /**
    * 把某条会话的 `updated_at` 记成现在（它刚被写过）。不碰 `sessionsNonce`。
    *
@@ -962,6 +974,7 @@ export const useStore = create<Store>((set) => ({
   inspectorOpen: false,
   inspectorTurn: null,
   sessions: [],
+  busy: {},
   appInfo: null,
   updateAvailable: null,
   settings: null,
@@ -986,6 +999,17 @@ export const useStore = create<Store>((set) => ({
   bumpConfig: () => set((s) => ({ configNonce: s.configNonce + 1 })),
 
   setSessions: (sessions) => set((s) => ({ sessions, sessionsNonce: s.sessionsNonce + 1 })),
+
+  setBusy: (id, busy) =>
+    set((s) => {
+      if (busy === id in s.busy) return s;
+      const next = { ...s.busy };
+      if (busy) next[id] = true;
+      else delete next[id];
+      return { busy: next };
+    }),
+
+  resetBusy: (ids) => set({ busy: Object.fromEntries(ids.map((id) => [id, true as const])) }),
 
   touchSession: (id) =>
     set((s) => ({

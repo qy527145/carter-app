@@ -380,6 +380,19 @@ impl AppShell {
         self.sessions.get(id).map(|s| s.clone())
     }
 
+    /// 此刻正在跑一轮的会话 id（不含侧边聊天）。
+    ///
+    /// 侧栏要给每条在跑的会话一个「生成中」的点，不只是当前打开的那条。平时靠
+    /// `turn_started` / `idle` 事件维护；界面刚启动、或错过了事件时用它对一次账。
+    pub fn busy_sessions(&self) -> Vec<String> {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.sessions
+            .iter()
+            .filter(|h| h.parent_id.is_none() && h.busy.load(SeqCst))
+            .map(|h| h.id.clone())
+            .collect()
+    }
+
     /// 让某个会话回答模型的问题。
     pub fn answer_ask(&self, session_id: &str, id: u64, answers: Vec<Vec<String>>) -> bool {
         match self.session(session_id) {
@@ -681,6 +694,17 @@ mod tests {
         );
         shell.sessions.insert(id.to_string(), h.clone());
         h
+    }
+
+    /// 侧栏的「生成中」点：列出所有在跑的主会话，侧边聊天不算。
+    #[test]
+    fn busy_sessions_lists_running_top_level_sessions() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let shell = shell();
+        add(&shell, "idle", None);
+        add(&shell, "run", None).busy.store(true, SeqCst);
+        add(&shell, "side", Some("run")).busy.store(true, SeqCst);
+        assert_eq!(shell.busy_sessions(), vec!["run".to_string()]);
     }
 
     /// 换走一条正在跑的会话：不关、不打断；这一轮跑完才关。

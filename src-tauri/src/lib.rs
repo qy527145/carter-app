@@ -233,6 +233,7 @@ pub fn run() {
             accept_memory,
             close_session,
             list_sessions,
+            busy_sessions,
             rename_session,
             fork_session,
             delete_session,

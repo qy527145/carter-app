@@ -25,7 +25,12 @@ import { toastError, toastOk } from "./toast";
 export async function refreshSessions(): Promise<void> {
   try {
     const s = useStore.getState();
-    const list = await api.listSessions(true);
+    const [list, busy] = await Promise.all([
+      api.listSessions(true),
+      // 顺手对一次账：错过的 `turn_started` / `idle`（界面刚启动、会话被关掉）在这里补齐。
+      api.busySessions().catch(() => null),
+    ]);
+    if (busy) s.resetBusy(busy);
     // 补出来那一行要按**引用**写：会话列表里显示的模型一律是 `渠道/显示名`，
     // 用实际请求名（`claude-opus-5-5`）会与列表里其它行长得不一样。
     s.setSessions(

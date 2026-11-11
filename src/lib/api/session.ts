@@ -237,6 +237,11 @@ export function listSessions(all = false, cwd?: string): Promise<SessionRow[]> {
   return invoke<SessionRow[]>("list_sessions", { all, cwd: cwd ?? null });
 }
 
+/** 此刻正在跑一轮的会话 id（侧栏的「生成中」点，不只是当前打开的那条）。 */
+export function busySessions(): Promise<string[]> {
+  return invoke<string[]>("busy_sessions");
+}
+
 export function renameSession(sessionId: string, title: string): Promise<void> {
   return invoke<void>("rename_session", { sessionId, title });
 }

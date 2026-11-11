@@ -169,6 +169,10 @@ export function useAppEvents() {
         const { session_id: sid, event: e } = payload;
         // 助理对话结束了一期：面板上的记忆与纪要要重拉，不管现在开着的是哪条对话。
         if (e.type === "assistant_episode") void refreshAssistant();
+        // 「在跑」的标记按所有会话记，不只是当前这条：切走之后它还在后台跑，
+        // 侧栏那一行的点要留着，跑完再灭。
+        if (e.type === "turn_started") useStore.getState().setBusy(sid, true);
+        else if (e.type === "idle") useStore.getState().setBusy(sid, false);
         // 增量进缓冲 —— 只认「确实属于当前主对话或当前侧边聊天」的，别的会话
         // 直接丢，免得缓冲里堆着永远不会被交出去的字。
         if (e.type === "text_delta" || e.type === "thinking_delta") {
