@@ -62,6 +62,7 @@ import {
 } from "../../lib/api";
 import { launchFlight, leaveMain } from "../../lib/flight";
 import { baseName } from "../../lib/format";
+import { isImeComposing } from "../../lib/ime";
 import { contextSummary, formatContext } from "../../lib/promptContext";
 import { ASSISTANT_CHAT_ID, openProjectChat, startProjectChat } from "../../lib/sessionOps";
 import {
@@ -463,6 +464,7 @@ function TeamPageBody({ onReloaded }: { onReloaded: () => void }) {
                   value={remoteDraft}
                   onChange={(e) => setRemoteDraft(e.target.value)}
                   onKeyDown={(e) => {
+                    if (isImeComposing(e)) return;
                     if (e.key === "Enter") void doSetRemote();
                     if (e.key === "Escape") setRemoteDraft(null);
                   }}

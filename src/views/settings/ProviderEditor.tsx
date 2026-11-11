@@ -44,6 +44,7 @@ import {
   recommendedCatalogModels,
   saveProvider,
 } from "../../lib/api";
+import { isImeComposing } from "../../lib/ime";
 import { PROTOCOLS, presetFor, UNKNOWN_PROTOCOL_HINT } from "../../lib/protocols";
 import { toastError } from "../../lib/toast";
 import { useAsync } from "../../lib/useAsync";
@@ -543,6 +544,7 @@ export function ProviderEditor({
             value={customTool}
             onChange={(e) => setCustomTool(e.target.value)}
             onKeyDown={(e) => {
+              if (isImeComposing(e)) return;
               if (e.key === "Enter") {
                 e.preventDefault();
                 addTool(customTool);

@@ -14,6 +14,7 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { isImeComposing } from "../../lib/ime";
 import { ASSISTANT_CHAT_ID, export_, fork, rename } from "../../lib/sessionOps";
 import { openSettings } from "../../lib/settingsTab";
 import { ticketMarkTitle } from "../../lib/ticketUi";
@@ -269,7 +270,7 @@ function ChatHeader() {
           onChange={(e) => setDraft(e.target.value)}
           onBlur={() => finish(true)}
           onKeyDown={(e) => {
-            if (e.nativeEvent.isComposing) return;
+            if (isImeComposing(e)) return;
             if (e.key === "Enter") finish(true);
             if (e.key === "Escape") finish(false);
           }}

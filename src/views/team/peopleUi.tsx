@@ -3,7 +3,7 @@
 // 这些在任务卡、任务抽屉、动态、指派框里反复出现。集中在一处，头像配色与「不认识时
 // 显示什么」的说法才不会各处不一样。
 
-import { Check, ChevronDown, LoaderCircle, UserPlus, UserRound } from "lucide-react";
+import { Check, LoaderCircle, Pencil, UserPlus, UserRound } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Modal } from "../../components/ui/Panel";
 import {
@@ -13,6 +13,7 @@ import {
   teamJoin,
   teamRenameMe,
 } from "../../lib/api";
+import { isImeComposing } from "../../lib/ime";
 import { avatarHue } from "../../lib/teamUi";
 import { toastError, toastOk } from "../../lib/toast";
 import { useStore } from "../../store";
@@ -275,6 +276,7 @@ export function JoinDialog({ cwd, onClose }: { cwd: string; onClose: () => void 
           setAsExisting(null);
         }}
         onKeyDown={(e) => {
+          if (isImeComposing(e)) return;
           if (e.key === "Enter") void submit();
         }}
         placeholder={gitName || "比如：徐侨"}
@@ -376,6 +378,7 @@ export function IdentityChip({ cwd, onJoin }: { cwd: string; onJoin: () => void 
           onChange={(e) => setDraft(e.target.value)}
           onBlur={() => void save()}
           onKeyDown={(e) => {
+            if (isImeComposing(e)) return;
             if (e.key === "Enter") void save();
             if (e.key === "Escape") setEditing(false);
           }}
@@ -396,7 +399,9 @@ export function IdentityChip({ cwd, onJoin }: { cwd: string; onJoin: () => void 
     >
       <PersonAvatar person={me.id} size={14} />
       {me.name}
-      <ChevronDown size={10} className="opacity-60" />
+      {/* 这里是「改称呼」，不是下拉菜单 —— 用 › 或 ⌄ 会让人以为点开能切到别的身份，
+          而团队里的身份就一个。铅笔是唯一说得通的那个图。 */}
+      <Pencil size={10} className="opacity-60" />
     </button>
   );
 }

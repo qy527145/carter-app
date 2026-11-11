@@ -14,6 +14,7 @@ import { AtSign, Send, Sparkles, UserRound, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { type TeamEvent, type TeamGoal, type TeamTask, teamAct } from "../../lib/api";
+import { isImeComposing } from "../../lib/ime";
 import {
   eventSender,
   eventVerb,
@@ -420,6 +421,8 @@ export function Composer({
           track(e.target.value, e.target.selectionStart);
         }}
         onKeyDown={(e) => {
+          // 输入法组字中的回车/方向键只是选词，不进补全、也不发送。
+          if (isImeComposing(e)) return;
           if (matches.length > 0) {
             if (e.key === "ArrowDown") {
               e.preventDefault();

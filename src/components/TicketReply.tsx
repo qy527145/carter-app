@@ -7,6 +7,7 @@
 import { Check, EyeOff } from "lucide-react";
 import { useState } from "react";
 import { type AssistantTicket, assistantTicketAction } from "../lib/api";
+import { isImeComposing } from "../lib/ime";
 import { toastError, toastOk } from "../lib/toast";
 import { Button } from "./ui/Button";
 import { Input } from "./ui/Input";
@@ -96,8 +97,7 @@ export function TicketReply({ t, withDone = false }: { t: AssistantTicket; withD
           onChange={(e) => onType(e.target.value)}
           onKeyDown={(e) => {
             // 输入法组字中的回车只是上屏，不发送。
-            // WebKit 下确认那一下 isComposing 可能已是 false，但 keyCode 仍是 229。
-            if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+            if (isImeComposing(e)) return;
             if (e.key === "Enter") send(pending);
           }}
           placeholder={

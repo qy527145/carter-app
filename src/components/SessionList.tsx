@@ -19,6 +19,7 @@ import { useRef, useState } from "react";
 import type { SessionRow } from "../lib/api";
 import { copyText } from "../lib/clipboard";
 import { bucketOf, fmtBytes, fullTime, relTime } from "../lib/format";
+import { isImeComposing } from "../lib/ime";
 import { displayName, modelTitle, useModelCatalog } from "../lib/modelLabel";
 import * as ops from "../lib/sessionOps";
 import { ticketMarkTitle } from "../lib/ticketUi";
@@ -61,7 +62,7 @@ function InlineRename({
       onBlur={() => finish(true)}
       onKeyDown={(e) => {
         e.stopPropagation();
-        if (e.nativeEvent.isComposing) return;
+        if (isImeComposing(e)) return;
         if (e.key === "Enter") {
           e.preventDefault();
           finish(true);

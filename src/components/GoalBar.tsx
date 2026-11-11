@@ -8,6 +8,7 @@
 import { CircleCheck, CircleDashed, CirclePause, CircleSlash, Pencil, Play, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { GoalView } from "../lib/api";
+import { isImeComposing } from "../lib/ime";
 import * as ops from "../lib/sessionOps";
 import { useStore } from "../store";
 import { IconButton } from "./ui/Button";
@@ -67,6 +68,7 @@ export function GoalBar() {
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
                 onKeyDown={(e) => {
+                  if (isImeComposing(e)) return;
                   if (e.key === "Enter") submit();
                   if (e.key === "Escape") setEditing(false);
                 }}

@@ -49,6 +49,7 @@ import {
   setSkillsEnabled,
   toggleSkill,
 } from "../../lib/api";
+import { isImeComposing } from "../../lib/ime";
 import { toastError, toastOk } from "../../lib/toast";
 import { useAsync } from "../../lib/useAsync";
 import { useStore } from "../../store";
@@ -304,7 +305,10 @@ function ScanRootsCard({
             mono
             value={custom}
             onChange={(e) => setCustom(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && submitCustom()}
+            onKeyDown={(e) => {
+              if (isImeComposing(e)) return;
+              if (e.key === "Enter") submitCustom();
+            }}
             placeholder="例如 D:\skills，也可以用 ~ 开头"
             disabled={busy}
           />

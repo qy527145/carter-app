@@ -69,6 +69,7 @@ import {
   type Verdict,
 } from "../../lib/api";
 import { fullTime, relTime } from "../../lib/format";
+import { isImeComposing } from "../../lib/ime";
 import { useModelCatalog } from "../../lib/modelLabel";
 import {
   ASSISTANT_CHAT_ID,
@@ -992,6 +993,7 @@ function MemorySection({
             placeholder="例如：周末别打扰我，线上故障除外"
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {
+              if (isImeComposing(e)) return;
               if (e.key === "Enter") add();
               if (e.key === "Escape") setAdding(false);
             }}
@@ -1067,6 +1069,7 @@ function MemoryRow({ m }: { m: AssistantMemory }) {
             onChange={(e) => setText(e.target.value)}
             onBlur={save}
             onKeyDown={(e) => {
+              if (isImeComposing(e)) return;
               if (e.key === "Enter") save();
               if (e.key === "Escape") {
                 setText(m.text);

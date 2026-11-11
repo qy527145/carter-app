@@ -13,6 +13,7 @@
 import { ChevronRight, Globe, Send, Square, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
+import { isImeComposing } from "../lib/ime";
 import { displayName, modelTitle, useModelCatalog } from "../lib/modelLabel";
 import * as ops from "../lib/sessionOps";
 import { useStore } from "../store";
@@ -155,7 +156,7 @@ export function SidePanel() {
             onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => {
               // 输入法组字中的回车只是上屏，不发送
-              if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+              if (isImeComposing(e)) return;
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
                 send();
