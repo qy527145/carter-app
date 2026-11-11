@@ -17,7 +17,16 @@ import { Input } from "./ui/Input";
  */
 export function TicketReply({ t, withDone = false }: { t: AssistantTicket; withDone?: boolean }) {
   const [text, setText] = useState("");
+  // 点中的候选。点一下只是「选上」，还得按发送才算答 —— 这些候选就是给用户拍板的，
+  // 误点一下就替人做了决定，收不回来。
+  const [picked, setPicked] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  const options = t.status === "needs_user" ? (t.options ?? []) : [];
+  // 状态变了之后候选可能整组没了，留下的选中项也不算数。
+  const choice = picked && options.includes(picked) ? picked : null;
+  /** 发出去的就一条：选中的候选，或者自己写的那句话。 */
+  const pending = choice ?? text.trim();
 
   const send = (reply: string) => {
     if (!reply.trim() || busy) return;
@@ -26,9 +35,22 @@ export function TicketReply({ t, withDone = false }: { t: AssistantTicket; withD
       .then(() => {
         toastOk("已送进工单");
         setText("");
+        setPicked(null);
       })
       .catch(toastError)
       .finally(() => setBusy(false));
+  };
+
+  /** 再点一次取消选中；选候选和写字只发一个，所以点候选时把输入框清空。 */
+  const pick = (o: string) => {
+    setPicked((cur) => (cur === o ? null : o));
+    setText("");
+  };
+
+  /** 输入框有字时清掉候选，二者只能发一个。 */
+  const onType = (v: string) => {
+    setText(v);
+    if (v) setPicked(null);
   };
 
   const done = () => {
@@ -49,14 +71,20 @@ export function TicketReply({ t, withDone = false }: { t: AssistantTicket; withD
       .finally(() => setBusy(false));
   };
 
-  const options = t.status === "needs_user" ? (t.options ?? []) : [];
-
   return (
     <div className="space-y-1.5">
       {options.length > 0 && (
         <div className="flex flex-wrap gap-1.5">
           {options.map((o) => (
-            <Button key={o} size="sm" disabled={busy} onClick={() => send(o)} title={o}>
+            <Button
+              key={o}
+              size="sm"
+              disabled={busy}
+              variant={choice === o ? "primary" : "secondary"}
+              onClick={() => pick(o)}
+              title={o}
+            >
+              {choice === o && <Check size={11} className="shrink-0" />}
               <span className="max-w-[28rem] truncate">{o}</span>
             </Button>
           ))}
@@ -65,9 +93,12 @@ export function TicketReply({ t, withDone = false }: { t: AssistantTicket; withD
       <div className="flex gap-2">
         <Input
           value={text}
-          onChange={(e) => setText(e.target.value)}
+          onChange={(e) => onType(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.nativeEvent.isComposing) send(text);
+            // 输入法组字中的回车只是上屏，不发送。
+            // WebKit 下确认那一下 isComposing 可能已是 false，但 keyCode 仍是 229。
+            if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+            if (e.key === "Enter") send(pending);
           }}
           placeholder={
             options.length > 0
@@ -78,7 +109,12 @@ export function TicketReply({ t, withDone = false }: { t: AssistantTicket; withD
           }
           className="text-xs"
         />
-        <Button size="sm" disabled={busy || !text.trim()} onClick={() => send(text)}>
+        <Button
+          size="sm"
+          variant={pending ? "primary" : "secondary"}
+          disabled={busy || !pending}
+          onClick={() => send(pending)}
+        >
           发送
         </Button>
         {withDone && (
