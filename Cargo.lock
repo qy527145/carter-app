@@ -618,7 +618,7 @@ dependencies = [
 
 [[package]]
 name = "carter-app"
-version = "0.1.9"
+version = "0.2.0"
 dependencies = [
  "carter",
  "carter-app-core",
@@ -639,7 +639,7 @@ dependencies = [
 
 [[package]]
 name = "carter-app-core"
-version = "0.1.9"
+version = "0.2.0"
 dependencies = [
  "arc-swap",
  "async-trait",
