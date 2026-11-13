@@ -69,6 +69,12 @@ export type Item =
        */
       agents?: AgentRun[];
       /**
+       * 命令还在跑时已经产出的输出（`tool_output` 增量拼起来）。结果到达后不再用，
+       * 也不进历史。只保留末尾 {@link LIVE_OUTPUT_MAX} 个字符 —— 一条刷屏的构建
+       * 不该把 store 撑大。
+       */
+      liveOutput?: string;
+      /**
        * 这条调用属于哪条会话。卡片上的「中断命令 / 转后台」要按它回传 ——
        * 侧边聊天的卡片不能用主对话的 id 去查。
        *
@@ -110,6 +116,9 @@ export type Turn =
   // `auto` = 这一轮是长任务目标自动推起来的（用户没说话），界面上画一条分隔而不是
   // 假装用户又发了一条。
   | { role: "assistant"; turn?: number; items: Item[]; auto?: boolean };
+
+/** 实时输出在界面上保留的末尾长度（字符）。 */
+export const LIVE_OUTPUT_MAX = 16 * 1024;
 
 /** 模型提问，等用户填完一次性提交。 */
 export type PendingForm = { id: number; questions: AskQuestion[] };
@@ -515,6 +524,19 @@ export function reduceConv(c: Conv, e: SessionEvent, sessionId?: string): Partia
           content: e.content,
           elapsedMs: e.elapsed_ms,
         }),
+      };
+    case "tool_output":
+      return {
+        turns: withAssistant(c.turns, (items) =>
+          items.map((it) => {
+            if (it.kind !== "tool" || it.callId !== e.call_id || it.result) return it;
+            const out = (it.liveOutput ?? "") + e.text;
+            return {
+              ...it,
+              liveOutput: out.length > LIVE_OUTPUT_MAX ? out.slice(-LIVE_OUTPUT_MAX) : out,
+            };
+          }),
+        ),
       };
     case "agent_progress":
       return {

@@ -373,6 +373,10 @@ pub enum SessionEvent {
         name: String,
         args: Value,
     },
+    /// 工具还在跑时的一段输出（增量）。目前只有 bash 发，约每 150ms 一批。
+    ///
+    /// 只给界面看，不进历史、不回放：结果到达时 `ToolFinished.content` 取代它。
+    ToolOutput { call_id: String, text: String },
     /// 工具执行结束。与 `ToolStarted` 按 `call_id` 配对。
     ///
     /// `content` 是工具回灌给模型的那段正文（可能被截断，截断处有明确标注）。

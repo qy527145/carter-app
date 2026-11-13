@@ -51,6 +51,11 @@ pub enum ToolEvent {
         content: String,
         elapsed_ms: u64,
     },
+    /// 工具还在跑时产出的一段输出（**增量**，按时间先后拼起来就是到目前为止的输出）。
+    ///
+    /// 目前只有 `bash` 发：一条跑几分钟的构建，结束前卡片上什么都看不到的话，
+    /// 用户分不清它是在干活还是卡死了。结果到达时以 `Finished` 的正文为准。
+    Output { call_id: String, text: String },
     /// `agent` 工具里那几个子 agent 的进度（整表快照）。
     ///
     /// 不单独为「开始 / 结束」发事件：一张卡片上同时有好几行，整表替换比逐行增量
@@ -188,7 +193,21 @@ impl Tool for Recorded {
         // 「用户按了中断 / 转后台」。包装层是唯一知道 `call_id` 的地方 —— 界面
         // 按钮回传的就是这个 id。
         let mut res = match &self.running {
-            Some(running) => running.scope(&call_id, self.inner.execute(args)).await,
+            Some(running) => {
+                let output: super::control::OutputSink = {
+                    let tx = self.tx.clone();
+                    let call_id = call_id.clone();
+                    Arc::new(move |text| {
+                        tx(ToolEvent::Output {
+                            call_id: call_id.clone(),
+                            text,
+                        })
+                    })
+                };
+                running
+                    .scope(&call_id, Some(output), self.inner.execute(args))
+                    .await
+            }
             None => self.inner.execute(args).await,
         };
         // 这一轮进行中到的跨会话来信，搭这条结果送进去（见 `peers.rs`）。界面卡片上

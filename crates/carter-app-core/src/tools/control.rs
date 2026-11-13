@@ -41,7 +41,10 @@ pub fn current() -> Option<Arc<ToolControl>> {
     CURRENT.try_with(|c| c.clone()).ok()
 }
 
-/// 单次工具调用的两个开关。
+/// 工具执行中途产出的输出往哪送（界面卡片上的实时输出）。参数是**增量**文本。
+pub type OutputSink = Arc<dyn Fn(String) + Send + Sync>;
+
+/// 单次工具调用的两个开关，外加一个实时输出出口。
 ///
 /// 用 `CancelToken` 而不是 oneshot：调用方只需要「按一下」，不需要传值；而且它
 /// 天然支持「按之前工具已经结束了」—— 置位无害。
@@ -51,6 +54,8 @@ pub struct ToolControl {
     call_id: String,
     interrupt: CancelToken,
     background: CancelToken,
+    /// 实时输出。`None` = 没人看（单测、设置页展示），工具就不必攒增量。
+    output: Option<OutputSink>,
 }
 
 impl ToolControl {
@@ -67,6 +72,20 @@ impl ToolControl {
     /// 等「转后台」被按下。
     pub async fn backgrounded(&self) {
         self.background.cancelled().await
+    }
+
+    /// 有没有人接实时输出。
+    pub fn streams_output(&self) -> bool {
+        self.output.is_some()
+    }
+
+    /// 推一段实时输出（增量）。没人接时什么都不做。
+    pub fn emit_output(&self, text: String) {
+        if let Some(out) = &self.output
+            && !text.is_empty()
+        {
+            out(text);
+        }
     }
 
     pub fn is_interrupted(&self) -> bool {
@@ -95,9 +114,10 @@ impl RunningTools {
         Arc::new(Self::default())
     }
 
-    fn register(&self, call_id: &str) -> Arc<ToolControl> {
+    fn register(&self, call_id: &str, output: Option<OutputSink>) -> Arc<ToolControl> {
         let control = Arc::new(ToolControl {
             call_id: call_id.to_string(),
+            output,
             ..Default::default()
         });
         self.entries
@@ -132,11 +152,13 @@ impl RunningTools {
     }
 
     /// 把控制句柄放进 task-local 执行一段工具调用。
-    pub(crate) async fn scope<F, T>(&self, call_id: &str, fut: F) -> T
+    ///
+    /// `output` 是这条调用的实时输出出口（见 [`ToolControl::emit_output`]）。
+    pub(crate) async fn scope<F, T>(&self, call_id: &str, output: Option<OutputSink>, fut: F) -> T
     where
         F: std::future::Future<Output = T>,
     {
-        let control = self.register(call_id);
+        let control = self.register(call_id, output);
         let out = CURRENT.scope(control, fut).await;
         self.finish(call_id);
         out
@@ -154,7 +176,7 @@ mod tests {
 
         let r = running.clone();
         let task = tokio::spawn(async move {
-            r.scope("t0", async move {
+            r.scope("t0", None, async move {
                 let c = current().expect("在 scope 里必须拿得到控制句柄");
                 tx.send(()).ok();
                 c.interrupted().await;
@@ -177,7 +199,7 @@ mod tests {
     #[tokio::test]
     async fn the_control_handle_is_scoped_to_one_call() {
         let running = RunningTools::new();
-        running.scope("t0", async {}).await;
+        running.scope("t0", None, async {}).await;
         assert!(current().is_none());
     }
 

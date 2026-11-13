@@ -318,6 +318,15 @@ impl Tool for PlatformBash {
         // 两条管道各交给一个读取任务。**不能等命令结束再收输出**：
         // 一是管道写满会把子进程卡死；二是「转后台」之后还得继续往日志里写。
         let live = Arc::new(LiveOutput::default());
+        // 单条命令的控制（界面 bash 卡片上的「中断命令 / 转后台」与实时输出）。
+        // 没有经过记录包装层时是 `None`（设置页展示、单测直接调工具）。
+        let control = super::control::current();
+        // 实时输出：有人看才攒增量，按节拍推给界面。这次调用一返回（无论怎么结束）
+        // 推送任务就随 guard 一起停掉 —— 之后由结果正文接管。
+        let _streamer = control
+            .as_ref()
+            .filter(|c| c.streams_output())
+            .map(|c| spawn_streamer(live.clone(), c.clone()));
         let mut readers = Some([
             spawn_reader(child.stdout.take(), live.clone(), Which::Stdout),
             spawn_reader(child.stderr.take(), live.clone(), Which::Stderr),
@@ -337,9 +346,6 @@ impl Tool for PlatformBash {
             });
         }
 
-        // 单条命令的控制（界面 bash 卡片上的「中断命令 / 转后台」）。
-        // 没有经过记录包装层时是 `None`（设置页展示、单测直接调工具）。
-        let control = super::control::current();
         let wait_interrupt = async {
             match control.as_ref() {
                 Some(c) => c.interrupted().await,
@@ -528,6 +534,9 @@ struct Live {
     /// 转到后台之后才有值。有它之后就不再攒内存了 —— 一条跑几个小时的后台
     /// 服务不该把全部输出留在进程里。
     log: Option<std::fs::File>,
+    /// 还没推给界面的输出，两路按到达顺序混在一起（终端里看到的就是这个顺序）。
+    /// 只在有人接实时输出时才攒，见 [`spawn_streamer`]。
+    pending: Option<Vec<u8>>,
 }
 
 impl LiveOutput {
@@ -538,10 +547,46 @@ impl LiveOutput {
             let _ = f.write_all(bytes);
             return;
         }
+        if let Some(p) = g.pending.as_mut() {
+            p.extend_from_slice(bytes);
+        }
         match which {
             Which::Stdout => g.stdout.extend_from_slice(bytes),
             Which::Stderr => g.stderr.extend_from_slice(bytes),
         }
+    }
+
+    /// 打开实时输出的攒批。
+    fn enable_streaming(&self) {
+        self.inner
+            .lock()
+            .unwrap()
+            .pending
+            .get_or_insert_with(Vec::new);
+    }
+
+    /// 取走一批还没推的输出，解成文本。
+    ///
+    /// 结尾半个 UTF-8 字符留到下一批 —— 管道按字节切块，一个汉字可能被劈成两半，
+    /// 各自 lossy 解出来就是两个 `�`。
+    fn take_pending(&self) -> String {
+        let mut g = self.inner.lock().unwrap();
+        let Some(p) = g.pending.as_mut() else {
+            return String::new();
+        };
+        if p.is_empty() {
+            return String::new();
+        }
+        let keep = match std::str::from_utf8(p) {
+            Ok(_) => 0,
+            // 只是结尾不完整（`error_len() == None`）：留下那几个字节。
+            Err(e) if e.error_len().is_none() => p.len() - e.valid_up_to(),
+            // 真的不是 UTF-8（Windows 的 GBK 输出等）：整批交给 `decode`。
+            Err(_) => 0,
+        };
+        let rest = p.split_off(p.len() - keep);
+        let chunk = std::mem::replace(p, rest);
+        decode(&chunk)
     }
 
     fn snapshot(&self) -> (Vec<u8>, Vec<u8>) {
@@ -588,6 +633,31 @@ impl ExitSlot {
         }
         self.target = Some(shell);
     }
+}
+
+/// 实时输出的推送节拍。太密了界面每帧都在重排，太疏了看着一顿一顿的。
+const STREAM_TICK: Duration = Duration::from_millis(150);
+
+/// 推送任务的句柄：drop 即停。
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// 起一个推送任务：每隔 [`STREAM_TICK`] 把新到的输出作为增量推给界面。
+fn spawn_streamer(live: Arc<LiveOutput>, control: Arc<super::control::ToolControl>) -> AbortOnDrop {
+    live.enable_streaming();
+    AbortOnDrop(tokio::spawn(async move {
+        let mut tick = tokio::time::interval(STREAM_TICK);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            control.emit_output(live.take_pending());
+        }
+    }))
 }
 
 /// 起一个读取任务，把管道里的字节喂给 [`LiveOutput`]。
@@ -741,6 +811,51 @@ mod tests {
         PlatformBash::new(ShellCwd::new(cwd), CancelToken::new(), None, "test")
     }
 
+    /// 管道把一个汉字劈成两半时，前半个字节要留到下一批，不能各自解成 `�`。
+    #[test]
+    fn a_split_utf8_char_waits_for_its_other_half() {
+        let live = LiveOutput::default();
+        live.enable_streaming();
+        let bytes = "中文".as_bytes();
+        live.push(Which::Stdout, &bytes[..4]);
+        assert_eq!(live.take_pending(), "中");
+        live.push(Which::Stdout, &bytes[4..]);
+        assert_eq!(live.take_pending(), "文");
+        assert_eq!(live.take_pending(), "");
+    }
+
+    /// 命令还在跑时，已经产出的输出就要推出来 —— 不是等命令结束才一次性给。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn output_streams_while_the_command_is_still_running() {
+        use super::super::control::{OutputSink, RunningTools};
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let sink: OutputSink = Arc::new(move |t| {
+            let _ = tx.send(t);
+        });
+        let running = RunningTools::new();
+        let tool = Arc::new(tool(std::env::temp_dir()));
+        let task = tokio::spawn(async move {
+            running
+                .scope("t0", Some(sink), async move {
+                    tool.execute(json!({"command": "echo early; sleep 2; echo late"}))
+                        .await
+                })
+                .await
+        });
+
+        let first = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("命令结束前就该收到第一段输出")
+            .unwrap();
+        assert!(first.contains("early"), "{first}");
+        assert!(!first.contains("late"), "{first}");
+
+        let res = task.await.unwrap();
+        assert!(res.content.contains("late"), "{}", res.content);
+    }
+
     #[tokio::test]
     async fn runs_a_trivial_command_in_the_session_cwd() {
         let dir = std::env::temp_dir();
@@ -821,7 +936,7 @@ mod tests {
         let tool = Arc::new(tool(std::env::temp_dir()));
         let r = running.clone();
         let task = tokio::spawn(async move {
-            r.scope("t0", async move {
+            r.scope("t0", None, async move {
                 tool.execute(json!({"command": "sleep 30"})).await
             })
             .await
@@ -858,7 +973,7 @@ mod tests {
         let running = RunningTools::new();
         let r = running.clone();
         let task = tokio::spawn(async move {
-            r.scope("t0", async move {
+            r.scope("t0", None, async move {
                 tool.execute(json!({"command": "echo first-line; sleep 30"}))
                     .await
             })

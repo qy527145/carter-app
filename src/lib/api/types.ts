@@ -97,6 +97,11 @@ export type SessionEvent =
       content: string;
       elapsed_ms: number;
     }
+  /**
+   * 工具还在跑时的一段输出（**增量**，目前只有 bash 发）。只给界面看，
+   * `tool_finished` 到达后以它的 `content` 为准。
+   */
+  | { type: "tool_output"; call_id: string; text: string }
   /** `agent` 工具里几个子 agent 的进度（整表快照，按 `call_id` 配对那张卡片）。 */
   | { type: "agent_progress"; call_id: string; agents: AgentRun[] }
   | { type: "todo_updated"; todos: TodoView[] }

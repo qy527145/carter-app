@@ -42,7 +42,7 @@ import {
   Wrench,
   X,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { sendCommand } from "../../lib/api";
 import { openSession } from "../../lib/sessionOps";
@@ -175,10 +175,29 @@ function Status({ item }: { item: ToolItem }) {
   );
 }
 
-/** 结果正文。等宽、可滚动、保留原始换行 —— 输出是给眼睛扫的。 */
-function Output({ text }: { text: string }) {
+/**
+ * 结果正文。等宽、可滚动、保留原始换行 —— 输出是给眼睛扫的。
+ *
+ * `follow`：实时输出时贴底跟随（像终端一样看最新的几行）；用户往上翻了就不再拽回去，
+ * 翻回底部再接着跟。
+ */
+function Output({ text, follow = false }: { text: string; follow?: boolean }) {
+  const ref = useRef<HTMLPreElement>(null);
+  const pinned = useRef(true);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 新输出到达时要重新贴底，`text` 就是触发条件
+  useEffect(() => {
+    const el = ref.current;
+    if (follow && el && pinned.current) el.scrollTop = el.scrollHeight;
+  }, [text, follow]);
   return (
-    <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-all text-[11px] leading-relaxed text-ink">
+    <pre
+      ref={ref}
+      onScroll={(e) => {
+        const el = e.currentTarget;
+        pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 8;
+      }}
+      className="max-h-72 overflow-auto whitespace-pre-wrap break-all text-[11px] leading-relaxed text-ink"
+    >
       {text}
     </pre>
   );
@@ -248,6 +267,7 @@ function BashCard({ item }: { item: ToolItem }) {
   const command = str(item.args, "command") ?? "";
   const r = item.result;
   const parsed = r ? bashBody(r.content) : null;
+  const live = !r ? (item.liveOutput ?? "") : "";
   // 卡片自己记着属于哪条会话 —— 侧边聊天的卡片不能用主对话的 id。
   const sessionId = item.sessionId ?? null;
 
@@ -297,7 +317,9 @@ function BashCard({ item }: { item: ToolItem }) {
           </div>
         ) : undefined
       }
-      defaultOpen={false}
+      // 运行中一有输出就展开：跑着的命令最想看的就是它在干什么。结果到了收回去，
+      // 由用户决定要不要再看（失败照旧强制展开）。
+      defaultOpen={!r && live.length > 0}
       forceOpen={r ? !r.ok : false}
     >
       {/* 输入、输出各占一段、中间一条分隔线：合在一起的话，长命令折行后
@@ -323,6 +345,8 @@ function BashCard({ item }: { item: ToolItem }) {
           ) : (
             <span className="text-[11px] text-dim">（无输出）</span>
           )
+        ) : live ? (
+          <Output text={live} follow />
         ) : (
           <span className="text-[11px] text-dim">运行中…</span>
         )}

@@ -229,7 +229,7 @@ mod start_session_tests {
             match ev {
                 ToolEvent::Started { call_id, .. } => started.push(call_id),
                 ToolEvent::Finished { .. } => finished += 1,
-                ToolEvent::Agent { .. } => {}
+                ToolEvent::Agent { .. } | ToolEvent::Output { .. } => {}
             }
         }
         assert_eq!(started.len(), 1, "一次调用只该画一张卡：{started:?}");
@@ -351,7 +351,7 @@ mod live_commands {
         let running = ctx.running.clone();
         let task = tokio::spawn(async move {
             running
-                .scope("call_1", async move {
+                .scope("call_1", None, async move {
                     let control = crate::tools::control::current().expect("scope 里应有控制句柄");
                     tx.send(()).ok();
                     control.backgrounded().await;

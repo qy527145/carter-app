@@ -474,6 +474,7 @@ pub(super) fn emit_tool_event(
                 content,
                 elapsed_ms,
             },
+            ToolEvent::Output { call_id, text } => SessionEvent::ToolOutput { call_id, text },
             ToolEvent::Agent { call_id, agents } => SessionEvent::AgentProgress { call_id, agents },
         };
         shell.emit(AppEvent::Session {
