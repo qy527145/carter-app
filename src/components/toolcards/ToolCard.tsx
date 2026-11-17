@@ -584,31 +584,8 @@ function ReadCard({ item }: { item: ToolItem }) {
   );
 }
 
-function TaskCard({ item }: { item: ToolItem }) {
-  const prompt = str(item.args, "prompt") ?? str(item.args, "prompts") ?? "";
-  const r = item.result;
-  return (
-    <Card
-      tone="violet"
-      icon={<Wrench size={11} />}
-      title="task"
-      subtitle="子 agent"
-      status={<Status item={item} />}
-      defaultOpen={!item.result}
-      forceOpen={r ? !r.ok : false}
-    >
-      {prompt && (
-        <div className="mb-2 whitespace-pre-wrap break-words text-[11px] leading-relaxed text-dim">
-          {prompt}
-        </div>
-      )}
-      {r && <Output text={r.content} />}
-    </Card>
-  );
-}
-
 /**
- * `agent`：主对话派出去的几个子 agent。
+ * `task`：主对话派出去的几个子 agent（carter 的并发 task 工具）。
  *
  * 折叠时看得到每个子 agent 的标题、状态、当前工具 —— 跑十几分钟的时候，
  * 「谁还活着、卡在哪」是唯一想看的东西。展开是「结论」：每个子 agent 最近一段
@@ -630,7 +607,7 @@ function AgentCard({ item }: { item: ToolItem }) {
     <Card
       tone="violet"
       icon={<Users size={11} />}
-      title="agent"
+      title="task"
       subtitle={summary}
       status={<Status item={item} />}
       defaultOpen={!item.result}
@@ -762,7 +739,7 @@ type CardProps = { item: ToolItem; isLast?: boolean; cwd?: string };
 
 const DISPATCH: Record<string, (p: CardProps) => React.ReactElement> = {
   bash: BashCard,
-  agent: AgentCard,
+  task: AgentCard,
   todo_write: TodoCard,
   glob: (p) => <SearchCard {...p} tone="blue" icon={<Folder size={11} />} title="glob" />,
   grep: (p) => <SearchCard {...p} tone="green" icon={<Search size={11} />} title="grep" />,
@@ -775,7 +752,6 @@ const DISPATCH: Record<string, (p: CardProps) => React.ReactElement> = {
   save_memory: (p) => (
     <FileCard {...p} tone="pink" icon={<FileText size={11} />} title="save_memory" />
   ),
-  task: TaskCard,
   skill: (p) => <FileCard {...p} tone="violet" icon={<Wrench size={11} />} title="skill" />,
 };
 

@@ -53,7 +53,7 @@ carter / llm_adapt_core     底层的 agent 循环、工具、会话、协议编
 | `view.rs` | 会话历史 → 前端展示形态 |
 | `history.rs` | 历史自愈：补上「有 tool_use 没有 tool_result」的断口 |
 | `title.rs` / `timeline.rs` / `prompts.rs` / `images.rs` | 标题、每轮起止时刻、用户原文、图片：都只服务界面 |
-| `side.rs` | 侧边聊天（`/btw`） |
+| `side.rs` | 侧边聊天（`/btw`）：会话管理；转录与说明在 `carter::side` |
 | `peers.rs` + `tools/peer.rs` | 跨会话消息 |
 | `protocol.rs` | App ↔ 前端 的 IPC 契约（事件与视图类型） |
 
@@ -61,11 +61,10 @@ carter / llm_adapt_core     底层的 agent 循环、工具、会话、协议编
 
 | 文件 | 职责 |
 | ---- | ---- |
-| `tools/mod.rs` | 工具池装配：按会话 cwd 包路径解析、套用户开关、外包记录层。**bash / grep / ask_user / 后台命令都在 carter 里**，这里不再各留一份 |
+| `tools/mod.rs` | 工具池装配：按会话 cwd 包路径解析、套用户开关、外包记录层。**bash / grep / ask_user / 后台命令 / 并发 task / goal_update 都在 carter 里**，这里只重建 `task` 的工具快照让子 agent 也遵守开关 |
 | `tools/multi_skill.rs` | 多根 `skill` 工具 |
-| `tools/agent.rs` | 并发子 agent |
 | `tools/cwd.rs` / `control.rs` / `record.rs` | 相对路径解析、按调用控制（实现 carter 的 `CommandControl`）、调用记录 |
-| `tools/goal_update.rs` / `schedule.rs` | 目标汇报、定时任务 |
+| `tools/schedule.rs` | 定时任务 |
 
 ### 配置与模型
 
@@ -114,7 +113,7 @@ carter / llm_adapt_core     底层的 agent 循环、工具、会话、协议编
 | ---- | ---- |
 | `changes.rs` | 观察文件系统得出「这一轮改了哪些文件」 |
 | `capture.rs` / `inspect.rs` / `preview.rs` | 原始报文捕获、语义视图、变更预览 |
-| `goal.rs` / `schedules.rs` / `memory_suggest.rs` | 长任务状态机、定时任务、记忆建议 |
+| `schedules.rs` / `memory_suggest.rs` | 定时任务、记忆建议（长任务目标的状态机在 `carter::goal`） |
 
 ## Tauri 层（`src-tauri/`）
 

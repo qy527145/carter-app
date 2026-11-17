@@ -36,7 +36,6 @@ pub mod catalog;
 pub mod changes;
 pub mod config_edit;
 pub mod connectors;
-pub mod goal;
 pub mod history;
 pub mod images;
 pub mod input;
@@ -69,11 +68,12 @@ pub mod view;
 
 pub use app_settings::AppSettings;
 pub use capture::{CaptureHook, CaptureStore, ExchangeBrief, ExchangeRecord};
+/// 长任务目标的数据类型就是 carter 的那份（状态机、持久化、决策都在 carter）。
+pub use carter::goal::{self, Goal, GoalStatus};
 pub use catalog::{CatalogEntry, CatalogHit, MetaMatch, ModelRow};
 pub use changes::{FileDiff, TurnFiles};
 pub use config_edit::{McpDraft, ModelDraft, ProviderDetail, ProviderDraft};
 pub use connectors::{AuthState, CliState, ConnectorRow, SkillState};
-pub use goal::{Goal, GoalStatus};
 pub use input::{CommandRow, FileKind};
 pub use preview::FilePreview;
 pub use protocol::{AppEvent, Command, GoalView, SessionEvent, TodoView, ToolUsageView, UsageView};

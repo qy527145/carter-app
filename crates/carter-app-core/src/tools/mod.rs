@@ -43,13 +43,11 @@
 //! 本应用还有一份界面上的开关，存在 `~/.carter-app/settings.json`，在装配之后再挑一遍
 //! （[`filter_tools`]）。界面上要写清楚：这一份 carter CLI 读不到。
 
-pub mod agent;
 pub mod assistant_config;
 pub mod assistant_report;
 pub mod assistant_ticket;
 pub mod control;
 pub mod cwd;
-pub mod goal_update;
 pub mod multi_skill;
 pub mod peer;
 pub mod record;
@@ -70,17 +68,16 @@ use tokio::sync::mpsc;
 use carter::tools::{BackgroundShells, EmbeddedGrep, PlatformBash, ShellCwd};
 
 use crate::app_settings::AppSettings;
-use crate::goal::GoalSignal;
 use crate::skills::Scan;
-use agent::AgentTool;
 use assistant_config::{AssistantConfigTool, Kind as ConfigKind};
 use assistant_report::AssistantReportTool;
 use assistant_ticket::{
     AssistantMemoryTool, AssistantRecallTool, AssistantTicketTool, Kind as TicketKind,
 };
+use carter::goal::GoalSignal;
+use carter::tools::GoalUpdateTool;
 use control::RunningTools;
 use cwd::CwdScoped;
-use goal_update::GoalUpdateTool;
 use multi_skill::MultiRootSkill;
 use record::{Recorded, ToolTx};
 use schedule::ScheduleTool;
@@ -117,7 +114,7 @@ pub struct ToolBuildArgs {
     pub shell_cwd: Option<Arc<ShellCwd>>,
     /// 正在跑的工具表。界面按 `call_id` 对单条命令做「中断 / 转后台」。
     pub running: Option<Arc<RunningTools>>,
-    /// 长任务目标的信号格子。恒常传 —— `goal_update` 是恒常注册的，见 `goal_update.rs`。
+    /// 长任务目标的信号格子。恒常传 —— `goal_update` 是恒常注册的（carter 的实现）。
     pub goal_signal: Arc<GoalSignal>,
     /// 定时任务表。`schedule` 工具通过对话增删改它。
     pub schedules: Arc<crate::schedules::ScheduleStore>,
@@ -249,9 +246,6 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
 
     let seq = Arc::new(AtomicU64::new(0));
     let mut tools = ToolRegistry::empty();
-    // `agent` 要自己发进度事件，而工具池那边也要用同一份 —— 先各留一份。
-    let agent_tx = tool_tx.clone();
-    let agent_activity = activity.clone();
 
     // 直接放进注册表 —— 别在这里套 `Recorded`，理由见本函数的文档。
     let push = |t: Arc<dyn Tool>, tools: &mut ToolRegistry| tools.push(t);
@@ -302,6 +296,9 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
     // `ask_user_question` 由 carter 注册（`ui_tx` 给它一条通道，`UiEvent::AskUser`
     // 由会话的转发任务接成界面表单）；后台命令表与 cwd 也交给它 —— carter 自己的
     // `bash` / `bash_output` / `kill_shell` 就是这么装起来的，这里不再重复一遍。
+    // `ui_tx` 同时是 `task` 的进度出口：会话的转发任务把 `UiEvent::AgentProgress`
+    // 接成界面上那张会动的卡片。`ask_user_question` 不该挂的会话（侧边、无人值守）
+    // 仍要给通道 —— 只按开关把它从结果里筛掉。
     let full = carter_build_tools(
         skills_enabled,
         provider.clone(),
@@ -310,12 +307,23 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
         base_system.clone(),
         cancel.clone(),
         mcp_tools,
-        ask_tx.filter(|_| settings.tool_enabled("ask_user_question")),
+        ask_tx.clone(),
         shells.clone(),
         Some(cwd.clone()),
+        // `goal_update` 这里自己挂（要在子 agent 快照之后）。
+        None,
     );
+    let ask_allowed = ask_tx.is_some() && settings.tool_enabled("ask_user_question");
 
     for t in filter_tools(&full, settings) {
+        if t.name() == "ask_user_question" && !ask_allowed {
+            continue;
+        }
+        // carter 的 `task` 握着的是**未过开关**的全量快照：这里按自己的规矩重建一个，
+        // 让子 agent 也遵守开关并带上记录包装（见下面的 `snapshot`）。
+        if t.name() == "task" {
+            continue;
+        }
         push(
             substitute_with(
                 t,
@@ -341,7 +349,7 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
     let snapshot: Vec<Arc<dyn Tool>> = tools
         .tools()
         .iter()
-        .filter(|t| !matches!(t.name(), "agent" | "ask_user_question" | "goal_update"))
+        .filter(|t| !matches!(t.name(), "task" | "ask_user_question" | "goal_update"))
         .map(|t| {
             Arc::new(
                 Recorded::new(t.clone(), tool_tx.clone(), seq.clone(), activity.clone())
@@ -351,19 +359,20 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
         })
         .collect();
     if include_task {
-        push(
-            Arc::new(AgentTool::new(
-                provider,
-                model,
-                agent_cfg,
-                base_system,
-                cancel,
-                snapshot,
-                agent_tx,
-                agent_activity,
-            )),
-            &mut tools,
+        let factory: carter::agent::ToolFactory = Arc::new(move || snapshot.clone());
+        let mut task = carter::agent::TaskTool::new(
+            provider,
+            model,
+            agent_cfg,
+            base_system,
+            cancel,
+            factory,
+            0,
         );
+        if let Some(tx) = &ask_tx {
+            task = task.with_progress(tx.clone());
+        }
+        push(Arc::new(task), &mut tools);
     }
 
     push(Arc::new(GoalUpdateTool::new(goal_signal)), &mut tools);

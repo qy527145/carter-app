@@ -402,23 +402,34 @@ pub(super) async fn forward_events(
         });
     };
 
-    // 这条通道只给 carter 的 `ask_user_question` 用：它把 `UiEvent::AskUser` 发到
-    // 这里，而不是走会话的 sink（那边刻意丢掉它，见 `sinks.rs`）。
+    // 这条通道走的是**工具自己发**的事件：carter 的 `ask_user_question` 把表单发到
+    // 这里，`task` 把子 agent 的进度发到这里。它们不走会话的 sink（那边刻意丢掉，
+    // 见 `sinks.rs`）。
     while let Some(ev) = ask_rx.recv().await {
-        let carter::agent::UiEvent::AskUser {
-            id,
-            questions,
-            response_tx,
-        } = ev
-        else {
-            continue;
-        };
-        // 发送端存住：前端要跨一次进程边界才回得来，而 oneshot 只能发一次。
-        let Some(reply) = response_tx.lock().ok().and_then(|mut g| g.take()) else {
-            continue;
-        };
-        asks.insert(id, questions.clone(), reply);
-        send(&shell, SessionEvent::AskForm { id, questions });
+        match ev {
+            carter::agent::UiEvent::AskUser {
+                id,
+                questions,
+                response_tx,
+            } => {
+                // 发送端存住：前端要跨一次进程边界才回得来，而 oneshot 只能发一次。
+                let Some(reply) = response_tx.lock().ok().and_then(|mut g| g.take()) else {
+                    continue;
+                };
+                asks.insert(id, questions.clone(), reply);
+                send(&shell, SessionEvent::AskForm { id, questions });
+            }
+            carter::agent::UiEvent::AgentProgress { call_id, agents } => {
+                send(
+                    &shell,
+                    SessionEvent::AgentProgress {
+                        call_id,
+                        agents: agents.into_iter().map(Into::into).collect(),
+                    },
+                );
+            }
+            _ => {}
+        }
     }
 }
 
@@ -479,7 +490,6 @@ pub(super) fn emit_tool_event(
                 elapsed_ms,
             },
             ToolEvent::Output { call_id, text } => SessionEvent::ToolOutput { call_id, text },
-            ToolEvent::Agent { call_id, agents } => SessionEvent::AgentProgress { call_id, agents },
         };
         shell.emit(AppEvent::Session {
             session_id: session_id.clone(),

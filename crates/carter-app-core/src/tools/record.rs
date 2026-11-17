@@ -56,14 +56,6 @@ pub enum ToolEvent {
     /// 目前只有 `bash` 发：一条跑几分钟的构建，结束前卡片上什么都看不到的话，
     /// 用户分不清它是在干活还是卡死了。结果到达时以 `Finished` 的正文为准。
     Output { call_id: String, text: String },
-    /// `agent` 工具里那几个子 agent 的进度（整表快照）。
-    ///
-    /// 不单独为「开始 / 结束」发事件：一张卡片上同时有好几行，整表替换比逐行增量
-    /// 简单得多，也不会在并发写时拼错。
-    Agent {
-        call_id: String,
-        agents: Vec<crate::protocol::AgentRun>,
-    },
 }
 
 /// 工具事件送到哪去。

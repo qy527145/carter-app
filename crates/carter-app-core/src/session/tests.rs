@@ -229,7 +229,7 @@ mod start_session_tests {
             match ev {
                 ToolEvent::Started { call_id, .. } => started.push(call_id),
                 ToolEvent::Finished { .. } => finished += 1,
-                ToolEvent::Agent { .. } | ToolEvent::Output { .. } => {}
+                ToolEvent::Output { .. } => {}
             }
         }
         assert_eq!(started.len(), 1, "一次调用只该画一张卡：{started:?}");

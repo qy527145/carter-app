@@ -185,7 +185,7 @@ fn injected(text: &str) -> bool {
     super::is_injected(text)
         || text.starts_with(carter::tools::DONE_MARK)
         || text.starts_with(crate::peers::PEER_MARK)
-        || text.starts_with(crate::goal::CONTINUE_PROMPT)
+        || text.starts_with(carter::goal::CONTINUE_PROMPT)
 }
 
 /// 用户亲口说的那几句。提取记忆只看这些。

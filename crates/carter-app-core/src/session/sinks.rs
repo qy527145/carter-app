@@ -69,7 +69,8 @@ impl UiSink for TxSink {
             | UiEvent::Idle
             | UiEvent::ToolCallStarted { .. }
             | UiEvent::ToolResult { .. }
-            | UiEvent::AskUser { .. } => return,
+            | UiEvent::AskUser { .. }
+            | UiEvent::AgentProgress { .. } => return,
         };
         self.shell.emit(AppEvent::Session {
             session_id: self.session_id.clone(),

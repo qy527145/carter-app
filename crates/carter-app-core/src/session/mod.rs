@@ -46,7 +46,6 @@ use carter::tools::Tool;
 
 use crate::app_settings::AppSettings;
 use crate::changes::ChangeWatch;
-use crate::goal::{self, Goal, GoalSignal, GoalStatus, TurnOutcome};
 use crate::protocol::{
     AppEvent, Command, ContextView, GoalCommand, GoalView, SessionEvent, TodoView, UsageView,
 };
@@ -54,6 +53,7 @@ use crate::shell::{AppShell, AskRegistry, SessionHandle};
 use crate::tools::ToolBuildArgs;
 use crate::tools::build_tools;
 use crate::tools::record::ToolEvent;
+use carter::goal::{self, Goal, GoalOutcome, GoalSignal, GoalStatus};
 
 pub struct SessionOptions {
     pub cwd: PathBuf,

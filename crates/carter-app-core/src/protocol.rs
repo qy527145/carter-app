@@ -146,24 +146,9 @@ pub enum ToolActionKind {
     Background,
 }
 
-/// `/goal` 的具体动作。
-///
-/// 名字与 CLI 风格一致（`/goal pause` 之类），但这里刻意做成结构化枚举而不是
-/// 「把用户打的字符串传下去自己解析」—— 解析在输入框那一侧做一次就够，
-/// 后端不该认识「pause」这种拼写。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum GoalCommand {
-    /// 设定 / 改写目标正文。
-    Set {
-        objective: String,
-    },
-    Clear,
-    Pause,
-    Resume,
-    /// 标记完成（用户在目标条上点「完成」）。
-    Complete,
-}
+/// `/goal` 的具体动作 —— 类型是 carter 的那份（状态转移规则在 `carter::goal::apply_action`）。
+/// 解析在输入框那一侧做一次就够，后端只认结构化枚举。
+pub use carter::goal::GoalCommand;
 
 // ---------------------------------------------------------------------------
 // 后端 → 前端
@@ -485,19 +470,27 @@ pub struct ContextView {
     pub auto: bool,
 }
 
-/// `agent` 工具里一个子 agent 的当前状态。整表随 [`SessionEvent::AgentProgress`] 下发。
+/// `task` 工具里一个子 agent 的当前状态。整表随 [`SessionEvent::AgentProgress`] 下发。
+/// 字段与 carter 的 `AgentRun` 一一对应；前端 `types.ts` 里的 `AgentRun` 也是这份。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentRun {
-    /// 主对话给这一行的短标题。
     pub description: String,
-    /// `running` | `done` | `failed` | `cancelled`。
     pub status: String,
-    /// 已经发起了几次工具调用 —— 「一条命令跑了很久」和「根本没动」能看出区别。
     pub steps: u32,
-    /// 此刻正在跑的工具名。`None` = 在思考或已经结束。
     pub tool: Option<String>,
-    /// 最近一段输出（尾部截断）。
     pub text: String,
+}
+
+impl From<carter::agent::AgentRun> for AgentRun {
+    fn from(a: carter::agent::AgentRun) -> Self {
+        Self {
+            description: a.description,
+            status: a.status,
+            steps: a.steps,
+            tool: a.tool,
+            text: a.text,
+        }
+    }
 }
 
 /// 一条已经跑完的工具调用（见 [`SessionEvent::ToolHistory`]）。
@@ -544,20 +537,8 @@ pub struct TodoView {
     pub status: String,
 }
 
-/// 长任务目标的界面视图。
-///
-/// `status` 是机器用的（`active` / `paused` / `completed` / `blocked`），
-/// `status_label` 是给人看的 —— 中文标签由后端给，免得前端再维护一份映射。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GoalView {
-    pub objective: String,
-    pub status: String,
-    pub status_label: String,
-    /// 已经自动继续了多少轮。
-    pub auto_continues: u32,
-    /// 模型在 `goal_update` 里写的说明（被卡住 / 需要拍板时界面要显出来）。
-    pub note: Option<String>,
-}
+/// 长任务目标的界面视图 —— carter 的那份，前端 `types.ts` 里的 `GoalView` 与它一一对应。
+pub use carter::goal::GoalView;
 
 /// 用量视图。
 ///

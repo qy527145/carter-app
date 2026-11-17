@@ -557,7 +557,7 @@ impl Runner {
             } else {
                 g.idle_streak.saturating_add(1)
             };
-            let outcome = TurnOutcome {
+            let outcome = GoalOutcome {
                 user_cancelled: result.user_cancelled,
                 failed: result.failed,
                 used_tools: result.used_tools,

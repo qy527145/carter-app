@@ -163,13 +163,14 @@ pub(crate) fn list_tools(shell: State<'_, Arc<AppShell>>, cwd: Option<String>) -
         });
     }
 
-    // `agent` 构造要一个 provider，这里拿不到 —— 单独补一行，标明它不可关。
+    // `task` 构造要一个 provider，这里拿不到 —— 单独补一行，标明它不可关。
     // 子 agent 的能力开关该是独立的一项，而不是混在「工具开关」里顺手关掉。
     rows.push(ToolRow {
-        name: "agent".into(),
-        description: "一次派生多个隔离子 agent 并行干活。每个子 agent 有独立上下文与工具池\
-             （不含 agent 自身，不会再往下派生），并遵守同一份工具开关。"
-            .into(),
+        name: "task".into(),
+        description:
+            "一次派生多个隔离子 agent 并行干活（carter 的 task 工具）。每个子 agent 有独立\
+             上下文与工具池（不含 task 自身，不会再往下派生），并遵守同一份工具开关。"
+                .into(),
         parameters: serde_json::Value::Null,
         enabled: true,
         toggleable: false,
