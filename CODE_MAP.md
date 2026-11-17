@@ -61,13 +61,10 @@ carter / llm_adapt_core     底层的 agent 循环、工具、会话、协议编
 
 | 文件 | 职责 |
 | ---- | ---- |
-| `tools/mod.rs` | 工具池装配：换实现、套用户开关、外包记录层 |
-| `tools/bash.rs` / `grep.rs` | 跨平台 shell、内置 ripgrep |
+| `tools/mod.rs` | 工具池装配：按会话 cwd 包路径解析、套用户开关、外包记录层。**bash / grep / ask_user / 后台命令都在 carter 里**，这里不再各留一份 |
 | `tools/multi_skill.rs` | 多根 `skill` 工具 |
 | `tools/agent.rs` | 并发子 agent |
-| `tools/ask_user.rs` | 一次问一组问题 |
-| `tools/background.rs` | 后台长命令 |
-| `tools/cwd.rs` / `control.rs` / `record.rs` | 相对路径解析、按调用控制、调用记录 |
+| `tools/cwd.rs` / `control.rs` / `record.rs` | 相对路径解析、按调用控制（实现 carter 的 `CommandControl`）、调用记录 |
 | `tools/goal_update.rs` / `schedule.rs` | 目标汇报、定时任务 |
 
 ### 配置与模型

@@ -79,13 +79,10 @@ pub(crate) fn list_tools(shell: State<'_, Arc<AppShell>>, cwd: Option<String>) -
         });
     }
 
-    // ask_user_question 的 schema 也来自本应用的实现（给一个没人读的通道即可）。
+    // ask_user_question 的 schema 来自 carter（给一个没人读的通道即可）。
     {
         use carter::tools::Tool as _;
-        let a = carter_app_core::tools::ask_user::AskUserTool::new(
-            tokio::sync::mpsc::unbounded_channel().0,
-            carter::agent::CancelToken::new(),
-        );
+        let a = carter::agent::AskUserQuestionTool::new(tokio::sync::mpsc::unbounded_channel().0);
         rows.push(ToolRow {
             enabled: settings.tool_enabled("ask_user_question"),
             toggleable: true,
@@ -100,7 +97,7 @@ pub(crate) fn list_tools(shell: State<'_, Arc<AppShell>>, cwd: Option<String>) -
     // 所以也要出现在开关列表里 —— 用户关掉 bash 时，这两个留着也没有意义，
     // 但那是用户自己的选择，界面上说清楚即可。
     {
-        use carter_app_core::tools::background::{BackgroundShells, BashOutputTool, KillShellTool};
+        use carter::tools::{BackgroundShells, BashOutputTool, KillShellTool};
         let shells = BackgroundShells::new();
         let extras: Vec<(std::sync::Arc<dyn carter::tools::Tool>, &str)> = vec![
             (

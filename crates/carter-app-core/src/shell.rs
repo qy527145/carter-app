@@ -143,7 +143,7 @@ pub struct SessionHandle {
     ///
     /// 放在句柄上而不是只放在会话任务里：界面切走再切回来时，要能立刻知道
     /// 「还有几条后台命令在跑」（`attach_session` 从这里取快照）。
-    pub background: Arc<crate::tools::background::BackgroundShells>,
+    pub background: Arc<carter::tools::BackgroundShells>,
     /// 只有 crate 内能构造 —— 命令通道的持有者是会话运行器，不该由外部塞进来。
     pub(crate) cmd_tx: mpsc::UnboundedSender<Command>,
 }
@@ -173,7 +173,7 @@ impl SessionHandle {
             clock_skew_ms: std::sync::atomic::AtomicU64::new(0),
             inbox: Arc::default(),
             steer: Arc::default(),
-            background: crate::tools::background::BackgroundShells::new(),
+            background: carter::tools::BackgroundShells::new(),
             cmd_tx,
         })
     }

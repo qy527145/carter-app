@@ -393,10 +393,8 @@ pub(super) async fn forward_events(
     shell: Arc<AppShell>,
     session_id: String,
     asks: Arc<AskRegistry>,
-    mut ask_rx: mpsc::UnboundedReceiver<AskRequest>,
+    mut ask_rx: mpsc::UnboundedReceiver<carter::agent::UiEvent>,
 ) {
-    let mut ask_open = true;
-
     let send = |shell: &AppShell, event: SessionEvent| {
         shell.emit(AppEvent::Session {
             session_id: session_id.clone(),
@@ -404,17 +402,23 @@ pub(super) async fn forward_events(
         });
     };
 
-    while ask_open {
-        tokio::select! {
-            req = ask_rx.recv(), if ask_open => match req {
-                Some(AskRequest::Questions { id, questions, reply }) => {
-                    // 发送端存住：前端要跨一次进程边界才回得来，而 oneshot 只能发一次。
-                    asks.insert(id, questions.clone(), reply);
-                    send(&shell, SessionEvent::AskForm { id, questions });
-                }
-                None => ask_open = false,
-            },
-        }
+    // 这条通道只给 carter 的 `ask_user_question` 用：它把 `UiEvent::AskUser` 发到
+    // 这里，而不是走会话的 sink（那边刻意丢掉它，见 `sinks.rs`）。
+    while let Some(ev) = ask_rx.recv().await {
+        let carter::agent::UiEvent::AskUser {
+            id,
+            questions,
+            response_tx,
+        } = ev
+        else {
+            continue;
+        };
+        // 发送端存住：前端要跨一次进程边界才回得来，而 oneshot 只能发一次。
+        let Some(reply) = response_tx.lock().ok().and_then(|mut g| g.take()) else {
+            continue;
+        };
+        asks.insert(id, questions.clone(), reply);
+        send(&shell, SessionEvent::AskForm { id, questions });
     }
 }
 

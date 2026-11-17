@@ -100,6 +100,26 @@ impl ToolControl {
     }
 }
 
+/// carter 的 `bash` 工具通过这个接口拿到界面上那两颗按钮与实时输出。
+#[async_trait::async_trait]
+impl carter::tools::CommandControl for ToolControl {
+    async fn interrupted(&self) {
+        ToolControl::interrupted(self).await
+    }
+
+    async fn backgrounded(&self) {
+        ToolControl::backgrounded(self).await
+    }
+
+    fn streams_output(&self) -> bool {
+        ToolControl::streams_output(self)
+    }
+
+    fn emit_output(&self, text: String) {
+        ToolControl::emit_output(self, text)
+    }
+}
+
 /// 一条会话里正在跑的工具。
 ///
 /// 键是 `Recorded` 发号的 `call_id` —— 与 `tool_started` / `tool_finished` 事件里

@@ -31,25 +31,9 @@ pub fn now_ms() -> u64 {
 // 提问
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AskOption {
-    pub label: String,
-    /// 这个选项意味着什么。界面上作为次要说明显示。
-    #[serde(default)]
-    pub description: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AskQuestion {
-    pub question: String,
-    /// 极短标签，界面上当标题用。
-    #[serde(default)]
-    pub header: Option<String>,
-    #[serde(default)]
-    pub multi_select: bool,
-    #[serde(default)]
-    pub options: Vec<AskOption>,
-}
+/// 提问的数据类型就是 carter 的那份：`ask_user_question` 工具现在在 carter 里，
+/// 前端 `types.ts` 里的 `AskQuestion` / `AskOption` 与它一一对应。
+pub use carter::agent::{AskOption, AskQuestion};
 
 /// 一个还在等回答的提问。界面接回正在跑的会话时用它补画表单。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -535,6 +519,21 @@ pub struct BackgroundShellView {
     pub command: String,
     /// 开始的时刻（epoch 毫秒）。界面据此显示「已运行多久」。
     pub started_at: u64,
+}
+
+impl From<carter::tools::RunningShell> for BackgroundShellView {
+    fn from(s: carter::tools::RunningShell) -> Self {
+        Self {
+            id: s.id,
+            command: s.command,
+            started_at: s.started_at,
+        }
+    }
+}
+
+/// carter 的后台表给的快照 → 界面视图。
+pub fn background_views(shells: Vec<carter::tools::RunningShell>) -> Vec<BackgroundShellView> {
+    shells.into_iter().map(Into::into).collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

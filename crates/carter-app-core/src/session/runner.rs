@@ -29,7 +29,7 @@ pub(super) struct Runner {
     /// 工具卡片的出口（**同步**调用，与正文增量同一条时间线，见 [`ToolTx`]）。
     pub(super) tool_tx: Option<crate::tools::record::ToolTx>,
     /// 工具发起的提问：接收端在 `forward_events` 任务手里。`None` = 还没建。
-    pub(super) ask_tx: Option<mpsc::UnboundedSender<AskRequest>>,
+    pub(super) ask_tx: Option<mpsc::UnboundedSender<carter::agent::UiEvent>>,
     pub(super) mcp_tools: Vec<Arc<dyn Tool>>,
     pub(super) activity: Arc<AtomicU32>,
     pub(super) goal_signal: Arc<GoalSignal>,
@@ -80,7 +80,7 @@ impl Runner {
         // 正文增量不在这里：它们与工具卡片要严格保序，所以在产生的那一刻直接
         // `emit`（见模块文档）。工具记录与提问本来就不是 carter 的概念，走各自的
         // 通道由转发任务收口。
-        let (ask_tx, ask_rx) = mpsc::unbounded_channel::<AskRequest>();
+        let (ask_tx, ask_rx) = mpsc::unbounded_channel::<carter::agent::UiEvent>();
         let tx = emit_tool_event(self.ctx.shell.clone(), session_id.clone());
         self.tool_tx = Some(tx);
         self.ask_tx = Some(ask_tx);
@@ -577,7 +577,7 @@ impl Runner {
         }
         // 用户亲口说话了：这一轮不再是哪封信的回信，跨会话的跳数从头数。
         if !crate::assistant::is_injected(&raw)
-            && !raw.starts_with(crate::tools::background::DONE_MARK)
+            && !raw.starts_with(carter::tools::DONE_MARK)
             && !raw.starts_with(crate::peers::PEER_MARK)
         {
             self.ctx.handle.inbox.reset_hops();
@@ -599,7 +599,7 @@ impl Runner {
         // 助理的汇报不展开：里面有外部事件的文字，写一个 `@~/.ssh/id_rsa` 不该把文件读进来。
         // 后台命令的完成通知同理：里面是命令输出。别的会话的来信也是别人写的字。
         let expansion = if crate::assistant::is_injected(&raw)
-            || raw.starts_with(crate::tools::background::DONE_MARK)
+            || raw.starts_with(carter::tools::DONE_MARK)
             || raw.starts_with(crate::peers::PEER_MARK)
         {
             Ok((raw.clone(), None))

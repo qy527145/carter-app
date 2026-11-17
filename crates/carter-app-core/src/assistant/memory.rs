@@ -183,7 +183,7 @@ fn text_of(m: &WireMessage) -> String {
 /// 这段用户输入是不是外部送进来的（汇报、事件、后台命令通知、自动继续）。
 fn injected(text: &str) -> bool {
     super::is_injected(text)
-        || text.starts_with(crate::tools::background::DONE_MARK)
+        || text.starts_with(carter::tools::DONE_MARK)
         || text.starts_with(crate::peers::PEER_MARK)
         || text.starts_with(crate::goal::CONTINUE_PROMPT)
 }

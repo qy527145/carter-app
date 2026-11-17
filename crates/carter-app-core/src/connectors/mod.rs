@@ -1198,7 +1198,7 @@ pub fn cancel_login(id: &str) {
     cancelled_set()
         .get_or_insert_with(Default::default)
         .insert(id.to_string());
-    crate::tools::background::kill_process_tree(pid);
+    carter::tools::kill_process_tree(pid);
 }
 
 /// 退出登录（清本机 token）。所有组织一起清 —— 界面上是一次「退出」，不该留半截。
@@ -1317,7 +1317,7 @@ async fn run_streamed(
             }
             _ = &mut deadline => {
                 if let Some(pid) = child.id() {
-                    crate::tools::background::kill_process_tree(pid);
+                    carter::tools::kill_process_tree(pid);
                 }
                 return Err(format!("超时（{} 秒）", timeout.as_secs()));
             }
@@ -1331,7 +1331,7 @@ async fn run_streamed(
             st = child.wait() => st.map_err(|e| format!("等待 {} 退出失败：{e}", v.cli))?,
             _ = &mut deadline => {
                 if let Some(pid) = child.id() {
-                    crate::tools::background::kill_process_tree(pid);
+                    carter::tools::kill_process_tree(pid);
                 }
                 return Err(format!("超时（{} 秒）", timeout.as_secs()));
             }

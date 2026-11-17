@@ -1,11 +1,24 @@
-//! 工具池装配：在 carter 的装配结果之上做三件事 —— 换掉两个实现、套一层用户开关、
-//! 外面再包一层记录。
+//! 工具池装配：在 carter 的装配结果之上做三件事 —— 按会话 cwd 包一层路径解析、
+//! 套一层用户开关、外面再包一层记录。
 //!
-//! ## 为什么不是在 carter 里加开关
+//! ## 基础能力在 carter，这里只做界面与扩展
 //!
-//! carter 0.1.4 的 `ToolRegistry` 是「全部常开」，`Config` 里也没有任何开关字段。
-//! 本应用不改 carter（它已经发布、CLI 也在用），而是在**装配之后**按名单挑一遍 ——
-//! `ToolRegistry::empty/push/tools` 都是 crate 公开 API，这条路成立。
+//! `bash`（shell 探测、`cd` 跟随、后台执行）、`grep`（内置 ripgrep）、
+//! `ask_user_question`（一次问一组）、`bash_output` / `kill_shell`、工具开关、插话
+//! 都已经在 carter 里（它们本来就不是界面能力）。这里**不再**各留一份实现：
+//! carter 的 `build_tools` 直接装配它们，本模块只负责把几样桌面场景才有的东西接上：
+//!
+//! * **路径解析** —— carter 的文件工具不解析相对路径（直接 `Path::new(&path)`，落到
+//!   进程 cwd 上）。命令行下这是对的，桌面应用下必然错：进程 cwd 取决于从哪启动。
+//!   所以文件工具包一层 [`cwd::CwdScoped`]，相对路径按会话的 cwd 解析。
+//! * **`bash` 的界面控制** —— carter 的 `PlatformBash` 留了一个 `CommandControl`
+//!   接口（单条命令的「中断 / 转后台」与实时输出），这里用 [`control`] 的 task-local
+//!   句柄接上。
+//! * **`skill`** —— carter 那个只认单根（`~/.carter/skills`）。技能页能加额外的扫描
+//!   路径，换成 [`multi_skill::MultiRootSkill`] 之后那些根里的技能才加载得到。
+//!   刻意走「换实现」而不是「再 push 一个」：工具池里两个同名工具会让 `specs()` 下发
+//!   两条，上游直接 400。
+//! * **`save_memory`** —— 项目级记忆默认跟随进程 cwd，桌面里换成绑定会话 cwd 的那份。
 //!
 //! ## 为什么不用 carter 自带的 `task`
 //!
@@ -17,31 +30,6 @@
 //! 所以换成 [`agent::AgentTool`]：一次收 `tasks: [...]` 并发派生，进度实时推给界面；
 //! 工具池直接用过滤后的快照（见 [`filter_tools`]），"关掉的工具对子 agent 同样失效"。
 //!
-//! ## 换掉 / 包住哪些实现
-//!
-//! * **`bash`** —— carter 那个硬编码 `sh -c`，Windows 上从 GUI 启动时 PATH 里多半
-//!   没有 `sh`，模型每次都拿到「program not found」而且看不出原因。换成
-//!   [`bash::PlatformBash`]：探测 shell、显式设工作目录、描述里写明当前平台。
-//! * **`grep`** —— carter 那个直接执行系统的 `rg` 二进制，客户机上没装就用不了。
-//!   换成 [`grep::EmbeddedGrep`]：ripgrep 的库（`ignore` + `grep-searcher` +
-//!   `grep-regex`）编进进程，行为与 `rg --line-number --no-heading` 对齐。
-//! * **文件工具**（`read_file` / `write_file` / `edit_file` / `glob` / `grep`）——
-//!   包一层 [`cwd::CwdScoped`]，把相对路径按会话的 cwd 解析。
-//! * **`ask_user_question`** —— carter 那个一次只能问一个问题、选项只有标签没有说明。
-//!   界面里「问三件事」要来回三轮，而每轮都是一次完整的模型请求。换成
-//!   [`ask_user::AskUserTool`]：一次问一组、支持多选。
-//! * **`skill`** —— carter 那个只认单根（构造期写死的 `~/.carter/skills`）。技能页能加
-//!   额外的扫描路径，换成 [`multi_skill::MultiRootSkill`] 之后那些根里的技能才加载得到。
-//!   刻意走「换实现」而不是「再 push 一个」：工具池里两个同名工具会让 `specs()` 下发
-//!   两条，上游直接 400。
-//!
-//! ## 路径解析
-//!
-//! carter 的文件工具**不解析相对路径** —— 它们直接 `Path::new(&path)`，于是相对路径
-//! 落到进程的 cwd 上。命令行下这是对的（进程 cwd 就是用户所在目录），桌面应用下必然
-//! 错：进程 cwd 取决于从哪启动，而会话有自己的工作目录。而且它**不报错** ——
-//! 系统提示里写着「工作目录：…」，文件却读写到了别处。
-//!
 //! ## 记录包装
 //!
 //! 每个工具外面包一层 [`record::Recorded`]，把**完整的参数与结果**送给界面。
@@ -49,22 +37,19 @@
 //! 卡片。这是「工具看起来都一样」的根因。主会话的包装在 `session/turn.rs::turn_tools`
 //! 里统一做（那里还知道用模型给的 `call_id`）；子 agent 的快照在这里套。
 //!
-//! ## 这份开关只影响本应用
+//! ## 两份开关
 //!
-//! 名单存在 `~/.carter-app/settings.json`，不是 `~/.carter/config.toml`。
-//! carter CLI 读不到它，也不会受它影响 —— 界面上必须把这句话写出来。
+//! carter 自己有 `[agent].disabled_tools`（CLI 与本应用共用，装配期就筛掉）；
+//! 本应用还有一份界面上的开关，存在 `~/.carter-app/settings.json`，在装配之后再挑一遍
+//! （[`filter_tools`]）。界面上要写清楚：这一份 carter CLI 读不到。
 
 pub mod agent;
-pub mod ask_user;
 pub mod assistant_config;
 pub mod assistant_report;
 pub mod assistant_ticket;
-pub mod background;
-pub mod bash;
 pub mod control;
 pub mod cwd;
 pub mod goal_update;
-pub mod grep;
 pub mod multi_skill;
 pub mod peer;
 pub mod record;
@@ -82,22 +67,20 @@ use carter::registry::ModelInfo;
 use carter::tools::{Tool, ToolRegistry};
 use tokio::sync::mpsc;
 
+use carter::tools::{BackgroundShells, EmbeddedGrep, PlatformBash, ShellCwd};
+
 use crate::app_settings::AppSettings;
 use crate::goal::GoalSignal;
 use crate::skills::Scan;
 use agent::AgentTool;
-use ask_user::{AskRequest, AskUserTool};
 use assistant_config::{AssistantConfigTool, Kind as ConfigKind};
 use assistant_report::AssistantReportTool;
 use assistant_ticket::{
     AssistantMemoryTool, AssistantRecallTool, AssistantTicketTool, Kind as TicketKind,
 };
-use background::{BackgroundShells, BashOutputTool, KillShellTool};
-use bash::{PlatformBash, ShellCwd};
 use control::RunningTools;
 use cwd::CwdScoped;
 use goal_update::GoalUpdateTool;
-use grep::EmbeddedGrep;
 use multi_skill::MultiRootSkill;
 use record::{Recorded, ToolTx};
 use schedule::ScheduleTool;
@@ -118,8 +101,9 @@ pub struct ToolBuildArgs {
     pub skills_enabled: bool,
     /// 工具事件（完整参数与结果）的出口。同步调用，见 [`ToolTx`]。
     pub tool_tx: ToolTx,
-    /// 提问请求的出口。`None` = 不给这个会话注册 `ask_user_question`。
-    pub ask_tx: Option<mpsc::UnboundedSender<AskRequest>>,
+    /// 提问请求的出口（carter 的 `UiEvent::AskUser` 走这里）。
+    /// `None` = 不给这个会话注册 `ask_user_question`。
+    pub ask_tx: Option<mpsc::UnboundedSender<carter::agent::UiEvent>>,
     /// 是否挂上 `agent`（派生子 agent 的入口）。侧边聊天不挂。
     pub include_task: bool,
     /// 后台命令表。`Some` 时才会挂上 `bash_output` / `kill_shell`。
@@ -191,14 +175,20 @@ pub fn substitute_with(
     match t.name() {
         // `bash` 换成跨平台实现。
         // 当前目录由会话持有（`cd` 要跨轮保留）；没给就从工作目录起一份新的。
-        "bash" => Arc::new(PlatformBash::new(
-            shell_cwd
-                .cloned()
-                .unwrap_or_else(|| ShellCwd::new(cwd.to_path_buf())),
-            cancel.clone(),
-            shells.cloned(),
-            session_id,
-        )),
+        "bash" => Arc::new(
+            PlatformBash::new(
+                shell_cwd
+                    .cloned()
+                    .unwrap_or_else(|| ShellCwd::new(cwd.to_path_buf())),
+                cancel.clone(),
+                shells.cloned(),
+                session_id,
+            )
+            // 界面卡片上的「中断命令 / 转后台」与实时输出：从 task-local 取控制句柄。
+            .with_control(Arc::new(|| {
+                control::current().map(|c| c as Arc<dyn carter::tools::CommandControl>)
+            })),
+        ),
         // `grep` 换成内置 ripgrep 引擎（不依赖系统 `rg`），仍然走 `CwdScoped`
         // 解析相对路径。构造时把 cwd 也传给它 —— 结果里的文件路径要显示成相对路径。
         "grep" => Arc::new(CwdScoped::new(
@@ -309,8 +299,9 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
         return tools;
     }
 
-    // ui_tx 传 None：carter 的 ask_user 会一并注册进来，而我们用自己的那个
-    // （见模块头的说明）。传 None 之后 carter 就不加它了。
+    // `ask_user_question` 由 carter 注册（`ui_tx` 给它一条通道，`UiEvent::AskUser`
+    // 由会话的转发任务接成界面表单）；后台命令表与 cwd 也交给它 —— carter 自己的
+    // `bash` / `bash_output` / `kill_shell` 就是这么装起来的，这里不再重复一遍。
     let full = carter_build_tools(
         skills_enabled,
         provider.clone(),
@@ -319,7 +310,9 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
         base_system.clone(),
         cancel.clone(),
         mcp_tools,
-        None,
+        ask_tx.filter(|_| settings.tool_enabled("ask_user_question")),
+        shells.clone(),
+        Some(cwd.clone()),
     );
 
     for t in filter_tools(&full, settings) {
@@ -333,27 +326,6 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
                 &session_id,
                 shell_cwd.as_ref(),
             ),
-            &mut tools,
-        );
-    }
-
-    // 后台命令的读取与结束。只有配了后台命令表才挂 —— 没有它的话，`bash` 的
-    // `run_in_background` 也无从谈起。
-    if let Some(shells) = &shells {
-        if settings.tool_enabled("bash_output") {
-            push(Arc::new(BashOutputTool::new(shells.clone())), &mut tools);
-        }
-        if settings.tool_enabled("kill_shell") {
-            push(Arc::new(KillShellTool::new(shells.clone())), &mut tools);
-        }
-    }
-
-    // 我们自己那个一次问一组问题的 ask_user。
-    if let Some(ask_tx) = ask_tx
-        && settings.tool_enabled("ask_user_question")
-    {
-        push(
-            Arc::new(AskUserTool::new(ask_tx, cancel.clone())),
             &mut tools,
         );
     }

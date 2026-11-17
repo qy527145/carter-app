@@ -52,7 +52,6 @@ use crate::protocol::{
 };
 use crate::shell::{AppShell, AskRegistry, SessionHandle};
 use crate::tools::ToolBuildArgs;
-use crate::tools::ask_user::AskRequest;
 use crate::tools::build_tools;
 use crate::tools::record::ToolEvent;
 
@@ -157,7 +156,7 @@ pub fn attach_session(shell: &AppShell, id: &str) -> Option<StartedSession> {
         // 发布过的那份快照，见 `Runner::emit` 里 `TodoUpdated` 那一支。
         todos: handle.todos.load().iter().map(todo_view).collect(),
         finished_tools: handle.live.finished_calls(),
-        background_shells: handle.background.running(),
+        background_shells: crate::protocol::background_views(handle.background.running()),
         handle,
     })
 }
@@ -173,7 +172,9 @@ fn watch_background(shell: &Arc<AppShell>, handle: &Arc<SessionHandle>) {
         emit(
             &shell,
             &session_id,
-            SessionEvent::BackgroundShells { shells },
+            SessionEvent::BackgroundShells {
+                shells: crate::protocol::background_views(shells),
+            },
         );
     }));
 }
@@ -334,7 +335,7 @@ pub fn start_session(shell: Arc<AppShell>, opts: SessionOptions) -> carter::Resu
         config,
         settings: AppSettings::load(),
         resumed,
-        shell_cwd: crate::tools::bash::ShellCwd::new(cwd.clone()),
+        shell_cwd: carter::tools::ShellCwd::new(cwd.clone()),
         cwd,
         unsupported_server_tools,
         capture: Some(capture_store),
@@ -472,7 +473,7 @@ pub(crate) fn start_side(w: SideWiring, id: String, parent_id: String) -> Arc<Se
         config: w.config,
         settings: AppSettings::load(),
         resumed: false,
-        shell_cwd: crate::tools::bash::ShellCwd::new(w.cwd.clone()),
+        shell_cwd: carter::tools::ShellCwd::new(w.cwd.clone()),
         cwd: w.cwd,
         unsupported_server_tools: w.unsupported_server_tools,
         // 侧边会话：不派生子 agent、不连 MCP、不抓包。见 `side.rs` 的模块头。
@@ -576,9 +577,9 @@ struct SessionCtx {
     /// 上面那份是按哪个引用解析出来的 —— 用户在设置页改了副模型，下一轮要重解析。
     fast_ref: Option<String>,
     /// 后台命令（`bash` 的 `run_in_background`）。一条会话一份，关会话时整组收掉。
-    shells: Arc<crate::tools::background::BackgroundShells>,
+    shells: Arc<carter::tools::BackgroundShells>,
     /// bash 此刻所在的目录。工具每轮重建，`cd` 的结果得放在会话这一层才留得住。
-    shell_cwd: Arc<crate::tools::bash::ShellCwd>,
+    shell_cwd: Arc<carter::tools::ShellCwd>,
     /// 正在跑的工具表：界面上的「中断命令 / 转后台」靠它定位到具体那一次调用。
     running: Arc<crate::tools::control::RunningTools>,
 }

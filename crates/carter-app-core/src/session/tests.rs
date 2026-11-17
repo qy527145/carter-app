@@ -319,7 +319,7 @@ mod live_commands {
             fast: None,
             fast_ref: None,
             shells: handle.background.clone(),
-            shell_cwd: crate::tools::bash::ShellCwd::new(dir),
+            shell_cwd: carter::tools::ShellCwd::new(dir),
             running: crate::tools::control::RunningTools::new(),
         }
     }
@@ -722,7 +722,7 @@ mod live_turn {
             fast: None,
             fast_ref: None,
             shells: handle.background.clone(),
-            shell_cwd: crate::tools::bash::ShellCwd::new(dir.clone()),
+            shell_cwd: carter::tools::ShellCwd::new(dir.clone()),
             running: crate::tools::control::RunningTools::new(),
         };
         let mut thread = Thread::new_empty();
