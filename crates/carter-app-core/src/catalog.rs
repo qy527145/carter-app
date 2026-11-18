@@ -1688,4 +1688,31 @@ kind = "anthropic"
         assert!(meta_info_in(&root, "deepseek/nope").is_none());
         assert!(meta_info_in(&root, "no-slash").is_none());
     }
+
+    /// 兜底快照必须是 carter 内置的那一份 —— app 早先自己编了一份 3.5 MB 的，
+    /// 两份的字段与刷新节奏会各自漂开。这条挡的是「有人又把它加回来」。
+    #[test]
+    fn the_bundled_snapshot_comes_from_carter() {
+        let ours = carter::registry::bundled::bundled_json();
+        assert!(ours.len() > 100_000, "内置快照不该是空的");
+        assert_eq!(
+            builtin_snapshot_date(),
+            carter::registry::bundled::bundled_date().unwrap_or("未知"),
+            "关于页显示的日期必须是 carter 快照的日期"
+        );
+        // 认服务商与「转售条目指回原厂」要用的字段得在。官方那几家（anthropic /
+        // openai）在目录里本来就不写 `api`，所以挑一家写了它的来验。
+        let root: serde_json::Value = serde_json::from_str(ours).unwrap();
+        assert!(
+            root.get("deepseek").and_then(|p| p.get("api")).is_some(),
+            "快照里应有按 base_url 认服务商要用的 api 字段"
+        );
+        let with_api = root
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(k, p)| !k.starts_with('$') && p.get("api").is_some())
+            .count();
+        assert!(with_api > 100, "带 api 的服务商太少：{with_api}");
+    }
 }
