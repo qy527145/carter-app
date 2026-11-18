@@ -31,8 +31,7 @@
     "test:core": "cargo test -p carter-app-core",
     "logs": "bun run scripts/logs.ts",
     "upgrade": "bun run scripts/upgrade.ts",
-    "clean": "bun run scripts/clean.ts",
-    "models:snapshot": "bun run scripts/models-snapshot.ts"
+    "clean": "bun run scripts/clean.ts"
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.14.19",

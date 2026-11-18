@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// 只收「把完整 URL 接在后面的反向代理」这一种形态（`https://gh-proxy.com/https://…`），
 /// 它们对 raw / releases / codeload 都通用。改动这张表时同步
-/// `scripts/models-snapshot.ts` 里的同名表。
+/// `crates/carter-app-core/src/models_sync.rs` 里按服务商补全用的那套取法。
 pub const GITHUB_ACCELS: &[&str] = &[
     "",
     "https://gh-proxy.com/",

@@ -73,7 +73,7 @@ carter / llm_adapt_core     底层的 agent 循环、工具、会话、协议编
 | `app_settings.rs` | 界面设置（主题、工具开关、加速/代理、自动更新） |
 | `config_edit.rs` | 保真编辑 `~/.carter/config.toml`（保留注释与 `${ENV}`） |
 | `catalog.rs` / `models_sync.rs` / `upstream_models.rs` | 模型目录、按需补元数据、从上游拉清单 |
-| `provider_link.rs` / `templates.rs` | 用元数据装配 provider、渠道模板 |
+| `templates.rs` | 渠道模板（kind / base_url / 该绑哪家目录） |
 | `paths.rs` / `platform.rs` | 应用私有路径、OS / shell 探测、PATH 补全 |
 
 ### 网络与更新
@@ -130,7 +130,6 @@ carter / llm_adapt_core     底层的 agent 循环、工具、会话、协议编
 
 - `protocol.rs` 的结构体 ↔ `src/lib/api/types.ts` 的类型
 - 事件名常量：`src-tauri/src/lib.rs` / `commands/update.rs` ↔ `api.ts` / `api/update.ts`
-- `net::GITHUB_ACCELS` ↔ `scripts/models-snapshot.ts` 的同名表
 - `update::REPO` ↔ `src-tauri/Cargo.toml` 的 `repository`
 
 ## 脚本（`scripts/`）
@@ -139,7 +138,6 @@ carter / llm_adapt_core     底层的 agent 循环、工具、会话、协议编
 | ---- | ---- |
 | `init.ts` / `sandbox.ts` / `clean.ts` | 初始化、隔离数据目录跑 dev、清产物 |
 | `build.ts` / `upgrade.ts` | 按平台打包、三处版本号一起改并打 tag |
-| `models-snapshot.ts` | 生成打进安装包的 models.dev 快照 |
 | `logs.ts` | 跟踪 `~/.carter-app/app.log` |
 
 ## 大文件的拆法
@@ -153,7 +151,7 @@ carter / llm_adapt_core     底层的 agent 循环、工具、会话、协议编
 
 ## 常见改动落点
 
-- **换镜像 / 加源**：`net.rs` 的 `GITHUB_ACCELS` / `MODEL_SOURCES`，再跑 `bun run models:snapshot`。
+- **换镜像 / 加源**：`net.rs` 的 `GITHUB_ACCELS` / `MODEL_SOURCES`。模型目录快照在 carter 里，换源要改那边。
 - **加一个连接器**：`connectors/mod.rs` 的 `VENDORS` 加一项（安装命令、登录方式、技能来源）。
 - **改技能扫描规则**：`skills/scan.rs` 的 `Scan::from_settings_at` 与 `discover_at`。
 - **加一个前端可见状态**：`protocol.rs` → `api.ts` → `events.ts` → store。

@@ -21,11 +21,10 @@
 //!    拿到之后验一下形状再落盘；没拿到就**不覆盖**旧缓存，界面明说是拉取失败
 //!    还是用的快照。
 //!
-//! 快照（`data/models-snapshot.json`）由 `scripts/models-snapshot.ts` 从 models.dev
-//! 源仓库生成，字段形状与 `api.json` 一致。
+//! 快照来自 `carter::registry::bundled`（发版时 gzip 压进二进制的 models.dev
+//! 目录）—— 与 CLI 用的是同一份，app 不再自己编一份。
 
 use std::collections::{HashMap, HashSet};
-use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
@@ -242,93 +241,30 @@ pub fn list(config: &Config) -> Vec<ModelRow> {
     rows
 }
 
-/// 解析模型引用并装配 provider —— carter 的 `resolve_provider` 之外只多做一件事：
-/// 目录里查不到的模型（本地 Ollama 之类）也能开。
+/// 解析模型引用并装配 provider。
 ///
-/// carter 对**任何**模型都要求 models.dev 目录里有对应条目，查不到整条会话都开
-/// 不了。本地跑什么模型，models.dev 不可能收全 —— 那些模型照样能用，只是不知道
-/// 上下文窗口和能力。
+/// 用 carter 的「本地模型放行」版本：服务商不在目录里（本地 Ollama、用户自建的
+/// `ws`）时合成一份最小元数据，会话照常能开；服务商在目录里却查不到这条 —— 那是
+/// meta 拼错了 —— 原样报回去。
 ///
-/// 放行的条件很窄：引用的**服务商 id** 在目录里不存在（用户自己起的名字 `ws`、
-/// `ollama` 天然如此）。服务商在目录里、但这条模型查不到，就是 meta 写错了 ——
-/// 照原样把 carter 的错误抛回去，别掩盖。
+/// 这段逻辑（含「查不到到底该不该报错」的判断）整份在
+/// `carter::registry::resolve_model_local`：CLI 与宿主必须对同一份配置得出同一个
+/// 结论，两边各写一份就会漂成「CLI 能开、app 报错」。
 pub fn resolve_provider(
     config: &Config,
     cache_json: &str,
     model_ref: &str,
     extra_hooks: Vec<std::sync::Arc<dyn llm_adapt_core::RequestHook>>,
 ) -> carter::Result<carter::provider::resolve::ResolvedProvider> {
-    let err = match carter::provider::resolve_provider(
-        config,
-        cache_json,
-        model_ref,
-        extra_hooks.clone(),
-    ) {
-        Ok(r) => return Ok(r),
-        Err(e) => e,
-    };
-    let Some(model) = local_model_info(config, cache_json, model_ref) else {
-        return Err(err);
-    };
-    tracing::info!(
-        model = model_ref,
-        "目录里没有这个模型，按本地模型放行（上下文窗口未知）"
-    );
-    crate::provider_link::build(config, model, extra_hooks)
+    carter::provider::resolve::resolve_provider_local(config, cache_json, model_ref, extra_hooks)
 }
 
-/// 目录里没有的模型的最小元数据。服务商在目录里（或配置里没有这个服务商）时
-/// 返回 `None` —— 那种情况下「查不到」是要报给用户看的。
-fn local_model_info(config: &Config, cache_json: &str, reference: &str) -> Option<ModelInfo> {
-    let (provider_name, model_name) = reference.split_once('/')?;
-    let pcfg = config.providers.get(provider_name)?;
-    let root = parse_cache(cache_json).ok()?;
-    if root.get(provider_name).is_some() {
-        return None;
-    }
-    Some(ModelInfo {
-        key: reference.to_string(),
-        provider: provider_name.to_string(),
-        api_name: pcfg
-            .models
-            .get(model_name)
-            .and_then(|m| m.api_name.clone())
-            .unwrap_or_else(|| model_name.to_string()),
-        // 0 = 未知。carter 的压缩阈值按它算，0 永远不触发 —— 「不知道就别切」。
-        context_window: 0,
-        max_output_tokens: 0,
-        tokenizer: String::new(),
-        capabilities: vec![Capability::Tools, Capability::Streaming],
-        pricing: Pricing {
-            input: 0.0,
-            output: 0.0,
-            cache_write: None,
-            cache_read: None,
-        },
-        // 用户为这个模型写的推理档位照常生效（`resolve_model` 也会覆盖这一项）。
-        default_reasoning: pcfg
-            .models
-            .get(model_name)
-            .and_then(|m| m.default_reasoning.clone()),
-    })
-}
-
-/// 编进二进制的目录快照。见模块头「缓存从哪来」。
-const BUILTIN_SNAPSHOT: &str = include_str!("../data/models-snapshot.json");
-
-/// 快照里记录的那次生成时间（`YYYY-MM-DD`，按 models.dev 源仓库的文件估算）。
+/// 快照里记录的那次生成时间（`YYYY-MM-DD`）。
 ///
 /// 快照是「发版那一刻」的目录，用户看到「用的是内置快照（x 月 y 日的）」
 /// 才知道该不该联网刷新一次。
 pub fn builtin_snapshot_date() -> &'static str {
-    static DATE: OnceLock<String> = OnceLock::new();
-    DATE.get_or_init(|| {
-        let v: serde_json::Value = serde_json::from_str(BUILTIN_SNAPSHOT).unwrap_or_default();
-        v.get("$generated_at")
-            .and_then(|x| x.as_str())
-            .unwrap_or("未知")
-            .to_string()
-    })
+    carter::registry::bundled::bundled_date().unwrap_or("未知")
 }
 
 /// carter 缓存的落盘位置（`~/.carter/models.json`，与 CLI 共用）。
@@ -345,15 +281,14 @@ fn cache_is_usable(json: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn write_snapshot() -> Result<(), String> {
-    fetch::write_cache(BUILTIN_SNAPSHOT).map_err(|e| format!("写入内置快照失败：{e}"))?;
-    Ok(())
-}
-
-/// 读 models.dev 缓存。文件不在（或坏了）时先把内置快照写出去，再用它。
+/// 读 models.dev 缓存。文件不在（或坏了）时把 carter 内置的快照写出去，再用它。
 ///
-/// 所有「要用模型元数据」的地方都该走这里，而不是直接
-/// `carter::registry::fetch::read_cache()` —— 后者在首次安装时直接失败。
+/// 所有「要用模型元数据」的地方都该走这里。快照本身在 `carter::registry::bundled`
+/// （gzip 压进二进制，约 380 KB）—— 早先 app 自己编了一份 3.5 MB 的，字段与刷新
+/// 节奏还会和 CLI 漂开；现在只有一份，两边用的是同一批元数据。
+///
+/// 为什么仍然要**写**出去：app 的「刷新元数据」与按服务商补全（`models_sync`）都以
+/// `~/.carter/models.json` 为落点，先把快照铺上，界面就不会停在「还没有」。
 pub fn read_cache() -> Result<String, String> {
     let path = cache_path();
     if let Ok(json) = std::fs::read_to_string(&path)
@@ -361,9 +296,11 @@ pub fn read_cache() -> Result<String, String> {
     {
         return Ok(json);
     }
-    write_snapshot().map_err(|e| format!("{e}（{} 也用不了）", path.display()))?;
+    let snapshot = carter::registry::bundled::bundled_json();
+    fetch::write_cache(snapshot)
+        .map_err(|e| format!("写入内置快照失败：{e}（{} 也用不了）", path.display()))?;
     tracing::info!("没有可用的 models.dev 缓存，已写入内置快照");
-    Ok(BUILTIN_SNAPSHOT.to_string())
+    Ok(snapshot.to_string())
 }
 
 /// 一次刷新是怎么完成的。
@@ -423,7 +360,10 @@ pub async fn refresh() -> Result<RefreshOutcome, String> {
             // 没拿到好目录：不覆盖旧缓存。没有旧缓存的话把快照铺上，别让界面停在「没有」。
             let _ = read_cache();
             RefreshOutcome {
-                count: count_models(&serde_json::from_str(BUILTIN_SNAPSHOT).unwrap_or_default()),
+                count: count_models(
+                    &serde_json::from_str(carter::registry::bundled::bundled_json())
+                        .unwrap_or_default(),
+                ),
                 source: BUILTIN.into(),
                 failed: vec![crate::net::SourceFailure {
                     source: "全部源".into(),
@@ -1241,11 +1181,13 @@ fn endpoint_key(url: &str) -> Option<String> {
             segs.truncate(segs.len() - 2);
             continue;
         }
-        // v1 / v4 / v1beta 这类版本段
+        // v1 / v4 / v1beta 这类版本段，以及三种协议各自的请求路径。
+        // `models` 是模型列表接口的尾段：`/v1/models` 与 `/v1` 指的是同一个端点，
+        // 不剥掉的话「拿拉列表的 URL 去认服务商」永远认不出来。
         let is_version = last.len() >= 2
             && last.starts_with('v')
             && last[1..].chars().next().is_some_and(|c| c.is_ascii_digit());
-        if is_version || last == "responses" || last == "messages" {
+        if is_version || last == "responses" || last == "messages" || last == "models" {
             segs.pop();
             continue;
         }

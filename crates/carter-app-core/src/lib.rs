@@ -49,7 +49,6 @@ pub mod platform;
 pub mod preview;
 pub mod prompts;
 pub mod protocol;
-pub mod provider_link;
 pub mod schedules;
 pub mod session;
 pub mod sessions;
