@@ -29,20 +29,10 @@ use crate::shell::{AppShell, LiveLog};
 
 /// 插话正文的第一行：标记 + 给模型的一句说明。界面显示时整行去掉。
 /// 与前端 `store.ts` 里那份逐字对应。
-pub const STEER_HEAD: &str = "【插话】用户在这一轮进行中补充的话（不是工具输出）：";
-
-/// 给模型看的正文。
-pub fn wrap(text: &str) -> String {
-    format!("{STEER_HEAD}\n{text}")
-}
-
-/// 这段用户正文是不是插话。
 ///
-/// 认**整行抬头**而不只是标记：用户自己打一句以「【插话】」开头的话是普通的一轮，
-/// 被认成插话的话轮次号就少数一个。
-pub fn is_steer(text: &str) -> bool {
-    text.starts_with(STEER_HEAD)
-}
+/// 抬头、[`wrap`]、[`is_steer`] 都由 carter 定义 —— CLI 与宿主必须对同一段正文
+/// 得出同一个判断，各写一份迟早会漂。
+pub use carter::agent::steer::{STEER_HEAD, is_steer, wrap};
 
 /// 一条排着的插话。
 #[derive(Debug, Clone, PartialEq, Eq)]
