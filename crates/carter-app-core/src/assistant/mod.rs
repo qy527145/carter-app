@@ -217,6 +217,17 @@ impl Source {
         self.enabled && self.state.next_at <= now
     }
 
+    /// 有人在等时的到点判断：`next_at` 是上一次轮询时按**当时**的节奏定的 —— 工单在那
+    /// 之后才进入等回复的话，它还是十分钟后。所以不看它，看距上次轮询有没有过
+    /// [`source::URGENT_SECS`]；没轮询过的也算到点。
+    pub fn is_due_urgently(&self, now: u64) -> bool {
+        self.enabled
+            && self
+                .state
+                .last_polled_at
+                .is_none_or(|t| t + source::URGENT_SECS * 1000 <= now)
+    }
+
     /// 有工单在等这个来源的回复吗？有就加密轮询（见 `source::interval_ms`）。
     ///
     /// 带探测命令的不算：对方的后续由探测命令去拉，观察源跑得再勤也看不到它，
@@ -799,6 +810,23 @@ pub(crate) mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("assistant.json")
+    }
+
+    /// 有人在等时不看 `next_at`：距上次轮询过了 30 秒就到点；没轮询过的也到点；停用的不到点。
+    #[test]
+    fn an_awaited_source_is_due_thirty_seconds_after_its_last_poll() {
+        let now = 1_000_000_000;
+        let mut s = source();
+        s.state.next_at = now + 600_000;
+        s.state.last_polled_at = Some(now - 31_000);
+        assert!(!s.is_due(now), "按原节奏还早");
+        assert!(s.is_due_urgently(now), "但有人在等：过了 30 秒就该查");
+        s.state.last_polled_at = Some(now - 5_000);
+        assert!(!s.is_due_urgently(now), "刚查过");
+        s.state.last_polled_at = None;
+        assert!(s.is_due_urgently(now), "从没查过");
+        s.enabled = false;
+        assert!(!s.is_due_urgently(now));
     }
 
     #[test]

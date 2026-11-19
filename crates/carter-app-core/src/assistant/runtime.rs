@@ -64,6 +64,7 @@ waiting（已回复对方、要等对方的下文）。\n\
 钉钉：`dws contact user search --keyword 姓名` 查到 userId，再用 `dws chat message list-by-sender --sender-user-id <userId> --start <现在的 ISO 时间> --end <一周后的 ISO 时间> --limit 20 --format json --jq '.result.conversationMessagesList[] | .title as $c | .messages[] | \"\\(.createTime) [\\($c)] \\(.sender): \\(.content)\"'`（每条消息一行：时间、会话、发送者、内容）；\
 单聊用 `dws chat message list-direct --user <userId> --time <现在> --format json --jq '.result.messages[] | \"\\(.createTime) \\(.sender): \\(.content)\"'`。时间写死成绝对时间，别用「最近 N 分钟」这种每次都变的窗口。\
 观察源本来就看得到对方下文的（私聊、PR 评论），用 match 给几个关键词（对方名字、单号）靠观察源等就行。\n\
+- 报 waiting 之前先再查一次对方有没有已经回了（你回复之后到现在这段）：有就接着处理，别把已经到了的回复当成「还在等」。\n\
 - 汇报要如实：没做完就不是 ready。";
 
 // ---------------------------------------------------------------------------
@@ -143,18 +144,27 @@ pub async fn tick(shell: &Arc<AppShell>) {
         return;
     }
     let now = now_ms();
-    let due: Vec<Source> = shell.assistant.read(|s| {
+    // 到点判断分两种：平时看 `next_at`；有工单在等这个来源时按加密节奏看距上次多久 ——
+    // 否则进入等回复后的第一次轮询仍按旧节奏，最坏要等满一个原间隔（排查过一次：
+    // 对方回了 6 分钟工单才醒）。
+    let due: Vec<(Source, bool)> = shell.assistant.read(|s| {
         s.sources
             .iter()
-            .filter(|x| x.is_due(now))
-            .cloned()
+            .filter_map(|x| {
+                let urgent = Source::is_awaited(s, &x.id);
+                let due = if urgent {
+                    x.is_due_urgently(now)
+                } else {
+                    x.is_due(now)
+                };
+                due.then(|| (x.clone(), urgent))
+            })
             .collect()
     });
-    for s in due {
+    for (s, urgent) in due {
         if !shell.assistant.claim(&s.id) {
             continue;
         }
-        let urgent = shell.assistant.read(|st| Source::is_awaited(st, &s.id));
         let shell = shell.clone();
         tokio::spawn(async move {
             poll_and_assess(&shell, &s, urgent).await;
