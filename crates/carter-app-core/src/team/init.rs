@@ -382,6 +382,7 @@ pub fn create_sync_source(
         command: String::new(),
         cwd: String::new(),
         every_minutes: 5,
+        trigger: String::new(),
         enabled: true,
         state: Default::default(),
     });
@@ -421,6 +422,7 @@ pub fn create_inbox_source(
         command: String::new(),
         cwd: String::new(),
         every_minutes: 1,
+        trigger: String::new(),
         enabled: true,
         state: Default::default(),
     });

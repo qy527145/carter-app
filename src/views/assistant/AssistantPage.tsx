@@ -55,6 +55,7 @@ import {
   type AssistantSettings,
   type AssistantSource,
   type AssistantTicket,
+  type AssistantTriggerStatus,
   approveAssistantDecision,
   assistantTicketAction,
   deleteAssistantSource,
@@ -215,7 +216,12 @@ export function AssistantPage() {
           </Section>
         )}
 
-        <SourcesSection sources={a.sources} busy={a.busy} />
+        <SourcesSection
+          sources={a.sources}
+          busy={a.busy}
+          triggers={a.triggers}
+          urgent={a.urgent_sources}
+        />
         <RulesSection settings={a.settings} />
         <MemorySection memories={a.memories ?? []} episodes={a.episodes ?? []} />
         <HistorySection decisions={a.decisions} ended={ended} />
@@ -472,7 +478,17 @@ function ApprovalCard({ d }: { d: AssistantDecision }) {
 // 观察源
 // ---------------------------------------------------------------------------
 
-function SourcesSection({ sources, busy }: { sources: AssistantSource[]; busy: string[] }) {
+function SourcesSection({
+  sources,
+  busy,
+  triggers,
+  urgent: urgentSources,
+}: {
+  sources: AssistantSource[];
+  busy: string[];
+  triggers?: Record<string, AssistantTriggerStatus>;
+  urgent?: string[];
+}) {
   const [editing, setEditing] = useState<AssistantSource | null | undefined>(undefined);
   const [confirming, setConfirming] = useState<AssistantSource | null>(null);
   const [polling, setPolling] = useState<string | null>(null);
@@ -511,11 +527,18 @@ function SourcesSection({ sources, busy }: { sources: AssistantSource[]; busy: s
         <div className="space-y-2">
           {sources.map((s) => {
             const checking = busy.includes(s.id) || polling === s.id;
+            const trig = triggers?.[s.id];
+            const urgent = (urgentSources ?? []).includes(s.id);
             return (
               <Card key={s.id} className="space-y-1">
                 <div className="flex items-center gap-2">
                   <span className="truncate text-sm font-medium text-ink">{s.name}</span>
                   <Badge>{minutesLabel(s.every_minutes)}</Badge>
+                  {urgent && s.enabled && !s.trigger.trim() && (
+                    <Badge tone="blue" title="有工单在等这个来源的回复，检查得更勤">
+                      加密检查
+                    </Badge>
+                  )}
                   {!s.enabled && <Badge tone="orange">已停用</Badge>}
                   {checking && <Badge tone="blue">检查中</Badge>}
                   <span className="ml-auto flex shrink-0 items-center gap-1">
@@ -540,6 +563,14 @@ function SourcesSection({ sources, busy }: { sources: AssistantSource[]; busy: s
                 <div className="mono truncate text-[11px] text-dim" title={s.command}>
                   $ {s.command}
                 </div>
+                {s.trigger.trim() !== "" && (
+                  <div
+                    className="mono truncate text-[11px] text-dim"
+                    title="触发命令：它每吐一行就让这个来源立刻查一次"
+                  >
+                    ⚡ {s.trigger}
+                  </div>
+                )}
                 <div className="flex flex-wrap gap-x-3 text-[11px] text-dim">
                   {s.state.last_polled_at ? (
                     <span title={fullTime(s.state.last_polled_at)}>
@@ -552,6 +583,27 @@ function SourcesSection({ sources, busy }: { sources: AssistantSource[]; busy: s
                   {!s.state.baselined && s.state.last_polled_at === null && (
                     <span>第一次检查只记下现状</span>
                   )}
+                  {s.trigger.trim() !== "" &&
+                    (trig?.last_line_at ? (
+                      <span
+                        title={trig.last_line ?? ""}
+                        className={trig.last_error ? "text-[var(--danger)]" : undefined}
+                      >
+                        {trig.last_error
+                          ? `监听器${trig.last_error}`
+                          : `监听器有动静 ${relTime(trig.last_line_at)}`}
+                        {trig.restarts > 0 && ` · 重启 ${trig.restarts} 次`}
+                      </span>
+                    ) : (
+                      <span className={trig?.last_error ? "text-[var(--danger)]" : undefined}>
+                        {trig?.last_error
+                          ? `监听器${trig.last_error}`
+                          : s.enabled
+                            ? "监听器启动中"
+                            : "监听器已停"}
+                        {(trig?.restarts ?? 0) > 0 && ` · 重启 ${trig?.restarts} 次`}
+                      </span>
+                    ))}
                   <span className="mono truncate">{s.cwd}</span>
                 </div>
                 {s.state.last_error && s.state.failures < FAILURES_TO_SHOW && (
@@ -627,6 +679,7 @@ function SourceEditor({
         command: "",
         cwd,
         every_minutes: 10,
+        trigger: "",
         enabled: true,
         state: {
           baselined: false,
@@ -726,6 +779,18 @@ function SourceEditor({
           max={24 * 60}
           value={String(d.every_minutes)}
           onChange={(e) => set("every_minutes", Number(e.target.value))}
+        />
+      </Field>
+      <Field
+        label="触发命令（可选）"
+        hint="一条长驻命令：它每吐一行，这个来源就立刻查一次。不产生事件 —— 查的还是上面那条命令，去重与评估照旧。适合 webhook 转发、inotifywait、fswatch；没有就不填，按定时检查。"
+      >
+        <Textarea
+          mono
+          rows={2}
+          value={d.trigger}
+          onChange={(e) => set("trigger", e.target.value)}
+          placeholder="例如：inotifywait -m -q -e create,modify /path/to/inbox"
         />
       </Field>
       <div className="mb-2 flex items-center gap-2">

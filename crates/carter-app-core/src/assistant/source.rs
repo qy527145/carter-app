@@ -88,7 +88,7 @@ pub fn diff(state: &mut SourceState, output: &str) -> Vec<String> {
     fresh
 }
 
-fn clip(line: &str) -> String {
+pub(super) fn clip(line: &str) -> String {
     if line.chars().count() <= MAX_LINE_CHARS {
         return line.to_string();
     }
@@ -157,6 +157,17 @@ pub async fn run_command(command: &str, cwd: &Path) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// 下一次该什么时候跑。`urgent` 时取 [`URGENT_SECS`] 与用户配置里更短的那个：有人
+/// 在等就别按十分钟一次的节奏耗着，但用户自己配得比 30 秒更密时尊重用户的。
+pub fn interval_ms(source: &Source, urgent: bool) -> u64 {
+    let configured = source.every_minutes.max(super::MIN_POLL_MINUTES) * 60_000;
+    if urgent {
+        configured.min(URGENT_SECS * 1000)
+    } else {
+        configured
+    }
+}
+
 async fn run_builtin(name: &str, cwd: &Path) -> Result<String, String> {
     match name {
         "team-inbox" => {
@@ -178,13 +189,20 @@ async fn run_builtin(name: &str, cwd: &Path) -> Result<String, String> {
     }
 }
 
+/// 有人在等回复时，这个来源的轮询间隔（秒）。见 `runtime::tick`。
+///
+/// 取 30 秒而不是更短：调度本身 10 秒一拍，再密下去只是让命令反复跑；要真做到「推」
+/// 就配触发命令（`trigger`），那里不靠轮询。
+pub const URGENT_SECS: u64 = 30;
+
 /// 轮询一次：跑命令、比对、把结果记进 `state`。返回新事件。
 ///
-/// 下一次的时间在这里推：失败也推，否则一个坏掉的命令每 10 秒跑一次。
-pub async fn poll(source: &Source) -> (SourceState, Result<Vec<String>, String>) {
+/// 下一次的时间在这里推：失败也推，否则一个坏掉的命令每 10 秒跑一次。`urgent` 为真时
+/// 按 [`URGENT_SECS`] 推 —— 有工单在等这个来源的回复。
+pub async fn poll(source: &Source, urgent: bool) -> (SourceState, Result<Vec<String>, String>) {
     let mut state = source.state.clone();
     let now = now_ms();
-    state.next_at = now + source.every_minutes.max(super::MIN_POLL_MINUTES) * 60_000;
+    state.next_at = now + interval_ms(source, urgent);
     state.last_polled_at = Some(now);
     match run_command(&source.command, Path::new(&source.cwd)).await {
         Ok(out) => {
@@ -206,6 +224,21 @@ pub async fn poll(source: &Source) -> (SourceState, Result<Vec<String>, String>)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 有人在等时压到 30 秒；用户本来就配得比这更密时按用户的。
+    #[test]
+    fn urgent_polling_is_30_seconds_but_never_slower_than_config() {
+        let mut src = super::super::tests::source();
+        src.every_minutes = 10;
+        assert_eq!(interval_ms(&src, false), 600_000);
+        assert_eq!(interval_ms(&src, true), URGENT_SECS * 1000);
+        src.every_minutes = super::super::MIN_POLL_MINUTES;
+        assert_eq!(
+            interval_ms(&src, true),
+            URGENT_SECS * 1000,
+            "1 分钟也压到 30 秒 —— 加密就是加密"
+        );
+    }
 
     /// 第一次只建基线：已有的东西不算新事件。
     #[test]
@@ -294,7 +327,18 @@ mod tests {
         let mut s = super::super::tests::source();
         s.command = "exit 1".into();
         s.cwd = std::env::temp_dir().to_string_lossy().into_owned();
-        let (st, res) = poll(&s).await;
+        let (st, res) = poll(&s, false).await;
+        assert_eq!(
+            st.next_at - st.last_polled_at.unwrap(),
+            300_000,
+            "按配置推下一次"
+        );
+        let (st, _) = poll(&s, true).await;
+        assert_eq!(
+            st.next_at - st.last_polled_at.unwrap(),
+            URGENT_SECS * 1000,
+            "有人在等时加密"
+        );
         assert!(res.is_err());
         assert_eq!(st.failures, 1);
         assert!(st.next_at > now_ms());

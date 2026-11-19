@@ -131,6 +131,7 @@ fn migrate_ticket_titles(shell: &AppShell) {
 /// 一拍：到点的来源各起一个任务去轮询，然后看能不能开工。
 pub async fn tick(shell: &Arc<AppShell>) {
     reap_dead_workers(shell);
+    sync_triggers(shell);
     let paused = shell.assistant.read(|s| s.settings.paused);
     if paused {
         return;
@@ -147,14 +148,23 @@ pub async fn tick(shell: &Arc<AppShell>) {
         if !shell.assistant.claim(&s.id) {
             continue;
         }
+        let urgent = shell.assistant.read(|st| Source::is_awaited(st, &s.id));
         let shell = shell.clone();
         tokio::spawn(async move {
-            poll_and_assess(&shell, &s).await;
+            poll_and_assess(&shell, &s, urgent).await;
             shell.assistant.release(&s.id);
         });
     }
     expire_waiters(shell, now);
     launch_queued(shell).await;
+}
+
+/// 触发命令的进程对账：该跑的跑起来，暂停 / 停用 / 删除的收掉。见 `trigger`。
+fn sync_triggers(shell: &Arc<AppShell>) {
+    let (sources, paused) = shell
+        .assistant
+        .read(|s| (s.sources.clone(), s.settings.paused));
+    shell.assistant.triggers.sync(shell, &sources, paused);
 }
 
 /// 等回复到期了还没等到：唤醒一次，把「等了多久、等的是什么」告诉它。
@@ -192,8 +202,8 @@ fn expire_waiters(shell: &Arc<AppShell>, now: u64) {
 // 轮询与评估
 // ---------------------------------------------------------------------------
 
-async fn poll_and_assess(shell: &Arc<AppShell>, source: &Source) {
-    let (state, result) = super::source::poll(source).await;
+pub(crate) async fn poll_and_assess(shell: &Arc<AppShell>, source: &Source, urgent: bool) {
+    let (state, result) = super::source::poll(source, urgent).await;
     let id = source.id.clone();
     let _ = shell.assistant.with(|s| {
         if let Some(x) = s.sources.iter_mut().find(|x| x.id == id) {
@@ -682,6 +692,7 @@ pub fn save_settings(shell: &Arc<AppShell>, mut next: Settings) -> Result<(), St
 pub fn save_source(shell: &Arc<AppShell>, mut source: Source) -> Result<(), String> {
     source.name = source.name.trim().to_string();
     source.command = source.command.trim().to_string();
+    source.trigger = source.trigger.trim().to_string();
     source.cwd = source.cwd.trim().to_string();
     if source.id.trim().is_empty() {
         source.id = new_id("src", now_ms());
@@ -690,12 +701,23 @@ pub fn save_source(shell: &Arc<AppShell>, mut source: Source) -> Result<(), Stri
     if !std::path::Path::new(&source.cwd).is_dir() {
         return Err(format!("工作目录 {} 不存在", source.cwd));
     }
+    // 命令改了就得换一份进程：旧的那条还在盯旧的东西，重启次数与最后一行也不再算数。
+    let old = shell.assistant.read(|s| {
+        s.sources
+            .iter()
+            .find(|x| x.id == source.id)
+            .map(|x| x.trigger.clone())
+    });
+    if old.as_deref().is_some_and(|t| t != source.trigger) {
+        shell.assistant.triggers.stop(&source.id);
+    }
     shell.assistant.with(|s| s.upsert_source(source))?;
     changed(shell);
     Ok(())
 }
 
 pub fn delete_source(shell: &Arc<AppShell>, id: &str) -> Result<(), String> {
+    shell.assistant.triggers.stop(id);
     shell.assistant.with(|s| s.sources.retain(|x| x.id != id))?;
     changed(shell);
     Ok(())
@@ -776,7 +798,7 @@ pub async fn poll_now(shell: &Arc<AppShell>, source_id: &str) -> Result<u32, Str
     if !shell.assistant.claim(&source.id) {
         return Err("这个观察源正在检查中".into());
     }
-    poll_and_assess(shell, &source).await;
+    poll_and_assess(shell, &source, false).await;
     shell.assistant.release(&source.id);
     let s = shell
         .assistant
@@ -1257,6 +1279,10 @@ pub struct AssistantView {
     pub busy: Vec<String>,
     /// 要人处理的工单数（侧栏角标、托盘）。
     pub attention: usize,
+    /// 各来源触发命令的运行状态（来源 id → 状态）。没配触发命令的来源不在这里。
+    pub triggers: std::collections::HashMap<String, super::trigger::TriggerStatus>,
+    /// 有工单在等回复、因而被加密轮询的来源 id。见 `source::URGENT_SECS`。
+    pub urgent_sources: Vec<String>,
     /// 每张工单最近一条汇报在助理对话里的轮次号（工单 id → 轮）。
     ///
     /// 助理对话的卡片上要能「跳到那一轮」；事件不回放，这个映射随面板状态一起带回，
@@ -1280,10 +1306,29 @@ pub fn view(shell: &AppShell) -> AssistantView {
     // 归属在记录汇报时就和那一轮一起存进了 `timeline`（见 `chat::record`），这里只是查表。
     let report_turns =
         super::chat::report_turns(&crate::timeline::load(crate::assistant::CHAT_SESSION_ID));
+    let triggers: std::collections::HashMap<String, super::trigger::TriggerStatus> = state
+        .sources
+        .iter()
+        .filter_map(|s| {
+            shell
+                .assistant
+                .triggers
+                .status_of(&s.id)
+                .map(|st| (s.id.clone(), st))
+        })
+        .collect();
+    let urgent_sources = state
+        .sources
+        .iter()
+        .filter(|s| Source::is_awaited(&state, &s.id))
+        .map(|s| s.id.clone())
+        .collect();
     AssistantView {
         state,
         busy,
         attention,
+        triggers,
+        urgent_sources,
         report_turns,
     }
 }

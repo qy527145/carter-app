@@ -39,8 +39,24 @@ export type AssistantSource = {
   command: string;
   cwd: string;
   every_minutes: number;
+  /**
+   * 触发命令：一条长驻命令，它每吐一行就让这个来源立刻查一次。空 = 只按定时检查。
+   * 它不产生事件 —— 查的仍是 `command`，格式与去重都照旧。
+   */
+  trigger: string;
   enabled: boolean;
   state: AssistantSourceState;
+};
+
+/** 触发命令的运行状态。面板上用它说明监听器还活着，还是已经退了几次。 */
+export type AssistantTriggerStatus = {
+  /** 重启过几次（不含第一次拉起）。 */
+  restarts: number;
+  /** 最近吐出来的一行 —— 有更新就说明监听器活着。 */
+  last_line: string | null;
+  last_line_at: number | null;
+  /** 最近一次退出 / 拉不起来的原因。正常时是 null。 */
+  last_error: string | null;
 };
 
 export type Verdict = "accept" | "would_accept" | "attach" | "ignore" | "unavailable";
@@ -149,6 +165,10 @@ export type AssistantView = {
   busy: string[];
   /** 要人处理的件数。 */
   attention: number;
+  /** 各来源触发命令的运行状态（来源 id → 状态）。没配触发命令的不在这里。 */
+  triggers?: Record<string, AssistantTriggerStatus>;
+  /** 有工单在等回复、正在加密轮询的来源 id。 */
+  urgent_sources?: string[];
   /** 每张工单最近一条汇报在助理对话里的轮次号（工单 id → 轮）。卡片上的「去对话」用它。 */
   report_turns?: Record<string, number>;
 };

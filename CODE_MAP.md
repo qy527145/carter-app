@@ -107,6 +107,7 @@ carter / llm_adapt_core     底层的 agent 循环、工具、会话、协议编
 | `assistant/` | 常驻助理：观察源 → 评估 → 开工 → 汇报 |
 | `assistant/runtime.rs` / `eval.rs` / `memory.rs` | 轮询主循环、事件评估、长期记忆 |
 | `assistant/wait.rs` | 「等回复」：工单声明在等什么，新行先对等待名单、命中直接唤醒，不经评估 |
+| `assistant/trigger.rs` | 触发命令：一条长驻命令，吐一行就让来源立刻查一次（看护进程、退避重启、状态） |
 | `tools/assistant_*.rs` | 助理对话里的工单、配置、汇报工具 |
 
 ### 其它

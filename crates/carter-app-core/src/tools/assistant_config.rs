@@ -401,6 +401,11 @@ impl AssistantConfigTool {
             command,
             cwd,
             every_minutes: every,
+            // 触发命令归用户管（面板上配），模型改观察源时原样保留。
+            trigger: existing
+                .as_ref()
+                .map(|s| s.trigger.clone())
+                .unwrap_or_default(),
             enabled,
             state: existing
                 .as_ref()

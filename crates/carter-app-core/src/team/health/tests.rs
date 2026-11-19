@@ -35,6 +35,7 @@ fn source(cwd: &Path, command: &str, enabled: bool) -> Source {
         command: command.to_string(),
         cwd: cwd.to_string_lossy().into_owned(),
         every_minutes: 5,
+        trigger: String::new(),
         enabled,
         state: SourceState::default(),
     }

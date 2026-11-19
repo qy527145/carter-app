@@ -31,6 +31,7 @@
 //! | Ticket + Assignment | [`Ticket`]：一张工单一条后台会话 | 会话就是现成的执行器，界面里点开就能接着聊 |
 //! | Subscription 扇出 | 评估判 `attach` 时把事件送进那张工单的会话 | 只在事件**明确指向**那张工单时才这么做 |
 //! | （没有对应） | [`wait`]：工单自己声明「在等谁的什么话」，新行先对它、命中直接送回 | 回复过对方的工单不必再经评估与排队才醒来 |
+//! | （没有对应） | [`trigger`]：来源可配一条长驻命令，吐一行就查一次 | 能推的来源不必等轮询；推来的行不当事件，查的仍是原命令 |
 //! | Report | `assistant_report` 工具 | 结构化的结局，不从正文里猜 |
 //! | Pause processing | [`Settings::paused`] | 停轮询、停开工；已经在跑的那一轮不打断 |
 //! | 重启恢复 | [`State::recover`] | 跑到一半的工单重新排队，带一句「先核对现状，别重复外部动作」 |
@@ -49,6 +50,7 @@ pub mod eval;
 pub mod memory;
 pub mod runtime;
 pub mod source;
+pub mod trigger;
 pub mod wait;
 
 use std::collections::HashMap;
@@ -164,6 +166,10 @@ pub struct Source {
     /// 命令在哪个目录跑；这个来源开出来的工单也在这里干活。
     pub cwd: String,
     pub every_minutes: u64,
+    /// 触发命令：一条长驻命令，它每吐一行就让这个来源立刻查一次（不产生事件）。
+    /// 空 = 只按定时检查。见 [`trigger`]。
+    #[serde(default)]
+    pub trigger: String,
     #[serde(default = "yes")]
     pub enabled: bool,
     /// 运行时状态。界面保存来源时原样带回，后端以盘上的为准（见 [`State::upsert_source`]）。
@@ -209,6 +215,14 @@ impl Source {
 
     pub fn is_due(&self, now: u64) -> bool {
         self.enabled && self.state.next_at <= now
+    }
+
+    /// 有工单在等这个来源的回复吗？有就加密轮询（见 `source::interval_ms`）。
+    pub fn is_awaited(state: &State, source_id: &str) -> bool {
+        state.tickets.iter().any(|t| {
+            t.status == TicketStatus::Waiting
+                && t.wait.as_ref().is_some_and(|w| w.source_id == source_id)
+        })
     }
 }
 
@@ -599,6 +613,8 @@ pub struct AssistantStore {
     /// 正在轮询 / 评估的来源。同一个来源同一时刻只跑一份 —— 原型里「一个 Thread
     /// 同时只有一个 Eval」。
     busy: Mutex<std::collections::HashSet<String>>,
+    /// 各来源的触发命令进程。见 [`trigger`]。不落盘。
+    pub(crate) triggers: trigger::TriggerTable,
 }
 
 impl AssistantStore {
@@ -614,6 +630,7 @@ impl AssistantStore {
             workers: Mutex::default(),
             errors: Mutex::default(),
             busy: Mutex::default(),
+            triggers: trigger::TriggerTable::default(),
         })
     }
 
@@ -749,6 +766,7 @@ pub(crate) mod tests {
             command: "gh api notifications".into(),
             cwd: "/tmp".into(),
             every_minutes: 5,
+            trigger: String::new(),
             enabled: true,
             state: SourceState::default(),
         }
