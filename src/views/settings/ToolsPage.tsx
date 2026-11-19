@@ -8,10 +8,19 @@
 // 否则用户会以为在命令行里也关掉了。
 
 import { ChevronRight } from "lucide-react";
-import { useState } from "react";
-import { Switch } from "../../components/ui/Input";
+import { useEffect, useState } from "react";
+import { Input, Segmented, Switch } from "../../components/ui/Input";
 import { Banner, Card, Collapse } from "../../components/ui/Panel";
-import { type AppSettings, listTools, setAppSettings, type ToolRow } from "../../lib/api";
+import {
+  type AppSettings,
+  type BashTimeoutSettings,
+  getBashTimeout,
+  listTools,
+  type OnTimeout,
+  setAppSettings,
+  setBashTimeout,
+  type ToolRow,
+} from "../../lib/api";
 import { toastError } from "../../lib/toast";
 import { useAsync } from "../../lib/useAsync";
 import { useStore } from "../../store";
@@ -54,6 +63,79 @@ function ToolItem({ t, onToggle }: { t: ToolRow; onToggle: (v: boolean) => void 
         </div>
       )}
     </Card>
+  );
+}
+
+/**
+ * bash 前台命令的超时：多久、超时之后转后台还是结束。
+ *
+ * 存在 `config.toml`（carter CLI 也认），改完下一条命令生效。两种处理给模型的话不一样
+ * —— 它要知道命令是还在后台跑，还是已经没了。
+ */
+function BashTimeoutRow() {
+  const state = useAsync(getBashTimeout, []);
+  const cur = state.data;
+  // 秒数在输入框里先改草稿，失焦 / 回车才存：边打边存会在「1」「12」「120」上各写一次盘。
+  const [draft, setDraft] = useState("");
+  useEffect(() => {
+    if (cur) setDraft(String(cur.secs));
+  }, [cur]);
+
+  function save(next: BashTimeoutSettings) {
+    setBashTimeout(next.secs, next.on_timeout)
+      .then(() => state.reload())
+      .catch((e) => {
+        toastError(e);
+        if (cur) setDraft(String(cur.secs));
+      });
+  }
+
+  function commitSecs() {
+    if (!cur) return;
+    const n = Math.round(Number(draft));
+    if (!Number.isFinite(n) || n === cur.secs) {
+      setDraft(String(cur.secs));
+      return;
+    }
+    save({ ...cur, secs: n });
+  }
+
+  if (!cur) return null;
+  return (
+    <div className="mb-4 rounded-xl border border-edge bg-card px-4 py-3">
+      <div className="flex flex-wrap items-center gap-3">
+        <span className="text-sm text-ink">命令超时</span>
+        <span className="flex items-center gap-1.5">
+          <Input
+            type="number"
+            min={5}
+            max={3600}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onBlur={commitSecs}
+            onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()}
+            className="w-20 text-xs"
+          />
+          <span className="text-xs text-dim">秒</span>
+        </span>
+        <span className="text-xs text-dim">超时后</span>
+        <Segmented<OnTimeout>
+          value={cur.on_timeout}
+          options={[
+            { id: "background", label: "转后台" },
+            { id: "kill", label: "终止" },
+          ]}
+          onChange={(on_timeout) => save({ ...cur, on_timeout })}
+        />
+      </div>
+      <div className="mt-1.5 text-[11px] leading-relaxed text-dim">
+        {cur.on_timeout === "background"
+          ? "前台命令跑满时长仍未结束，就转到后台继续跑，跑完自动唤醒对话；模型会被告知这是超时转的，不是你操作的。"
+          : "前台命令跑满时长仍未结束就结束整棵进程树；模型会被告知这是超时，不是你中断的，并拿到已有的输出。"}
+        模型单次调用可以自己指定更长的超时。存在 <span className="mono">config.toml</span>，carter
+        命令行也按这个来。
+      </div>
+    </div>
   );
 }
 
@@ -104,6 +186,8 @@ export function ToolsPage() {
           命令行读不到它，在那边这些工具依然是开着的。
         </Banner>
       </div>
+
+      <BashTimeoutRow />
 
       {off.length > 0 && (
         <div className="mb-4 text-xs text-dim">

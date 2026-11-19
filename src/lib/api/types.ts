@@ -298,6 +298,8 @@ export type Command =
    * `background` 让命令继续跑、工具立刻返回 `shell_id`。
    */
   | { type: "tool_action"; call_id: string; action: "interrupt" | "background" }
+  /** 终止一条后台命令。模型会收到「被用户终止」的通知（与自己跑完区分）。 */
+  | { type: "kill_shell"; shell_id: string }
   | { type: "cancel" }
   /**
    * 重跑某一轮用户输入（回答下面的「重试」）。

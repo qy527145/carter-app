@@ -279,6 +279,8 @@ impl Runner {
             Command::DropPrompt { id } => drop_queued(&mut self.queued, id),
             // 空闲时按「中断命令」= 那条命令已经结束了，什么都不用做。
             Command::ToolAction { .. } => {}
+            // 空闲时终止后台命令：通知会从后台表的完成通道回来，唤醒新的一轮。
+            Command::KillShell { shell_id } => kill_shell_by_user(&self.ctx, &shell_id),
             Command::Compact => {
                 self.ctx.refresh();
                 self.compact(false).await;

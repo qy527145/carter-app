@@ -218,6 +218,9 @@ pub(super) fn handle_live_command(
         Command::AnswerForm { id, answers } => {
             ctx.handle.asks.answer(id, answers);
         }
+        // 一轮进行中也要能立刻终止：等这一轮跑完才杀，用户按的那一下就白按了。
+        // 通知照常进完成通道，这一轮结束后才送给模型。
+        Command::KillShell { shell_id } => kill_shell_by_user(ctx, &shell_id),
         // `/goal pause` 必须立刻生效：否则一条正在自动继续的长任务要等整串跑完
         // 才停得下来，而用户按暂停正是因为不想再等了。
         Command::Goal { action } => {
@@ -247,6 +250,13 @@ pub(super) fn handle_live_command(
         other => queued.push_back(other),
     }
     false
+}
+
+/// 用户终止一条后台命令。找不到 / 已经结束都不是错：按钮与命令结束本来就可能撞在一起。
+pub(super) fn kill_shell_by_user(ctx: &SessionCtx, shell_id: &str) {
+    if let Err(e) = ctx.shells.kill_by_user(shell_id) {
+        tracing::debug!("终止后台命令 {shell_id}：{e}");
+    }
 }
 
 /// 展开输入框里的 `/命令` 与 `@文件`。

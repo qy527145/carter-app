@@ -29,7 +29,7 @@ carter / llm_adapt_core     底层的 agent 循环、工具、会话、协议编
 | `lib/teamUi.ts` / `ticketUi.ts` | 团队看板 / 工单的纯展示逻辑（有 bun 测试） |
 | `views/settings/` | 设置页各分区；`ScenesPage` 是场景模型；`ConnectorsPage` / `SkillsPage` / `AboutPage` 是连接器、技能、更新 |
 | `views/team/` | 团队看板、依赖图、任务抽屉 |
-| `components/` | 输入框、侧栏、更新提示条、工具卡片渲染 |
+| `components/` | 输入框、侧栏、更新提示条、工具卡片渲染；`BackgroundTasksBar` 是后台任务条（含「终止」） |
 | `components/ChatView.tsx` | 再导出 `components/chat/*` |
 | `components/chat/` | 对话主区：`fragments`（正文片段）、`changes`（本轮动过的文件）、`turns`（一轮消息）、`list`（列表与贴底滚动）、`chrome`（头部 / 待办 / 输入区与 `ChatView` 本体） |
 | `components/payload/` | 报文面板：JSON 树、SSE 时间线、可视化 |

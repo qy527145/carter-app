@@ -82,6 +82,9 @@ pub enum Command {
         call_id: String,
         action: ToolActionKind,
     },
+    /// 终止一条后台命令（界面上后台任务条里的「终止」）。与模型自己 `kill_shell` 不同：
+    /// 模型并不知道，所以会收到一条「被用户终止」的通知（见 carter 的 `kill_by_user`）。
+    KillShell { shell_id: String },
     /// 中断当前轮。已经生成的内容保留。
     Cancel,
     /// 重跑某一轮用户输入（界面上回答下面的「重试」）。
@@ -512,14 +515,23 @@ pub struct BackgroundShellView {
     pub command: String,
     /// 开始的时刻（epoch 毫秒）。界面据此显示「已运行多久」。
     pub started_at: u64,
+    /// 怎么进的后台：`model`（模型起的）| `user`（用户按了转后台）| `timeout`（超时自动转）。
+    pub origin: String,
 }
 
 impl From<carter::tools::RunningShell> for BackgroundShellView {
     fn from(s: carter::tools::RunningShell) -> Self {
+        use carter::tools::Origin;
         Self {
             id: s.id,
             command: s.command,
             started_at: s.started_at,
+            origin: match s.origin {
+                Origin::Model => "model",
+                Origin::User => "user",
+                Origin::Timeout => "timeout",
+            }
+            .to_string(),
         }
     }
 }

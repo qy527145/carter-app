@@ -253,6 +253,8 @@ pub fn run() {
             set_fast_model,
             scene_models,
             set_scene_model,
+            get_bash_timeout,
+            set_bash_timeout,
             get_compaction,
             set_compaction,
             // 团队目录

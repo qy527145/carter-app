@@ -204,6 +204,23 @@ export interface CompactionSettings {
   ratio: number;
 }
 
+/** 前台命令超时之后：转到后台继续跑，或结束它。 */
+export type OnTimeout = "background" | "kill";
+
+/** 前台 bash 命令的超时策略（`agent.bash_timeout_secs` / `agent.bash_on_timeout`，carter CLI 也认）。 */
+export interface BashTimeoutSettings {
+  secs: number;
+  on_timeout: OnTimeout;
+}
+
+export function getBashTimeout(): Promise<BashTimeoutSettings> {
+  return invoke<BashTimeoutSettings>("get_bash_timeout");
+}
+
+export function setBashTimeout(secs: number, onTimeout: OnTimeout): Promise<void> {
+  return invoke<void>("set_bash_timeout", { secs, onTimeout });
+}
+
 export function getCompaction(): Promise<CompactionSettings> {
   return invoke<CompactionSettings>("get_compaction");
 }

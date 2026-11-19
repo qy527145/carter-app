@@ -228,6 +228,32 @@ pub(crate) async fn set_scene_model(
     carter_app_core::scene_models::set_scene(shell.inner(), &scene, model_ref.as_deref())
 }
 
+/// 前台 bash 命令的超时策略（`agent.bash_timeout_secs` / `agent.bash_on_timeout`）。
+#[derive(serde::Serialize)]
+pub(crate) struct BashTimeoutSettings {
+    secs: u64,
+    on_timeout: carter::config::OnTimeout,
+}
+
+#[tauri::command]
+pub(crate) fn get_bash_timeout(shell: State<'_, Arc<AppShell>>) -> BashTimeoutSettings {
+    let cfg = shell.config.load();
+    BashTimeoutSettings {
+        secs: cfg.agent.bash_timeout_secs,
+        on_timeout: cfg.agent.bash_on_timeout,
+    }
+}
+
+/// **必须是 `async fn`**：热重载里有 `tokio::spawn`，理由同 [`set_default_model`]。
+#[tauri::command]
+pub(crate) async fn set_bash_timeout(
+    shell: State<'_, Arc<AppShell>>,
+    secs: u64,
+    on_timeout: carter::config::OnTimeout,
+) -> Result<(), String> {
+    config_edit::set_bash_timeout_reload(shell.inner(), secs, on_timeout)
+}
+
 /// 自动压缩的当前设置（`agent.compact_enabled` / `agent.compact_threshold_ratio`）。
 #[derive(serde::Serialize)]
 pub(crate) struct CompactionSettings {

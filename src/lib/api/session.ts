@@ -103,6 +103,8 @@ export type BackgroundShellView = {
   command: string;
   /** 开始的时刻（epoch 毫秒）。界面据此显示「已运行多久」。 */
   started_at: number;
+  /** 怎么进的后台：模型起的 / 用户按了转后台 / 超时自动转。 */
+  origin: "model" | "user" | "timeout";
 };
 
 /** 一条已经跑完的工具调用（见 `CreatedSession.finished_tools`）。 */

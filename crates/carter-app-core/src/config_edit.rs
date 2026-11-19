@@ -348,6 +348,32 @@ pub fn set_compaction(doc: &mut DocumentMut, enabled: bool, ratio: f64) -> Resul
     Ok(())
 }
 
+/// 前台 bash 命令的超时（`agent.bash_timeout_secs`）与超时后的处理（`agent.bash_on_timeout`）。
+/// 写进 `config.toml` 而不是应用设置：carter CLI 也认这两项，两边行为一致。
+pub fn set_bash_timeout(
+    doc: &mut DocumentMut,
+    secs: u64,
+    on_timeout: carter::config::OnTimeout,
+) -> Result<(), String> {
+    if !(5..=3600).contains(&secs) {
+        return Err(format!("超时 {secs}s 应在 5 到 3600 秒之间"));
+    }
+    let agent = child_table(doc.as_table_mut(), "agent")?;
+    agent.insert("bash_timeout_secs", value(secs as i64));
+    agent.insert("bash_on_timeout", value(on_timeout.as_str()));
+    Ok(())
+}
+
+pub fn set_bash_timeout_reload(
+    shell: &crate::shell::AppShell,
+    secs: u64,
+    on_timeout: carter::config::OnTimeout,
+) -> Result<(), String> {
+    let mut doc = load_doc()?;
+    set_bash_timeout(&mut doc, secs, on_timeout)?;
+    apply(shell, &doc)
+}
+
 pub fn set_skills_enabled(doc: &mut DocumentMut, enabled: bool) -> Result<(), String> {
     child_table(doc.as_table_mut(), "skills")?.insert("enabled", value(enabled));
     Ok(())
@@ -1118,6 +1144,18 @@ whatever = true
             ..base.clone()
         };
         assert!(save_mcp_server(&mut d, &http).unwrap_err().contains("url"));
+    }
+
+    #[test]
+    fn bash_timeout_is_written_and_validated() {
+        use carter::config::OnTimeout;
+        let mut d = doc();
+        set_bash_timeout(&mut d, 300, OnTimeout::Kill).unwrap();
+        let out = d.to_string();
+        // 键名与取值必须是 carter 认的那一套（`OnTimeout` 是 snake_case）。
+        assert!(out.contains("bash_timeout_secs = 300"), "{out}");
+        assert!(out.contains("bash_on_timeout = \"kill\""), "{out}");
+        assert!(set_bash_timeout(&mut d, 1, OnTimeout::Kill).is_err());
     }
 
     #[test]

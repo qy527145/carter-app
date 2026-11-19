@@ -26,7 +26,9 @@ pub(crate) struct ToolRow {
 #[tauri::command]
 pub(crate) fn list_tools(shell: State<'_, Arc<AppShell>>, cwd: Option<String>) -> Vec<ToolRow> {
     let settings = AppSettings::load();
-    let skills_on = shell.config.load().skills.enabled;
+    let config = shell.config.load();
+    let skills_on = config.skills.enabled;
+    let timeout = carter_app_core::tools::BashTimeout::of(&config.agent);
 
     let mut registry = carter::tools::ToolRegistry::builtin();
     if skills_on {
@@ -48,7 +50,7 @@ pub(crate) fn list_tools(shell: State<'_, Arc<AppShell>>, cwd: Option<String>) -
         .unwrap_or_else(carter::config::paths::carter_home);
     let mut rows: Vec<ToolRow> = Vec::new();
     for t in registry.tools() {
-        let t = carter_app_core::tools::substitute(t.clone(), &settings, &cwd);
+        let t = carter_app_core::tools::substitute(t.clone(), &settings, &cwd, timeout);
         let name = t.name().to_string();
         let note = match name.as_str() {
             "bash" => Some(carter_app_core::platform::os_label().to_string()),

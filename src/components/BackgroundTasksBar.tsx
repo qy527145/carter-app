@@ -19,15 +19,40 @@
 // 状态来自后端的 `background_shells` 事件，给的是「此刻还在跑的那些」。增量在这里
 // 没有意义：漏掉一条「结束了」只会让提醒条一直挂着，而它的全部价值就是「还挂着 = 还没完」。
 
-import { ChevronRight, Terminal } from "lucide-react";
+import { ChevronRight, Square, Terminal } from "lucide-react";
 import { useEffect, useState } from "react";
+import { type BackgroundShellView, sendCommand } from "../lib/api";
 import { fmtDuration } from "../lib/format";
+import { toastError } from "../lib/toast";
 import { useStore } from "../store";
 import { Collapse } from "./ui/Panel";
+
+/** 怎么进的后台。模型起的最常见，不标；另外两种标出来，免得人以为是模型自作主张。 */
+const ORIGIN_LABEL: Record<BackgroundShellView["origin"], string | null> = {
+  model: null,
+  user: "手动转入",
+  timeout: "超时转入",
+};
 
 export function BackgroundTasksBar() {
   const shells = useStore((s) => s.backgroundShells);
   const streaming = useStore((s) => s.streaming);
+  const sessionId = useStore((s) => s.sessionId);
+  // 按过「终止」的那几条：等后端快照把它们摘掉之前，按钮先变灰，别让人连点。
+  const [killing, setKilling] = useState<Set<string>>(new Set());
+
+  const kill = (id: string) => {
+    if (!sessionId) return;
+    setKilling((s) => new Set(s).add(id));
+    sendCommand(sessionId, { type: "kill_shell", shell_id: id }).catch((e) => {
+      setKilling((s) => {
+        const n = new Set(s);
+        n.delete(id);
+        return n;
+      });
+      toastError(e);
+    });
+  };
   const [open, setOpen] = useState(false);
   const [now, setNow] = useState(() => Date.now());
 
@@ -88,12 +113,29 @@ export function BackgroundTasksBar() {
                 <code className="mono min-w-0 flex-1 truncate text-ink/90" title={s.command}>
                   {s.command}
                 </code>
+                {ORIGIN_LABEL[s.origin] && (
+                  <span className="shrink-0 rounded bg-bubble px-1 py-px text-[10px] text-dim">
+                    {ORIGIN_LABEL[s.origin]}
+                  </span>
+                )}
                 <span className="shrink-0 tabular-nums text-dim">
                   {fmtDuration(elapsed(s.started_at))}
                 </span>
+                <button
+                  type="button"
+                  onClick={() => kill(s.id)}
+                  disabled={killing.has(s.id)}
+                  title="结束这条命令（连同子进程）。模型会收到「被用户终止」的通知"
+                  className="inline-flex shrink-0 items-center gap-1 rounded bg-bubble px-1.5 py-0.5 text-[11px] text-dim transition-colors hover:text-[var(--danger)] disabled:opacity-40"
+                >
+                  <Square size={9} />
+                  终止
+                </button>
               </div>
             ))}
-            <div className="pt-0.5 text-[11px] text-dim/70">跑完会自动唤醒这条对话接着做。</div>
+            <div className="pt-0.5 text-[11px] text-dim/70">
+              跑完会自动唤醒这条对话接着做；手动终止也会告诉它。
+            </div>
           </div>
         </Collapse>
       </div>

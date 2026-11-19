@@ -153,10 +153,54 @@ pub fn filter_tools(full: &ToolRegistry, settings: &AppSettings) -> Vec<Arc<dyn 
 /// 抽成函数是为了让**两处共用同一份判断**：真正装配工具池的 [`build_tools`]，与设置页
 /// 那份只用来展示的 registry（`src-tauri` 的 `list_tools`）。后者此前手抄了一遍 `bash`
 /// 的构造，而设置页显示一份与真实行为对不上的说明，比不显示更坏。
-pub fn substitute(t: Arc<dyn Tool>, settings: &AppSettings, cwd: &Path) -> Arc<dyn Tool> {
+pub fn substitute(
+    t: Arc<dyn Tool>,
+    settings: &AppSettings,
+    cwd: &Path,
+    timeout: BashTimeout,
+) -> Arc<dyn Tool> {
     // 只在设置页「工具」列表里用到：那里只展示名字与描述，不会真的执行 ——
     // 于是给一个永远不会置位的取消令牌、不给后台表。
-    substitute_with(t, settings, cwd, &CancelToken::new(), None, "", None)
+    let cancel = CancelToken::new();
+    substitute_with(
+        t,
+        settings,
+        cwd,
+        BashRuntime {
+            cancel: &cancel,
+            shells: None,
+            session_id: "",
+            shell_cwd: None,
+            timeout,
+        },
+    )
+}
+
+/// bash 运行期要的东西：取消令牌、后台表、当前目录、超时策略。打包是为了
+/// [`substitute_with`] 的参数不至于一长串（展示用的那份全给空的）。
+pub struct BashRuntime<'a> {
+    pub cancel: &'a CancelToken,
+    pub shells: Option<&'a Arc<BackgroundShells>>,
+    pub session_id: &'a str,
+    pub shell_cwd: Option<&'a Arc<ShellCwd>>,
+    pub timeout: BashTimeout,
+}
+
+/// bash 的超时策略（`agent.bash_timeout_secs` / `agent.bash_on_timeout`）。
+/// 设置页那份只读 registry 也要带上：工具描述里写着超时之后会发生什么。
+#[derive(Debug, Clone, Copy)]
+pub struct BashTimeout {
+    pub secs: u64,
+    pub on_timeout: carter::config::OnTimeout,
+}
+
+impl BashTimeout {
+    pub fn of(agent: &AgentConfig) -> Self {
+        Self {
+            secs: agent.bash_timeout_secs,
+            on_timeout: agent.bash_on_timeout,
+        }
+    }
 }
 
 /// [`substitute`] 的完整版。真正装配工具池时走这条，带上取消令牌与后台命令表。
@@ -164,11 +208,15 @@ pub fn substitute_with(
     t: Arc<dyn Tool>,
     settings: &AppSettings,
     cwd: &Path,
-    cancel: &CancelToken,
-    shells: Option<&Arc<BackgroundShells>>,
-    session_id: &str,
-    shell_cwd: Option<&Arc<ShellCwd>>,
+    rt: BashRuntime<'_>,
 ) -> Arc<dyn Tool> {
+    let BashRuntime {
+        cancel,
+        shells,
+        session_id,
+        shell_cwd,
+        timeout,
+    } = rt;
     match t.name() {
         // `bash` 换成跨平台实现。
         // 当前目录由会话持有（`cd` 要跨轮保留）；没给就从工作目录起一份新的。
@@ -181,6 +229,7 @@ pub fn substitute_with(
                 shells.cloned(),
                 session_id,
             )
+            .with_timeout(timeout.secs, timeout.on_timeout)
             // 界面卡片上的「中断命令 / 转后台」与实时输出：从 task-local 取控制句柄。
             .with_control(Arc::new(|| {
                 control::current().map(|c| c as Arc<dyn carter::tools::CommandControl>)
@@ -329,10 +378,13 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
                 t,
                 settings,
                 &cwd,
-                &cancel,
-                shells.as_ref(),
-                &session_id,
-                shell_cwd.as_ref(),
+                BashRuntime {
+                    cancel: &cancel,
+                    shells: shells.as_ref(),
+                    session_id: &session_id,
+                    shell_cwd: shell_cwd.as_ref(),
+                    timeout: BashTimeout::of(&agent_cfg),
+                },
             ),
             &mut tools,
         );
@@ -488,7 +540,14 @@ mod tests {
         let settings = AppSettings::default();
         let swapped: Vec<_> = filter_tools(&full, &settings)
             .into_iter()
-            .map(|t| substitute(t, &settings, Path::new("/tmp")))
+            .map(|t| {
+                substitute(
+                    t,
+                    &settings,
+                    Path::new("/tmp"),
+                    BashTimeout::of(&AgentConfig::default()),
+                )
+            })
             .collect();
         let greps: Vec<_> = swapped.iter().filter(|t| t.name() == "grep").collect();
         assert_eq!(greps.len(), 1, "必须恰好一个");
@@ -514,7 +573,14 @@ mod tests {
 
         let swapped: Vec<_> = filter_tools(&full, &settings)
             .into_iter()
-            .map(|t| substitute(t, &settings, std::path::Path::new("/tmp")))
+            .map(|t| {
+                substitute(
+                    t,
+                    &settings,
+                    std::path::Path::new("/tmp"),
+                    BashTimeout::of(&AgentConfig::default()),
+                )
+            })
             .collect();
         let skills: Vec<_> = swapped.iter().filter(|t| t.name() == "skill").collect();
         assert_eq!(skills.len(), 1, "必须恰好一个");

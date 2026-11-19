@@ -824,6 +824,60 @@ mod live_turn {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// 后台任务条上的「终止」：会话把它当「用户终止」，模型会收到与「自己跑完」不同的通知。
+    #[tokio::test(flavor = "multi_thread")]
+    pub(super) async fn the_terminate_button_kills_a_background_command_as_the_user() {
+        let Fixture {
+            mut runner,
+            handle,
+            mut events,
+            dir,
+            ..
+        } = fixture("kill-bg");
+        let mut done = handle.background.subscribe();
+        let turn = tokio::spawn(async move {
+            let r = runner.run_one_turn(None).await;
+            (r, runner)
+        });
+        let started = wait_for(&mut events, "工具开始", |e| {
+            matches!(e, SessionEvent::ToolStarted { .. })
+        })
+        .await;
+        let SessionEvent::ToolStarted { call_id, .. } = started else {
+            unreachable!()
+        };
+        assert!(handle.send(Command::ToolAction {
+            call_id,
+            action: crate::protocol::ToolActionKind::Background,
+        }));
+        let (_, mut runner) = tokio::time::timeout(Duration::from_secs(30), turn)
+            .await
+            .expect("这一轮应当收尾")
+            .unwrap();
+
+        let running = handle.background.running();
+        assert_eq!(running.len(), 1);
+        assert_eq!(running[0].origin, carter::tools::Origin::User);
+        let id = running[0].id.clone();
+
+        // 空闲时按「终止」走的是 runner 的命令分发。
+        runner
+            .handle_command(Command::KillShell {
+                shell_id: id.clone(),
+            })
+            .await;
+        assert!(handle.background.running().is_empty());
+        let got = tokio::time::timeout(Duration::from_secs(5), done.recv()).await;
+        assert_eq!(got.ok().flatten().as_deref(), Some(id.as_str()));
+        let text = handle
+            .background
+            .completion(&id)
+            .expect("用户终止要通知模型");
+        assert!(text.contains("已被用户终止"), "{text}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// 工具还在跑时用户发了一句：工具结果回灌的**那一次**请求就带上它，不等这一轮结束；
     /// 它进了历史但不算新的一轮，界面收到 `prompt_injected`。
     #[tokio::test(flavor = "multi_thread")]

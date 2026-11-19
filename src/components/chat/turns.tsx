@@ -609,20 +609,22 @@ function latestAsks(turns: Turn[], times?: Record<number, TurnTime>): Set<number
 const DONE_MARK = "【后台命令】";
 
 /**
- * 后台命令结束时系统送进来的通知：第一行是「shell_id · 已结束（退出码 N）」，
- * 后面是给模型看的说明与输出。不是用户说的话，画成一张可展开的卡片。
+ * 后台命令结束时系统送进来的通知：第一行是「shell_id · 已结束（退出码 N）」或
+ * 「shell_id · 已被用户终止」，后面是给模型看的说明与输出。不是用户说的话，画成一张可展开的卡片。
  */
 function BackgroundDoneTurn({ text }: { text: string }) {
   const rest = text.slice(DONE_MARK.length);
   const cut = rest.indexOf("\n");
   const title = cut < 0 ? rest : rest.slice(0, cut);
   const body = cut < 0 ? "" : rest.slice(cut + 1).trim();
-  const failed = !/退出码 0）/.test(title);
+  // 用户终止的不算失败：那是你自己按的，标红只会吓人。
+  const stopped = title.includes("被用户终止");
+  const failed = !stopped && !/退出码 0）/.test(title);
   return (
     <details className="group rounded-xl border border-edge bg-card px-3.5 py-2.5">
       <summary
         className={`flex cursor-pointer list-none items-center gap-1.5 text-xs font-medium ${
-          failed ? "text-danger" : "text-ok"
+          stopped ? "text-dim" : failed ? "text-danger" : "text-ok"
         }`}
       >
         <Terminal size={12} className="shrink-0" />

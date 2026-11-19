@@ -583,9 +583,9 @@ dependencies = [
 
 [[package]]
 name = "carter"
-version = "0.2.7"
+version = "0.2.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7586563498c86be9b75d62ec2c84422a51d11aa2fb693756b53d694cce08d1db"
+checksum = "0dbe6d5d251154a122ca4504133a611ff35c6691610e24eda5f3e0d927169cc1"
 dependencies = [
  "anyhow",
  "arboard",
