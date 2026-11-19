@@ -68,6 +68,7 @@ export type TicketStatus =
   | "failed"
   | "needs_user"
   | "unreported"
+  | "waiting"
   | "dropped"
   | "done"
   | "stopped";
@@ -94,6 +95,19 @@ export type AssistantTicket = {
   runs: number;
   /** 助理对话里这条的汇报被划掉了（「忽略」）。面板上照常显示。 */
   ignored?: boolean;
+  /** `waiting` 时在等什么。唤醒后就没有了。 */
+  wait?: AssistantWait;
+};
+
+/**
+ * 一张「等回复」的工单在等什么：盯哪个观察源、新行里含哪些关键词算等到、最晚等到几点。
+ * 等到了运行时直接把那几行送回工单，不经评估。
+ */
+export type AssistantWait = {
+  source_id: string;
+  keywords: string[];
+  until: number;
+  note: string;
 };
 
 /**

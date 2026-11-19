@@ -2,11 +2,13 @@
 //!
 //! ```text
 //! 调度循环（10 秒一拍）
-//!   ├─ 到点的观察源 ──poll──▶ 新行 ──eval──▶ 决定
-//!   │                                  ├─ accept（自动模式）→ 开工单（排队）
-//!   │                                  ├─ accept（观察模式）→ 记「本来会接」
-//!   │                                  ├─ attach → 送进那张工单
-//!   │                                  └─ ignore / unavailable → 只记一笔
+//!   ├─ 到点的观察源 ──poll──▶ 新行 ──先对「等回复」的工单──▶ 命中 → 直接送进那张工单（不评估）
+//!   │                                  └─ 其余 ──eval──▶ 决定
+//!   │                                                ├─ accept（自动模式）→ 开工单（排队）
+//!   │                                                ├─ accept（观察模式）→ 记「本来会接」
+//!   │                                                ├─ attach → 送进那张工单
+//!   │                                                └─ ignore / unavailable → 只记一笔
+//!   ├─ 等回复到期的工单 ──▶ 唤醒一次，让它自己决定催还是收尾
 //!   └─ 排队的工单 ──有空位──▶ 开（或续接）执行会话，发任务
 //!
 //! 事件监听（总线）
@@ -54,7 +56,8 @@ const UNREPORTED: &str =
 const WORKER_RULES: &str = "\
 - 不要调用 ask_user_question —— 没有人会回答，这一轮会一直卡住。要用户决定的事，用 assistant_report 的 needs_user 问一个具体问题。\n\
 - 做到一半需要助理知道的事（发现了相关情况、要它帮忙协调别的工单），用 send_message(to=\"assistant\") 发给它；它不会因此被叫醒，用户下次开口时一起看到。\n\
-- 结束前必须调用 assistant_report 汇报结局：ready（有结果可看）、needs_user、blocked（缺条件做不下去）、failed、dropped（核实后无需处理）。\n\
+- 结束前必须调用 assistant_report 汇报结局：ready（有结果可看）、needs_user、blocked（缺条件做不下去）、failed、dropped（核实后无需处理）、\
+waiting（已回复对方、要等对方的下文：说清等什么、给能认出那条回复的关键词，等到了会直接叫醒你）。\n\
 - 汇报要如实：没做完就不是 ready。";
 
 // ---------------------------------------------------------------------------
@@ -150,7 +153,39 @@ pub async fn tick(shell: &Arc<AppShell>) {
             shell.assistant.release(&s.id);
         });
     }
+    expire_waiters(shell, now);
     launch_queued(shell).await;
+}
+
+/// 等回复到期了还没等到：唤醒一次，把「等了多久、等的是什么」告诉它。
+fn expire_waiters(shell: &Arc<AppShell>, now: u64) {
+    let expired: Vec<(String, String, u64)> = shell.assistant.read(|s| {
+        s.tickets
+            .iter()
+            .filter(|t| t.status == TicketStatus::Waiting)
+            .filter_map(|t| {
+                let w = t.wait.as_ref()?;
+                (w.until <= now).then(|| {
+                    let source = s
+                        .sources
+                        .iter()
+                        .find(|x| x.id == w.source_id)
+                        .map(|x| x.name.clone())
+                        .unwrap_or_else(|| t.source_name.clone());
+                    let waited = now.saturating_sub(t.updated_at) / 60_000;
+                    (
+                        t.id.clone(),
+                        super::wait::expired_text(w, &source, waited),
+                        waited,
+                    )
+                })
+            })
+            .collect()
+    });
+    for (id, text, waited) in expired {
+        tracing::info!(ticket = %id, waited_minutes = waited, "助理：等回复到期，唤醒工单");
+        deliver(shell, &id, text, Wake::Automatic);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -176,8 +211,58 @@ async fn poll_and_assess(shell: &Arc<AppShell>, source: &Source) {
     if events.is_empty() {
         return;
     }
+    // 在等回复的工单先挑：它们自己说过在等什么，命中的行直接送进去，不花评估那次调用。
+    let events = wake_waiters(shell, source, events);
+    if events.is_empty() {
+        launch_queued(shell).await;
+        return;
+    }
     assess(shell, source, events).await;
     launch_queued(shell).await;
+}
+
+/// 把新行先分给在等它们的工单（见 [`super::wait`]），返回没人认领的行。
+///
+/// 每张认领到行的工单记一条 `attach` 决定：面板上看得出这条回复去了哪、为什么没经过评估。
+pub fn wake_waiters(shell: &Arc<AppShell>, source: &Source, events: Vec<String>) -> Vec<String> {
+    let (claims, rest) = shell
+        .assistant
+        .read(|s| super::wait::claim(&s.tickets, &source.id, events));
+    for c in claims {
+        let label = shell
+            .assistant
+            .read(|s| s.ticket(&c.ticket_id).map(Ticket::label))
+            .unwrap_or_else(|| c.ticket_id.clone());
+        let text = super::wait::arrived_text(source, &c.wait, &c.lines);
+        let delivered = deliver(shell, &c.ticket_id, text, Wake::Automatic);
+        let now = now_ms();
+        record(
+            shell,
+            Decision {
+                id: new_id("dec", now),
+                at: now,
+                source_id: source.id.clone(),
+                source_name: source.name.clone(),
+                events: c.lines,
+                verdict: if delivered {
+                    Verdict::Attach
+                } else {
+                    Verdict::Ignore
+                },
+                rule: None,
+                reason: if delivered {
+                    super::wait::claim_reason(&label, &c.wait)
+                } else {
+                    format!("{label} 在等这条回复，但送进去时它已经结束了")
+                },
+                title: None,
+                task: None,
+                ticket_id: delivered.then(|| c.ticket_id.clone()),
+                dismissed: false,
+            },
+        );
+    }
+    rest
 }
 
 /// 评估一批事件，并按决定执行。返回记下的那条决定。
@@ -335,7 +420,8 @@ fn record(shell: &Arc<AppShell>, d: Decision) {
 pub enum Wake {
     /// 观察源来的。原型的规矩：受阻 / 失败 / 等拍板的工单，自动来的消息只记下、不唤醒
     /// （人还没处理，自动消息推着它再跑一遍只是空转）；用户标完成的、核实无需处理的
-    /// 也不唤醒。待查看的会被唤醒（比如 PR 上来了新的评审意见）。
+    /// 也不唤醒。待查看的会被唤醒（比如 PR 上来了新的评审意见）；等回复的更是 ——
+    /// 它就是在等这个。
     Automatic,
     /// 用户（回答、重试、继续）。除了叫停的，都唤醒。
     Person,
@@ -368,14 +454,17 @@ pub fn deliver(shell: &Arc<AppShell>, ticket_id: &str, text: String, wake: Wake)
             t.updated_at = now_ms();
             let wakes = match wake {
                 Wake::Person => !matches!(t.status, TicketStatus::Working | TicketStatus::Queued),
-                Wake::Automatic => {
-                    matches!(t.status, TicketStatus::Ready | TicketStatus::Unreported)
-                }
+                Wake::Automatic => matches!(
+                    t.status,
+                    TicketStatus::Ready | TicketStatus::Unreported | TicketStatus::Waiting
+                ),
             };
             if wakes {
                 t.status = TicketStatus::Queued;
                 t.question = None;
                 t.options.clear();
+                // 醒了就不再是「等回复」：下次要等得由它重新报一次。
+                t.wait = None;
             }
             true
         })
@@ -450,6 +539,7 @@ pub async fn ticket_action(
                 t.status = TicketStatus::Done;
                 t.question = None;
                 t.options.clear();
+                t.wait = None;
                 t.updated_at = now_ms();
                 Some(t.clone())
             })?;
@@ -490,6 +580,7 @@ pub async fn ticket_action(
                 t.pending.clear();
                 t.question = None;
                 t.options.clear();
+                t.wait = None;
                 t.updated_at = now_ms();
                 if was_working {
                     t.session_id.clone()
@@ -741,6 +832,7 @@ pub async fn launch_queued(shell: &Arc<AppShell>) {
                 t.pending.clear();
                 t.question = None;
                 t.options.clear();
+                t.wait = None;
                 t.updated_at = now_ms();
                 out.push(Launch {
                     ticket: t.clone(),
@@ -1039,6 +1131,14 @@ async fn on_idle(shell: &Arc<AppShell>, session_id: &str) {
             // 对话与面板上这张工单看起来是两件事，而用户要的是同一条对话。
             if t.status.needs_person() {
                 alert(shell, t);
+            } else if t.status == TicketStatus::Waiting {
+                // 不出声（不是要人处理的），但助理对话里留一笔：用户问「那件事怎么样了」
+                // 时它答得上来「回了，在等对方」。
+                let _ = super::chat::record(
+                    shell,
+                    super::chat::report_text(t),
+                    Some(super::chat::tag(t)),
+                );
             }
         }
     }
@@ -1309,10 +1409,85 @@ mod tests {
         assert!(should_settle(Done, None, 1));
         // 出错那一轮照旧判失败：错误这时已经被取走，拖到下一轮就丢了。
         assert!(should_settle(Working, Some("上游 500"), 2));
-        // 已经汇报过的（待查看 / 等拍板 / 受阻）不再等命令。
+        // 已经汇报过的（待查看 / 等拍板 / 受阻 / 等回复）不再等命令。
         assert!(should_settle(Ready, None, 1));
         assert!(should_settle(NeedsUser, None, 1));
         assert!(should_settle(Blocked, None, 2));
+        assert!(
+            should_settle(Waiting, None, 1),
+            "等回复的会话要关掉，不能靠后台命令撑着"
+        );
+    }
+
+    /// 等回复的工单：自动事件能叫醒它（它就是在等这个），醒了 `wait` 清掉；
+    /// 到期了也叫醒一次，带上等了多久。
+    #[test]
+    fn a_waiting_ticket_wakes_on_automatic_events_and_on_expiry() {
+        let dir =
+            std::env::temp_dir().join(format!("carter-wait-{}-{}", std::process::id(), now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = super::super::AssistantStore::open(dir.join("assistant.json"));
+        let shell = Arc::new(
+            Arc::into_inner(AppShell::new(carter::config::Config::default()))
+                .unwrap()
+                .with_assistant(store.clone()),
+        );
+        let source = crate::assistant::tests::source();
+        let id = store
+            .with(|s| {
+                s.sources.push(source.clone());
+                s.open_ticket(&source, "r", "a", "a", vec![])
+            })
+            .unwrap();
+        let park = |until: u64| {
+            store
+                .with(|s| {
+                    let t = s.ticket_mut(&id).unwrap();
+                    t.status = TicketStatus::Waiting;
+                    t.pending.clear();
+                    t.updated_at = now_ms() - 5 * 60_000;
+                    t.wait = Some(crate::assistant::Wait {
+                        source_id: source.id.clone(),
+                        keywords: vec!["张三".into()],
+                        until,
+                        note: "张三的答复".into(),
+                    });
+                })
+                .unwrap();
+        };
+
+        // 没命中的行留给评估，工单不动。
+        park(now_ms() + 60_000);
+        let rest = wake_waiters(
+            &shell,
+            &source,
+            vec!["李四：无关".into(), "张三：可以".into()],
+        );
+        assert_eq!(rest, vec!["李四：无关"]);
+        let t = store.read(|s| s.ticket(&id).cloned()).unwrap();
+        assert_eq!(t.status, TicketStatus::Queued, "命中就唤醒");
+        assert!(t.wait.is_none(), "醒了就不再等");
+        assert!(t.pending[0].contains("张三：可以"), "{:?}", t.pending);
+        let d = store.read(|s| s.decisions[0].clone());
+        assert_eq!(d.verdict, Verdict::Attach);
+        assert_eq!(d.ticket_id.as_deref(), Some(id.as_str()));
+        assert!(d.reason.contains("没有经过评估"), "{}", d.reason);
+
+        // 到期：唤醒一次，说明等了多久。
+        park(now_ms() - 1);
+        expire_waiters(&shell, now_ms());
+        let t = store.read(|s| s.ticket(&id).cloned()).unwrap();
+        assert_eq!(t.status, TicketStatus::Queued);
+        assert!(t.pending[0].contains("等了 5 分钟"), "{:?}", t.pending);
+        assert!(t.pending[0].contains("张三的答复"), "{:?}", t.pending);
+
+        // 没到期就不动。
+        park(now_ms() + 60_000);
+        expire_waiters(&shell, now_ms());
+        assert_eq!(
+            store.read(|s| s.ticket(&id).map(|t| t.status)).unwrap(),
+            TicketStatus::Waiting
+        );
     }
 
     /// 第一次开工发的是完整任务书：任务、依据、事件、约定、汇报要求一样不少。
@@ -1381,6 +1556,10 @@ mod tests {
         // 用户在助理对话里划掉那条汇报：看过了，但没回答也没结束 —— 不再算「等着我」。
         // 面板上那张卡片还在，只是角标少一个。
         s.ticket_mut(&a).unwrap().ignored = true;
+        assert_eq!(attention(&s), 1);
+        // 等回复的不算：它停着是在等对方，不是在等用户。
+        let c = s.open_ticket(&crate::assistant::tests::source(), "r", "c", "c", vec![]);
+        s.ticket_mut(&c).unwrap().status = TicketStatus::Waiting;
         assert_eq!(attention(&s), 1);
     }
 }

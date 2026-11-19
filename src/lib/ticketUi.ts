@@ -18,6 +18,7 @@ export const TICKET_STATUS_LABEL: Record<TicketStatus, string> = {
   failed: "失败",
   needs_user: "等你拍板",
   unreported: "跑完未汇报",
+  waiting: "等回复",
   dropped: "无需处理",
   done: "已完成",
   stopped: "已叫停",
@@ -33,6 +34,7 @@ export const TICKET_STATUS_TONE: Record<TicketStatus, TicketTone | undefined> = 
   failed: "pink",
   needs_user: "violet",
   unreported: "orange",
+  waiting: undefined,
   dropped: undefined,
   done: undefined,
   stopped: undefined,
@@ -47,8 +49,8 @@ export const TICKET_NEEDS_PERSON: TicketStatus[] = [
   "unreported",
 ];
 
-/** 还没收尾的（排队中 / 进行中）。 */
-export const TICKET_ACTIVE: TicketStatus[] = ["queued", "working"];
+/** 还没收尾的（排队中 / 进行中 / 等回复）。等回复的停着是在等对方，不是等用户，算进行中。 */
+export const TICKET_ACTIVE: TicketStatus[] = ["queued", "working", "waiting"];
 
 /** 侧栏与对话头部那枚标记上的一句话。 */
 export function ticketMarkTitle(status: TicketStatus): string {

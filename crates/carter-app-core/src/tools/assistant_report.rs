@@ -13,7 +13,8 @@ use serde_json::{Value, json};
 
 use carter::tools::{Tool, ToolResult};
 
-use crate::assistant::{AssistantStore, TicketStatus};
+use crate::assistant::wait::{DEFAULT_TIMEOUT_MINUTES, MAX_TIMEOUT_MINUTES};
+use crate::assistant::{AssistantStore, TicketStatus, Wait};
 use crate::protocol::now_ms;
 
 pub struct AssistantReportTool {
@@ -35,6 +36,17 @@ struct Report {
     summary: String,
     question: Option<String>,
     options: Vec<String>,
+    /// `waiting` 时：等什么。来源还没解析（工具里才有状态可查），先攒着原始参数。
+    wait: Option<WaitArgs>,
+}
+
+/// `status = waiting` 的参数。`source` 是观察源的名字（或 id），不给就用开单的那个来源。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WaitArgs {
+    note: String,
+    keywords: Vec<String>,
+    source: Option<String>,
+    timeout_minutes: u64,
 }
 
 fn parse(args: &Value) -> Result<Report, String> {
@@ -63,15 +75,24 @@ fn parse(args: &Value) -> Result<Report, String> {
         "blocked" => TicketStatus::Blocked,
         "failed" => TicketStatus::Failed,
         "dropped" => TicketStatus::Dropped,
+        "waiting" => TicketStatus::Waiting,
         other => {
             return Err(format!(
-                "status 只能是 ready / needs_user / blocked / failed / dropped，收到 `{other}`"
+                "status 只能是 ready / needs_user / blocked / failed / dropped / waiting，收到 `{other}`"
             ));
         }
     };
     if status == TicketStatus::NeedsUser && question.is_none() {
         return Err("status = needs_user 时必须用 question 问一个具体问题".into());
     }
+    let wait = if status == TicketStatus::Waiting {
+        Some(parse_wait(args)?)
+    } else {
+        if args.get("wait_for").is_some() || args.get("match").is_some() {
+            return Err("wait_for / match 只在 status = waiting 时给".into());
+        }
+        None
+    };
     let mut options: Vec<String> = Vec::new();
     for o in args
         .get("options")
@@ -97,6 +118,58 @@ fn parse(args: &Value) -> Result<Report, String> {
         summary,
         question,
         options,
+        wait,
+    })
+}
+
+fn parse_wait(args: &Value) -> Result<WaitArgs, String> {
+    let note = args
+        .get("wait_for")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or("status = waiting 时必须用 wait_for 说清在等什么")?
+        .to_string();
+    let mut keywords: Vec<String> = Vec::new();
+    for k in args
+        .get("match")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(k) = k.as_str().map(str::trim).filter(|k| !k.is_empty()) else {
+            continue;
+        };
+        if !keywords.iter().any(|x| x.eq_ignore_ascii_case(k)) {
+            keywords.push(k.to_string());
+        }
+    }
+    let source = args
+        .get("source")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let timeout_minutes = match args.get("timeout_minutes") {
+        None | Some(Value::Null) => DEFAULT_TIMEOUT_MINUTES,
+        Some(v) => {
+            let n = v
+                .as_u64()
+                .or_else(|| v.as_f64().filter(|f| *f >= 0.0).map(|f| f as u64))
+                .ok_or("timeout_minutes 要是一个分钟数")?;
+            if n == 0 || n > MAX_TIMEOUT_MINUTES {
+                return Err(format!(
+                    "timeout_minutes 应在 1 到 {MAX_TIMEOUT_MINUTES}（7 天）之间"
+                ));
+            }
+            n
+        }
+    };
+    Ok(WaitArgs {
+        note,
+        keywords,
+        source,
+        timeout_minutes,
     })
 }
 
@@ -112,9 +185,13 @@ impl Tool for AssistantReportTool {
          * needs_user —— 必须用户决定才能往下走，用 question 问**一个**具体问题；有几种明确走法时用 options 列出来，用户点一下就能答；\n\
          * blocked —— 缺权限、缺依赖、外部系统不通，做不下去；\n\
          * failed —— 试过了，做不成；\n\
-         * dropped —— 核实后发现不需要做（复现不了、已经有人做了、不是问题）。\n\
+         * dropped —— 核实后发现不需要做（复现不了、已经有人做了、不是问题）；\n\
+         * waiting —— 已经回复了对方、要等对方的下文才能继续（群里 @ 你的人、私聊你的人、PR 作者）。\
+         用 wait_for 说清在等什么，用 match 给几个能认出那条回复的关键词（对方的名字、会话 id、单号）；\
+         观察源里一出现匹配的行，这条会话会被直接叫醒并收到那几行，不用自己轮询。\
+         到了 timeout_minutes（默认一天）还没等到也会被叫醒一次。\n\
          如实汇报：没做完不是 ready。summary 只写结果、实际跑过的检查和剩下的事。\n\
-         除了 dropped，用户都会收到一条系统通知。"
+         除了 dropped 和 waiting，用户都会收到一条系统通知。"
     }
 
     fn parameters(&self) -> Value {
@@ -123,7 +200,7 @@ impl Tool for AssistantReportTool {
             "properties": {
                 "status": {
                     "type": "string",
-                    "enum": ["ready", "needs_user", "blocked", "failed", "dropped"]
+                    "enum": ["ready", "needs_user", "blocked", "failed", "dropped", "waiting"]
                 },
                 "summary": {
                     "type": "string",
@@ -137,6 +214,23 @@ impl Tool for AssistantReportTool {
                     "type": "array",
                     "items": { "type": "string" },
                     "description": "needs_user 时可选：2 到 4 个候选答案，每个一句话、自成一体（如「用 A：改接口，兼容旧调用」）。用户点哪个就原样送回给你；用户也可以不选、自己写"
+                },
+                "wait_for": {
+                    "type": "string",
+                    "description": "waiting 时必填：在等什么，一句话（如「张三对方案的答复」）"
+                },
+                "match": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "waiting 时给：观察源新行里含任一关键词（不分大小写）就算等到了。写能认出那条回复的东西：对方名字、会话 / 群 id、PR 号。不给 = 这个来源的任何新行都算，一般太宽"
+                },
+                "source": {
+                    "type": "string",
+                    "description": "waiting 时可选：盯哪个观察源（名字）。不给 = 开这张工单的那个来源"
+                },
+                "timeout_minutes": {
+                    "type": "integer",
+                    "description": "waiting 时可选：最多等多少分钟，默认 1440（一天），最多 7 天"
                 }
             },
             "required": ["status", "summary"]
@@ -149,12 +243,18 @@ impl Tool for AssistantReportTool {
             summary,
             question,
             options,
+            wait,
         } = match parse(&args) {
             Ok(v) => v,
             Err(e) => return ToolResult::err(format!("assistant_report: {e}")),
         };
         let id = self.ticket_id.clone();
         let res = self.store.with(|s| {
+            // 先解析来源：要用到全部状态（来源表），得在拿工单的可变引用之前做。
+            let wait = match &wait {
+                Some(w) => Some(resolve_wait(s, &id, w)?),
+                None => None,
+            };
             let Some(t) = s.ticket_mut(&id) else {
                 return Err("这张工单已经不在了".to_string());
             };
@@ -165,11 +265,22 @@ impl Tool for AssistantReportTool {
             t.summary = Some(summary.clone());
             t.question = question.clone();
             t.options = options.clone();
+            t.wait = wait;
             t.updated_at = now_ms();
-            Ok(t.label())
+            Ok((t.label(), t.wait.clone()))
         });
         match res {
-            Ok(Ok(label)) => ToolResult::ok(format!(
+            Ok(Ok((label, Some(w)))) => ToolResult::ok(format!(
+                "已记录：{label} → 等回复（{}；最多等到 {}）。现在结束这一轮，不要再做别的事 —— \
+                 等到了会把那几行直接送回这条会话。",
+                if w.keywords.is_empty() {
+                    "来源的任何新行".to_string()
+                } else {
+                    format!("关键词「{}」", w.keywords.join("」「"))
+                },
+                crate::schedules::fmt_local(w.until)
+            )),
+            Ok(Ok((label, None))) => ToolResult::ok(format!(
                 "已记录：{label} → {}。现在结束这一轮，不要再做别的事。",
                 status.label()
             )),
@@ -177,6 +288,49 @@ impl Tool for AssistantReportTool {
             Err(e) => ToolResult::err(format!("assistant_report: 写盘失败：{e}")),
         }
     }
+}
+
+/// 把 `waiting` 的参数落成 [`Wait`]：来源按名字或 id 找；没指定就用开单的那个来源。
+/// 用户在助理对话里直接指派的工单没有来源，必须指明。
+fn resolve_wait(
+    s: &crate::assistant::State,
+    ticket_id: &str,
+    w: &WaitArgs,
+) -> Result<Wait, String> {
+    let t = s.ticket(ticket_id).ok_or("这张工单已经不在了")?;
+    let source_id = match &w.source {
+        Some(key) => s
+            .sources
+            .iter()
+            .find(|x| x.name.trim() == key.trim() || x.id == key.trim())
+            .map(|x| x.id.clone())
+            .ok_or_else(|| {
+                let names: Vec<&str> = s.sources.iter().map(|x| x.name.as_str()).collect();
+                format!(
+                    "没有叫「{key}」的观察源。现在有的：{}",
+                    if names.is_empty() {
+                        "（没有）".to_string()
+                    } else {
+                        names.join("、")
+                    }
+                )
+            })?,
+        None if !t.source_id.is_empty() && s.sources.iter().any(|x| x.id == t.source_id) => {
+            t.source_id.clone()
+        }
+        None => {
+            return Err(
+                "这张工单不是观察源开的（或那个来源已删），waiting 时要用 source 指明盯哪个观察源"
+                    .into(),
+            );
+        }
+    };
+    Ok(Wait {
+        source_id,
+        keywords: w.keywords.clone(),
+        until: now_ms() + w.timeout_minutes * 60_000,
+        note: w.note.clone(),
+    })
 }
 
 #[cfg(test)]
@@ -206,6 +360,106 @@ mod tests {
         assert!(ask(json!(["只有一个"])).is_err());
         assert!(ask(json!(["1", "2", "3", "4", "5"])).is_err());
         assert!(parse(&json!({"status": "ready", "summary": "x", "options": ["a", "b"]})).is_err());
+    }
+
+    /// `waiting` 要说清等什么；关键词去空白去重；超时有默认、有上限；
+    /// 其它状态不许带 wait_for / match。
+    #[test]
+    fn waiting_needs_a_note_and_bounds_its_timeout() {
+        assert!(
+            parse(&json!({"status": "waiting", "summary": "回了"}))
+                .err()
+                .unwrap()
+                .contains("wait_for")
+        );
+        let r = parse(&json!({
+            "status": "waiting", "summary": "回了", "wait_for": "张三的答复",
+            "match": [" 张三 ", "张三", "", "cid=42"], "timeout_minutes": 30
+        }))
+        .unwrap();
+        let w = r.wait.unwrap();
+        assert_eq!(w.note, "张三的答复");
+        assert_eq!(w.keywords, vec!["张三", "cid=42"]);
+        assert_eq!(w.timeout_minutes, 30);
+        assert!(w.source.is_none());
+
+        let r = parse(&json!({"status": "waiting", "summary": "x", "wait_for": "y"})).unwrap();
+        assert_eq!(r.wait.unwrap().timeout_minutes, DEFAULT_TIMEOUT_MINUTES);
+        assert!(
+            parse(
+                &json!({"status": "waiting", "summary": "x", "wait_for": "y", "timeout_minutes": 0})
+            )
+            .is_err()
+        );
+        assert!(
+            parse(&json!({
+                "status": "waiting", "summary": "x", "wait_for": "y",
+                "timeout_minutes": MAX_TIMEOUT_MINUTES + 1
+            }))
+            .is_err()
+        );
+        assert!(parse(&json!({"status": "ready", "summary": "x", "wait_for": "y"})).is_err());
+    }
+
+    /// 来源：不给就用开单的那个；助理直接指派的工单没有来源，必须指明；指了不存在的要报错。
+    #[tokio::test]
+    async fn waiting_resolves_the_source_or_asks_for_one() {
+        let dir = std::env::temp_dir().join(format!(
+            "carter-wait-src-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let store = AssistantStore::open(dir.join("assistant.json"));
+        let source = crate::assistant::tests::source();
+        let (from_source, assigned) = store
+            .with(|s| {
+                s.sources.push(source.clone());
+                (
+                    s.open_ticket(&source, "r", "t", "x", vec![]),
+                    s.assign_ticket("/tmp", "u", "y"),
+                )
+            })
+            .unwrap();
+
+        let r = AssistantReportTool::new(store.clone(), from_source.clone())
+            .execute(json!({"status": "waiting", "summary": "回了", "wait_for": "答复", "match": ["张三"]}))
+            .await;
+        assert!(r.ok, "{}", r.content);
+        assert!(r.content.contains("等回复"), "{}", r.content);
+        store.read(|s| {
+            let t = s.ticket(&from_source).unwrap();
+            assert_eq!(t.status, TicketStatus::Waiting);
+            let w = t.wait.as_ref().unwrap();
+            assert_eq!(w.source_id, source.id);
+            assert!(w.until > now_ms());
+        });
+
+        let tool = AssistantReportTool::new(store.clone(), assigned.clone());
+        let r = tool
+            .execute(json!({"status": "waiting", "summary": "回了", "wait_for": "答复"}))
+            .await;
+        assert!(!r.ok);
+        assert!(r.content.contains("source"), "{}", r.content);
+        let r = tool
+            .execute(json!({"status": "waiting", "summary": "回了", "wait_for": "答复", "source": "不存在"}))
+            .await;
+        assert!(!r.ok);
+        assert!(
+            r.content.contains("GitHub 通知"),
+            "要列出现有的来源：{}",
+            r.content
+        );
+        let r = tool
+            .execute(json!({"status": "waiting", "summary": "回了", "wait_for": "答复", "source": "GitHub 通知"}))
+            .await;
+        assert!(r.ok, "{}", r.content);
+        assert_eq!(
+            store.read(|s| s
+                .ticket(&assigned)
+                .and_then(|t| t.wait.clone())
+                .map(|w| w.source_id)),
+            Some(source.id.clone())
+        );
     }
 
     #[test]

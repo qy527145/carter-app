@@ -30,6 +30,7 @@
 //! | Mandate | 工单上记下的规则与理由 | 执行会话的提示词里写明「只做规则允许的那件事」 |
 //! | Ticket + Assignment | [`Ticket`]：一张工单一条后台会话 | 会话就是现成的执行器，界面里点开就能接着聊 |
 //! | Subscription 扇出 | 评估判 `attach` 时把事件送进那张工单的会话 | 只在事件**明确指向**那张工单时才这么做 |
+//! | （没有对应） | [`wait`]：工单自己声明「在等谁的什么话」，新行先对它、命中直接送回 | 回复过对方的工单不必再经评估与排队才醒来 |
 //! | Report | `assistant_report` 工具 | 结构化的结局，不从正文里猜 |
 //! | Pause processing | [`Settings::paused`] | 停轮询、停开工；已经在跑的那一轮不打断 |
 //! | 重启恢复 | [`State::recover`] | 跑到一半的工单重新排队，带一句「先核对现状，别重复外部动作」 |
@@ -48,6 +49,7 @@ pub mod eval;
 pub mod memory;
 pub mod runtime;
 pub mod source;
+pub mod wait;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -268,6 +270,9 @@ pub enum TicketStatus {
     NeedsUser,
     /// 跑完一轮却没调 `assistant_report`。不能当作完成 —— 它可能只是半路停了。
     Unreported,
+    /// 已经回复过对方，在等对方的下文（`wait` 里是等什么）。不占并发名额、不发通知、
+    /// 会话照常关掉；观察源里一出现匹配的行就直接唤醒，不经过评估。见 [`wait`]。
+    Waiting,
     /// 核实后无需处理。
     Dropped,
     /// 用户看过、标了完成。
@@ -298,6 +303,7 @@ impl TicketStatus {
             Self::Failed => "失败",
             Self::NeedsUser => "等你拍板",
             Self::Unreported => "跑完未汇报",
+            Self::Waiting => "等回复",
             Self::Dropped => "无需处理",
             Self::Done => "已完成",
             Self::Stopped => "已叫停",
@@ -347,6 +353,23 @@ pub struct Ticket {
     /// 开过几次工（首次 + 跟进 + 重试）。
     #[serde(default)]
     pub runs: u32,
+    /// 「等回复」时在等什么。只在 [`TicketStatus::Waiting`] 时有；唤醒时清掉。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait: Option<Wait>,
+}
+
+/// 一张「等回复」的工单在等什么。由执行会话用 `assistant_report(status = waiting)` 定下，
+/// 运行时拿它去比对观察源的新行（见 [`wait::claim`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Wait {
+    /// 盯哪个观察源。
+    pub source_id: String,
+    /// 新行里含任意一个关键词（不分大小写）就算等到了。空 = 这个来源的任何新行都算。
+    pub keywords: Vec<String>,
+    /// 最晚等到什么时候（epoch 毫秒）。到了还没等到也唤醒一次，让模型自己决定催还是收尾。
+    pub until: u64,
+    /// 在等什么，一句话。面板上显示，唤醒时也带给模型。
+    pub note: String,
 }
 
 impl Ticket {
@@ -476,6 +499,7 @@ impl State {
             pending: Vec::new(),
             ignored: false,
             runs: 0,
+            wait: None,
         });
         self.prune_tickets();
         id

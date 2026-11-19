@@ -305,6 +305,8 @@ function TicketCard({ t }: { t: AssistantTicket }) {
   const waiting = NEEDS_PERSON.includes(t.status);
   const canRetry = ["blocked", "failed", "unreported"].includes(t.status);
   const live = !["done", "stopped", "dropped"].includes(t.status);
+  // 等回复的也能直接结束：用户知道对方不会再回了，不必等它到期。
+  const canClose = waiting || t.status === "waiting";
 
   return (
     <Card className="space-y-2">
@@ -344,7 +346,7 @@ function TicketCard({ t }: { t: AssistantTicket }) {
               <RotateCcw size={12} />
             </IconButton>
           )}
-          {waiting && (
+          {canClose && (
             <IconButton
               title="看过了，结束"
               disabled={busy}
@@ -368,6 +370,15 @@ function TicketCard({ t }: { t: AssistantTicket }) {
       )}
       {t.summary && (
         <div className="whitespace-pre-wrap text-xs leading-relaxed text-ink/80">{t.summary}</div>
+      )}
+      {t.status === "waiting" && t.wait && (
+        <div className="rounded-md bg-ink/5 px-3 py-2 text-xs leading-relaxed text-ink/80">
+          在等：{t.wait.note}
+          {t.wait.keywords.length > 0 && (
+            <span className="text-dim">（认「{t.wait.keywords.join("」「")}」）</span>
+          )}
+          <span className="text-dim">{` · 最晚 ${fullTime(t.wait.until)}`}</span>
+        </div>
       )}
 
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-dim">
