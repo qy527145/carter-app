@@ -340,8 +340,7 @@ pub fn start_session(shell: Arc<AppShell>, opts: SessionOptions) -> carter::Resu
         unsupported_server_tools,
         capture: Some(capture_store),
         include_task: true,
-        fast: None,
-        fast_ref: None,
+        helpers: Default::default(),
         // 与句柄上那份是同一个：界面接回这条会话时要能读到「还有几条在跑」。
         shells: handle.background.clone(),
         running: crate::tools::control::RunningTools::new(),
@@ -479,8 +478,7 @@ pub(crate) fn start_side(w: SideWiring, id: String, parent_id: String) -> Arc<Se
         // 侧边会话：不派生子 agent、不连 MCP、不抓包。见 `side.rs` 的模块头。
         include_task: false,
         capture: None,
-        fast: None,
-        fast_ref: None,
+        helpers: Default::default(),
         // 同上：侧边聊天也可能起后台命令，句柄上那份要跟着变。
         shells: handle.background.clone(),
         running: crate::tools::control::RunningTools::new(),
@@ -571,11 +569,9 @@ struct SessionCtx {
     capture: Option<Arc<crate::capture::CaptureStore>>,
     /// 是否挂 `task`（派生子 agent）。侧边聊天不挂。
     include_task: bool,
-    /// 副模型（`agent.fast_model`）解析出来的句柄，配了才算数。
-    /// 见 [`SessionCtx::fast_model`] —— 压缩与标题走它。
-    fast: Option<CompactModel>,
-    /// 上面那份是按哪个引用解析出来的 —— 用户在设置页改了副模型，下一轮要重解析。
-    fast_ref: Option<String>,
+    /// 辅助模型（压缩、标题、记忆）按引用解析出来的句柄，`None` = 解析失败。
+    /// 见 [`SessionCtx::helper_model`]。配置重读时清空（渠道地址、密钥可能改了）。
+    helpers: std::collections::HashMap<String, Option<CompactModel>>,
     /// 后台命令（`bash` 的 `run_in_background`）。一条会话一份，关会话时整组收掉。
     shells: Arc<carter::tools::BackgroundShells>,
     /// bash 此刻所在的目录。工具每轮重建，`cd` 的结果得放在会话这一层才留得住。
@@ -594,44 +590,54 @@ impl SessionCtx {
     /// 刻意**不动** `model` / `provider`：那是这条对话的身份。用户改了默认模型，
     /// 新会话用新的，这条接着用它自己选的那个。
     fn refresh(&mut self) {
-        self.config = self.shell.config.load_full();
+        let config = self.shell.config.load_full();
+        if !Arc::ptr_eq(&config, &self.config) {
+            self.helpers.clear();
+        }
+        self.config = config;
         self.settings = AppSettings::load();
     }
 
-    /// 副模型（`agent.fast_model`）：压缩上下文、生成标题、总结用它。
+    /// 辅助场景（压缩、标题、记忆候选、记忆整理）该用的模型，按 [`crate::scene_models`]
+    /// 的回落链：场景自己的绑定 → 副模型 → 这条会话自己的模型。
     ///
-    /// 解析结果**缓存住**：解析一次要建一个 HTTP 客户端，而压缩判断每轮都要问一次。
-    /// 缓存的键是引用串本身 —— 用户在设置页改了副模型，下一轮就重解析。
-    ///
-    /// 解析失败**不报错**（只 warn 一条）：副模型是锦上添花，为它把主对话带崩是错的。
-    /// 调用方拿到 `None` 就回落主模型。
-    fn fast_model(&mut self) -> Option<CompactModel> {
-        let want = self
+    /// 解析失败**不报错**（只 warn 一条），接着往下回落：辅助调用是锦上添花，
+    /// 为它把主对话带崩是错的。
+    pub(super) fn helper_model(&mut self, scene: crate::scene_models::Scene) -> CompactModel {
+        let bound = crate::scene_models::binding(scene, &self.config, &self.settings, None);
+        let fast = self
             .config
             .agent
             .fast_model
             .clone()
             .filter(|s| !s.trim().is_empty());
-        if want.as_deref() == self.fast_ref.as_deref() {
-            return self.fast.clone();
+        for reference in [bound, fast].into_iter().flatten() {
+            if let Some(m) = self.resolve_cached(&reference) {
+                return m;
+            }
         }
-        self.fast_ref = want.clone();
-        let Some(reference) = want else {
-            // 副模型被清掉了：回到「没配」的状态。
-            self.fast = None;
-            return None;
-        };
-        // 副模型就是这条会话正在用的模型：直接复用主 provider —— 再解析一遍
+        CompactModel {
+            provider: self.provider.clone(),
+            model: self.model.clone(),
+        }
+    }
+
+    /// 按引用解析一个辅助模型，结果**缓存住**：解析一次要建一个 HTTP 客户端，而压缩
+    /// 判断每轮都要问一次。缓存的键是引用串本身 —— 用户改了绑定，换个键就是重解析。
+    fn resolve_cached(&mut self, reference: &str) -> Option<CompactModel> {
+        // 就是这条会话正在用的模型：直接复用主 provider —— 再解析一遍
         // 要多建一个 HTTP 客户端，而它们会打出两个一模一样的请求。
         if reference == self.model.key {
-            self.fast = Some(CompactModel {
+            return Some(CompactModel {
                 provider: self.provider.clone(),
                 model: self.model.clone(),
             });
-            return self.fast.clone();
+        }
+        if let Some(hit) = self.helpers.get(reference) {
+            return hit.clone();
         }
 
-        // 副模型发的请求（压缩、标题）同样挂抓包钩子 —— 与 `switch_model` 一个道理：
+        // 辅助请求（压缩、标题）同样挂抓包钩子 —— 与 `switch_model` 一个道理：
         // 那些请求也是这条对话的一部分，静默不抓会让人以为「报文面板漏了」。
         // 它们没带 `WireRequest.meta`（carter 的压缩与标题不标会话），所以落进
         // `_orphan.jsonl` 而不是会话文件里。
@@ -647,28 +653,30 @@ impl SessionCtx {
         let cache = match crate::catalog::read_cache() {
             Ok(c) => c,
             Err(e) => {
-                tracing::warn!("副模型 `{reference}` 用不上：读模型缓存失败（{e}）");
+                // 读缓存失败是暂时的，不记进缓存，下次再试。
+                tracing::warn!("辅助模型 `{reference}` 用不上：读模型缓存失败（{e}）");
                 return None;
             }
         };
-        self.fast = match crate::catalog::resolve_provider(&self.config, &cache, &reference, hooks)
-        {
-            Ok(r) => {
-                // 协议按**副模型自己那个渠道**标（主模型可能在另一个渠道、另一个协议上）。
-                if let Some(h) = &hook {
-                    label_capture(h, &self.config, &r.model);
+        let resolved =
+            match crate::catalog::resolve_provider(&self.config, &cache, reference, hooks) {
+                Ok(r) => {
+                    // 协议按**它自己那个渠道**标（主模型可能在另一个渠道、另一个协议上）。
+                    if let Some(h) = &hook {
+                        label_capture(h, &self.config, &r.model);
+                    }
+                    Some(CompactModel {
+                        provider: r.provider,
+                        model: r.model,
+                    })
                 }
-                Some(CompactModel {
-                    provider: r.provider,
-                    model: r.model,
-                })
-            }
-            Err(e) => {
-                tracing::warn!("副模型 `{reference}` 解析失败，这一轮回落主模型：{e}");
-                None
-            }
-        };
-        self.fast.clone()
+                Err(e) => {
+                    tracing::warn!("辅助模型 `{reference}` 解析失败，往下回落：{e}");
+                    None
+                }
+            };
+        self.helpers.insert(reference.to_string(), resolved.clone());
+        resolved
     }
 
     /// 当前的系统提示（含技能目录）。技能开关与扫描路径都会变，所以每轮重算。

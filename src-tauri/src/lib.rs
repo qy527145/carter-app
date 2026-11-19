@@ -251,6 +251,8 @@ pub fn run() {
             list_models,
             set_default_model,
             set_fast_model,
+            scene_models,
+            set_scene_model,
             get_compaction,
             set_compaction,
             // 团队目录

@@ -208,6 +208,26 @@ pub(crate) async fn set_fast_model(
     config_edit::set_fast_model_reload(shell.inner(), model_ref.as_deref())
 }
 
+/// 场景模型总览：每个场景的绑定、回落链、此刻实际会用的模型。
+#[tauri::command]
+pub(crate) fn scene_models(
+    shell: State<'_, Arc<AppShell>>,
+) -> carter_app_core::scene_models::SceneModelsView {
+    carter_app_core::scene_models::view(shell.inner())
+}
+
+/// 改一个场景的绑定。`None` = 清掉，走回落链。回传新的应用设置（前端 store 要对齐）。
+///
+/// **必须是 `async fn`**：改「普通对话」会写主模型并热重载，理由同 [`set_default_model`]。
+#[tauri::command]
+pub(crate) async fn set_scene_model(
+    shell: State<'_, Arc<AppShell>>,
+    scene: String,
+    model_ref: Option<String>,
+) -> Result<carter_app_core::AppSettings, String> {
+    carter_app_core::scene_models::set_scene(shell.inner(), &scene, model_ref.as_deref())
+}
+
 /// 自动压缩的当前设置（`agent.compact_enabled` / `agent.compact_threshold_ratio`）。
 #[derive(serde::Serialize)]
 pub(crate) struct CompactionSettings {

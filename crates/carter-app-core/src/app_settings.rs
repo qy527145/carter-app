@@ -78,6 +78,10 @@ pub struct AppSettings {
     /// 关掉之后只剩「设置 → 关于 → 检查更新」这一个手动入口 —— 有些网络
     /// 环境里每次启动都查一遍既慢又多一次失败日志。
     pub auto_check_update: bool,
+    /// 场景模型的覆盖：场景 id → `渠道/模型`。只放本应用独有的那几个场景
+    /// （助理对话、压缩、标题、记忆候选、记忆整理），见 `scene_models` 模块。
+    /// 缺省空 = 全部走回落链。
+    pub scene_models: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for AppSettings {
@@ -95,6 +99,7 @@ impl Default for AppSettings {
             http_proxy: String::new(),
             model_sources: String::new(),
             auto_check_update: true,
+            scene_models: Default::default(),
         }
     }
 }
@@ -288,11 +293,16 @@ mod tests {
             model_sources: "https://mirror.example/models.json\n\n  \nhttps://models.dev/api.json"
                 .into(),
             auto_check_update: false,
+            scene_models: [("title".to_string(), "p/haiku".to_string())].into(),
         };
         s.save_to(&path).unwrap();
 
         let back = AppSettings::load_from(&path);
         assert_eq!(back.theme, "light");
+        assert_eq!(
+            back.scene_models.get("title").map(String::as_str),
+            Some("p/haiku")
+        );
         assert_eq!(back.disabled_tools, vec!["bash".to_string()]);
         assert_eq!(back.sidebar_width, 300);
         assert_eq!(back.conversation_mode, "compact");

@@ -79,11 +79,9 @@ impl Runner {
         //
         // 这里显式解析一次副模型（不能靠 `run_one_turn` 里那份缓存：标题跑在它前面，
         // 那时缓存还没填）。解析过一次之后就是同一份缓存。
-        let (provider, model) = match self.ctx.fast_model() {
-            Some(f) => (f.provider, f.model),
-            // 没配副模型（或它解析不出来）：用主模型起标题，也好过没有标题。
-            None => (self.ctx.provider.clone(), self.ctx.model.clone()),
-        };
+        // 回落链：标题的场景模型 → 副模型 → 这条会话的模型（也好过没有标题）。
+        let CompactModel { provider, model } =
+            self.ctx.helper_model(crate::scene_models::Scene::Title);
         // 渠道种类决定用哪种写法关思考（见 `title.rs`：推理模型会把 32 个 token
         // 全花在思考上，正文一个字都不留）。副模型可能挂在另一个渠道上，所以取
         // **它自己那个** kind。
@@ -151,10 +149,9 @@ impl Runner {
             return;
         }
         let reply = ms::reply_text(messages);
-        let model = self.ctx.fast_model().unwrap_or_else(|| CompactModel {
-            provider: self.ctx.provider.clone(),
-            model: self.ctx.model.clone(),
-        });
+        let model = self
+            .ctx
+            .helper_model(crate::scene_models::Scene::MemorySuggest);
         let existing = carter::memory::load(&self.ctx.cwd);
         let shell = self.ctx.shell.clone();
         let session_id = self.ctx.handle.id.clone();
@@ -379,11 +376,7 @@ impl Runner {
         let turns_before = crate::view::user_turn_count(&self.thread.messages);
 
         // 压缩用副模型：这是「把长历史揉短」的活儿，要的是便宜和快。
-        let fast = self.ctx.fast_model();
-        let compact_model = Some(fast.unwrap_or_else(|| CompactModel {
-            provider: self.ctx.provider.clone(),
-            model: self.ctx.model.clone(),
-        }));
+        let compact_model = Some(self.ctx.helper_model(crate::scene_models::Scene::Compact));
 
         // 一轮里能调多少次模型由模型自己决定（不再要工具就收尾）。给 carter 一个用不完
         // 的上限 —— `max_turns` 是它 CLI 里的防失控保险，而工单里「翻几十个文档、逐个

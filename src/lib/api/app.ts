@@ -50,6 +50,11 @@ export type AppSettings = {
   model_sources: string;
   /** 启动后自动检查新版本。关掉只剩「关于」页的手动入口。 */
   auto_check_update: boolean;
+  /**
+   * 场景模型覆盖：场景 id → `渠道/模型`。改动请走 `setSceneModel`（理由同 `skill_roots`）。
+   * 只有本应用独有的场景存在这里，普通对话 / 工单的绑定各有去处，见设置 → 场景模型。
+   */
+  scene_models: Record<string, string>;
 };
 
 /** models.dev 缓存是哪一次、从哪个源拉的。镜像 `catalog::CacheMeta`。 */

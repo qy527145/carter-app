@@ -40,11 +40,7 @@ impl Runner {
         let turns_before = crate::view::user_turn_count(&self.thread.messages);
         self.emit(SessionEvent::CompactStarted { auto });
 
-        let fast = self.ctx.fast_model();
-        let cm = fast.unwrap_or_else(|| CompactModel {
-            provider: self.ctx.provider.clone(),
-            model: self.ctx.model.clone(),
-        });
+        let cm = self.ctx.helper_model(crate::scene_models::Scene::Compact);
         let target = if auto {
             self.context_view().threshold
         } else {

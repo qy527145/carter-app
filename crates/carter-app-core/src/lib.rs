@@ -49,6 +49,7 @@ pub mod platform;
 pub mod preview;
 pub mod prompts;
 pub mod protocol;
+pub mod scene_models;
 pub mod schedules;
 pub mod session;
 pub mod sessions;

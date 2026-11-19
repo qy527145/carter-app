@@ -221,6 +221,7 @@ pub fn stale_attach(raw: &Raw, state: &State) -> bool {
 }
 
 /// 解析评估用的模型：设置里指定的 → 副模型 → 默认模型。
+/// 与 `scene_models::Scene::TicketEval` 的回落链是同一条，改一边要同改另一边。
 pub fn resolve(
     config: &Config,
     model_ref: Option<&str>,

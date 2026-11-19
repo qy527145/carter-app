@@ -17,6 +17,7 @@ import {
   MessagesSquare,
   Palette,
   Plug,
+  Route,
   Server,
   Sparkles,
   Wrench,
@@ -31,6 +32,7 @@ import { ChannelsPage } from "./ChannelsPage";
 import { ConnectorsPage } from "./ConnectorsPage";
 import { McpPage } from "./McpPage";
 import { ModelsPage } from "./ModelsPage";
+import { ScenesPage } from "./ScenesPage";
 import { SchedulesPage } from "./SchedulesPage";
 import { SessionsPage } from "./SessionsPage";
 import { SkillsPage } from "./SkillsPage";
@@ -44,6 +46,7 @@ const GROUPS = [
     tabs: [
       { id: "channels", label: "渠道", icon: Plug },
       { id: "models", label: "模型", icon: Cpu },
+      { id: "scenes", label: "场景模型", icon: Route },
       { id: "connectors", label: "连接器", icon: Cable },
       { id: "mcp", label: "MCP", icon: Server },
     ],
@@ -188,6 +191,7 @@ export function SettingsPage() {
           {tab === "channels" && <ChannelsPage />}
           {tab === "connectors" && <ConnectorsPage />}
           {tab === "models" && <ModelsPage />}
+          {tab === "scenes" && <ScenesPage />}
           {tab === "tools" && <ToolsPage />}
           {tab === "schedules" && <SchedulesPage />}
           {tab === "changes" && <ChangesPage />}

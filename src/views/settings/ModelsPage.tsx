@@ -239,7 +239,7 @@ export function ModelsPage() {
         <span className="text-ink">主模型</span>（<span className="mono">agent.model</span>）
         是新对话默认用的；<span className="text-ink">副模型</span>（
         <span className="mono">agent.fast_model</span>）只用于压缩上下文、生成标题、总结 ——
-        那些活儿要的是便宜和快，不必用最强的模型。副模型没设时回落主模型。
+        那些活儿要的是便宜和快，不必用最强的模型。每个场景具体用谁、怎么回落，见「场景模型」页。
       </PageIntro>
 
       <CompactionRow />

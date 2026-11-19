@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { AppSettings } from "./app";
 
 // ---------------------------------------------------------------------------
 // 渠道 / 模型 / 协议
@@ -144,6 +145,48 @@ export function listModels(): Promise<ModelRow[]> {
  */
 export function setFastModel(modelRef: string | null): Promise<void> {
   return invoke<void>("set_fast_model", { modelRef });
+}
+
+// ---------------------------------------------------------------------------
+// 场景模型（镜像 `scene_models.rs`）
+// ---------------------------------------------------------------------------
+
+/** 回落链上的一环：场景自己的绑定 / 副模型 / 主模型 / 发起调用的那条会话的模型。 */
+export type SceneStep = "scene" | "fast" | "main" | "session";
+
+export interface SceneRow {
+  id: string;
+  label: string;
+  description: string;
+  /** 这个场景自己的绑定；`null` = 走回落链。 */
+  binding: string | null;
+  /** 回落链（不含场景自身）。 */
+  fallback: SceneStep[];
+  /** 实际会用的模型；`null` = 用发起调用的那条会话自己的模型。 */
+  effective: string | null;
+  effective_from: SceneStep;
+  /** 绑定存在哪：`config`（CLI 也认）| `assistant`（助理设置）| `app`（仅本应用）。 */
+  storage: "config" | "assistant" | "app";
+  /** 绑定指不到任何模型；运行时会跳过它往下回落。 */
+  binding_broken: boolean;
+}
+
+export interface SceneModelsView {
+  main: string;
+  fast: string | null;
+  scenes: SceneRow[];
+}
+
+export function getSceneModels(): Promise<SceneModelsView> {
+  return invoke<SceneModelsView>("scene_models");
+}
+
+/**
+ * 改一个场景的绑定，`null` = 清掉走回落链。回传新的 `AppSettings`，
+ * 调用方要 `setSettings` 对齐（`set_app_settings` 是整体覆盖写入）。
+ */
+export function setSceneModel(scene: string, modelRef: string | null): Promise<AppSettings> {
+  return invoke<AppSettings>("set_scene_model", { scene, modelRef });
 }
 
 /** 自动压缩：开关 + 触发比例（占上下文窗口的比例，0.3–0.95）。 */

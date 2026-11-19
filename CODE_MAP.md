@@ -27,7 +27,7 @@ carter / llm_adapt_core     底层的 agent 循环、工具、会话、协议编
 | `lib/updater.ts` | 一键更新的前端状态（首页提示条与关于页共用一份） |
 | `lib/sessionOps.ts` | 会话级操作的组合（新建、切换、刷新） |
 | `lib/teamUi.ts` / `ticketUi.ts` | 团队看板 / 工单的纯展示逻辑（有 bun 测试） |
-| `views/settings/` | 设置页各分区；`ConnectorsPage` / `SkillsPage` / `AboutPage` 是连接器、技能、更新 |
+| `views/settings/` | 设置页各分区；`ScenesPage` 是场景模型；`ConnectorsPage` / `SkillsPage` / `AboutPage` 是连接器、技能、更新 |
 | `views/team/` | 团队看板、依赖图、任务抽屉 |
 | `components/` | 输入框、侧栏、更新提示条、工具卡片渲染 |
 | `components/ChatView.tsx` | 再导出 `components/chat/*` |
@@ -71,6 +71,7 @@ carter / llm_adapt_core     底层的 agent 循环、工具、会话、协议编
 | 文件 | 职责 |
 | ---- | ---- |
 | `app_settings.rs` | 界面设置（主题、工具开关、加速/代理、自动更新） |
+| `scene_models.rs` | 场景模型：八个场景各用哪个模型、回落链（设置页「场景模型」与运行时共用一份规则） |
 | `config_edit.rs` | 保真编辑 `~/.carter/config.toml`（保留注释与 `${ENV}`） |
 | `catalog.rs` / `models_sync.rs` / `upstream_models.rs` | 模型目录、按需补元数据、从上游拉清单 |
 | `templates.rs` | 渠道模板（kind / base_url / 该绑哪家目录） |

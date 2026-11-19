@@ -494,10 +494,9 @@ impl Runner {
         let existing = store.read(|s| s.memories.clone());
         let prompt =
             memory::consolidate_prompt(&existing, &user, &memory::transcript(&messages, 24_000));
-        let model = self.ctx.fast_model().unwrap_or_else(|| CompactModel {
-            provider: self.ctx.provider.clone(),
-            model: self.ctx.model.clone(),
-        });
+        let model = self
+            .ctx
+            .helper_model(crate::scene_models::Scene::MemoryConsolidate);
         let consolidated = crate::assistant::eval::ask_with(
             &*model.provider,
             &model.model,
