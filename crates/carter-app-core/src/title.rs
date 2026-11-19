@@ -2,12 +2,12 @@
 //!
 //! ## 为什么不用 carter 现成的 `generate_title`
 //!
-//! 提示词与后处理由 carter 的 [`carter::agent::generate_title`] 提供（同一套
-//! 「取首行、去引号」，CLI 与 GUI 的名字才长得一样），`max_tokens` 是 **32**
-//! （标题就几个字，够用了）。
+//! 提示词、结构化输出与后处理由 carter 的 [`carter::agent::generate_title`] 提供
+//! （先用 json_schema 要 `{"title": "..."}`，渠道不认就降级纯文本，回来的文本宽松
+//! 解析 —— CLI 与 GUI 的名字才长得一样），`max_tokens` 只有几十个（标题就几个字）。
 //!
 //! 推理模型不是这么算账的 —— 它**先思考、再输出**，两边共用一个 `max_tokens`。
-//! 32 个 token 会被思考整个吃掉，正文一个字都不剩。DeepSeek 上实测：
+//! 几十个 token 会被思考整个吃掉，正文一个字都不剩。DeepSeek 上实测（当时是 32）：
 //!
 //! ```text
 //! finish = Length   output_tokens = 32   reasoning_tokens = 32   content = ""
@@ -27,6 +27,13 @@
 //! 各家的字段一起发；严格的渠道会因为不认识的字段 400，[`SwitchOff`] 再逐个单独试。
 //! 所有写法都被拒时才不带字段发一次 —— 有些模型根本不接受这类参数（比如不支持
 //! `reasoning_effort` 的非推理模型），它们本来就不思考，不该因此丢掉标题。
+//!
+//! ## 与结构化输出的先后
+//!
+//! 带 schema 的那次请求被拒时，400 分不清是「不认思考字段」还是「不认 schema」。
+//! [`SwitchOff`] 不在这时挨个换写法，而是**直接把拒绝交回去**：carter 会去掉 schema
+//! 重发，纯文本那次再完整走一遍关思考的写法。否则一个两样都不认的严格渠道，
+//! 要先陪着 schema 把每种写法试一遍、再陪着纯文本试一遍，一次标题打出近十个请求。
 //!
 //! ## 失败要说话
 //!
@@ -119,6 +126,8 @@ impl LlmProvider for SwitchOff {
         // 用 `extra` 而不是 IR 的 `thinking` 字段：IR 里那个是「用多少思考」，
         // 表达不了「一点都不要」，而且 chat completions 的编码器根本不读它。
         // `extra` 是原样并进请求体的通道 —— 这正是它存在的理由。
+        // 带 schema 的请求被拒：先让 carter 去掉 schema（见模块文档「与结构化输出的先后」）。
+        let structured = req.wire.response_format != llm_adapt_core::ResponseFormat::Text;
         for fields in &self.steps {
             let mut with = req.clone();
             for (key, value) in fields {
@@ -127,7 +136,7 @@ impl LlmProvider for SwitchOff {
             match self.inner.stream(with).await {
                 // 只有「请求本身不被接受」才值得换写法。空输出 / 超时 / 限流之类
                 // 换了也没用，原样交回给上层的重试逻辑。
-                Err(carter::CarterError::Llm(ref le)) if is_rejected(le) => {}
+                Err(carter::CarterError::Llm(ref le)) if is_rejected(le) && !structured => {}
                 other => return other,
             }
         }
@@ -370,7 +379,7 @@ mod tests {
     /// 标题请求的形状 —— 这是与 carter 的约定，也是曾经出过的 bug 的回归测试：
     /// 用户那句话必须**原样**发。carter 0.1.6 里它和压缩共用 `run_summary`，
     /// 会加「【待压缩历史】」前缀；0.1.7 起改由调用方自己给用户消息。
-    /// 另外 32 个 token 全留给正文，并带上会话 id 与「这是起标题」的用途标记。
+    /// 另外带上会话 id、「这是起标题」的用途标记，以及结构化输出的 schema。
     #[tokio::test]
     async fn the_title_request_carries_the_prompt_as_is() {
         let p = Counting::new();
@@ -380,7 +389,17 @@ mod tests {
         let seen = p.last.lock().unwrap().take().expect("请求应到达渠道");
         let text = seen.wire.messages[0].content[0].as_text().unwrap_or("");
         assert_eq!(text, "你好啊", "用户消息不能被加上压缩用的前缀");
-        assert_eq!(seen.wire.max_tokens, Some(32), "标题只要 32 个 token");
+        assert!(
+            seen.wire.max_tokens.is_some_and(|n| n <= 64),
+            "标题只要几十个 token"
+        );
+        assert!(
+            matches!(
+                seen.wire.response_format,
+                llm_adapt_core::ResponseFormat::JsonSchema { .. }
+            ),
+            "标题先用结构化输出"
+        );
         assert_eq!(seen.wire.meta.session_id.as_deref(), Some("s-1"));
         assert_eq!(
             seen.wire.meta.purpose,
@@ -525,7 +544,52 @@ mod tests {
         assert_eq!(body["thinking"], serde_json::json!({"type": "disabled"}));
         assert_eq!(body["reasoning_effort"], serde_json::json!("none"));
         assert_eq!(body["enable_thinking"], serde_json::json!(false));
-        assert_eq!(body["max_tokens"], serde_json::json!(32));
+        assert_eq!(
+            body["response_format"]["type"],
+            serde_json::json!("json_schema")
+        );
+    }
+
+    /// 什么都不认的严格渠道：带 schema 被拒就交回 carter 去掉 schema，纯文本那次
+    /// 再走完关思考的写法 —— 不陪着 schema 把每种写法都试一遍。
+    #[tokio::test]
+    async fn a_rejected_schema_is_dropped_before_trying_other_forms() {
+        struct Picky {
+            seen: Mutex<Vec<ChatRequest>>,
+        }
+        #[async_trait::async_trait]
+        impl LlmProvider for Picky {
+            async fn stream(&self, req: ChatRequest) -> carter::Result<EventStream> {
+                let reject = req.wire.response_format != llm_adapt_core::ResponseFormat::Text
+                    || req.wire.extra.contains_key("thinking")
+                    || req.wire.extra.contains_key("enable_thinking");
+                self.seen.lock().unwrap().push(req);
+                if reject {
+                    return Err(bad_request());
+                }
+                Ok(text_stream("工具功能一览"))
+            }
+        }
+        let p = Arc::new(Picky {
+            seen: Mutex::new(Vec::new()),
+        });
+        let out = generate("你好", "s", p.clone(), &model(), "openai_chat").await;
+        assert!(!out.degraded);
+        assert_eq!(out.title, "工具功能一览");
+
+        let seen = p.seen.lock().unwrap();
+        // 1 次带 schema（被拒）+ 纯文本：合并写法被拒 → 单独 reasoning_effort 成功。
+        assert_eq!(seen.len(), 3);
+        assert!(matches!(
+            seen[0].wire.response_format,
+            llm_adapt_core::ResponseFormat::JsonSchema { .. }
+        ));
+        assert_eq!(
+            seen[2].wire.response_format,
+            llm_adapt_core::ResponseFormat::Text
+        );
+        assert_eq!(seen[2].wire.extra.len(), 1);
+        assert!(seen[2].wire.extra.contains_key("reasoning_effort"));
     }
 
     /// 可重试的错误要重试，重试成功就拿到真标题。

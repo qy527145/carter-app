@@ -75,14 +75,14 @@ impl Runner {
         let Some(recorder) = self.thread.recorder() else {
             return;
         };
-        // 与 carter CLI 同一个函数（`generate_title`）：3-6 词中文、取首行、去引号。
+        // 与 carter CLI 同一个函数（`generate_title`）：先要 JSON schema，渠道不认就降级纯文本。
         //
         // 这里显式解析一次副模型（不能靠 `run_one_turn` 里那份缓存：标题跑在它前面，
         // 那时缓存还没填）。解析过一次之后就是同一份缓存。
         // 回落链：标题的场景模型 → 副模型 → 这条会话的模型（也好过没有标题）。
         let CompactModel { provider, model } =
             self.ctx.helper_model(crate::scene_models::Scene::Title);
-        // 渠道种类决定用哪种写法关思考（见 `title.rs`：推理模型会把 32 个 token
+        // 渠道种类决定用哪种写法关思考（见 `title.rs`：推理模型会把几十个 token
         // 全花在思考上，正文一个字都不留）。副模型可能挂在另一个渠道上，所以取
         // **它自己那个** kind。
         let kind = self.ctx.config.provider_for(&model.provider).kind;
