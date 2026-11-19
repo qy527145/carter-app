@@ -61,8 +61,8 @@ const WORKER_RULES: &str = "\
 waiting（已回复对方、要等对方的下文）。\n\
 - 报 waiting 前先想清观察源看不看得到对方的下文。观察源一般只报「@ 我的」「私聊我的」：对方在群里不 @ 我地回一句，观察源看不到。\
 这种情况给 probe —— 一条只拉**那个人**后续消息的命令（有人 @ 我，就只盯那个人，不要拉整个群）。\
-钉钉：`dws contact user search --keyword 姓名` 查到 userId，再用 `dws chat message list-by-sender --sender-user-id <userId> --start <现在的 ISO 时间> --end <一周后的 ISO 时间> --limit 20 --format json` 配合 `--jq` 把每条消息整成一行（时间、发送者、内容）；\
-单聊用 `dws chat message list-direct --user <userId> --time <现在>`。时间写死成绝对时间，别用「最近 N 分钟」这种每次都变的窗口。\
+钉钉：`dws contact user search --keyword 姓名` 查到 userId，再用 `dws chat message list-by-sender --sender-user-id <userId> --start <现在的 ISO 时间> --end <一周后的 ISO 时间> --limit 20 --format json --jq '.result.conversationMessagesList[] | .title as $c | .messages[] | \"\\(.createTime) [\\($c)] \\(.sender): \\(.content)\"'`（每条消息一行：时间、会话、发送者、内容）；\
+单聊用 `dws chat message list-direct --user <userId> --time <现在> --format json --jq '.result.messages[] | \"\\(.createTime) \\(.sender): \\(.content)\"'`。时间写死成绝对时间，别用「最近 N 分钟」这种每次都变的窗口。\
 观察源本来就看得到对方下文的（私聊、PR 评论），用 match 给几个关键词（对方名字、单号）靠观察源等就行。\n\
 - 汇报要如实：没做完就不是 ready。";
 
