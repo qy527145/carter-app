@@ -84,14 +84,18 @@ fn field(args: &Value, key: &str) -> Option<String> {
 
 /// 列表用的一行。
 fn describe_source(s: &Source) -> String {
-    format!(
+    let mut out = format!(
         "- {}（{}，每 {} 分钟，{}）：`{}`",
         s.name,
         s.cwd,
         s.every_minutes,
         if s.enabled { "启用" } else { "停用" },
         s.command
-    )
+    );
+    if !s.trigger.trim().is_empty() {
+        out.push_str(&format!("\n  触发命令：`{}`", s.trigger));
+    }
+    out
 }
 
 #[async_trait::async_trait]
@@ -113,7 +117,11 @@ impl Tool for AssistantConfigTool {
                 "新增或修改一个观察源：一条定时跑的命令，输出里每行一件事，新出现的行就是事件。\n\
                  按名字找现有的那条：同名就更新，没有就新建。\n\
                  命令要能反复跑、输出稳定（`gh ...`、`git ...`、`dws ...`）。写完会自动试跑一次，\
-                 试跑失败会原样把错误回给你 —— 先把命令修对再告诉用户建好了。"
+                 试跑失败会原样把错误回给你 —— 先把命令修对再告诉用户建好了。\n\
+                 每一行带上**日后认得出对方**的字段：IM 消息带发送者名字、发送者 id（钉钉 senderOpenDingTalkId）\
+                 和会话 id，PR / issue 带仓库与编号 —— 工单回复对方后要靠这些等对方的下文、按发送者拉后续。\n\
+                 trigger 是可选的触发命令（长驻，吐一行就立刻查一次），只给能推的来源配；\
+                 `dws` 这类只能拉的别配。"
             }
             Kind::SourceDelete => "删掉一个观察源（按名字）。已经开出来的工单不受影响。",
             Kind::RuleSave => {
@@ -148,6 +156,7 @@ impl Tool for AssistantConfigTool {
                     "command": { "type": "string", "description": "要反复跑的命令，每行输出一件事" },
                     "cwd": { "type": "string", "description": "命令在哪个目录跑；不给就沿用原来的，新建时必填" },
                     "every_minutes": { "type": "integer", "description": "多久检查一次（分钟，1 ~ 1440），不给就用 10" },
+                    "trigger": { "type": "string", "description": "可选：触发命令，一条长驻命令，每吐一行就让这个来源立刻查一次（不产生事件）。给空字符串 = 去掉。不给 = 不动" },
                     "enabled": { "type": "boolean", "description": "是否启用，不给就是启用" }
                 },
                 "required": ["name"]
@@ -401,11 +410,14 @@ impl AssistantConfigTool {
             command,
             cwd,
             every_minutes: every,
-            // 触发命令归用户管（面板上配），模型改观察源时原样保留。
-            trigger: existing
-                .as_ref()
-                .map(|s| s.trigger.clone())
-                .unwrap_or_default(),
+            // 没给就保留原来的；给了空字符串就是去掉。
+            trigger: match args.get("trigger").and_then(Value::as_str) {
+                Some(t) => t.trim().to_string(),
+                None => existing
+                    .as_ref()
+                    .map(|s| s.trigger.clone())
+                    .unwrap_or_default(),
+            },
             enabled,
             state: existing
                 .as_ref()

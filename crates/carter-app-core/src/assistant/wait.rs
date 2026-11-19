@@ -20,8 +20,21 @@
 //! 关键词是子串、不分大小写，任一命中即可；没给关键词就是「这个来源的任何新行」。
 //! 一行只送给一张工单（等得最久的那张）—— 两张工单等同一个人时，先到先得，另一张
 //! 到期自会醒来问一句。没有命中的行原样交给评估，与以前一样。
+//!
+//! ## 探测命令
+//!
+//! 观察源往往只报「@ 我的」「私聊我的」：对方在群里不 @ 我地回一句，观察源跑得再勤也
+//! 看不到。所以工单报 waiting 时可以再给一条**探测命令**，由它自己限定范围 —— 按发送者
+//! 拉那个人的后续、或按会话拉那个群的消息 —— 运行时替它每隔 [`super::source::URGENT_SECS`]
+//! 在工单目录跑一次，输出里新出现的行就是等到的回复，不再用关键词过滤（范围已经由命令
+//! 定了）。第一次（报 waiting 的那一刻）只建基线：对方之前说过的话不算「新回复」。
+//!
+//! 探测命令只服务这一张工单：输出不进评估、不进观察源的去重表，工单醒了它就停。
 
-use super::{EVENT_MARK, Source, Ticket, TicketStatus, Wait};
+use std::path::Path;
+
+use super::source;
+use super::{EVENT_MARK, Source, SourceState, Ticket, TicketStatus, Wait};
 
 /// 默认最多等多久（分钟）。
 pub const DEFAULT_TIMEOUT_MINUTES: u64 = 24 * 60;
@@ -91,9 +104,17 @@ pub fn claim(
 /// 等到了：送进工单的那段话。与评估 attach 的写法同一种格式（`EVENT_MARK` 开头），
 /// 模型认得。
 pub fn arrived_text(source: &Source, w: &Wait, lines: &[String]) -> String {
+    arrived_from(&format!("来源「{}」", source.name), w, lines)
+}
+
+/// 探测命令拉到的：同一种格式，只是出处不同。
+pub fn probed_text(w: &Wait, lines: &[String]) -> String {
+    arrived_from("探测命令", w, lines)
+}
+
+fn arrived_from(origin: &str, w: &Wait, lines: &[String]) -> String {
     let mut s = format!(
-        "{EVENT_MARK}来源「{}」 · 等到的回复（你在等：{}）\n",
-        source.name,
+        "{EVENT_MARK}{origin} · 等到的回复（你在等：{}）\n",
         w.note.trim()
     );
     for l in lines {
@@ -101,6 +122,44 @@ pub fn arrived_text(source: &Source, w: &Wait, lines: &[String]) -> String {
     }
     s.push_str("\n接着处理。处理完照常用 assistant_report 汇报；还要等下文就再报一次 waiting。");
     s
+}
+
+/// 探测命令连续失败了：唤醒工单让它修。悄悄失败到超时的话，对方的回复等于没人管。
+pub fn probe_broken_text(w: &Wait, error: &str) -> String {
+    format!(
+        "（替你盯着的探测命令连续失败了：{error}。你在等：{}。修一下命令再报一次 waiting，\
+         或者换个办法等。）",
+        w.note.trim()
+    )
+}
+
+/// 跑一次探测命令：在工单目录跑、按行比对、返回新行。与 [`source::poll`] 同一种做法，
+/// 只是状态记在工单的 `wait` 上，而不是来源上。
+///
+/// 第一次只建基线（`probe_state` 还没有、或还没 `baselined`）。
+pub async fn probe(w: &Wait, cwd: &Path) -> (SourceState, Result<Vec<String>, String>) {
+    let mut state = w.probe_state.clone().unwrap_or_default();
+    let now = crate::protocol::now_ms();
+    state.next_at = now + source::URGENT_SECS * 1000;
+    state.last_polled_at = Some(now);
+    let Some(cmd) = w.probe.as_deref().filter(|p| !p.trim().is_empty()) else {
+        return (state, Err("没有探测命令".into()));
+    };
+    match source::run_command(cmd, cwd).await {
+        Ok(out) => {
+            let fresh = source::diff(&mut state, &out);
+            state.last_new = fresh.len() as u32;
+            state.last_error = None;
+            state.failures = 0;
+            (state, Ok(fresh))
+        }
+        Err(e) => {
+            state.last_new = 0;
+            state.failures += 1;
+            state.last_error = Some(e.clone());
+            (state, Err(e))
+        }
+    }
 }
 
 /// 到期没等到：送进工单的那段话。
@@ -141,6 +200,8 @@ mod tests {
             keywords: keywords.iter().map(|k| k.to_string()).collect(),
             until: now_ms() + 60_000,
             note: "张三的答复".into(),
+            probe: None,
+            probe_state: None,
         });
         t
     }
@@ -153,6 +214,8 @@ mod tests {
             keywords: vec!["张三".into(), " cid=42 ".into()],
             until: 0,
             note: String::new(),
+            probe: None,
+            probe_state: None,
         };
         assert!(matches(&w, "[群] 张三：好的"));
         assert!(matches(&w, "private CID=42 reply"));
@@ -179,6 +242,41 @@ mod tests {
         assert_eq!(claims[0].ticket_id, "old");
         assert_eq!(claims[0].lines, vec!["张三：收到", "李四：也收到"]);
         assert_eq!(rest, vec!["王五：无关"]);
+    }
+
+    /// 探测命令：第一次只建基线，之后新出现的行才是回复；失败计次。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_probe_baselines_first_and_then_reports_new_lines() {
+        let dir =
+            std::env::temp_dir().join(format!("carter-probe-{}-{}", std::process::id(), now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("log");
+        std::fs::write(&log, "张三：之前说过的\n").unwrap();
+        let mut w = Wait {
+            source_id: "src_1".into(),
+            keywords: vec![],
+            until: 0,
+            note: "张三".into(),
+            probe: Some(format!("cat {}", log.display())),
+            probe_state: None,
+        };
+        let (st, res) = probe(&w, &dir).await;
+        assert!(res.unwrap().is_empty(), "第一次只建基线");
+        assert!(st.baselined);
+        w.probe_state = Some(st);
+
+        std::fs::write(&log, "张三：之前说过的\n张三：现在回你了\n").unwrap();
+        let (st, res) = probe(&w, &dir).await;
+        assert_eq!(res.unwrap(), vec!["张三：现在回你了"]);
+        assert_eq!(st.failures, 0);
+        assert!(st.next_at > now_ms());
+        w.probe_state = Some(st);
+
+        w.probe = Some("exit 3".into());
+        let (st, res) = probe(&w, &dir).await;
+        assert!(res.is_err());
+        assert_eq!(st.failures, 1);
     }
 
     /// 只认盯着这个来源的、而且正在等的工单。

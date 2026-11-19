@@ -177,7 +177,7 @@ pub struct Source {
     pub state: SourceState,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SourceState {
     /// 见过的行（指纹）。比对新行用，有上限，见 [`source::MAX_SEEN`]。
@@ -218,10 +218,15 @@ impl Source {
     }
 
     /// 有工单在等这个来源的回复吗？有就加密轮询（见 `source::interval_ms`）。
+    ///
+    /// 带探测命令的不算：对方的后续由探测命令去拉，观察源跑得再勤也看不到它，
+    /// 白白多跑几遍（观察源的脚本往往比探测命令重得多）。
     pub fn is_awaited(state: &State, source_id: &str) -> bool {
         state.tickets.iter().any(|t| {
             t.status == TicketStatus::Waiting
-                && t.wait.as_ref().is_some_and(|w| w.source_id == source_id)
+                && t.wait
+                    .as_ref()
+                    .is_some_and(|w| w.source_id == source_id && !w.has_probe())
         })
     }
 }
@@ -384,6 +389,20 @@ pub struct Wait {
     pub until: u64,
     /// 在等什么，一句话。面板上显示，唤醒时也带给模型。
     pub note: String,
+    /// 探测命令：观察源本身看不到对方的后续（群里没 @ 我的回复）时，由工单自己给一条
+    /// 命令，运行时替它每隔 `source::URGENT_SECS` 在工单目录跑一次，输出里新出现的、
+    /// 命中关键词的行就是等到的回复。报 waiting 时先跑一次建基线。见 [`wait::probe`]。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe: Option<String>,
+    /// 探测命令的运行状态（见过的行、下次什么时候跑、上次的错）。不给界面。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe_state: Option<SourceState>,
+}
+
+impl Wait {
+    pub fn has_probe(&self) -> bool {
+        self.probe.as_deref().is_some_and(|p| !p.trim().is_empty())
+    }
 }
 
 impl Ticket {
@@ -980,6 +999,15 @@ pub fn chat_segment(store: &AssistantStore) -> String {
          - 观察源：一条能反复跑的命令，输出里**每行一件事**；新出现的行就是事件。\n\
          - 接单规则：一句话写清什么样的事可以替你做、做到什么程度。规则是文字，模型读。\n\
          - 接单后助理在后台另开一条会话去做（工单），做完把结局汇报回这个会话。\n\
+         - 工单回复了对方之后可以停在「等回复」：对方再回时直接把那几行送回工单接着干，不经评估、不排队。\
+         对方的下文从哪来有两条路：观察源本身能看到的（私聊、PR 评论），工单给关键词靠观察源等，\
+         这时那个观察源会自动加密到 30 秒一次；观察源看不到的（群里不 @ 的回复），工单自己给一条\
+         只拉那个人后续消息的探测命令，运行时每 30 秒替它跑。所以**配观察源时，每一行要带上足以\
+         让工单日后认出对方、也让探测命令拉得到对方的字段**：IM 消息带发送者名字和发送者 id（钉钉的\
+         senderOpenDingTalkId / userId）、会话 id；PR / issue 带仓库与编号。缺了这些，工单只能全群\
+         拉、或者等到超时。\n\
+         - 能推的来源（webhook 转发、inotifywait、fswatch）可以再配一条触发命令：它吐一行就立刻查一次；\
+         钉钉 `dws` 这类只能拉的没有，不用硬配。\n\
          - 默认「只观察」：只记录本来会接的，用户批准才开工。别擅自切成自动。\n\
          - 改完配置用一两句说清改成了什么，别复述工具调用。\n\n\
          **你是大脑，不是手。** 你没有命令行和文件工具，也不该有：用户交代要动手的事\
@@ -1031,7 +1059,7 @@ pub fn status_text(store: &AssistantStore) -> String {
     }
     for x in s.sources.iter().take(15) {
         out.push_str(&format!(
-            "- {}（{}，每 {} 分钟，{}{}）：`{}`\n",
+            "- {}（{}，每 {} 分钟，{}{}{}）：`{}`\n",
             x.name,
             x.cwd,
             x.every_minutes,
@@ -1039,6 +1067,11 @@ pub fn status_text(store: &AssistantStore) -> String {
             match &x.state.last_error {
                 Some(e) => format!("，上次失败：{e}"),
                 None => String::new(),
+            },
+            if x.trigger.trim().is_empty() {
+                String::new()
+            } else {
+                "，有触发命令".to_string()
             },
             x.command
         ));
@@ -1066,7 +1099,7 @@ pub fn status_text(store: &AssistantStore) -> String {
     }
     for t in live.iter().take(20) {
         out.push_str(&format!(
-            "- #{} {}（{}）{}\n",
+            "- #{} {}（{}）{}{}\n",
             t.number,
             t.title,
             t.status.label(),
@@ -1074,7 +1107,19 @@ pub fn status_text(store: &AssistantStore) -> String {
                 .as_deref()
                 .or(t.summary.as_deref())
                 .map(|x| format!("：{x}"))
-                .unwrap_or_default()
+                .unwrap_or_default(),
+            match &t.wait {
+                Some(w) if t.status == TicketStatus::Waiting => format!(
+                    "；在等：{}（{}）",
+                    w.note.trim(),
+                    if w.has_probe() {
+                        "探测命令盯着"
+                    } else {
+                        "靠观察源"
+                    }
+                ),
+                _ => String::new(),
+            }
         ));
     }
     out

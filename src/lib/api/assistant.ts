@@ -124,6 +124,10 @@ export type AssistantWait = {
   keywords: string[];
   until: number;
   note: string;
+  /** 探测命令：观察源看不到对方后续时，工单自己给的那条命令，运行时每 30 秒替它跑。 */
+  probe?: string;
+  /** 探测命令的运行状态；只关心上次有没有失败。 */
+  probe_state?: { last_error: string | null; failures: number; last_polled_at: number | null };
 };
 
 /**

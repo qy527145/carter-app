@@ -384,6 +384,16 @@ function TicketCard({ t }: { t: AssistantTicket }) {
             <span className="text-dim">（认「{t.wait.keywords.join("」「")}」）</span>
           )}
           <span className="text-dim">{` · 最晚 ${fullTime(t.wait.until)}`}</span>
+          {t.wait.probe && (
+            <div className="mono mt-1 truncate text-[11px] text-dim" title={t.wait.probe}>
+              ⌖ {t.wait.probe}
+              {t.wait.probe_state?.last_error && (
+                <span className="text-[var(--danger)]">
+                  {` · 上次失败：${t.wait.probe_state.last_error}`}
+                </span>
+              )}
+            </div>
+          )}
         </div>
       )}
 

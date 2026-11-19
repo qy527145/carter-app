@@ -8,6 +8,7 @@
 //!   │                                                ├─ accept（观察模式）→ 记「本来会接」
 //!   │                                                ├─ attach → 送进那张工单
 //!   │                                                └─ ignore / unavailable → 只记一笔
+//!   ├─ 带探测命令的「等回复」工单 ──每 30 秒跑一次──▶ 新行 → 直接送进那张工单
 //!   ├─ 等回复到期的工单 ──▶ 唤醒一次，让它自己决定催还是收尾
 //!   └─ 排队的工单 ──有空位──▶ 开（或续接）执行会话，发任务
 //!
@@ -57,7 +58,12 @@ const WORKER_RULES: &str = "\
 - 不要调用 ask_user_question —— 没有人会回答，这一轮会一直卡住。要用户决定的事，用 assistant_report 的 needs_user 问一个具体问题。\n\
 - 做到一半需要助理知道的事（发现了相关情况、要它帮忙协调别的工单），用 send_message(to=\"assistant\") 发给它；它不会因此被叫醒，用户下次开口时一起看到。\n\
 - 结束前必须调用 assistant_report 汇报结局：ready（有结果可看）、needs_user、blocked（缺条件做不下去）、failed、dropped（核实后无需处理）、\
-waiting（已回复对方、要等对方的下文：说清等什么、给能认出那条回复的关键词，等到了会直接叫醒你）。\n\
+waiting（已回复对方、要等对方的下文）。\n\
+- 报 waiting 前先想清观察源看不看得到对方的下文。观察源一般只报「@ 我的」「私聊我的」：对方在群里不 @ 我地回一句，观察源看不到。\
+这种情况给 probe —— 一条只拉**那个人**后续消息的命令（有人 @ 我，就只盯那个人，不要拉整个群）。\
+钉钉：`dws contact user search --keyword 姓名` 查到 userId，再用 `dws chat message list-by-sender --sender-user-id <userId> --start <现在的 ISO 时间> --end <一周后的 ISO 时间> --limit 20 --format json` 配合 `--jq` 把每条消息整成一行（时间、发送者、内容）；\
+单聊用 `dws chat message list-direct --user <userId> --time <现在>`。时间写死成绝对时间，别用「最近 N 分钟」这种每次都变的窗口。\
+观察源本来就看得到对方下文的（私聊、PR 评论），用 match 给几个关键词（对方名字、单号）靠观察源等就行。\n\
 - 汇报要如实：没做完就不是 ready。";
 
 // ---------------------------------------------------------------------------
@@ -155,8 +161,115 @@ pub async fn tick(shell: &Arc<AppShell>) {
             shell.assistant.release(&s.id);
         });
     }
+    run_probes(shell, now).await;
     expire_waiters(shell, now);
     launch_queued(shell).await;
+}
+
+/// 探测命令连续失败几次就叫醒工单让它修。
+const PROBE_FAILURES_TO_WAKE: u32 = 3;
+
+/// 跑到点的探测命令（见 `wait::probe`）：新行直接送进那张工单；连续失败则叫醒它修命令。
+///
+/// 各工单的命令并发跑，但每拍只跑一遍：命令本身有 60 秒超时，下一拍到了还没跑完的
+/// 不会再起一份 —— `next_at` 在起跑前就推过了。
+async fn run_probes(shell: &Arc<AppShell>, now: u64) {
+    let due: Vec<(String, String, super::Wait)> = shell.assistant.read(|s| {
+        s.tickets
+            .iter()
+            .filter(|t| t.status == TicketStatus::Waiting)
+            .filter_map(|t| {
+                let w = t.wait.as_ref()?;
+                if !w.has_probe() {
+                    return None;
+                }
+                let next = w.probe_state.as_ref().map_or(0, |st| st.next_at);
+                (next <= now).then(|| (t.id.clone(), t.cwd.clone(), w.clone()))
+            })
+            .collect()
+    });
+    if due.is_empty() {
+        return;
+    }
+    // 先把 `next_at` 推掉，免得下一拍又起一份。
+    let _ = shell.assistant.with(|s| {
+        for (id, _, _) in &due {
+            if let Some(w) = s.ticket_mut(id).and_then(|t| t.wait.as_mut()) {
+                let st = w.probe_state.get_or_insert_with(Default::default);
+                st.next_at = now + super::source::URGENT_SECS * 1000;
+            }
+        }
+    });
+    let mut tasks = Vec::new();
+    for (id, cwd, w) in due {
+        let shell = shell.clone();
+        tasks.push(tokio::spawn(async move {
+            let (state, result) = super::wait::probe(&w, std::path::Path::new(&cwd)).await;
+            let label = shell
+                .assistant
+                .read(|s| s.ticket(&id).map(Ticket::label))
+                .unwrap_or_else(|| id.clone());
+            // 工单这期间醒了（用户回了话、观察源那边先等到了）就别再碰它的 `wait`。
+            let still_waiting = shell
+                .assistant
+                .with(|s| {
+                    let Some(t) = s.ticket_mut(&id) else {
+                        return false;
+                    };
+                    if t.status != TicketStatus::Waiting {
+                        return false;
+                    }
+                    if let Some(w) = t.wait.as_mut() {
+                        w.probe_state = Some(state.clone());
+                    }
+                    true
+                })
+                .unwrap_or(false);
+            if !still_waiting {
+                return;
+            }
+            match result {
+                Ok(lines) if lines.is_empty() => {}
+                Ok(lines) => {
+                    tracing::info!(ticket = %id, n = lines.len(), "助理：探测命令等到了回复，唤醒工单");
+                    let text = super::wait::probed_text(&w, &lines);
+                    let delivered = deliver(&shell, &id, text, Wake::Automatic);
+                    let at = now_ms();
+                    record(
+                        &shell,
+                        Decision {
+                            id: new_id("dec", at),
+                            at,
+                            source_id: w.source_id.clone(),
+                            source_name: format!("{label} 的探测命令"),
+                            events: lines,
+                            verdict: if delivered { Verdict::Attach } else { Verdict::Ignore },
+                            rule: None,
+                            reason: if delivered {
+                                format!("{label} 在等这条回复（探测命令拉到的），直接送进去，没有经过评估")
+                            } else {
+                                format!("{label} 在等这条回复，但送进去时它已经结束了")
+                            },
+                            title: None,
+                            task: None,
+                            ticket_id: delivered.then(|| id.clone()),
+                            dismissed: false,
+                        },
+                    );
+                }
+                Err(e) if state.failures >= PROBE_FAILURES_TO_WAKE => {
+                    tracing::warn!(ticket = %id, error = %e, "助理：探测命令连续失败，唤醒工单修命令");
+                    deliver(&shell, &id, super::wait::probe_broken_text(&w, &e), Wake::Automatic);
+                }
+                Err(e) => {
+                    tracing::info!(ticket = %id, error = %e, failures = state.failures, "助理：探测命令失败");
+                }
+            }
+        }));
+    }
+    for t in tasks {
+        let _ = t.await;
+    }
 }
 
 /// 触发命令的进程对账：该跑的跑起来，暂停 / 停用 / 删除的收掉。见 `trigger`。
@@ -1442,6 +1555,96 @@ mod tests {
         }
     }
 
+    /// 带探测命令的工单：到点跑一次，新行直接送进工单并唤醒；连续失败三次也唤醒。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_probe_wakes_the_ticket_on_new_lines_and_on_repeated_failure() {
+        let dir = std::env::temp_dir().join(format!(
+            "carter-runprobe-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = super::super::AssistantStore::open(dir.join("assistant.json"));
+        let shell = Arc::new(
+            Arc::into_inner(AppShell::new(carter::config::Config::default()))
+                .unwrap()
+                .with_assistant(store.clone()),
+        );
+        let mut source = crate::assistant::tests::source();
+        source.cwd = dir.to_string_lossy().into_owned();
+        let id = store
+            .with(|s| {
+                s.sources.push(source.clone());
+                s.open_ticket(&source, "r", "a", "a", vec![])
+            })
+            .unwrap();
+        let log = dir.join("log");
+        std::fs::write(&log, "张三：老话\n").unwrap();
+        let park = |probe: &str, state: Option<crate::assistant::SourceState>| {
+            store
+                .with(|s| {
+                    let t = s.ticket_mut(&id).unwrap();
+                    t.status = TicketStatus::Waiting;
+                    t.pending.clear();
+                    t.wait = Some(crate::assistant::Wait {
+                        source_id: source.id.clone(),
+                        keywords: vec![],
+                        until: now_ms() + 3_600_000,
+                        note: "张三的答复".into(),
+                        probe: Some(probe.to_string()),
+                        probe_state: state,
+                    });
+                })
+                .unwrap();
+        };
+
+        // 没基线：第一拍只建基线，不唤醒。
+        park("cat log", None);
+        run_probes(&shell, now_ms()).await;
+        let t = store.read(|s| s.ticket(&id).cloned()).unwrap();
+        assert_eq!(t.status, TicketStatus::Waiting);
+        let st = t.wait.as_ref().unwrap().probe_state.clone().unwrap();
+        assert!(st.baselined);
+        assert!(st.next_at > now_ms(), "下一次推到了 30 秒后");
+
+        // 没到点：不跑。
+        std::fs::write(&log, "张三：老话\n张三：回你了\n").unwrap();
+        run_probes(&shell, now_ms()).await;
+        assert_eq!(
+            store.read(|s| s.ticket(&id).map(|t| t.status)).unwrap(),
+            TicketStatus::Waiting
+        );
+
+        // 到点了：新行送进工单，唤醒。
+        run_probes(
+            &shell,
+            now_ms() + super::super::source::URGENT_SECS * 1000 + 1,
+        )
+        .await;
+        let t = store.read(|s| s.ticket(&id).cloned()).unwrap();
+        assert_eq!(t.status, TicketStatus::Queued);
+        assert!(t.wait.is_none());
+        assert!(t.pending[0].contains("张三：回你了"), "{:?}", t.pending);
+        assert!(t.pending[0].contains("探测命令"), "{:?}", t.pending);
+        let d = store.read(|s| s.decisions[0].clone());
+        assert_eq!(d.verdict, Verdict::Attach);
+        assert!(d.source_name.contains("探测命令"));
+
+        // 连续失败三次：叫醒它修命令。
+        let mut broken = crate::assistant::SourceState {
+            baselined: true,
+            ..Default::default()
+        };
+        broken.failures = PROBE_FAILURES_TO_WAKE - 1;
+        park("exit 7", Some(broken));
+        run_probes(&shell, now_ms()).await;
+        let t = store.read(|s| s.ticket(&id).cloned()).unwrap();
+        assert_eq!(t.status, TicketStatus::Queued);
+        assert!(t.pending[0].contains("连续失败"), "{:?}", t.pending);
+        assert!(t.pending[0].contains("退出码 7"), "{:?}", t.pending);
+    }
+
     /// 「跑完」= 这条工单对话退出、**且没有后台命令还在跑**。还有命令在跑时先不收尾：
     /// 否则会把还在干的活报成「跑完未汇报」，还会顺势关掉会话、连带杀掉那些命令。
     #[test]
@@ -1496,6 +1699,8 @@ mod tests {
                         keywords: vec!["张三".into()],
                         until,
                         note: "张三的答复".into(),
+                        probe: None,
+                        probe_state: None,
                     });
                 })
                 .unwrap();

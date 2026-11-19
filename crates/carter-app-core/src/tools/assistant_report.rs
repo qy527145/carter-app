@@ -47,6 +47,8 @@ struct WaitArgs {
     keywords: Vec<String>,
     source: Option<String>,
     timeout_minutes: u64,
+    /// 探测命令：观察源看不到对方后续时，工单自己给的那条命令。
+    probe: Option<String>,
 }
 
 fn parse(args: &Value) -> Result<Report, String> {
@@ -165,11 +167,18 @@ fn parse_wait(args: &Value) -> Result<WaitArgs, String> {
             n
         }
     };
+    let probe = args
+        .get("probe")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
     Ok(WaitArgs {
         note,
         keywords,
         source,
         timeout_minutes,
+        probe,
     })
 }
 
@@ -187,8 +196,11 @@ impl Tool for AssistantReportTool {
          * failed —— 试过了，做不成；\n\
          * dropped —— 核实后发现不需要做（复现不了、已经有人做了、不是问题）；\n\
          * waiting —— 已经回复了对方、要等对方的下文才能继续（群里 @ 你的人、私聊你的人、PR 作者）。\
-         用 wait_for 说清在等什么，用 match 给几个能认出那条回复的关键词（对方的名字、会话 id、单号）；\
-         观察源里一出现匹配的行，这条会话会被直接叫醒并收到那几行，不用自己轮询。\
+         用 wait_for 说清在等什么。**先想清观察源看不看得到对方的下文**：观察源通常只报「@ 我的」\
+         「私聊我的」，对方在群里不 @ 你地回一句，观察源永远看不到 —— 这种情况必须给 probe：\
+         一条只拉对方后续的命令（按发送者或按会话拉，每行一条消息，时间范围写成绝对时间）。\
+         运行时每 30 秒替你跑它，输出里新出现的行就直接送回这条会话；报 waiting 那一刻先跑一次建基线，之前的话不算。\
+         观察源本来就看得到对方下文的（私聊、PR 评论）才用 match 给几个关键词（对方的名字、单号）靠观察源等。\
          到了 timeout_minutes（默认一天）还没等到也会被叫醒一次。\n\
          如实汇报：没做完不是 ready。summary 只写结果、实际跑过的检查和剩下的事。\n\
          除了 dropped 和 waiting，用户都会收到一条系统通知。"
@@ -231,6 +243,10 @@ impl Tool for AssistantReportTool {
                 "timeout_minutes": {
                     "type": "integer",
                     "description": "waiting 时可选：最多等多少分钟，默认 1440（一天），最多 7 天"
+                },
+                "probe": {
+                    "type": "string",
+                    "description": "waiting 时可选但群聊场景必给：一条只拉对方后续的命令（按发送者 / 按会话），每行一条消息。运行时每 30 秒在工单目录跑一次，新出现的行直接送回来；现在先跑一次建基线。输出要稳定（同一条消息每次都是同一行），时间范围写死成绝对时间，不要用「最近 N 分钟」这种每次都变的窗口"
                 }
             },
             "required": ["status", "summary"]
@@ -249,10 +265,41 @@ impl Tool for AssistantReportTool {
             Err(e) => return ToolResult::err(format!("assistant_report: {e}")),
         };
         let id = self.ticket_id.clone();
+        // 探测命令先跑一次建基线：命令写错现在就能知道，而不是等 30 秒后在后台悄悄失败。
+        // 要在拿锁之前跑（跑命令是异步的，`with` 里不能 await）。
+        let baseline = match &wait {
+            Some(w) if w.probe.is_some() => {
+                let cwd = self
+                    .store
+                    .read(|s| s.ticket(&id).map(|t| t.cwd.clone()))
+                    .unwrap_or_default();
+                let probe_wait = Wait {
+                    source_id: String::new(),
+                    keywords: Vec::new(),
+                    until: 0,
+                    note: String::new(),
+                    probe: w.probe.clone(),
+                    probe_state: None,
+                };
+                let (st, res) =
+                    crate::assistant::wait::probe(&probe_wait, std::path::Path::new(&cwd)).await;
+                if let Err(e) = res {
+                    return ToolResult::err(format!(
+                        "assistant_report: probe 试跑失败，先修好再报 waiting：{e}"
+                    ));
+                }
+                Some(st)
+            }
+            _ => None,
+        };
         let res = self.store.with(|s| {
             // 先解析来源：要用到全部状态（来源表），得在拿工单的可变引用之前做。
             let wait = match &wait {
-                Some(w) => Some(resolve_wait(s, &id, w)?),
+                Some(w) => {
+                    let mut resolved = resolve_wait(s, &id, w)?;
+                    resolved.probe_state = baseline.clone();
+                    Some(resolved)
+                }
                 None => None,
             };
             let Some(t) = s.ticket_mut(&id) else {
@@ -273,7 +320,17 @@ impl Tool for AssistantReportTool {
             Ok(Ok((label, Some(w)))) => ToolResult::ok(format!(
                 "已记录：{label} → 等回复（{}；最多等到 {}）。现在结束这一轮，不要再做别的事 —— \
                  等到了会把那几行直接送回这条会话。",
-                if w.keywords.is_empty() {
+                if w.has_probe() {
+                    format!(
+                        "探测命令每 {} 秒跑一次，已建基线{}",
+                        crate::assistant::source::URGENT_SECS,
+                        if w.keywords.is_empty() {
+                            String::new()
+                        } else {
+                            format!("；观察源那边也认关键词「{}」", w.keywords.join("」「"))
+                        }
+                    )
+                } else if w.keywords.is_empty() {
                     "来源的任何新行".to_string()
                 } else {
                     format!("关键词「{}」", w.keywords.join("」「"))
@@ -330,6 +387,8 @@ fn resolve_wait(
         keywords: w.keywords.clone(),
         until: now_ms() + w.timeout_minutes * 60_000,
         note: w.note.clone(),
+        probe: w.probe.clone(),
+        probe_state: None,
     })
 }
 
@@ -460,6 +519,53 @@ mod tests {
                 .map(|w| w.source_id)),
             Some(source.id.clone())
         );
+    }
+
+    /// 带探测命令的 waiting：报的时候先跑一次建基线；命令跑不通就拒收。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn waiting_with_a_probe_baselines_now_and_refuses_a_broken_one() {
+        let dir = std::env::temp_dir().join(format!(
+            "carter-wait-probe-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = AssistantStore::open(dir.join("assistant.json"));
+        let mut source = crate::assistant::tests::source();
+        source.cwd = dir.to_string_lossy().into_owned();
+        let id = store
+            .with(|s| {
+                s.sources.push(source.clone());
+                s.open_ticket(&source, "r", "t", "x", vec![])
+            })
+            .unwrap();
+        let tool = AssistantReportTool::new(store.clone(), id.clone());
+
+        let r = tool
+            .execute(json!({"status": "waiting", "summary": "回了", "wait_for": "张三", "probe": "exit 2"}))
+            .await;
+        assert!(!r.ok);
+        assert!(r.content.contains("probe"), "{}", r.content);
+        assert_eq!(
+            store.read(|s| s.ticket(&id).map(|t| t.status)).unwrap(),
+            TicketStatus::Queued,
+            "拒收就不该改状态"
+        );
+
+        std::fs::write(dir.join("log"), "张三：老话\n").unwrap();
+        let r = tool
+            .execute(json!({"status": "waiting", "summary": "回了", "wait_for": "张三", "probe": "cat log"}))
+            .await;
+        assert!(r.ok, "{}", r.content);
+        assert!(r.content.contains("探测命令"), "{}", r.content);
+        store.read(|s| {
+            let w = s.ticket(&id).unwrap().wait.clone().unwrap();
+            assert_eq!(w.probe.as_deref(), Some("cat log"));
+            let st = w.probe_state.unwrap();
+            assert!(st.baselined, "报的时候就建好基线");
+            assert_eq!(st.seen.len(), 1);
+        });
     }
 
     #[test]
