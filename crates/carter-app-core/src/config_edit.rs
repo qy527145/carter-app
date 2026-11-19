@@ -309,7 +309,7 @@ pub fn set_default_model(doc: &mut DocumentMut, model_ref: &str) -> Result<(), S
     Ok(())
 }
 
-/// 副模型（`agent.fast_model`）：压缩上下文、生成标题、总结用的那个。
+/// 副模型（`agent.fast_model`）：辅助场景（标题、记忆、助理等）默认指向的那个，见 `scene_models`。
 ///
 /// `None` = 删掉这个键，回落主模型。**删键而不是写空串**：配置里留一句
 /// `fast_model = ""` 会让读的人以为配了个空模型，而 carter 那边它是 `Option<String>`，

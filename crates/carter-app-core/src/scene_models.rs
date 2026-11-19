@@ -111,9 +111,10 @@ impl Scene {
     pub fn default_choice(self) -> Option<&'static str> {
         match self {
             Scene::Chat => None,
-            Scene::AssistantChat | Scene::TicketWork => Some(MAIN),
-            Scene::TicketEval
-            | Scene::Compact
+            // 助理对话多是派单、问进度，副模型够用；压缩要保住长历史里的关键细节，用主模型。
+            Scene::TicketWork | Scene::Compact => Some(MAIN),
+            Scene::AssistantChat
+            | Scene::TicketEval
             | Scene::Title
             | Scene::MemorySuggest
             | Scene::MemoryConsolidate => Some(FAST),
@@ -394,13 +395,22 @@ mod tests {
     #[test]
     fn helper_scenes_default_to_fast_then_the_session_model() {
         let c = config("p/main", Some("p/fast"));
+        assert_eq!(Scene::Title.default_choice(), Some(FAST));
         let links = chain(Scene::Title, FAST, &c);
         assert_eq!(steps(&links), [Step::Fast, Step::Session]);
         assert_eq!(pick(&links, |_| true), Some(0));
         // 没配副模型：不回落到全局主模型，而是会话自己的模型。
         let c = config("p/main", None);
-        let links = chain(Scene::Compact, FAST, &c);
+        let links = chain(Scene::Title, FAST, &c);
         assert_eq!(pick(&links, |_| true), Some(1));
+    }
+
+    #[test]
+    fn compaction_defaults_to_main_then_the_session_model() {
+        let c = config("p/main", Some("p/fast"));
+        assert_eq!(Scene::Compact.default_choice(), Some(MAIN));
+        let links = chain(Scene::Compact, MAIN, &c);
+        assert_eq!(steps(&links), [Step::Main, Step::Session]);
     }
 
     #[test]
@@ -431,12 +441,16 @@ mod tests {
     }
 
     #[test]
-    fn ticket_work_and_assistant_chat_default_to_main() {
+    fn ticket_work_defaults_to_main_and_assistant_chat_to_fast() {
         let c = config("p/main", Some("p/fast"));
-        for s in [Scene::TicketWork, Scene::AssistantChat] {
-            assert_eq!(s.default_choice(), Some(MAIN));
-            assert_eq!(steps(&chain(s, MAIN, &c)), [Step::Main]);
-        }
+        assert_eq!(Scene::TicketWork.default_choice(), Some(MAIN));
+        assert_eq!(steps(&chain(Scene::TicketWork, MAIN, &c)), [Step::Main]);
+        assert_eq!(Scene::AssistantChat.default_choice(), Some(FAST));
+        // 副模型没配也不会没得用：兜到主模型。
+        let c = config("p/main", None);
+        let links = chain(Scene::AssistantChat, FAST, &c);
+        assert_eq!(steps(&links), [Step::Fast, Step::Main]);
+        assert_eq!(pick(&links, |_| true), Some(1));
     }
 
     #[test]

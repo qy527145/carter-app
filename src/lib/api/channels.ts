@@ -83,7 +83,7 @@ export type ModelRow = {
    */
   label: string | null;
   is_default: boolean;
-  /** 是不是副模型（`agent.fast_model`）：压缩上下文、生成标题用的那个。 */
+  /** 是不是副模型（`agent.fast_model`）：辅助场景默认指向的那个，见场景模型。 */
   is_fast: boolean;
   protocol: string;
   /** 配置里给这个模型指定的默认推理档位，原样（字符串或表）。 */
@@ -141,7 +141,7 @@ export function listModels(): Promise<ModelRow[]> {
 }
 
 /**
- * 设副模型（压缩上下文、生成标题用）。传 `null` 清除、回落主模型。
+ * 设副模型（辅助场景默认指向它）。传 `null` 清除。
  */
 export function setFastModel(modelRef: string | null): Promise<void> {
   return invoke<void>("set_fast_model", { modelRef });

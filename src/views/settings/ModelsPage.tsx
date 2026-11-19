@@ -119,7 +119,7 @@ function ModelCard({
           <Button
             size="sm"
             onClick={onSetFast}
-            title="压缩上下文、生成标题、总结用它（要便宜、要快）"
+            title="辅助场景（标题、记忆、助理等）默认指向它，见「场景模型」页"
           >
             设为副模型
           </Button>
@@ -140,7 +140,7 @@ const RATIOS = ["0.6", "0.7", "0.75", "0.8", "0.9"] as const;
 /**
  * 自动压缩：开关 + 触发比例。
  *
- * 放在模型页是因为它和「副模型」是一回事的两半 —— 压缩用的就是副模型；
+ * 放在模型页是因为它和模型选择是一回事的两半 —— 压缩用哪个模型在「场景模型」页设；
  * 对话输入框右下角的上下文圆环点开说明里也指到这里。
  */
 function CompactionRow() {
@@ -238,8 +238,8 @@ export function ModelsPage() {
         <br />
         <span className="text-ink">主模型</span>（<span className="mono">agent.model</span>）
         是新对话默认用的；<span className="text-ink">副模型</span>（
-        <span className="mono">agent.fast_model</span>）只用于压缩上下文、生成标题、总结 ——
-        那些活儿要的是便宜和快，不必用最强的模型。每个场景具体用谁、怎么回落，见「场景模型」页。
+        <span className="mono">agent.fast_model</span>）给标题、记忆、助理这类辅助活儿用 ——
+        要的是便宜和快，不必用最强的模型。每个场景具体指向谁、怎么回落，见「场景模型」页。
       </PageIntro>
 
       <CompactionRow />

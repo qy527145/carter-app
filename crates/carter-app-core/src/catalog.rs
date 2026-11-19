@@ -78,7 +78,7 @@ pub struct ModelRow {
     /// 没绑 meta、或目录查不到时是 `None`，界面退回显示引用本身。
     pub label: Option<String>,
     pub is_default: bool,
-    /// 是不是**副模型**（`agent.fast_model`）：压缩上下文、生成标题、总结用的那个。
+    /// 是不是**副模型**（`agent.fast_model`）：辅助场景（标题、记忆、助理等）默认指向的那个，见 `scene_models`。
     /// 没配就是主模型自己上（`false`）。
     pub is_fast: bool,
     /// 渠道走哪种线协议（kind 可能是别名）。

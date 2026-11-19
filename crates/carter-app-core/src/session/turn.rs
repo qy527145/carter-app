@@ -375,7 +375,7 @@ impl Runner {
         // `TurnRemap` 的口径必须是同一个数。
         let turns_before = crate::view::user_turn_count(&self.thread.messages);
 
-        // 压缩用副模型：这是「把长历史揉短」的活儿，要的是便宜和快。
+        // 压缩用「上下文压缩」的场景模型（默认主模型，见 `scene_models`）。
         let compact_model = Some(self.ctx.helper_model(crate::scene_models::Scene::Compact));
 
         // 一轮里能调多少次模型由模型自己决定（不再要工具就收尾）。给 carter 一个用不完

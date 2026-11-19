@@ -196,7 +196,7 @@ pub(crate) async fn set_default_model(
     config_edit::set_default_model_reload(shell.inner(), &model_ref)
 }
 
-/// 设副模型（`agent.fast_model`）：压缩上下文、生成标题用的那个。`None` = 清除，
+/// 设副模型（`agent.fast_model`）：辅助场景默认指向的那个，见 `scene_models`。`None` = 清除，
 /// 回落主模型 —— 所以界面上「清除副模型」和「设为副模型」共用一个命令。
 ///
 /// **必须是 `async fn`**，理由同 [`set_default_model`]。
