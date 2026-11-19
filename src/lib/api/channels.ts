@@ -154,21 +154,30 @@ export function setFastModel(modelRef: string | null): Promise<void> {
 /** 回落链上的一环：场景自己的绑定 / 副模型 / 主模型 / 发起调用的那条会话的模型。 */
 export type SceneStep = "scene" | "fast" | "main" | "session";
 
+/** 取值里的指针记号。具体模型一律是 `渠道/模型`。 */
+export const SCENE_MAIN = "@main";
+export const SCENE_FAST = "@fast";
+
+/** 回落链上的一格。`model` 为 `null` = 没设，或这一格是「会话模型」。 */
+export interface SceneLink {
+  step: SceneStep;
+  model: string | null;
+}
+
 export interface SceneRow {
   id: string;
   label: string;
   description: string;
-  /** 这个场景自己的绑定；`null` = 走回落链。 */
-  binding: string | null;
-  /** 回落链（不含场景自身）。 */
-  fallback: SceneStep[];
-  /** 实际会用的模型；`null` = 用发起调用的那条会话自己的模型。 */
-  effective: string | null;
-  effective_from: SceneStep;
+  /** 此刻的取值：指针 `@main` / `@fast`，或具体的 `渠道/模型`。 */
+  choice: string;
+  /** 场景默认的取值；普通对话是 `null`（它就是主模型本身）。 */
+  default_choice: string | null;
+  /** 回落链，从取值开始。 */
+  chain: SceneLink[];
+  /** 链上实际生效的那一格；`null` = 一个都用不上。 */
+  effective: number | null;
   /** 绑定存在哪：`config`（CLI 也认）| `assistant`（助理设置）| `app`（仅本应用）。 */
   storage: "config" | "assistant" | "app";
-  /** 绑定指不到任何模型；运行时会跳过它往下回落。 */
-  binding_broken: boolean;
 }
 
 export interface SceneModelsView {
@@ -182,11 +191,11 @@ export function getSceneModels(): Promise<SceneModelsView> {
 }
 
 /**
- * 改一个场景的绑定，`null` = 清掉走回落链。回传新的 `AppSettings`，
+ * 改一个场景的取值（指针或具体模型），`null` = 恢复默认。回传新的 `AppSettings`，
  * 调用方要 `setSettings` 对齐（`set_app_settings` 是整体覆盖写入）。
  */
-export function setSceneModel(scene: string, modelRef: string | null): Promise<AppSettings> {
-  return invoke<AppSettings>("set_scene_model", { scene, modelRef });
+export function setSceneModel(scene: string, value: string | null): Promise<AppSettings> {
+  return invoke<AppSettings>("set_scene_model", { scene, modelRef: value });
 }
 
 /** 自动压缩：开关 + 触发比例（占上下文窗口的比例，0.3–0.95）。 */

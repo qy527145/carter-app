@@ -12,6 +12,9 @@
 //! | 工单执行 / 评估 | 助理设置的 `work_model` / `eval_model` | 早就有，不另存第二份 |
 //! | 其余五个 | `settings.json` 的 `scene_models` | 只有本应用有这些场景（或这层覆盖） |
 //!
+//! 每个场景的取值是 `@main`（主模型）、`@fast`（副模型）或一个具体的 `渠道/模型`；
+//! 没单独设过就是场景默认。回落链由取值展开（见 [`chain`]）。
+//!
 //! 回落链里的「会话模型」指**这条会话自己正在用的模型**（可能中途切过），不是全局主模型。
 
 use std::sync::Arc;
@@ -104,16 +107,27 @@ impl Scene {
         }
     }
 
-    /// 没绑定时依次试的后备（不含 [`Step::Scene`] 本身）。
-    pub fn fallback(self) -> &'static [Step] {
+    /// 没单独设置时的取值：`@main` 或 `@fast`。普通对话没有默认 —— 它就是主模型本身。
+    pub fn default_choice(self) -> Option<&'static str> {
         match self {
-            // 普通对话的绑定就是主模型本身，没有后备可言。
-            Scene::Chat => &[],
-            Scene::AssistantChat | Scene::TicketWork => &[Step::Main],
-            Scene::TicketEval => &[Step::Fast, Step::Main],
+            Scene::Chat => None,
+            Scene::AssistantChat | Scene::TicketWork => Some(MAIN),
+            Scene::TicketEval
+            | Scene::Compact
+            | Scene::Title
+            | Scene::MemorySuggest
+            | Scene::MemoryConsolidate => Some(FAST),
+        }
+    }
+
+    /// 回落链的最后一环。辅助场景兜到**发起调用的那条会话**自己的模型：会话中途切过模型的话，
+    /// 压缩该用它切过去的那个，而不是全局主模型。其余场景没有「那条会话」，兜到主模型。
+    fn terminal(self) -> Step {
+        match self {
             Scene::Compact | Scene::Title | Scene::MemorySuggest | Scene::MemoryConsolidate => {
-                &[Step::Fast, Step::Session]
+                Step::Session
             }
+            _ => Step::Main,
         }
     }
 
@@ -127,15 +141,19 @@ impl Scene {
     }
 }
 
-/// 某个场景此刻的绑定（只看这个场景自己，不回落）。空串当没配。
-pub fn binding(
+/// 取值里代表「主模型」「副模型」的记号。具体模型一律是 `渠道/模型`，含 `/`，不会撞上。
+pub const MAIN: &str = "@main";
+pub const FAST: &str = "@fast";
+
+/// 场景此刻的取值：单独设过的，或场景默认。普通对话恒为主模型的具体引用。
+pub fn choice(
     scene: Scene,
     config: &Config,
     app: &AppSettings,
     shell: Option<&AppShell>,
-) -> Option<String> {
+) -> String {
     let raw = match scene {
-        Scene::Chat => Some(config.agent.model.clone()),
+        Scene::Chat => return config.agent.model.clone(),
         Scene::TicketWork => {
             shell.and_then(|s| s.assistant.read(|a| a.settings.work_model.clone()))
         }
@@ -144,44 +162,76 @@ pub fn binding(
         }
         _ => app.scene_models.get(scene.id()).cloned(),
     };
-    raw.filter(|r| !r.trim().is_empty())
+    raw.map(|r| r.trim().to_string())
+        .filter(|r| !r.is_empty())
+        .or_else(|| scene.default_choice().map(str::to_string))
+        .unwrap_or_else(|| MAIN.to_string())
 }
 
-/// 按回落链定下用哪个引用。`Session` 一环不在这里展开（那要看具体哪条会话）：
-/// 走到它时返回 `(None, Step::Session)`，调用方用会话自己的模型。
+/// 回落链上的一格：哪一环、此刻指向哪个模型（`None` = 没设，或是「会话模型」）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Link {
+    pub step: Step,
+    pub model: Option<String>,
+}
+
+/// 由取值展开回落链。取值本质上要么是**指针**（`@main` / `@fast`），要么是**具体模型**：
 ///
-/// `usable` 用来跳过解析不出来的引用（渠道被删了之类）——与运行时「解析失败就回落」一致。
-pub fn pick(
-    scene: Scene,
-    bound: Option<String>,
-    config: &Config,
-    usable: impl Fn(&str) -> bool,
-) -> (Option<String>, Step) {
-    let fast = config
-        .agent
-        .fast_model
-        .clone()
-        .filter(|r| !r.trim().is_empty());
-    let candidates =
-        std::iter::once((Step::Scene, bound)).chain(scene.fallback().iter().map(|s| {
-            (
-                *s,
-                match s {
-                    Step::Fast => fast.clone(),
-                    Step::Main => Some(config.agent.model.clone()),
-                    Step::Scene | Step::Session => None,
-                },
-            )
-        }));
-    for (step, r) in candidates {
-        if step == Step::Session {
-            return (None, Step::Session);
-        }
-        if let Some(r) = r.filter(|r| usable(r)) {
-            return (Some(r), step);
+/// - 指针 → 它指向的那个 → 最后一环；
+/// - 具体模型 → 它自己 → 场景默认那个指针 → 最后一环（模型被删了也不至于没得用）。
+///
+/// 最后一环：辅助场景是「会话模型」，其余是主模型。同一环不重复出现。
+pub fn chain(scene: Scene, choice: &str, config: &Config) -> Vec<Link> {
+    let link = |step: Step, model: Option<String>| Link { step, model };
+    let pointer = |c: &str| match c {
+        FAST => Some(link(
+            Step::Fast,
+            config
+                .agent
+                .fast_model
+                .clone()
+                .filter(|r| !r.trim().is_empty()),
+        )),
+        MAIN => Some(link(Step::Main, Some(config.agent.model.clone()))),
+        _ => None,
+    };
+    let mut out = Vec::new();
+    match pointer(choice) {
+        Some(l) => out.push(l),
+        None => {
+            out.push(link(Step::Scene, Some(choice.to_string())));
+            out.extend(scene.default_choice().and_then(pointer));
         }
     }
-    (None, Step::Session)
+    let tail = match scene.terminal() {
+        Step::Main => link(Step::Main, Some(config.agent.model.clone())),
+        step => link(step, None),
+    };
+    if !out.iter().any(|l| l.step == tail.step) {
+        out.push(tail);
+    }
+    out
+}
+
+/// 沿链找第一个用得上的。走到「会话模型」就停 —— 那一环由调用方用会话自己的模型补上。
+/// 返回下标；`None` = 一个都用不上（只有主模型也指不到时才会发生）。
+pub fn pick(links: &[Link], usable: impl Fn(&str) -> bool) -> Option<usize> {
+    links.iter().position(|l| match (&l.step, &l.model) {
+        (Step::Session, _) => true,
+        (_, Some(r)) => usable(r),
+        (_, None) => false,
+    })
+}
+
+/// 场景此刻实际会用的引用。`None` = 用发起调用的那条会话自己的模型（或什么都用不上）。
+pub fn resolve_ref(
+    scene: Scene,
+    config: &Config,
+    app: &AppSettings,
+    shell: Option<&AppShell>,
+) -> Option<String> {
+    let links = chain(scene, &choice(scene, config, app, shell), config);
+    pick(&links, |r| model_exists(config, r)).and_then(|i| links[i].model.clone())
 }
 
 /// 引用在当前配置里指得到一个模型。
@@ -200,18 +250,16 @@ pub struct SceneRow {
     pub id: &'static str,
     pub label: &'static str,
     pub description: &'static str,
-    /// 这个场景自己的绑定；`None` = 走回落链。
-    pub binding: Option<String>,
-    /// 回落链（不含场景自身）。
-    pub fallback: Vec<Step>,
-    /// 实际会用的模型；`None` = 用发起调用的那条会话自己的模型。
-    pub effective: Option<String>,
-    /// `effective` 来自回落链的哪一环。
-    pub effective_from: Step,
+    /// 此刻的取值：`@main` | `@fast` | `渠道/模型`。
+    pub choice: String,
+    /// 场景默认的取值；普通对话是 `None`（它就是主模型本身，没有「恢复默认」）。
+    pub default_choice: Option<&'static str>,
+    /// 回落链，从取值开始。
+    pub chain: Vec<Link>,
+    /// 链上实际生效的那一格；`None` = 一个都用不上。
+    pub effective: Option<usize>,
     /// 绑定存在哪：`config` | `assistant` | `app`。
     pub storage: &'static str,
-    /// 绑定指不到任何模型（渠道或模型被删了）。运行时会跳过它往下回落。
-    pub binding_broken: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -227,17 +275,16 @@ pub fn view(shell: &AppShell) -> SceneModelsView {
     let scenes = Scene::ALL
         .into_iter()
         .map(|s| {
-            let bound = binding(s, &config, &app, Some(shell));
-            let (effective, from) = pick(s, bound.clone(), &config, |r| model_exists(&config, r));
+            let c = choice(s, &config, &app, Some(shell));
+            let links = chain(s, &c, &config);
             SceneRow {
                 id: s.id(),
                 label: s.label(),
                 description: s.description(),
-                binding_broken: bound.as_deref().is_some_and(|r| !model_exists(&config, r)),
-                binding: bound,
-                fallback: s.fallback().to_vec(),
-                effective,
-                effective_from: from,
+                effective: pick(&links, |r| model_exists(&config, r)),
+                choice: c,
+                default_choice: s.default_choice(),
+                chain: links,
                 storage: s.storage(),
             }
         })
@@ -253,31 +300,38 @@ pub fn view(shell: &AppShell) -> SceneModelsView {
     }
 }
 
-/// 改一个场景的绑定。`None` = 清掉，回到回落链。普通对话不能清（主模型必须有）。
+/// 改一个场景的取值：`@main` / `@fast` / `渠道/模型`。`None`（或等于场景默认）= 恢复默认，
+/// 存储里删掉这一项 —— 以后改了场景默认，没单独设过的场景跟着走。
 ///
 /// 回传新的应用设置：`set_app_settings` 是整体覆盖写入，前端 store 要对齐，
 /// 否则下一次改主题会把这里写进去的绑定抹掉。
 pub fn set_scene(
     shell: &Arc<AppShell>,
     id: &str,
-    model_ref: Option<&str>,
+    value: Option<&str>,
 ) -> Result<AppSettings, String> {
     let scene = Scene::from_id(id).ok_or_else(|| format!("不认识的场景 `{id}`"))?;
-    let model_ref = model_ref.map(str::trim).filter(|r| !r.is_empty());
-    if let Some(r) = model_ref {
+    let value = value
+        .map(str::trim)
+        .filter(|v| !v.is_empty() && Some(*v) != scene.default_choice());
+    if let Some(v) = value {
         let config = shell.config.load_full();
-        if !model_exists(&config, r) {
-            return Err(format!("模型 `{r}` 不在任何渠道里"));
+        let token = v == MAIN || v == FAST;
+        if scene == Scene::Chat && token {
+            return Err("普通对话就是主模型本身，只能选具体的模型".into());
+        }
+        if !token && !model_exists(&config, v) {
+            return Err(format!("模型 `{v}` 不在任何渠道里"));
         }
     }
     let mut app = AppSettings::load();
     match scene {
         Scene::Chat => {
-            let r = model_ref.ok_or("普通对话必须有模型（它就是主模型）")?;
+            let r = value.ok_or("普通对话必须有模型（它就是主模型）")?;
             crate::config_edit::set_default_model_reload(shell, r)?;
         }
         Scene::TicketWork | Scene::TicketEval => {
-            let v = model_ref.map(str::to_string);
+            let v = value.map(str::to_string);
             shell.assistant.with(|s| match scene {
                 Scene::TicketWork => s.settings.work_model = v,
                 _ => s.settings.eval_model = v,
@@ -285,32 +339,30 @@ pub fn set_scene(
             shell.emit(AppEvent::AssistantChanged);
         }
         _ => {
-            match model_ref {
+            match value {
                 Some(r) => app
                     .scene_models
                     .insert(scene.id().to_string(), r.to_string()),
                 None => app.scene_models.remove(scene.id()),
             };
             app.save()?;
-            if scene == Scene::AssistantChat {
-                switch_assistant_chat(shell, &app);
-            }
         }
+    }
+    // 主模型、副模型一变，助理对话的取值可能指向别处了；它自己的取值变了更不用说。
+    if matches!(scene, Scene::Chat | Scene::AssistantChat) {
+        switch_assistant_chat(shell, &app);
     }
     Ok(app)
 }
 
-/// 助理对话是常驻的：改了它的场景模型，当场让正在跑的那条换过去，
+/// 助理对话是常驻的：它的模型变了就当场让正在跑的那条换过去，
 /// 否则要等到下次重启应用才生效，而用户没有别的办法让它重开。
-fn switch_assistant_chat(shell: &Arc<AppShell>, app: &AppSettings) {
+pub fn switch_assistant_chat(shell: &Arc<AppShell>, app: &AppSettings) {
     let Some(handle) = shell.session(crate::assistant::CHAT_SESSION_ID) else {
         return;
     };
     let config = shell.config.load_full();
-    let bound = binding(Scene::AssistantChat, &config, app, Some(shell));
-    let (Some(target), _) = pick(Scene::AssistantChat, bound, &config, |r| {
-        model_exists(&config, r)
-    }) else {
+    let Some(target) = resolve_ref(Scene::AssistantChat, &config, app, Some(shell)) else {
         return;
     };
     if handle.model.load().key != target {
@@ -318,16 +370,10 @@ fn switch_assistant_chat(shell: &Arc<AppShell>, app: &AppSettings) {
     }
 }
 
-/// 助理对话开新会话时用的模型（界面没显式指定时）。`None` = 交给会话入口用主模型。
-pub fn assistant_chat_model(shell: &AppShell) -> Option<String> {
+/// 不依附于某条会话的场景（助理对话、工单执行、工单评估）该用的引用。
+pub fn standalone_ref(shell: &AppShell, scene: Scene) -> Option<String> {
     let config = shell.config.load_full();
-    binding(
-        Scene::AssistantChat,
-        &config,
-        &AppSettings::load(),
-        Some(shell),
-    )
-    .filter(|r| model_exists(&config, r))
+    resolve_ref(scene, &config, &AppSettings::load(), Some(shell))
 }
 
 #[cfg(test)]
@@ -341,59 +387,56 @@ mod tests {
         c
     }
 
-    fn all(_: &str) -> bool {
-        true
+    fn steps(links: &[Link]) -> Vec<Step> {
+        links.iter().map(|l| l.step).collect()
     }
 
     #[test]
-    fn helper_scenes_prefer_their_own_binding_then_fast_then_the_session() {
+    fn helper_scenes_default_to_fast_then_the_session_model() {
         let c = config("p/main", Some("p/fast"));
-        assert_eq!(
-            pick(Scene::Title, Some("p/t".into()), &c, all),
-            (Some("p/t".into()), Step::Scene)
-        );
-        assert_eq!(
-            pick(Scene::Title, None, &c, all),
-            (Some("p/fast".into()), Step::Fast)
-        );
-        let no_fast = config("p/main", None);
-        // 不回落到全局主模型：会话中途切过模型的话，压缩该用它切过去的那个。
-        assert_eq!(
-            pick(Scene::Compact, None, &no_fast, all),
-            (None, Step::Session)
-        );
-    }
-
-    #[test]
-    fn ticket_eval_falls_back_to_fast_then_main() {
+        let links = chain(Scene::Title, FAST, &c);
+        assert_eq!(steps(&links), [Step::Fast, Step::Session]);
+        assert_eq!(pick(&links, |_| true), Some(0));
+        // 没配副模型：不回落到全局主模型，而是会话自己的模型。
         let c = config("p/main", None);
-        assert_eq!(
-            pick(Scene::TicketEval, None, &c, all),
-            (Some("p/main".into()), Step::Main)
-        );
-        let c = config("p/main", Some("p/fast"));
-        assert_eq!(
-            pick(Scene::TicketEval, None, &c, all),
-            (Some("p/fast".into()), Step::Fast)
-        );
+        let links = chain(Scene::Compact, FAST, &c);
+        assert_eq!(pick(&links, |_| true), Some(1));
     }
 
     #[test]
-    fn ticket_work_and_assistant_chat_skip_the_fast_model() {
+    fn a_concrete_choice_falls_back_through_the_scene_default() {
+        let c = config("p/main", Some("p/fast"));
+        let links = chain(Scene::MemorySuggest, "gone/x", &c);
+        assert_eq!(steps(&links), [Step::Scene, Step::Fast, Step::Session]);
+        // 绑定的模型被删了：跳过它，与运行时一致。
+        assert_eq!(pick(&links, |r| r != "gone/x"), Some(1));
+        let links = chain(Scene::TicketWork, "p/x", &c);
+        assert_eq!(steps(&links), [Step::Scene, Step::Main]);
+    }
+
+    #[test]
+    fn ticket_eval_defaults_to_fast_then_main() {
+        let c = config("p/main", None);
+        let links = chain(Scene::TicketEval, FAST, &c);
+        assert_eq!(steps(&links), [Step::Fast, Step::Main]);
+        assert_eq!(pick(&links, |_| true), Some(1));
+    }
+
+    #[test]
+    fn choosing_main_for_a_helper_scene_still_ends_at_the_session() {
+        let c = config("p/main", Some("p/fast"));
+        let links = chain(Scene::Title, MAIN, &c);
+        // 指针只指向它自己那一个，不再绕回场景默认的副模型。
+        assert_eq!(steps(&links), [Step::Main, Step::Session]);
+    }
+
+    #[test]
+    fn ticket_work_and_assistant_chat_default_to_main() {
         let c = config("p/main", Some("p/fast"));
         for s in [Scene::TicketWork, Scene::AssistantChat] {
-            assert_eq!(pick(s, None, &c, all), (Some("p/main".into()), Step::Main));
+            assert_eq!(s.default_choice(), Some(MAIN));
+            assert_eq!(steps(&chain(s, MAIN, &c)), [Step::Main]);
         }
-    }
-
-    #[test]
-    fn a_broken_binding_is_skipped_like_at_runtime() {
-        let c = config("p/main", Some("p/fast"));
-        let usable = |r: &str| r != "gone/x";
-        assert_eq!(
-            pick(Scene::MemorySuggest, Some("gone/x".into()), &c, usable),
-            (Some("p/fast".into()), Step::Fast)
-        );
     }
 
     #[test]

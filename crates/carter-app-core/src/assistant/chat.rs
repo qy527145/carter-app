@@ -73,7 +73,9 @@ pub fn ensure(shell: &Arc<AppShell>) -> Result<(), String> {
 /// 与 [`ensure`] 同一条路，只是能指定模型（界面上第一次打开时带的那个）。
 fn start_with(shell: &Arc<AppShell>, model: Option<String>) -> Result<(), String> {
     // 没显式指定就用「助理对话」的场景模型（没配则交给会话入口用主模型）。
-    let model = model.or_else(|| crate::scene_models::assistant_chat_model(shell));
+    let model = model.or_else(|| {
+        crate::scene_models::standalone_ref(shell, crate::scene_models::Scene::AssistantChat)
+    });
     let mut opts = options(model);
     // 新起一条（盘上没有）时的工作目录跟着最近的工单走，见 [`resume_cwd`]。
     if let Some(dir) = resume_cwd(shell) {

@@ -62,6 +62,8 @@ import {
   getAssistantEpisode,
   pollAssistantSource,
   reassessAssistantDecision,
+  SCENE_FAST,
+  SCENE_MAIN,
   saveAssistantMemory,
   saveAssistantSettings,
   saveAssistantSource,
@@ -816,8 +818,11 @@ function SettingsEditor({
   const [d, setD] = useState<AssistantSettings>(settings);
   const [saving, setSaving] = useState(false);
   const models = useModelCatalog();
-  const modelOptions = [
-    { value: "", label: "默认" },
+  // 与「设置 → 场景模型」同一套取值：指针（主 / 副模型）或具体模型。空 = 场景默认。
+  const modelOptions = (dflt: string) => [
+    { value: "", label: `默认（${dflt}）` },
+    { value: SCENE_MAIN, label: "主模型" },
+    { value: SCENE_FAST, label: "副模型" },
     ...models.map((m) => ({ value: m.reference, label: m.label ?? m.reference })),
   ];
 
@@ -915,18 +920,18 @@ function SettingsEditor({
             onChange={(e) => setD((p) => ({ ...p, max_running: Number(e.target.value) }))}
           />
         </Field>
-        <Field label="评估模型" hint="默认用副模型">
+        <Field label="评估模型">
           <Select
             value={d.eval_model ?? ""}
             onChange={(v) => setD((p) => ({ ...p, eval_model: v || null }))}
-            options={modelOptions}
+            options={modelOptions("副模型")}
           />
         </Field>
         <Field label="执行模型">
           <Select
             value={d.work_model ?? ""}
             onChange={(v) => setD((p) => ({ ...p, work_model: v || null }))}
-            options={modelOptions}
+            options={modelOptions("主模型")}
           />
         </Field>
       </div>

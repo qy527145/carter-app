@@ -599,20 +599,18 @@ impl SessionCtx {
     }
 
     /// 辅助场景（压缩、标题、记忆候选、记忆整理）该用的模型，按 [`crate::scene_models`]
-    /// 的回落链：场景自己的绑定 → 副模型 → 这条会话自己的模型。
+    /// 的回落链（取值是指针或具体模型，兜底是这条会话自己的模型）。
     ///
     /// 解析失败**不报错**（只 warn 一条），接着往下回落：辅助调用是锦上添花，
     /// 为它把主对话带崩是错的。
     pub(super) fn helper_model(&mut self, scene: crate::scene_models::Scene) -> CompactModel {
-        let bound = crate::scene_models::binding(scene, &self.config, &self.settings, None);
-        let fast = self
-            .config
-            .agent
-            .fast_model
-            .clone()
-            .filter(|s| !s.trim().is_empty());
-        for reference in [bound, fast].into_iter().flatten() {
-            if let Some(m) = self.resolve_cached(&reference) {
+        use crate::scene_models as sm;
+        let choice = sm::choice(scene, &self.config, &self.settings, None);
+        for link in sm::chain(scene, &choice, &self.config) {
+            if link.step == sm::Step::Session {
+                break;
+            }
+            if let Some(m) = link.model.and_then(|r| self.resolve_cached(&r)) {
                 return m;
             }
         }

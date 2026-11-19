@@ -133,7 +133,7 @@ impl Tool for AssistantConfigTool {
                 "改助理的其余配置。面板上能改的都在这里，用户不必自己跑到设置页去点。\n\
                  - max_running：同时最多跑几张工单（1~8）。改大之后排队的那几张会立刻开工；\n\
                  - scope：工作约定，每张工单的执行对话都会读到的一段话（做到什么程度停、怎么交付）；\n\
-                 - eval_model / work_model：评估用与执行用的模型（`渠道/显示名`，空 = 默认）。\n\
+                 - eval_model / work_model：评估用与执行用的模型：`@main`（主模型）、`@fast`（副模型）或具体的 `渠道/显示名`；空 = 场景默认（评估默认副模型，执行默认主模型）。\n\
                  只改用户明确要求的那个字段，没提的不要动。"
             }
         }
@@ -186,8 +186,8 @@ impl Tool for AssistantConfigTool {
                         "description": "同时最多跑几张工单（1 ~ 8）。用户说「一次多干几件」「别同时开那么多」时改它"
                     },
                     "scope": { "type": "string", "description": "工作约定：每张工单的执行对话都会读到的一段话" },
-                    "eval_model": { "type": "string", "description": "评估用的模型（`渠道/显示名`）；传空字符串 = 用默认" },
-                    "work_model": { "type": "string", "description": "执行工单用的模型（`渠道/显示名`）；传空字符串 = 用默认" }
+                    "eval_model": { "type": "string", "description": "评估用的模型：`@main` / `@fast` / `渠道/显示名`；传空字符串 = 默认（副模型）" },
+                    "work_model": { "type": "string", "description": "执行工单用的模型：`@main` / `@fast` / `渠道/显示名`；传空字符串 = 默认（主模型）" }
                 }
             }),
         }

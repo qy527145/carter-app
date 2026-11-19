@@ -288,7 +288,7 @@ async fn judge(
     events: &[String],
 ) -> Result<Outcome, String> {
     let config = shell.config.load_full();
-    let (provider, model) = eval::resolve(&config, settings.eval_model.as_deref())?;
+    let (provider, model) = eval::resolve(&config, settings)?;
     let answer = eval::ask(
         &*provider,
         &model,
@@ -754,7 +754,9 @@ pub async fn launch_queued(shell: &Arc<AppShell>) {
         return;
     }
     changed(shell);
-    let work_model = shell.assistant.read(|s| s.settings.work_model.clone());
+    // 工单执行的场景模型（取值是指针或具体模型），见 `scene_models`。
+    let work_model =
+        crate::scene_models::standalone_ref(shell, crate::scene_models::Scene::TicketWork);
     for l in picked {
         if let Err(e) = start(shell, &l, work_model.clone()).await {
             fail(shell, &l.ticket.id, &e);

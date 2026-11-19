@@ -104,9 +104,10 @@ pub struct Settings {
     pub scope: String,
     /// 同时最多几张工单在跑。多出来的排队。
     pub max_running: u32,
-    /// 评估用的模型（`渠道/显示名`）。`None` = 副模型，没配副模型就用默认模型。
+    /// 评估用的模型：`@main` / `@fast` / `渠道/显示名`。`None` = 场景默认（副模型）。
+    /// 回落链见 `scene_models`。
     pub eval_model: Option<String>,
-    /// 执行工单用的模型。`None` = 默认模型。
+    /// 执行工单用的模型，取值同上。`None` = 场景默认（主模型）。
     pub work_model: Option<String>,
     /// 暂停：不轮询、不评估、不开工。已经在跑的那一轮不打断。
     pub paused: bool,

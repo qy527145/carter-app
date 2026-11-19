@@ -220,23 +220,25 @@ pub fn stale_attach(raw: &Raw, state: &State) -> bool {
             .is_some_and(|t| t.status.ended())
 }
 
-/// 解析评估用的模型：设置里指定的 → 副模型 → 默认模型。
-/// 与 `scene_models::Scene::TicketEval` 的回落链是同一条，改一边要同改另一边。
+/// 解析评估用的模型：沿「工单评估」场景的回落链（见 `scene_models`）挨个试，
+/// 第一个解析得出来的就用它。
 pub fn resolve(
     config: &Config,
-    model_ref: Option<&str>,
+    settings: &super::Settings,
 ) -> Result<(Arc<dyn LlmProvider>, ModelInfo), String> {
+    use crate::scene_models as sm;
     let cache = crate::catalog::read_cache().map_err(|e| e.to_string())?;
-    let candidates = [
-        model_ref.map(str::to_string),
-        config.agent.fast_model.clone(),
-        Some(config.agent.model.clone()),
-    ];
-    let mut last = String::from("没有可用的模型");
-    for r in candidates
-        .into_iter()
-        .flatten()
+    // 不走 `sm::choice` 读助理设置：调用方手里已经有这一刻的那份，再读一次可能对不上。
+    let choice = settings
+        .eval_model
+        .clone()
         .filter(|r| !r.trim().is_empty())
+        .or_else(|| sm::Scene::TicketEval.default_choice().map(str::to_string))
+        .unwrap_or_else(|| sm::MAIN.to_string());
+    let mut last = String::from("没有可用的模型");
+    for r in sm::chain(sm::Scene::TicketEval, &choice, config)
+        .into_iter()
+        .filter_map(|l| l.model)
     {
         match crate::catalog::resolve_provider(config, &cache, &r, vec![]) {
             Ok(p) => return Ok((p.provider, p.model)),
@@ -467,7 +469,7 @@ mod live {
     #[ignore]
     async fn live_eval_accepts_a_matching_event_and_ignores_noise() {
         let config = carter::config::Config::load().expect("读不到 ~/.carter/config.toml");
-        let (provider, model) = resolve(&config, None).expect("解析不出模型");
+        let (provider, model) = resolve(&config, &Settings::default()).expect("解析不出模型");
         let settings = Settings {
             rules: vec![Rule {
                 id: "r1".into(),
