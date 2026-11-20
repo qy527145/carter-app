@@ -28,46 +28,125 @@ pub use carter::platform::{
 pub use carter::platform::{CREATE_NO_WINDOW, hide_console, hide_console_async};
 
 use std::path::PathBuf;
+use std::sync::OnceLock;
+use std::time::Duration;
 
-/// 把用户级可执行目录补进本进程的 `PATH`。
+/// 把用户登录 shell 里的 `PATH` 合进本进程的 `PATH`。
 ///
 /// ## 为什么需要
 ///
 /// 从 Finder / 开始菜单启动的 GUI 进程**不读 shell 启动文件**，拿到的 PATH 是系统
-/// 给的默认值：没有 `/usr/local/bin`、没有 `~/.local/bin`。而官方 CLI 的安装脚本
-/// 恰恰把二进制放进 `~/.local/bin`（钉钉的 `dws` 就是这样）。结果就是「我在终端里
-/// 明明能跑 `dws`，这个应用却说没装」。
+/// 给的默认值。而用户实际装的东西几乎都靠启动文件补路径：`~/.bun/bin` 写在 `.zshrc`、
+/// `~/.cargo/bin` 在 `.zshenv`、`/opt/homebrew/bin` 由安装器写进 `.zprofile`。于是
+/// 「我在终端里明明能跑 `bun run dev` / `cargo test` / `dws`，应用的工具里却 command
+/// not found」—— 两边差别在 PATH 上，而 PATH 在界面上完全看不见，用户只能困惑。
 ///
-/// 补的是**用户级**目录，不是把登录 shell 的 PATH 整个搬过来：后者要起一个 shell、
-/// 要解析 rc 文件，慢且不可预测（rc 里可能有一堆交互式的东西）。
+/// ## 怎么补
+///
+/// 起一次用户自己的登录 + 交互 shell，把它的 `PATH` 读回来放在**前面**（和终端里的
+/// 优先级一致）；再补上安装脚本的用户级目录（`~/.local/bin`）兜底 —— 探测失败时
+/// （rc 里有交互式的东西、超时、没有 `$SHELL`）这一步仍然管用。探测只做一次并缓存，
+/// 代价只在首次启动。
+///
+/// ## 以后要挪回 carter
+///
+/// 探测与合并是「基础能力」，carter 里已经有一份实现（`platform::login_shell_path` /
+/// `merge_path`）。但本仓库固定依赖 crates.io 上的 carter 版本，发版之前拿不到 ——
+/// 所以这里先留一份自洽的实现。升级 carter 之后删掉本地副本，改调那两处。
 ///
 /// 幂等 —— 装完 CLI 之后再调一次，把新出现的目录补上。
 pub fn ensure_user_paths() {
-    let Some(home) = crate::paths::home_dir() else {
-        return;
-    };
-    let mut dirs = vec![home.join(".local").join("bin")];
+    let mut dirs = login_shell_path().unwrap_or_default();
+    if let Some(home) = crate::paths::home_dir() {
+        dirs.push(home.join(".local").join("bin"));
+    }
     if cfg!(windows) {
         // npm / bun 的全局 bin 在 Windows 上也常常不在这份 PATH 里。
         if let Some(appdata) = std::env::var_os("APPDATA") {
             dirs.push(PathBuf::from(appdata).join("npm"));
         }
     }
-    let current = std::env::var_os("PATH").unwrap_or_default();
-    let mut paths: Vec<PathBuf> = std::env::split_paths(&current).collect();
-    let mut added = false;
-    for d in dirs {
-        if d.is_dir() && !paths.contains(&d) {
-            paths.push(d);
-            added = true;
-        }
+    // 不存在的目录不塞进去：登录 shell 的 PATH 里常留着已经卸载的旧工具链。
+    dirs.retain(|d| d.is_dir());
+
+    let current: Vec<PathBuf> =
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect();
+    let merged = merge_path(&dirs, &current);
+    if merged == current {
+        return;
     }
-    if added && let Ok(joined) = std::env::join_paths(&paths) {
+    if let Ok(joined) = std::env::join_paths(&merged) {
         // SAFETY（语义上）：`set_var` 在多线程下与并发读 PATH 有数据竞争。
         // 这里只在启动早期、或用户点了「安装」之后的命令层调用，那时没有
         // 别的线程在读 PATH 做决策；而且这是整个应用唯一写 PATH 的地方。
         unsafe { std::env::set_var("PATH", joined) };
     }
+}
+
+/// 用户登录 + 交互 shell 里的 `PATH`，顺序与那个 shell 里一致。探不到就 `None`。
+fn login_shell_path() -> Option<Vec<PathBuf>> {
+    static CACHE: OnceLock<Option<Vec<PathBuf>>> = OnceLock::new();
+    CACHE.get_or_init(probe_login_shell_path).clone()
+}
+
+fn probe_login_shell_path() -> Option<Vec<PathBuf>> {
+    if cfg!(windows) {
+        // Windows 上没有「登录 shell」这回事，PATH 由注册表给，上面那几行兜底目录就够。
+        return None;
+    }
+    // `$SHELL` 不能无条件信：可能是 fish（语法不同），也可能指向已删除的路径。
+    let shell = std::env::var("SHELL")
+        .ok()
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+        .unwrap_or_else(|| PathBuf::from("/bin/zsh"));
+    let mut cmd = std::process::Command::new(&shell);
+    cmd.args(["-l", "-i", "-c", "printf 'CARTER_LOGIN_PATH=%s\\n' \"$PATH\""])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        // rc 文件的告警与 `-i` 的提示走 stderr，别让它们掺进解析。
+        .stderr(std::process::Stdio::null());
+    let mut child = cmd.spawn().ok()?;
+    let mut out = child.stdout.take()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        use std::io::Read as _;
+        let mut buf = String::new();
+        let _ = out.read_to_string(&mut buf);
+        let _ = tx.send(buf);
+    });
+    match rx.recv_timeout(Duration::from_secs(3)) {
+        Ok(raw) => {
+            let _ = child.wait();
+            // 只认标记行、且取最后一行：rc 自己也可能往 stdout 写东西。
+            let value = raw
+                .lines()
+                .filter_map(|l| l.trim_end_matches('\r').strip_prefix("CARTER_LOGIN_PATH="))
+                .next_back()?;
+            let dirs: Vec<PathBuf> = std::env::split_paths(value)
+                .filter(|p| !p.as_os_str().is_empty())
+                .collect();
+            (!dirs.is_empty()).then_some(dirs)
+        }
+        // rc 里可能挂着要交互的东西（询问、下载）。启动路径上不能等，直接杀掉。
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            None
+        }
+    }
+}
+
+/// 合并两份 PATH：`first` 整体在前，随后追加 `second` 里没出现过的条目。幂等。
+fn merge_path(first: &[PathBuf], second: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::with_capacity(first.len() + second.len());
+    for p in first.iter().chain(second) {
+        if p.as_os_str().is_empty() || out.contains(p) {
+            continue;
+        }
+        out.push(p.clone());
+    }
+    out
 }
 
 #[cfg(test)]
@@ -107,6 +186,26 @@ mod tests {
             d.contains("cmd 的内建命令不可用") || d.contains("不是 bash"),
             "描述里要写清哪些命令不存在：{d}"
         );
+    }
+
+    /// 补两遍必须和补一遍一样 —— 启动时调一次、装完连接器又调一次，重复项会让
+    /// PATH 越滚越长，还会盖住「用户自己改了 PATH」的效果。
+    #[test]
+    fn ensure_user_paths_is_idempotent() {
+        let _guard = crate::paths::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        ensure_user_paths();
+        let once = std::env::var_os("PATH").unwrap();
+        ensure_user_paths();
+        let twice = std::env::var_os("PATH").unwrap();
+        assert_eq!(once, twice);
+        // 兜底目录一定在，不管登录 shell 探测成功没有。
+        let dirs: Vec<PathBuf> = std::env::split_paths(&twice).collect();
+        if let Some(home) = crate::paths::home_dir() {
+            let local = home.join(".local").join("bin");
+            if local.is_dir() {
+                assert!(dirs.contains(&local), "缺了兜底目录：{dirs:?}");
+            }
+        }
     }
 
     /// app 复用的必须就是 carter 那一份，而不是又抄了一遍 —— 两份漂开正是
