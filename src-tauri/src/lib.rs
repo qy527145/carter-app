@@ -257,6 +257,8 @@ pub fn run() {
             set_bash_timeout,
             get_compaction,
             set_compaction,
+            get_max_output_tokens,
+            set_max_output_tokens,
             // 团队目录
             team_status,
             team_health,

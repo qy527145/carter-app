@@ -348,6 +348,21 @@ pub fn set_compaction(doc: &mut DocumentMut, enabled: bool, ratio: f64) -> Resul
     Ok(())
 }
 
+/// 单次推理的最大输出 tokens（`agent.max_output_tokens`）。
+///
+/// 它同时是推理模型「思考 + 正文」的共用额度，所以下限给 1024 —— 再小
+/// 思考就能把整份额度吃光，正文一个字不剩（标题生成那边踩过这个坑）。
+/// 上限 1_000_000：再大只会把「思考吃光 / 被网关截断」这类失败拖得更久。
+pub fn set_max_output_tokens(doc: &mut DocumentMut, tokens: u32) -> Result<(), String> {
+    if !(1024..=1_000_000).contains(&tokens) {
+        return Err(format!(
+            "单次输出上限 {tokens} 应在 1024 到 1000000 tokens 之间"
+        ));
+    }
+    child_table(doc.as_table_mut(), "agent")?.insert("max_output_tokens", value(tokens as i64));
+    Ok(())
+}
+
 /// 前台 bash 命令的超时（`agent.bash_timeout_secs`）与超时后的处理（`agent.bash_on_timeout`）。
 /// 写进 `config.toml` 而不是应用设置：carter CLI 也认这两项，两边行为一致。
 pub fn set_bash_timeout(
@@ -527,6 +542,15 @@ pub fn set_fast_model_reload(
 ) -> Result<(), String> {
     let mut doc = load_doc()?;
     set_fast_model(&mut doc, model_ref)?;
+    apply(shell, &doc)
+}
+
+pub fn set_max_output_tokens_reload(
+    shell: &crate::shell::AppShell,
+    tokens: u32,
+) -> Result<(), String> {
+    let mut doc = load_doc()?;
+    set_max_output_tokens(&mut doc, tokens)?;
     apply(shell, &doc)
 }
 
@@ -920,6 +944,18 @@ whatever = true
         assert!(out.contains(r#"model = "ws/sonnet""#), "{out}");
         assert!(set_compaction(&mut d, true, 0.1).is_err());
         assert!(set_compaction(&mut d, true, 1.0).is_err());
+    }
+
+    /// 单次输出上限：写进 `[agent]`、不动别的键，越界挡在外面。
+    #[test]
+    fn max_output_tokens_is_written_and_range_checked() {
+        let mut d = doc();
+        set_max_output_tokens(&mut d, 32_000).unwrap();
+        let out = d.to_string();
+        assert!(out.contains("max_output_tokens = 32000"), "{out}");
+        assert!(out.contains(r#"model = "ws/sonnet""#), "{out}");
+        assert!(set_max_output_tokens(&mut d, 1023).is_err());
+        assert!(set_max_output_tokens(&mut d, 1_000_001).is_err());
     }
 
     /// 副模型：写进去、清掉，而且两件事都不动别的键。

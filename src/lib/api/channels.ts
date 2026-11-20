@@ -228,3 +228,17 @@ export function getCompaction(): Promise<CompactionSettings> {
 export function setCompaction(enabled: boolean, ratio: number): Promise<void> {
   return invoke<void>("set_compaction", { enabled, ratio });
 }
+
+/**
+ * 单次请求的最大输出 tokens（`agent.max_output_tokens`）。
+ *
+ * 这是**本机配的值**，不是模型本身的输出上限（后者见模型目录的 `max_output_tokens`）。
+ * `null` = 配置里没写，请求不带这个字段、由渠道决定。
+ */
+export function getMaxOutputTokens(): Promise<number | null> {
+  return invoke<number | null>("get_max_output_tokens");
+}
+
+export function setMaxOutputTokens(tokens: number): Promise<void> {
+  return invoke<void>("set_max_output_tokens", { tokens });
+}

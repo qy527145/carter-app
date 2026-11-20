@@ -228,6 +228,24 @@ pub(crate) async fn set_scene_model(
     carter_app_core::scene_models::set_scene(shell.inner(), &scene, model_ref.as_deref())
 }
 
+/// 单次请求的最大输出 tokens（`agent.max_output_tokens`）。
+///
+/// `None` = 配置里没写，不上报这个字段、走渠道默认。界面显示它时需要说清楚
+/// 「这是本地配的值，不是模型本身的输出上限」—— 后者见模型目录那份元数据。
+#[tauri::command]
+pub(crate) fn get_max_output_tokens(shell: State<'_, Arc<AppShell>>) -> Option<u32> {
+    shell.config.load().agent.max_output_tokens
+}
+
+/// **必须是 `async fn`**：热重载里有 `tokio::spawn`，理由同 [`set_default_model`]。
+#[tauri::command]
+pub(crate) async fn set_max_output_tokens(
+    shell: State<'_, Arc<AppShell>>,
+    tokens: u32,
+) -> Result<(), String> {
+    config_edit::set_max_output_tokens_reload(shell.inner(), tokens)
+}
+
 /// 前台 bash 命令的超时策略（`agent.bash_timeout_secs` / `agent.bash_on_timeout`）。
 #[derive(serde::Serialize)]
 pub(crate) struct BashTimeoutSettings {

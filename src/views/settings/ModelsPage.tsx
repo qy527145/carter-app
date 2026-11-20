@@ -5,13 +5,14 @@
 // 会把 models.dev 的元数据解出来 —— 上下文窗口、能力、定价。
 
 import { CircleAlert, Download, Pencil, Plus, Star, Zap } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Button, IconButton } from "../../components/ui/Button";
-import { Segmented, Switch } from "../../components/ui/Input";
+import { Input, Segmented, Switch } from "../../components/ui/Input";
 import { Badge } from "../../components/ui/Panel";
 import {
   type CompactionSettings,
   getCompaction,
+  getMaxOutputTokens,
   listModels,
   type ModelRow,
   refreshModelCatalog,
@@ -19,6 +20,7 @@ import {
   setCompaction,
   setDefaultModel,
   setFastModel,
+  setMaxOutputTokens,
 } from "../../lib/api";
 import { capabilityLabel, fmtPrice, fmtTokens } from "../../lib/format";
 import { reasoningDisplay } from "../../lib/protocols";
@@ -191,6 +193,96 @@ function CompactionRow() {
   );
 }
 
+/** 给输入框用的几档。1K 是下限（再小思考就能吃光额度），不是推荐值。 */
+const OUTPUT_TOKEN_MIN = 1024;
+const OUTPUT_TOKEN_MAX = 1_000_000;
+
+/**
+ * 单次请求的最大输出 tokens（`agent.max_output_tokens`）。
+ *
+ * 它是**推理模型「思考 + 正文」共用的额度**，所以给的是「一次请求」的预算，不是
+ * 「一轮任务」的 —— 长输出靠多轮工具循环，这里给太大只会让「思考吃光额度」和
+ * 「网关截断」两种失败都拖得更久。它也不该超过模型本身的上限（模型卡片上的「输出」），
+ * 有的渠道收到超限值会直接 400。
+ */
+function MaxOutputTokensRow() {
+  const state = useAsync(getMaxOutputTokens, []);
+  const cur = state.data ?? null;
+  // 和工具页的命令超时一样：草稿在输入框里改，失焦 / 回车才写盘。
+  const [draft, setDraft] = useState("");
+  useEffect(() => {
+    if (cur != null) setDraft(String(cur));
+  }, [cur]);
+
+  function save(tokens: number) {
+    setMaxOutputTokens(tokens)
+      .then(() => state.reload())
+      .catch((e) => {
+        toastError(e);
+        if (cur != null) setDraft(String(cur));
+      });
+  }
+
+  function commit() {
+    if (cur == null) return;
+    const n = Math.round(Number(draft));
+    if (!Number.isFinite(n) || n === cur) {
+      setDraft(String(cur));
+      return;
+    }
+    save(n);
+  }
+
+  if (state.loading) return null;
+  return (
+    <div className="mb-4 rounded-xl border border-edge bg-card px-4 py-3">
+      <div className="flex flex-wrap items-center gap-3">
+        <span className="text-sm text-ink">单次最大输出</span>
+        {cur == null ? (
+          <>
+            <span className="text-xs text-dim">未配置（由渠道决定）</span>
+            <Button size="sm" className="ml-auto" onClick={() => save(32_000)}>
+              设为 32K
+            </Button>
+          </>
+        ) : (
+          <>
+            <span className="flex items-center gap-1.5">
+              <Input
+                type="number"
+                min={OUTPUT_TOKEN_MIN}
+                max={OUTPUT_TOKEN_MAX}
+                step={1024}
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                onBlur={commit}
+                onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()}
+                className="w-24 text-xs"
+              />
+              <span className="text-xs text-dim">tokens</span>
+            </span>
+            <Segmented
+              value={String(cur)}
+              options={[
+                { id: "16000", label: "16K" },
+                { id: "32000", label: "32K" },
+                { id: "64000", label: "64K" },
+              ]}
+              onChange={(v) => save(Number(v))}
+            />
+          </>
+        )}
+      </div>
+      <div className="mt-1.5 text-[11px] leading-relaxed text-dim">
+        每一次请求（含思考）最多能生成多少。推理模型的思考和正文共用这一份额度，
+        给小了可能被思考吃光正文。别超过模型本身的输出上限（卡片上「输出」那一项），
+        有的渠道收到超限值会直接报错。存在 <span className="mono">config.toml</span>， carter
+        命令行也按这个来。
+      </div>
+    </div>
+  );
+}
+
 export function ModelsPage() {
   const state = useAsync(listModels, []);
   const [refreshing, setRefreshing] = useState(false);
@@ -241,6 +333,8 @@ export function ModelsPage() {
         <span className="mono">agent.fast_model</span>）给标题、记忆、助理这类辅助活儿用 ——
         要的是便宜和快，不必用最强的模型。每个场景具体指向谁、怎么回落，见「场景模型」页。
       </PageIntro>
+
+      <MaxOutputTokensRow />
 
       <CompactionRow />
 
