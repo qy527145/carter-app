@@ -28,8 +28,6 @@ pub use carter::platform::{
 pub use carter::platform::{CREATE_NO_WINDOW, hide_console, hide_console_async};
 
 use std::path::PathBuf;
-use std::sync::OnceLock;
-use std::time::Duration;
 
 /// 把用户登录 shell 里的 `PATH` 合进本进程的 `PATH`。
 ///
@@ -48,15 +46,15 @@ use std::time::Duration;
 /// （rc 里有交互式的东西、超时、没有 `$SHELL`）这一步仍然管用。探测只做一次并缓存，
 /// 代价只在首次启动。
 ///
-/// ## 以后要挪回 carter
+/// ## 探测本身在 carter 里
 ///
-/// 探测与合并是「基础能力」，carter 里已经有一份实现（`platform::login_shell_path` /
-/// `merge_path`）。但本仓库固定依赖 crates.io 上的 carter 版本，发版之前拿不到 ——
-/// 所以这里先留一份自洽的实现。升级 carter 之后删掉本地副本，改调那两处。
+/// 起 shell、解析标记行、3 秒超时、缓存都是「基础能力」，实现在
+/// `carter::platform::login_shell_path`；合并用 `carter::platform::merge_path`。
+/// 本函数只负责宿主自己的那部分：把结果放进进程环境，并补上兜底目录。
 ///
 /// 幂等 —— 装完 CLI 之后再调一次，把新出现的目录补上。
 pub fn ensure_user_paths() {
-    let mut dirs = login_shell_path().unwrap_or_default();
+    let mut dirs = carter::platform::login_shell_path().unwrap_or_default();
     if let Some(home) = crate::paths::home_dir() {
         dirs.push(home.join(".local").join("bin"));
     }
@@ -71,7 +69,7 @@ pub fn ensure_user_paths() {
 
     let current: Vec<PathBuf> =
         std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect();
-    let merged = merge_path(&dirs, &current);
+    let merged = carter::platform::merge_path(&dirs, &current);
     if merged == current {
         return;
     }
@@ -81,72 +79,6 @@ pub fn ensure_user_paths() {
         // 别的线程在读 PATH 做决策；而且这是整个应用唯一写 PATH 的地方。
         unsafe { std::env::set_var("PATH", joined) };
     }
-}
-
-/// 用户登录 + 交互 shell 里的 `PATH`，顺序与那个 shell 里一致。探不到就 `None`。
-fn login_shell_path() -> Option<Vec<PathBuf>> {
-    static CACHE: OnceLock<Option<Vec<PathBuf>>> = OnceLock::new();
-    CACHE.get_or_init(probe_login_shell_path).clone()
-}
-
-fn probe_login_shell_path() -> Option<Vec<PathBuf>> {
-    if cfg!(windows) {
-        // Windows 上没有「登录 shell」这回事，PATH 由注册表给，上面那几行兜底目录就够。
-        return None;
-    }
-    // `$SHELL` 不能无条件信：可能是 fish（语法不同），也可能指向已删除的路径。
-    let shell = std::env::var("SHELL")
-        .ok()
-        .map(PathBuf::from)
-        .filter(|p| p.is_file())
-        .unwrap_or_else(|| PathBuf::from("/bin/zsh"));
-    let mut cmd = std::process::Command::new(&shell);
-    cmd.args(["-l", "-i", "-c", "printf 'CARTER_LOGIN_PATH=%s\\n' \"$PATH\""])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        // rc 文件的告警与 `-i` 的提示走 stderr，别让它们掺进解析。
-        .stderr(std::process::Stdio::null());
-    let mut child = cmd.spawn().ok()?;
-    let mut out = child.stdout.take()?;
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        use std::io::Read as _;
-        let mut buf = String::new();
-        let _ = out.read_to_string(&mut buf);
-        let _ = tx.send(buf);
-    });
-    match rx.recv_timeout(Duration::from_secs(3)) {
-        Ok(raw) => {
-            let _ = child.wait();
-            // 只认标记行、且取最后一行：rc 自己也可能往 stdout 写东西。
-            let value = raw
-                .lines()
-                .filter_map(|l| l.trim_end_matches('\r').strip_prefix("CARTER_LOGIN_PATH="))
-                .next_back()?;
-            let dirs: Vec<PathBuf> = std::env::split_paths(value)
-                .filter(|p| !p.as_os_str().is_empty())
-                .collect();
-            (!dirs.is_empty()).then_some(dirs)
-        }
-        // rc 里可能挂着要交互的东西（询问、下载）。启动路径上不能等，直接杀掉。
-        Err(_) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            None
-        }
-    }
-}
-
-/// 合并两份 PATH：`first` 整体在前，随后追加 `second` 里没出现过的条目。幂等。
-fn merge_path(first: &[PathBuf], second: &[PathBuf]) -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = Vec::with_capacity(first.len() + second.len());
-    for p in first.iter().chain(second) {
-        if p.as_os_str().is_empty() || out.contains(p) {
-            continue;
-        }
-        out.push(p.clone());
-    }
-    out
 }
 
 #[cfg(test)]
@@ -192,7 +124,9 @@ mod tests {
     /// PATH 越滚越长，还会盖住「用户自己改了 PATH」的效果。
     #[test]
     fn ensure_user_paths_is_idempotent() {
-        let _guard = crate::paths::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::paths::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         ensure_user_paths();
         let once = std::env::var_os("PATH").unwrap();
         ensure_user_paths();
