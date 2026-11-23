@@ -49,7 +49,7 @@ use crate::changes::ChangeWatch;
 use crate::protocol::{
     AppEvent, Command, ContextView, GoalCommand, GoalView, SessionEvent, TodoView, UsageView,
 };
-use crate::shell::{AppShell, AskRegistry, SessionHandle};
+use crate::shell::{AppShell, SessionHandle};
 use crate::tools::ToolBuildArgs;
 use crate::tools::build_tools;
 use crate::tools::record::ToolEvent;
@@ -131,6 +131,9 @@ pub struct StartedSession {
     /// 这条会话此刻还在后台跑的子 agent 组（`task` 的 `run_in_background`）。
     /// 与 `background_shells` 同理。
     pub background_agents: Vec<crate::protocol::BackgroundAgentsView>,
+    /// 正在跑的 `task` 卡片各自最近一次的子 agent 表。进度事件不回放，接回时靠它
+    /// 把卡片上的行补回来，否则要等下一次进度推过来、中间那张卡是空的。
+    pub agent_progress: Vec<crate::protocol::AgentProgressView>,
 }
 
 /// 接上一条正在后台跑的会话（不关掉重开），返回界面要的那份状态。
@@ -163,6 +166,7 @@ pub fn attach_session(shell: &AppShell, id: &str) -> Option<StartedSession> {
         background_agents: crate::protocol::background_agent_views(
             handle.background_agents.running(),
         ),
+        agent_progress: handle.agent_progress_snapshot(),
         handle,
     })
 }
@@ -449,6 +453,7 @@ pub fn start_session(shell: Arc<AppShell>, opts: SessionOptions) -> carter::Resu
         // `attach_session`，那条路会带回真正在跑的那些）。
         background_shells: Vec::new(),
         background_agents: Vec::new(),
+        agent_progress: Vec::new(),
     })
 }
 

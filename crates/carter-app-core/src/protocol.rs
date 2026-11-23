@@ -521,6 +521,13 @@ impl From<carter::agent::AgentRun> for AgentRun {
     }
 }
 
+/// 一张正在跑的 `task` 卡片上最近一次的子 agent 表（接回会话时随快照带回）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentProgressView {
+    pub call_id: String,
+    pub agents: Vec<AgentRun>,
+}
+
 /// 一组还在后台跑的子 agent（见 [`SessionEvent::BackgroundAgents`]）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackgroundAgentsView {

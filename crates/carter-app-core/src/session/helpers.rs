@@ -410,7 +410,7 @@ pub(super) fn emit(shell: &AppShell, session_id: &str, event: SessionEvent) {
 pub(super) async fn forward_events(
     shell: Arc<AppShell>,
     session_id: String,
-    asks: Arc<AskRegistry>,
+    handle: Arc<crate::shell::SessionHandle>,
     mut ask_rx: mpsc::UnboundedReceiver<carter::agent::UiEvent>,
 ) {
     let send = |shell: &AppShell, event: SessionEvent| {
@@ -434,17 +434,20 @@ pub(super) async fn forward_events(
                 let Some(reply) = response_tx.lock().ok().and_then(|mut g| g.take()) else {
                     continue;
                 };
-                asks.insert(id, questions.clone(), reply);
+                handle.asks.insert(id, questions.clone(), reply);
                 send(&shell, SessionEvent::AskForm { id, questions });
             }
             carter::agent::UiEvent::AgentProgress { call_id, agents } => {
-                send(
-                    &shell,
-                    SessionEvent::AgentProgress {
-                        call_id,
-                        agents: agents.into_iter().map(Into::into).collect(),
-                    },
-                );
+                let agents: Vec<crate::protocol::AgentRun> =
+                    agents.into_iter().map(Into::into).collect();
+                // 留一份在句柄上：进度事件不回放，界面切走再接回时靠它把 task 卡片上的
+                // 子 agent 行补回来（见 `SessionHandle::agent_progress`）。
+                handle
+                    .agent_progress
+                    .lock()
+                    .unwrap()
+                    .insert(call_id.clone(), agents.clone());
+                send(&shell, SessionEvent::AgentProgress { call_id, agents });
             }
             _ => {}
         }

@@ -1054,3 +1054,52 @@ mod background_agents {
         assert!(handle.background_agents.running().is_empty());
     }
 }
+
+/// 子 agent 的进度表留在句柄上，接回时能拿到；轮末随 `live` 一起清。
+#[cfg(test)]
+mod agent_progress_snapshot {
+    use super::*;
+
+    #[tokio::test]
+    async fn progress_is_kept_on_the_handle_until_the_turn_ends() {
+        let shell = AppShell::new(Config::default());
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        let handle = SessionHandle::new(
+            "ap-test".into(),
+            std::env::temp_dir(),
+            live_turn::model(),
+            None,
+            cmd_tx,
+        );
+        let (tx, rx) = mpsc::unbounded_channel();
+        let fwd = tokio::spawn(forward_events(
+            shell.clone(),
+            handle.id.clone(),
+            handle.clone(),
+            rx,
+        ));
+        tx.send(carter::agent::UiEvent::AgentProgress {
+            call_id: "c1".into(),
+            agents: vec![carter::agent::AgentRun {
+                id: "a1".into(),
+                description: "查依赖".into(),
+                status: "running".into(),
+                steps: 1,
+                tool: Some("bash".into()),
+                text: String::new(),
+            }],
+        })
+        .unwrap();
+        drop(tx);
+        fwd.await.unwrap();
+
+        let snap = handle.agent_progress_snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].call_id, "c1");
+        assert_eq!(snap[0].agents[0].id, "a1");
+        assert_eq!(snap[0].agents[0].tool.as_deref(), Some("bash"));
+
+        handle.publish_history(&[]);
+        assert!(handle.agent_progress_snapshot().is_empty());
+    }
+}

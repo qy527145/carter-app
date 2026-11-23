@@ -95,6 +95,17 @@ export type CreatedSession = {
   background_shells?: BackgroundShellView[];
   /** 这条会话此刻还在后台跑的子 agent 组。同理，接上时靠它把提醒条补回来。 */
   background_agents?: BackgroundAgentsView[];
+  /**
+   * 正在跑的 `task` 卡片各自最近一次的子 agent 表。进度事件不回放，接回时按 `call_id`
+   * 补进卡片 —— 不补的话要等下一次进度推过来，中间那张卡是空的、点不开。
+   */
+  agent_progress?: AgentProgressView[];
+};
+
+/** 一张 `task` 卡片上的子 agent 表（见 `CreatedSession.agent_progress`）。 */
+export type AgentProgressView = {
+  call_id: string;
+  agents: AgentRun[];
 };
 
 /** 一组还在后台跑的子 agent（`task` 的 `run_in_background`）。 */

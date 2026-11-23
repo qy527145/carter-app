@@ -87,7 +87,7 @@ impl Runner {
         let forwarder = tokio::spawn(forward_events(
             self.ctx.shell.clone(),
             session_id.clone(),
-            self.ctx.handle.asks.clone(),
+            self.ctx.handle.clone(),
             ask_rx,
         ));
 

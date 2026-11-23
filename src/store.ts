@@ -933,8 +933,32 @@ function withLive(
       items.push(tool);
     }
   });
+  // 只有子 agent 的调用（后台组在轮末之后还在跑）时不开助手轮：那会在用户气泡后面
+  // 凭空长出一条空的回答。
+  if (items.length === 0) return { turns, agentTools };
   const last = turns[turns.length - 1];
   return { turns: [...turns, { role: "assistant", turn: last?.turn, items }], agentTools };
+}
+
+/**
+ * 打开 / 接回一条会话时的对话内容：历史 + 进行中那一轮 + 已跑完的工具结果 +
+ * 正在跑的 task 卡片上的子 agent 行。
+ */
+function openedConversation(c: CreatedSession): {
+  turns: Turn[];
+  agentTools: Record<string, ToolItem[]>;
+} {
+  const restored = restoreFinished(
+    withLive(historyToTurns(c.history, c.prompts), c.live ?? []),
+    c.finished_tools ?? [],
+  );
+  // 进度事件不回放：把每张正在跑的 task 卡上的子 agent 行补回来，否则接回那一刻
+  // 卡片是空的，要等下一次进度推过来才点得开。
+  const turns = (c.agent_progress ?? []).reduce(
+    (t, p) => updateAgents(t, p.call_id, p.agents),
+    restored.turns,
+  );
+  return { turns, agentTools: restored.agentTools };
 }
 
 /**
@@ -1170,10 +1194,7 @@ export const useStore = create<Store>((set) => ({
       // `startProjectChat`），会话后到，这时再清一次就把刚落地的卡片抹掉了。
       ...(opts?.keepComposer ? {} : { composerContexts: [] }),
       goal: c.goal,
-      ...restoreFinished(
-        withLive(historyToTurns(c.history, c.prompts), c.live ?? []),
-        c.finished_tools ?? [],
-      ),
+      ...openedConversation(c),
       // 接上的是正在跑的会话：错过的 `turn_started` 补不回来，按后端说的来。
       streaming: c.running ?? false,
       // 同理：切走时错过的提问也补不回来。不摆出表单，那一轮就永远等着。

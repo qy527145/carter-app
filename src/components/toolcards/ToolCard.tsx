@@ -602,7 +602,10 @@ function ReadCard({ item }: { item: ToolItem }) {
  */
 function AgentCard({ item, cwd = "" }: { item: ToolItem; cwd?: string }) {
   const r = item.result;
-  const agents = item.agents ?? [];
+  // 后台组的行以后台表为准：卡片上那份只到最近一次进度，而接回会话时它可能是空的；
+  // 后台表是接回时随快照带回的，此刻还在跑的组一定在里面。
+  const group = useStore((s) => s.backgroundAgents.find((g) => g.id === item.callId));
+  const agents = group?.agents ?? item.agents ?? [];
   const running = agents.filter((a) => a.status === "running").length;
   const failed = agents.filter((a) => a.status === "failed").length;
   const background = r?.ok === true && r.content.startsWith("task_id=");

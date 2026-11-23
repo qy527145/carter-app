@@ -39,6 +39,8 @@ pub(crate) struct CreatedSession {
     background_shells: Vec<carter_app_core::protocol::BackgroundShellView>,
     /// 这条会话此刻还在后台跑的子 agent 组。同理，事件不回放，接上时靠它补提醒条。
     background_agents: Vec<carter_app_core::protocol::BackgroundAgentsView>,
+    /// 正在跑的 `task` 卡片各自最近一次的子 agent 表。进度事件不回放，接回时靠它补行。
+    agent_progress: Vec<carter_app_core::protocol::AgentProgressView>,
 }
 
 /// 进行中那一轮的一条记录（`LiveItem` 的界面形态）。
@@ -104,6 +106,7 @@ impl CreatedSession {
             finished_tools: started.finished_tools,
             background_shells: started.background_shells,
             background_agents: started.background_agents,
+            agent_progress: started.agent_progress,
         }
     }
 }

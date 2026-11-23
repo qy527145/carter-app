@@ -147,6 +147,13 @@ pub struct SessionHandle {
     /// 这条会话的后台子 agent 表（`task` 的 `run_in_background`）。与 `background` 同理
     /// 放在句柄上：界面接回时要立刻知道「还有几组在跑」。
     pub background_agents: Arc<carter::agent::BackgroundAgents>,
+    /// 每张正在跑的 `task` 卡片上最近一次的子 agent 表（按 `call_id`）。
+    ///
+    /// 进度事件不回放：界面切走再接回时，那张卡片只剩 `live` 里一条没有结果的记录，
+    /// 子 agent 的行要等下一次进度推过来才出现 —— 中间那张卡是空的、点不开。接回时
+    /// 从这里补。与 `live` 一样在轮末清掉。
+    pub agent_progress:
+        std::sync::Mutex<std::collections::HashMap<String, Vec<crate::protocol::AgentRun>>>,
     /// 只有 crate 内能构造 —— 命令通道的持有者是会话运行器，不该由外部塞进来。
     pub(crate) cmd_tx: mpsc::UnboundedSender<Command>,
 }
@@ -178,6 +185,7 @@ impl SessionHandle {
             steer: Arc::default(),
             background: carter::tools::BackgroundShells::new(),
             background_agents: carter::agent::BackgroundAgents::new(),
+            agent_progress: std::sync::Mutex::new(std::collections::HashMap::new()),
             cmd_tx,
         })
     }
@@ -193,6 +201,23 @@ impl SessionHandle {
     pub fn publish_history(&self, messages: &[WireMessage]) {
         self.history.store(Arc::new(messages.to_vec()));
         self.live.clear();
+        self.agent_progress.lock().unwrap().clear();
+    }
+
+    /// 接回时用：正在跑的 `task` 卡片各自最近一次的子 agent 表。
+    pub fn agent_progress_snapshot(&self) -> Vec<crate::protocol::AgentProgressView> {
+        let mut out: Vec<_> = self
+            .agent_progress
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(call_id, agents)| crate::protocol::AgentProgressView {
+                call_id: call_id.clone(),
+                agents: agents.clone(),
+            })
+            .collect();
+        out.sort_by(|a, b| a.call_id.cmp(&b.call_id));
+        out
     }
 }
 
