@@ -37,6 +37,8 @@ pub(crate) struct CreatedSession {
     /// 这条会话此刻还在跑的后台命令。事件不回放，切走再接上时靠它把「还有后台
     /// 任务在跑」那条提醒补回来。
     background_shells: Vec<carter_app_core::protocol::BackgroundShellView>,
+    /// 这条会话此刻还在后台跑的子 agent 组。同理，事件不回放，接上时靠它补提醒条。
+    background_agents: Vec<carter_app_core::protocol::BackgroundAgentsView>,
 }
 
 /// 进行中那一轮的一条记录（`LiveItem` 的界面形态）。
@@ -55,6 +57,8 @@ pub(crate) enum LiveView {
         name: String,
         args: String,
         result: Option<String>,
+        /// 哪个子 agent 敲的；主对话为 `None`。
+        agent_id: Option<String>,
     },
 }
 
@@ -85,11 +89,13 @@ impl CreatedSession {
                         name,
                         args,
                         result,
+                        agent_id,
                     } => LiveView::Tool {
                         call_id,
                         name,
                         args,
                         result,
+                        agent_id,
                     },
                 })
                 .collect(),
@@ -97,6 +103,7 @@ impl CreatedSession {
             todos: started.todos,
             finished_tools: started.finished_tools,
             background_shells: started.background_shells,
+            background_agents: started.background_agents,
         }
     }
 }

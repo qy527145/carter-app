@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AskQuestion, Command, GoalView, MessageView, TodoView } from "./types";
+import type { AgentRun, AskQuestion, Command, GoalView, MessageView, TodoView } from "./types";
 
 // ---------------------------------------------------------------------------
 // 会话
@@ -93,6 +93,18 @@ export type CreatedSession = {
    * 在跑」那条提醒补回来。
    */
   background_shells?: BackgroundShellView[];
+  /** 这条会话此刻还在后台跑的子 agent 组。同理，接上时靠它把提醒条补回来。 */
+  background_agents?: BackgroundAgentsView[];
+};
+
+/** 一组还在后台跑的子 agent（`task` 的 `run_in_background`）。 */
+export type BackgroundAgentsView = {
+  /** `task_id`（`task` 返回给模型的那个；也是对话里那张卡片的 `call_id`）。 */
+  id: string;
+  /** 开始的时刻（epoch 毫秒）。 */
+  started_at: number;
+  /** 这组里每个子 agent 的当前状态。 */
+  agents: AgentRun[];
 };
 
 /** 一条还在跑的后台命令（`bash` 的 `run_in_background`）。 */
@@ -120,7 +132,15 @@ export type ToolUsageView = {
 export type LiveView =
   | { kind: "text"; text: string }
   | { kind: "user"; text: string }
-  | { kind: "tool"; call_id: string; name: string; args: string; result: string | null };
+  | {
+      kind: "tool";
+      call_id: string;
+      name: string;
+      args: string;
+      result: string | null;
+      /** 哪个子 agent 敲的；主对话为 `null`。 */
+      agent_id: string | null;
+    };
 
 /** 侧边聊天（`/btw`）：继承主会话上下文、不落盘、关掉即丢。 */
 export type CreatedSide = {

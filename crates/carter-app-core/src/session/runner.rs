@@ -146,6 +146,8 @@ impl Runner {
         // 等这一轮（以及排在前面的用户消息）跑完再起新的一轮 —— 与 Claude Code 一样，
         // 模型起完后台命令就可以收工，结束了再被叫回来，而不是守着它轮询。
         let mut done_rx = self.ctx.shells.subscribe();
+        // 后台子 agent 全部结束时的通知：与后台命令同一条路。
+        let mut agents_rx = self.ctx.handle.background_agents.subscribe();
         // 别的会话发来的信。同样只在空闲时取；正在跑的那一轮里由工具结果捎带（见 `peers.rs`）。
         let inbox = self.ctx.handle.inbox.clone();
 
@@ -162,6 +164,12 @@ impl Runner {
                         Some(id) = done_rx.recv() => {
                             // `None` = 模型这期间已经用 bash_output 看到它结束了，不必再报。
                             match self.ctx.shells.completion(&id) {
+                                Some(text) => Command::SendPrompt { text, id: None, interject: false },
+                                None => continue,
+                            }
+                        },
+                        Some(id) = agents_rx.recv() => {
+                            match self.ctx.handle.background_agents.completion(&id) {
                                 Some(text) => Command::SendPrompt { text, id: None, interject: false },
                                 None => continue,
                             }
@@ -187,6 +195,8 @@ impl Runner {
         // 后台命令跟着会话走：会话没了，它们就不该继续占着端口 / CPU。
         // 这一步要在等转发任务之前做 —— 那些子进程的日志不会再有人读。
         self.ctx.shells.kill_all();
+        // 后台子 agent 同理：没有下一轮来接它们的结论了。
+        self.ctx.handle.background_agents.cancel_all();
         if let Some(mgr) = mcp_mgr {
             mgr.shutdown().await;
         }
@@ -281,6 +291,7 @@ impl Runner {
             Command::ToolAction { .. } => {}
             // 空闲时终止后台命令：通知会从后台表的完成通道回来，唤醒新的一轮。
             Command::KillShell { shell_id } => kill_shell_by_user(&self.ctx, &shell_id),
+            Command::KillAgents { task_id } => kill_agents_by_user(&self.ctx, &task_id),
             Command::Compact => {
                 self.ctx.refresh();
                 self.compact(false).await;
@@ -579,6 +590,7 @@ impl Runner {
         // 用户亲口说话了：这一轮不再是哪封信的回信，跨会话的跳数从头数。
         if !crate::assistant::is_injected(&raw)
             && !raw.starts_with(carter::tools::DONE_MARK)
+            && !raw.starts_with(carter::agent::AGENT_DONE_MARK)
             && !raw.starts_with(crate::peers::PEER_MARK)
         {
             self.ctx.handle.inbox.reset_hops();
@@ -601,6 +613,7 @@ impl Runner {
         // 后台命令的完成通知同理：里面是命令输出。别的会话的来信也是别人写的字。
         let expansion = if crate::assistant::is_injected(&raw)
             || raw.starts_with(carter::tools::DONE_MARK)
+            || raw.starts_with(carter::agent::AGENT_DONE_MARK)
             || raw.starts_with(crate::peers::PEER_MARK)
         {
             Ok((raw.clone(), None))

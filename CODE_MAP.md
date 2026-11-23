@@ -29,7 +29,8 @@ carter / llm_adapt_core     底层的 agent 循环、工具、会话、协议编
 | `lib/teamUi.ts` / `ticketUi.ts` | 团队看板 / 工单的纯展示逻辑（有 bun 测试） |
 | `views/settings/` | 设置页各分区；`ScenesPage` 是场景模型；`ConnectorsPage` / `SkillsPage` / `AboutPage` 是连接器、技能、更新 |
 | `views/team/` | 团队看板、依赖图、任务抽屉 |
-| `components/` | 输入框、侧栏、更新提示条、工具卡片渲染；`BackgroundTasksBar` 是后台任务条（含「终止」） |
+| `components/` | 输入框、侧栏、更新提示条、工具卡片渲染；`BackgroundTasksBar` 是后台任务条（后台命令 + 后台子 agent 组，含「终止」） |
+| `components/toolcards/ToolCard.tsx` | 按工具名分派的卡片；`AgentCard` / `AgentRows` 是 `task` 的三层呈现（卡 → 子 agent 行 → 它的工具卡），行里的工具卡从 store 的 `agentTools[agent_id]` 取 |
 | `components/ChatView.tsx` | 再导出 `components/chat/*` |
 | `components/chat/` | 对话主区：`fragments`（正文片段）、`changes`（本轮动过的文件）、`turns`（一轮消息）、`list`（列表与贴底滚动）、`chrome`（头部 / 待办 / 输入区与 `ChatView` 本体） |
 | `components/payload/` | 报文面板：JSON 树、SSE 时间线、可视化 |
@@ -61,7 +62,8 @@ carter / llm_adapt_core     底层的 agent 循环、工具、会话、协议编
 
 | 文件 | 职责 |
 | ---- | ---- |
-| `tools/mod.rs` | 工具池装配：按会话 cwd 包路径解析、套用户开关、外包记录层。**bash / grep / ask_user / 后台命令 / 并发 task / goal_update 都在 carter 里**，这里只重建 `task` 的工具快照让子 agent 也遵守开关 |
+| `tools/mod.rs` | 工具池装配：按会话 cwd 包路径解析、套用户开关、外包记录层。**bash / grep / ask_user / 后台命令 / 并发 task（前台 + 后台）/ goal_update 都在 carter 里**，这里只重建 `task` 的工具快照让子 agent 也遵守开关，并把句柄上的 `background_agents` 登记表挂给它 |
+| `tools/record.rs` | 记录包装层：完整参数 / 结果 / 耗时 → 界面；从 carter 的 task-local 取 `agent_id` 标在事件上，界面据此把子 agent 的调用收进它那一行 |
 | `tools/multi_skill.rs` | 多根 `skill` 工具 |
 | `tools/cwd.rs` / `control.rs` / `record.rs` | 相对路径解析、按调用控制（实现 carter 的 `CommandControl`）、调用记录 |
 | `tools/schedule.rs` | 定时任务 |

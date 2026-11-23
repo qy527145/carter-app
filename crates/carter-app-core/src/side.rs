@@ -230,6 +230,7 @@ mod tests {
                 name: "bash".into(),
                 args: r#"{"command":"cargo test"}"#.into(),
                 result: None,
+                agent_id: None,
             },
         ];
         let mapped: Vec<carter::side::LiveTurn> = live

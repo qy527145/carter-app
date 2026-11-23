@@ -128,6 +128,9 @@ pub struct StartedSession {
     /// 与 `todos` 同理：事件不回放，用户切走再回来时靠它把「还有后台任务在跑」
     /// 那条提醒补回来 —— 不带的话，明明有任务在跑，界面上却什么都不显示。
     pub background_shells: Vec<crate::protocol::BackgroundShellView>,
+    /// 这条会话此刻还在后台跑的子 agent 组（`task` 的 `run_in_background`）。
+    /// 与 `background_shells` 同理。
+    pub background_agents: Vec<crate::protocol::BackgroundAgentsView>,
 }
 
 /// 接上一条正在后台跑的会话（不关掉重开），返回界面要的那份状态。
@@ -157,6 +160,9 @@ pub fn attach_session(shell: &AppShell, id: &str) -> Option<StartedSession> {
         todos: handle.todos.load().iter().map(todo_view).collect(),
         finished_tools: handle.live.finished_calls(),
         background_shells: crate::protocol::background_views(handle.background.running()),
+        background_agents: crate::protocol::background_agent_views(
+            handle.background_agents.running(),
+        ),
         handle,
     })
 }
@@ -166,17 +172,31 @@ pub fn attach_session(shell: &AppShell, id: &str) -> Option<StartedSession> {
 /// 表挂在句柄上（工具在轮内直接往里塞命令），所以开头这一接、侧边聊天各接一次。
 /// 事件不回放 —— 切走再回来靠 [`attach_session`] 带回的那份快照。
 fn watch_background(shell: &Arc<AppShell>, handle: &Arc<SessionHandle>) {
-    let shell = shell.clone();
+    let shell_for_shells = shell.clone();
     let session_id = handle.id.clone();
     handle.background.set_observer(Arc::new(move |shells| {
         emit(
-            &shell,
+            &shell_for_shells,
             &session_id,
             SessionEvent::BackgroundShells {
                 shells: crate::protocol::background_views(shells),
             },
         );
     }));
+    // 后台子 agent 表同一套：起一组、全部结束、被终止都推整表快照。
+    let shell = shell.clone();
+    let session_id = handle.id.clone();
+    handle
+        .background_agents
+        .set_observer(Arc::new(move |groups| {
+            emit(
+                &shell,
+                &session_id,
+                SessionEvent::BackgroundAgents {
+                    groups: crate::protocol::background_agent_views(groups),
+                },
+            );
+        }));
 }
 
 /// 新建 / 续接一个会话。返回的句柄立即可以投递命令。
@@ -428,6 +448,7 @@ pub fn start_session(shell: Arc<AppShell>, opts: SessionOptions) -> carter::Resu
         // 新起的 runner 手里还没有后台命令（续接一条**还在跑**的会话走的是
         // `attach_session`，那条路会带回真正在跑的那些）。
         background_shells: Vec::new(),
+        background_agents: Vec::new(),
     })
 }
 

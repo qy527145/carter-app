@@ -39,12 +39,14 @@ impl Runner {
                 call_id: call.id.clone(),
                 name: call.name,
                 args: call.input,
+                agent_id: None,
             });
             self.emit(SessionEvent::ToolFinished {
                 call_id: call.id,
                 ok: false,
                 content: crate::history::INTERRUPTED_RESULT.to_string(),
                 elapsed_ms: 0,
+                agent_id: None,
             });
         }
         self.ctx.handle.publish_history(&self.thread.messages);
@@ -260,6 +262,9 @@ impl Runner {
                 live: self.live(),
                 shells: Some(self.ctx.shells.clone()),
                 session_id: self.ctx.handle.id.clone(),
+                // 后台子 agent 只给主对话：侧边不挂 `task`，助理对话不动手。
+                background_agents: (self.ctx.include_task && !is_chat)
+                    .then(|| self.ctx.handle.background_agents.clone()),
                 shell_cwd: Some(self.ctx.shell_cwd.clone()),
                 running: Some(self.ctx.running.clone()),
                 assistant: ticket.map(|(id, _)| (self.ctx.shell.assistant.clone(), id)),

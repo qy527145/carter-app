@@ -13,6 +13,7 @@ import {
   ScanSearch,
   Target,
   Terminal,
+  Users,
 } from "lucide-react";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import type { ReportTag, TurnTime } from "../../lib/api";
@@ -607,19 +608,23 @@ function latestAsks(turns: Turn[], times?: Record<number, TurnTime>): Set<number
 
 /** 与后端 `tools::background::DONE_MARK` 逐字对应。 */
 const DONE_MARK = "【后台命令】";
+/** 与后端 `agent::subagent::AGENT_DONE_MARK` 逐字对应。 */
+const AGENT_DONE_MARK = "【子 agent】";
 
 /**
- * 后台命令结束时系统送进来的通知：第一行是「shell_id · 已结束（退出码 N）」或
- * 「shell_id · 已被用户终止」，后面是给模型看的说明与输出。不是用户说的话，画成一张可展开的卡片。
+ * 后台的东西结束时系统送进来的通知：第一行是「id · 已结束（退出码 N）」/
+ * 「id · N 个子 agent 已全部结束」/「id · 已被用户终止」，后面是给模型看的说明与
+ * 输出（或结论）。不是用户说的话，画成一张可展开的卡片。
  */
-function BackgroundDoneTurn({ text }: { text: string }) {
-  const rest = text.slice(DONE_MARK.length);
+function BackgroundDoneTurn({ text, kind }: { text: string; kind: "shell" | "agents" }) {
+  const mark = kind === "shell" ? DONE_MARK : AGENT_DONE_MARK;
+  const rest = text.slice(mark.length);
   const cut = rest.indexOf("\n");
   const title = cut < 0 ? rest : rest.slice(0, cut);
   const body = cut < 0 ? "" : rest.slice(cut + 1).trim();
   // 用户终止的不算失败：那是你自己按的，标红只会吓人。
   const stopped = title.includes("被用户终止");
-  const failed = !stopped && !/退出码 0）/.test(title);
+  const failed = !stopped && kind === "shell" && !/退出码 0）/.test(title);
   return (
     <details className="group rounded-xl border border-edge bg-card px-3.5 py-2.5">
       <summary
@@ -627,8 +632,14 @@ function BackgroundDoneTurn({ text }: { text: string }) {
           stopped ? "text-dim" : failed ? "text-danger" : "text-ok"
         }`}
       >
-        <Terminal size={12} className="shrink-0" />
-        <span className="truncate">后台命令 {title}</span>
+        {kind === "shell" ? (
+          <Terminal size={12} className="shrink-0" />
+        ) : (
+          <Users size={12} className="shrink-0" />
+        )}
+        <span className="truncate">
+          {kind === "shell" ? "后台命令" : "后台子 agent"} {title}
+        </span>
         <ChevronRight size={12} className="shrink-0 transition-transform group-open:rotate-90" />
       </summary>
       {body && (
@@ -751,7 +762,10 @@ function TurnView({
       );
     if (turn.text.startsWith(EVENT_MARK))
       return wrap(<ReportTurn mark={EVENT_MARK} text={turn.text} />);
-    if (turn.text.startsWith(DONE_MARK)) return wrap(<BackgroundDoneTurn text={turn.text} />);
+    if (turn.text.startsWith(DONE_MARK))
+      return wrap(<BackgroundDoneTurn text={turn.text} kind="shell" />);
+    if (turn.text.startsWith(AGENT_DONE_MARK))
+      return wrap(<BackgroundDoneTurn text={turn.text} kind="agents" />);
     if (turn.text.startsWith(PEER_MARK)) return wrap(<PeerTurn text={turn.text} />);
     return wrap(
       <UserTurn turn={turn} time={time} onRetry={onRetry} retryAsks={retryAsks} onFork={onFork} />,

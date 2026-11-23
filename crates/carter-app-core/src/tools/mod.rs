@@ -110,6 +110,10 @@ pub struct ToolBuildArgs {
     pub shells: Option<Arc<BackgroundShells>>,
     /// 后台命令的日志按会话分目录。
     pub session_id: String,
+    /// 后台子 agent 表。`Some` 时 `task` 才声明 `run_in_background`。
+    ///
+    /// 侧边聊天不给（它本来就不挂 `task`）；助理对话也不给（它不动手）。
+    pub background_agents: Option<Arc<carter::agent::BackgroundAgents>>,
     /// bash 此刻所在的目录。由会话持有，`cd` 跨调用、跨轮保留。见 [`ShellCwd`]。
     pub shell_cwd: Option<Arc<ShellCwd>>,
     /// 正在跑的工具表。界面按 `call_id` 对单条命令做「中断 / 转后台」。
@@ -282,6 +286,7 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
         include_task,
         shells,
         session_id,
+        background_agents,
         shell_cwd,
         running,
         goal_signal,
@@ -361,6 +366,8 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
         Some(cwd.clone()),
         // `goal_update` 这里自己挂（要在子 agent 快照之后）。
         None,
+        // carter 的那个 `task` 下面会被丢掉、按自己的规矩重建，登记表挂在那一份上。
+        None,
     );
     let ask_allowed = ask_tx.is_some() && settings.tool_enabled("ask_user_question");
 
@@ -423,6 +430,9 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
         );
         if let Some(tx) = &ask_tx {
             task = task.with_progress(tx.clone());
+        }
+        if let Some(agents) = &background_agents {
+            task = task.with_background(agents.clone());
         }
         push(Arc::new(task), &mut tools);
     }

@@ -144,6 +144,9 @@ pub struct SessionHandle {
     /// 放在句柄上而不是只放在会话任务里：界面切走再切回来时，要能立刻知道
     /// 「还有几条后台命令在跑」（`attach_session` 从这里取快照）。
     pub background: Arc<carter::tools::BackgroundShells>,
+    /// 这条会话的后台子 agent 表（`task` 的 `run_in_background`）。与 `background` 同理
+    /// 放在句柄上：界面接回时要立刻知道「还有几组在跑」。
+    pub background_agents: Arc<carter::agent::BackgroundAgents>,
     /// 只有 crate 内能构造 —— 命令通道的持有者是会话运行器，不该由外部塞进来。
     pub(crate) cmd_tx: mpsc::UnboundedSender<Command>,
 }
@@ -174,6 +177,7 @@ impl SessionHandle {
             inbox: Arc::default(),
             steer: Arc::default(),
             background: carter::tools::BackgroundShells::new(),
+            background_agents: carter::agent::BackgroundAgents::new(),
             cmd_tx,
         })
     }
@@ -205,6 +209,8 @@ pub enum LiveItem {
         args: String,
         /// `None` = 还在跑。
         result: Option<String>,
+        /// 哪个子 agent 敲的（见 `SessionEvent::ToolStarted::agent_id`）。主对话为 `None`。
+        agent_id: Option<String>,
     },
 }
 
@@ -242,12 +248,19 @@ impl LiveLog {
             .push(LiveItem::User(text.to_string()));
     }
 
-    pub fn tool_started(&self, call_id: &str, name: &str, args: &serde_json::Value) {
+    pub fn tool_started(
+        &self,
+        call_id: &str,
+        name: &str,
+        args: &serde_json::Value,
+        agent_id: Option<&str>,
+    ) {
         self.0.lock().unwrap().push(LiveItem::Tool {
             call_id: call_id.to_string(),
             name: name.to_string(),
             args: args.to_string(),
             result: None,
+            agent_id: agent_id.map(str::to_string),
         });
     }
 
@@ -263,6 +276,7 @@ impl LiveLog {
                     name,
                     args,
                     result: Some(result),
+                    ..
                 } => Some((call_id.clone(), name.clone(), args.clone(), result.clone())),
                 _ => None,
             })
@@ -282,6 +296,7 @@ impl LiveLog {
                     name,
                     args: _,
                     result: Some(result),
+                    ..
                 } => Some(crate::protocol::ToolUsageView {
                     call_id: call_id.clone(),
                     name: name.clone(),

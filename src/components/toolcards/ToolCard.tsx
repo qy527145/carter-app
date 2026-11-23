@@ -44,10 +44,10 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
-import { sendCommand } from "../../lib/api";
+import { type AgentRun, sendCommand } from "../../lib/api";
 import { openSession } from "../../lib/sessionOps";
 import { toastError } from "../../lib/toast";
-import type { Item } from "../../store";
+import { type Item, useStore } from "../../store";
 import { HtmlFilePreview, imageTokenIn, looksLikeHtml, StoredImage } from "../Media";
 import { Collapse } from "../ui/Panel";
 
@@ -587,21 +587,38 @@ function ReadCard({ item }: { item: ToolItem }) {
 /**
  * `task`：主对话派出去的几个子 agent（carter 的并发 task 工具）。
  *
- * 折叠时看得到每个子 agent 的标题、状态、当前工具 —— 跑十几分钟的时候，
- * 「谁还活着、卡在哪」是唯一想看的东西。展开是「结论」：每个子 agent 最近一段
- * 输出（尾部），以及交回来给模型的汇总。
+ * ## 层次
+ *
+ * 子 agent 自己敲的命令**不**与主对话的卡片平铺在一起（那样一张 task 卡旁边跟着几十
+ * 张 bash 卡，看不出谁是谁的）：后端在每次调用上标了 `agent_id`，store 按它把那些卡片
+ * 收进 `agentTools`，这里再按行展开 —— task 卡 → 某个子 agent 的行 → 它的工具卡片。
+ * 三层都能折，默认全收起：跑十几分钟的时候，「谁还活着、卡在哪」一行就够。
+ *
+ * ## 前台与后台
+ *
+ * 前台：工具等到全部结束才返回，结论就是结果正文。后台（`run_in_background`）：
+ * 工具立刻返回一个 `task_id`，这张卡上标「后台」，子 agent 的后续动态改在输入框上方
+ * 的后台任务条里看（同一份 `agents`，按 id 对上），结束时以一条系统通知送回结论。
  */
-function AgentCard({ item }: { item: ToolItem }) {
+function AgentCard({ item, cwd = "" }: { item: ToolItem; cwd?: string }) {
   const r = item.result;
   const agents = item.agents ?? [];
   const running = agents.filter((a) => a.status === "running").length;
-  const summary = r
-    ? running === 0
-      ? agents.length > 1
-        ? `${agents.length} 个子 agent`
-        : (agents[0]?.description ?? "子 agent")
-      : `${running} 个在跑`
-    : "派发中…";
+  const failed = agents.filter((a) => a.status === "failed").length;
+  const background = r?.ok === true && r.content.startsWith("task_id=");
+  const summary = !r
+    ? agents.length === 0
+      ? "派发中…"
+      : running > 0
+        ? `${running}/${agents.length} 个在跑${currentTools(agents)}`
+        : `${agents.length} 个子 agent`
+    : background
+      ? running > 0
+        ? `已转后台 · ${running} 个在跑`
+        : "已转后台 · 已结束"
+      : agents.length > 1
+        ? `${agents.length} 个子 agent${failed ? ` · ${failed} 个失败` : ""}`
+        : (agents[0]?.description ?? "子 agent");
 
   return (
     <Card
@@ -609,45 +626,127 @@ function AgentCard({ item }: { item: ToolItem }) {
       icon={<Users size={11} />}
       title="task"
       subtitle={summary}
-      status={<Status item={item} />}
-      defaultOpen={!item.result}
+      status={
+        <>
+          {background && (
+            <span className="shrink-0 rounded bg-bubble px-1 py-px text-[10px] text-dim">后台</span>
+          )}
+          <Status item={item} />
+        </>
+      }
+      // 默认收起：标题行已经说了「几个在跑、卡在哪」。失败照旧强制展开。
+      defaultOpen={false}
       forceOpen={r ? !r.ok : false}
     >
-      {agents.length > 0 && (
-        <ul className="mb-2 space-y-1.5">
-          {agents.map((a, i) => (
-            // biome-ignore lint/suspicious/noArrayIndexKey: 子 agent 只有描述没有 id，描述还可能重名
-            <li key={i} className="rounded-md bg-ink/[0.03] px-2 py-1.5">
-              <div className="flex items-center gap-1.5">
-                <AgentDot status={a.status} />
-                <span className="min-w-0 flex-1 truncate text-[11px] text-ink">
-                  {a.description}
-                </span>
-                {a.status === "running" && a.tool && (
-                  <span className="mono shrink-0 rounded bg-ink/5 px-1 text-[10px] text-dim">
-                    {a.tool}
-                  </span>
-                )}
-                {a.steps > 0 && (
-                  <span className="shrink-0 tabular-nums text-[10px] text-dim">{a.steps} 步</span>
-                )}
-              </div>
-              {a.status === "running" && a.text && (
-                <div className="mono mt-1 line-clamp-2 whitespace-pre-wrap break-all text-[10px] leading-relaxed text-dim">
-                  {a.text}
-                </div>
-              )}
-            </li>
-          ))}
-        </ul>
+      {/* 历史里的 task 卡没有子 agent 表（进度事件不回放），只剩结论。 */}
+      {agents.length > 0 ? (
+        <AgentRows agents={agents} cwd={cwd} />
+      ) : (
+        !r && <div className="text-[11px] text-dim">正在派发子 agent…</div>
       )}
-      {r && <Output text={r.content} />}
+      {r && !background && (
+        <Section label={agents.length > 1 ? "汇总" : "结论"}>
+          <Output text={r.content} />
+        </Section>
+      )}
+      {r && background && (
+        <div className="mt-2 text-[11px] text-dim">
+          子 agent
+          在后台跑着，进度看输入框上方的后台任务条；全部结束后会以一条系统通知把结论送回来。
+        </div>
+      )}
     </Card>
   );
 }
 
+/** 标题行上「正在用什么」：最多列两个，再多就省略。 */
+function currentTools(agents: AgentRun[]): string {
+  const names = agents.filter((a) => a.status === "running" && a.tool).map((a) => a.tool);
+  if (names.length === 0) return "";
+  const shown = [...new Set(names)].slice(0, 2).join("、");
+  return ` · ${shown}${names.length > 2 ? "…" : ""}`;
+}
+
+/**
+ * 几个子 agent 各一行，每行可展开看它自己的工具调用。`task` 卡片与后台任务条共用 ——
+ * 同一个子 agent 在两处长得一样，用户不用重新认一遍。
+ */
+export function AgentRows({ agents, cwd = "" }: { agents: AgentRun[]; cwd?: string }) {
+  return (
+    <ul className="space-y-1.5">
+      {agents.map((a) => (
+        <AgentRow key={a.id} agent={a} cwd={cwd} />
+      ))}
+    </ul>
+  );
+}
+
+function AgentRow({ agent: a, cwd }: { agent: AgentRun; cwd: string }) {
+  // 只订阅自己那一格：别的子 agent 每来一条事件都重画整张卡，几个并行跑起来会很卡。
+  const tools = useStore((s) => s.agentTools[a.id]);
+  const [open, setOpen] = useState(false);
+  const steps = tools?.length ?? a.steps;
+  const failed = a.status === "failed";
+
+  return (
+    <li className="overflow-hidden rounded-md bg-ink/[0.03]">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center gap-1.5 px-2 py-1.5 text-left transition-colors hover:bg-ink/5"
+      >
+        <ChevronRight
+          size={11}
+          className={`shrink-0 text-dim transition-transform ${open ? "rotate-90" : ""}`}
+        />
+        <AgentDot status={a.status} />
+        <span className="min-w-0 flex-1 truncate text-[11px] text-ink">{a.description}</span>
+        {a.status === "running" && a.tool && (
+          <span className="mono shrink-0 rounded bg-ink/5 px-1 text-[10px] text-dim">{a.tool}</span>
+        )}
+        {a.status !== "running" && (
+          <span className={`shrink-0 text-[10px] ${failed ? "text-[var(--danger)]" : "text-dim"}`}>
+            {AGENT_STATUS_LABEL[a.status] ?? a.status}
+          </span>
+        )}
+        {steps > 0 && (
+          <span className="shrink-0 tabular-nums text-[10px] text-dim">{steps} 步</span>
+        )}
+      </button>
+      {/* 收起时也露一眼它在说什么：跑着的子 agent 最近两行输出，比一个转圈的点有用。 */}
+      {!open && a.status === "running" && a.text && (
+        <div className="mono line-clamp-2 whitespace-pre-wrap break-all px-2 pb-1.5 text-[10px] leading-relaxed text-dim">
+          {a.text}
+        </div>
+      )}
+      <Collapse open={open}>
+        <div className="space-y-1.5 border-t border-edge px-2 py-1.5">
+          {tools && tools.length > 0 ? (
+            tools.map((t) => <ToolCard key={t.callId} item={t} cwd={cwd} />)
+          ) : (
+            <div className="text-[11px] text-dim">
+              {a.status === "running" ? "还没调过工具（在思考）。" : "没有调过工具。"}
+            </div>
+          )}
+          {a.text && (
+            <Section label={a.status === "running" ? "最近输出" : "结论"}>
+              <Output text={a.text} />
+            </Section>
+          )}
+        </div>
+      </Collapse>
+    </li>
+  );
+}
+
+const AGENT_STATUS_LABEL: Record<string, string> = {
+  done: "完成",
+  failed: "失败",
+  cancelled: "已取消",
+};
+
 /** 子 agent 状态的圆点：跑着转、成了绿、挂了红、断了灰。 */
-function AgentDot({ status }: { status: string }) {
+export function AgentDot({ status }: { status: string }) {
   if (status === "running") {
     return <LoaderCircle size={10} className="shrink-0 animate-spin text-tone-violet" />;
   }

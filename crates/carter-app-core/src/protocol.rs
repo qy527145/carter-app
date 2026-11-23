@@ -85,6 +85,9 @@ pub enum Command {
     /// 终止一条后台命令（界面上后台任务条里的「终止」）。与模型自己 `kill_shell` 不同：
     /// 模型并不知道，所以会收到一条「被用户终止」的通知（见 carter 的 `kill_by_user`）。
     KillShell { shell_id: String },
+    /// 终止一组后台子 agent（界面上后台任务条里的「终止」）。同样会给模型一条
+    /// 「被用户终止」的通知（见 carter 的 `BackgroundAgents::cancel_by_user`）。
+    KillAgents { task_id: String },
     /// 中断当前轮。已经生成的内容保留。
     Cancel,
     /// 重跑某一轮用户输入（界面上回答下面的「重试」）。
@@ -340,15 +343,26 @@ pub enum SessionEvent {
     /// 一段正文结束（换行/收尾），前端据此收束当前气泡。
     TextEnd,
     /// 工具调用即将执行。`args` 是**完整**的参数对象。
+    ///
+    /// `agent_id`：这次调用是哪个子 agent 敲的（与 `AgentProgress` 里那一行的 `id`
+    /// 同一个）。主对话自己的调用为 `None`。界面靠它把子 agent 的卡片收进它那一行
+    /// 底下，而不是与主对话的卡片平铺在一起。
     ToolStarted {
         call_id: String,
         name: String,
         args: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_id: Option<String>,
     },
     /// 工具还在跑时的一段输出（增量）。目前只有 bash 发，约每 150ms 一批。
     ///
     /// 只给界面看，不进历史、不回放：结果到达时 `ToolFinished.content` 取代它。
-    ToolOutput { call_id: String, text: String },
+    ToolOutput {
+        call_id: String,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_id: Option<String>,
+    },
     /// 工具执行结束。与 `ToolStarted` 按 `call_id` 配对。
     ///
     /// `content` 是工具回灌给模型的那段正文（可能被截断，截断处有明确标注）。
@@ -357,6 +371,8 @@ pub enum SessionEvent {
         ok: bool,
         content: String,
         elapsed_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_id: Option<String>,
     },
     /// 这条会话里**已经跑完**的工具调用（整表快照，只随接回时带回）。
     ///
@@ -366,11 +382,17 @@ pub enum SessionEvent {
     ///
     /// `result` 是截断过的展示文本（与 `ToolFinished.content` 同一口径）。
     ToolHistory { tools: Vec<ToolUsageView> },
-    /// `agent` 工具里各个子 agent 的进度（整表快照）。
+    /// `task` 工具里各个子 agent 的进度（整表快照）。前台与后台的组都走这里。
     AgentProgress {
         call_id: String,
         agents: Vec<AgentRun>,
     },
+    /// 后台子 agent 表变了（起一组 / 进度 / 全部结束 / 被终止）。
+    ///
+    /// 与 `BackgroundShells` 同一套：整表快照，只含**还在跑的**组。前台这一轮可能
+    /// 早就结束了而它们还在跑，界面要在输入框上方留一条提醒。空数组 = 全跑完了。
+    /// 一组自己跑完时这条之后还会跟着一轮完成通知（`AGENT_DONE_MARK` 开头的 user 消息）。
+    BackgroundAgents { groups: Vec<BackgroundAgentsView> },
     /// todo 列表整表更新。用于底栏那条进度提示。
     TodoUpdated { todos: Vec<TodoView> },
     /// 后台命令表变了（启动 / 从前台转后台 / 自己结束 / 被 `kill_shell` 结束）。
@@ -477,6 +499,8 @@ pub struct ContextView {
 /// 字段与 carter 的 `AgentRun` 一一对应；前端 `types.ts` 里的 `AgentRun` 也是这份。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentRun {
+    /// 这个子 agent 的 id。它自己的工具调用在 `tool_started.agent_id` 里带的就是它。
+    pub id: String,
     pub description: String,
     pub status: String,
     pub steps: u32,
@@ -487,6 +511,7 @@ pub struct AgentRun {
 impl From<carter::agent::AgentRun> for AgentRun {
     fn from(a: carter::agent::AgentRun) -> Self {
         Self {
+            id: a.id,
             description: a.description,
             status: a.status,
             steps: a.steps,
@@ -494,6 +519,34 @@ impl From<carter::agent::AgentRun> for AgentRun {
             text: a.text,
         }
     }
+}
+
+/// 一组还在后台跑的子 agent（见 [`SessionEvent::BackgroundAgents`]）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackgroundAgentsView {
+    /// `task_id`（`task` 工具返回给模型的那个；也是这组卡片的 `call_id`）。
+    pub id: String,
+    /// 开始的时刻（epoch 毫秒）。
+    pub started_at: u64,
+    /// 这组里每个子 agent 的当前状态。
+    pub agents: Vec<AgentRun>,
+}
+
+impl From<carter::agent::RunningAgent> for BackgroundAgentsView {
+    fn from(g: carter::agent::RunningAgent) -> Self {
+        Self {
+            id: g.id,
+            started_at: g.started_at,
+            agents: g.agents.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+/// carter 的后台子 agent 表给的快照 → 界面视图。
+pub fn background_agent_views(
+    groups: Vec<carter::agent::RunningAgent>,
+) -> Vec<BackgroundAgentsView> {
+    groups.into_iter().map(Into::into).collect()
 }
 
 /// 一条已经跑完的工具调用（见 [`SessionEvent::ToolHistory`]）。

@@ -221,6 +221,7 @@ pub(super) fn handle_live_command(
         // 一轮进行中也要能立刻终止：等这一轮跑完才杀，用户按的那一下就白按了。
         // 通知照常进完成通道，这一轮结束后才送给模型。
         Command::KillShell { shell_id } => kill_shell_by_user(ctx, &shell_id),
+        Command::KillAgents { task_id } => kill_agents_by_user(ctx, &task_id),
         // `/goal pause` 必须立刻生效：否则一条正在自动继续的长任务要等整串跑完
         // 才停得下来，而用户按暂停正是因为不想再等了。
         Command::Goal { action } => {
@@ -256,6 +257,13 @@ pub(super) fn handle_live_command(
 pub(super) fn kill_shell_by_user(ctx: &SessionCtx, shell_id: &str) {
     if let Err(e) = ctx.shells.kill_by_user(shell_id) {
         tracing::debug!("终止后台命令 {shell_id}：{e}");
+    }
+}
+
+/// 用户在后台任务条上终止一组子 agent。找不到说明它刚好跑完了，不是错误。
+pub(super) fn kill_agents_by_user(ctx: &SessionCtx, task_id: &str) {
+    if let Err(e) = ctx.handle.background_agents.cancel_by_user(task_id) {
+        tracing::debug!("终止后台子 agent {task_id}：{e}");
     }
 }
 
@@ -483,23 +491,35 @@ pub(super) fn emit_tool_event(
                 call_id,
                 name,
                 args,
+                agent_id,
             } => SessionEvent::ToolStarted {
                 call_id,
                 name,
                 args,
+                agent_id,
             },
             ToolEvent::Finished {
                 call_id,
                 ok,
                 content,
                 elapsed_ms,
+                agent_id,
             } => SessionEvent::ToolFinished {
                 call_id,
                 ok,
                 content,
                 elapsed_ms,
+                agent_id,
             },
-            ToolEvent::Output { call_id, text } => SessionEvent::ToolOutput { call_id, text },
+            ToolEvent::Output {
+                call_id,
+                text,
+                agent_id,
+            } => SessionEvent::ToolOutput {
+                call_id,
+                text,
+                agent_id,
+            },
         };
         shell.emit(AppEvent::Session {
             session_id: session_id.clone(),

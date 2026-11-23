@@ -31,6 +31,7 @@ import type {
   AppSettings,
   AskQuestion,
   AssistantView,
+  BackgroundAgentsView,
   BackgroundShellView,
   BlockView,
   ContextView,
@@ -64,8 +65,8 @@ export type Item =
       args: unknown;
       result?: { ok: boolean; content: string; elapsedMs: number };
       /**
-       * 只有 `agent` 工具有：它派出去的那几个子 agent 的实时状态。
-       * 整表替换，见后端 `AgentProgress`。
+       * 只有 `task` 工具有：它派出去的那几个子 agent 的实时状态。整表替换，见后端
+       * `AgentProgress`。每个子 agent 自己的工具调用在 `Conv.agentTools[agents[i].id]`。
        */
       agents?: AgentRun[];
       /**
@@ -116,6 +117,8 @@ export type Turn =
   // `auto` = 这一轮是长任务目标自动推起来的（用户没说话），界面上画一条分隔而不是
   // 假装用户又发了一条。
   | { role: "assistant"; turn?: number; items: Item[]; auto?: boolean };
+
+export type ToolItem = Extract<Item, { kind: "tool" }>;
 
 /** 实时输出在界面上保留的末尾长度（字符）。 */
 export const LIVE_OUTPUT_MAX = 16 * 1024;
@@ -173,6 +176,19 @@ export type Conv = {
    * 提醒就认这几位。
    */
   backgroundShells: BackgroundShellView[];
+  /**
+   * 还在后台跑的子 agent 组（`task` 的 `run_in_background`）。整表快照，空 = 都跑完了。
+   * 与 `backgroundShells` 同一条提醒条。
+   */
+  backgroundAgents: BackgroundAgentsView[];
+  /**
+   * 子 agent 各自的工具调用，按子 agent id 分组（`tool_started.agent_id`）。
+   *
+   * **不进 `turns`**：子 agent 的几十次 bash 不是对话内容，是某张 `task` 卡片里
+   * 某一行底下的过程；后台跑的那些组更是在这一轮结束之后还在往外吐事件，塞进
+   * `turns` 会凭空长出一段没人说过话的助手轮。`task` 卡片与后台任务条按 id 来这里取。
+   */
+  agentTools: Record<string, ToolItem[]>;
 };
 
 /**
@@ -448,6 +464,48 @@ function fillToolResult(
   return turns;
 }
 
+/** 按 `call_id` 换掉那张 task 卡上的子 agent 表。找不到就原样返回（不新开轮次）。 */
+function updateAgents(turns: Turn[], callId: string, agents: AgentRun[]): Turn[] {
+  for (let i = turns.length - 1; i >= 0; i--) {
+    const t = turns[i];
+    if (t.role !== "assistant") continue;
+    const j = t.items.findIndex((it) => it.kind === "tool" && it.callId === callId);
+    if (j >= 0) {
+      const items = t.items.slice();
+      items[j] = { ...(items[j] as ToolItem), agents };
+      const next = turns.slice();
+      next[i] = { ...t, items };
+      return next;
+    }
+  }
+  return turns;
+}
+
+/** 子 agent 的一次调用进它自己那一格。整表换新对象，zustand 才看得出变化。 */
+function appendAgentTool(
+  map: Record<string, ToolItem[]>,
+  agentId: string,
+  item: ToolItem,
+): Record<string, ToolItem[]> {
+  return { ...map, [agentId]: [...(map[agentId] ?? []), item] };
+}
+
+/** 按 `call_id` 改子 agent 那一格里的某一条。找不到就原样返回（不换对象）。 */
+function mapAgentTool(
+  map: Record<string, ToolItem[]>,
+  agentId: string,
+  callId: string,
+  fn: (it: ToolItem) => ToolItem,
+): Record<string, ToolItem[]> {
+  const list = map[agentId];
+  if (!list) return map;
+  const j = list.findIndex((it) => it.callId === callId);
+  if (j < 0) return map;
+  const next = list.slice();
+  next[j] = fn(list[j]);
+  return { ...map, [agentId]: next };
+}
+
 /**
  * 事件 → 一条对话状态的增量。主对话与侧边聊天共用这一份。
  *
@@ -504,52 +562,69 @@ export function reduceConv(c: Conv, e: SessionEvent, sessionId?: string): Partia
       return { turns: withAssistant(c.turns, (items) => appendThinking(items, e.text)) };
     case "text_end":
       return { turns: withAssistant(c.turns, closeText) };
-    case "tool_started":
-      return {
-        turns: withAssistant(c.turns, (items) => [
-          ...closeText(items),
-          {
-            kind: "tool",
-            callId: e.call_id,
-            name: e.name,
-            args: e.args,
-            sessionId,
-          },
-        ]),
+    case "tool_started": {
+      const item: ToolItem = {
+        kind: "tool",
+        callId: e.call_id,
+        name: e.name,
+        args: e.args,
+        sessionId,
       };
-    case "tool_finished":
+      // 子 agent 敲的：收进它自己那一格，不进对话（见 `Conv.agentTools`）。
+      if (e.agent_id) {
+        return { agentTools: appendAgentTool(c.agentTools, e.agent_id, item) };
+      }
       return {
-        turns: fillToolResult(c.turns, e.call_id, {
-          ok: e.ok,
-          content: e.content,
-          elapsedMs: e.elapsed_ms,
-        }),
+        turns: withAssistant(c.turns, (items) => [...closeText(items), item]),
       };
-    case "tool_output":
+    }
+    case "tool_finished": {
+      const result = { ok: e.ok, content: e.content, elapsedMs: e.elapsed_ms };
+      if (e.agent_id) {
+        return {
+          agentTools: mapAgentTool(c.agentTools, e.agent_id, e.call_id, (it) => ({
+            ...it,
+            result,
+          })),
+        };
+      }
+      return { turns: fillToolResult(c.turns, e.call_id, result) };
+    }
+    case "tool_output": {
+      const grow = (it: ToolItem): ToolItem => {
+        if (it.result) return it;
+        const out = (it.liveOutput ?? "") + e.text;
+        return {
+          ...it,
+          liveOutput: out.length > LIVE_OUTPUT_MAX ? out.slice(-LIVE_OUTPUT_MAX) : out,
+        };
+      };
+      if (e.agent_id) {
+        return { agentTools: mapAgentTool(c.agentTools, e.agent_id, e.call_id, grow) };
+      }
       return {
         turns: withAssistant(c.turns, (items) =>
-          items.map((it) => {
-            if (it.kind !== "tool" || it.callId !== e.call_id || it.result) return it;
-            const out = (it.liveOutput ?? "") + e.text;
-            return {
-              ...it,
-              liveOutput: out.length > LIVE_OUTPUT_MAX ? out.slice(-LIVE_OUTPUT_MAX) : out,
-            };
-          }),
+          items.map((it) => (it.kind === "tool" && it.callId === e.call_id ? grow(it) : it)),
         ),
       };
+    }
     case "agent_progress":
+      // 按 `call_id` 找那张 task 卡，**不**只看末尾的助手轮：后台组在这一轮结束、
+      // 用户又说了话之后还在推进度，`withAssistant` 会在用户气泡后面凭空长出一条
+      // 空的助手轮。后台任务条上那一组也同步换成这份 —— 后端的表快照只在起 / 收时发，
+      // 每一步的动态走的是这条事件。
       return {
-        turns: withAssistant(c.turns, (items) =>
-          items.map((it) =>
-            it.kind === "tool" && it.callId === e.call_id ? { ...it, agents: e.agents } : it,
-          ),
+        turns: updateAgents(c.turns, e.call_id, e.agents),
+        backgroundAgents: c.backgroundAgents.map((g) =>
+          g.id === e.call_id ? { ...g, agents: e.agents } : g,
         ),
       };
     case "todo_updated":
       return { todos: e.todos };
     case "background_shells":
       return { backgroundShells: e.shells };
+    case "background_agents":
+      return { backgroundAgents: e.groups };
     case "ask_form":
       return { pendingForm: { id: e.id, questions: e.questions } };
     case "files_changed":
@@ -825,22 +900,41 @@ export function historyToTurns(history: MessageView[], prompts: TurnPrompt[] = [
  * 接上之后要等下一个增量才会冒出一段没头没尾的回答，前面跑过的命令也看不见。
  * 工具卡片用的 `callId` 与事件里的是同一个号，后续的 `tool_finished` 能对上。
  */
-function withLive(turns: Turn[], live: LiveView[]): Turn[] {
-  if (live.length === 0) return turns;
+function withLive(
+  turns: Turn[],
+  live: LiveView[],
+): { turns: Turn[]; agentTools: Record<string, ToolItem[]> } {
+  const agentTools: Record<string, ToolItem[]> = {};
+  if (live.length === 0) return { turns, agentTools };
   // 最后一段正文可能还在写：不收束，后续增量才会接在同一段里。
-  const items: Item[] = live.map((x, i) => {
-    if (x.kind === "text") return { kind: "text", text: x.text, closed: i < live.length - 1 };
-    if (x.kind === "user") return { kind: "steer", text: x.text };
-    return {
+  const items: Item[] = [];
+  live.forEach((x, i) => {
+    if (x.kind === "text") {
+      items.push({ kind: "text", text: x.text, closed: i < live.length - 1 });
+      return;
+    }
+    if (x.kind === "user") {
+      items.push({ kind: "steer", text: x.text });
+      return;
+    }
+    const tool: ToolItem = {
       kind: "tool",
       callId: x.call_id,
       name: x.name,
       args: parseArgs(x.args),
       result: x.result === null ? undefined : { ok: true, content: x.result, elapsedMs: 0 },
     };
+    // 子 agent 敲的进它自己那一格，与实时事件走的是同一条规矩。
+    if (x.agent_id) {
+      const list = agentTools[x.agent_id] ?? [];
+      list.push(tool);
+      agentTools[x.agent_id] = list;
+    } else {
+      items.push(tool);
+    }
   });
   const last = turns[turns.length - 1];
-  return [...turns, { role: "assistant", turn: last?.turn, items }];
+  return { turns: [...turns, { role: "assistant", turn: last?.turn, items }], agentTools };
 }
 
 /**
@@ -851,21 +945,26 @@ function withLive(turns: Turn[], live: LiveView[]): Turn[] {
  * 了（事件在界面不在这条会话上时发过了），按 `call_id` 用 `finished_tools` 补上，
  * 顺序不变。
  */
-function restoreFinished(turns: Turn[], done: ToolUsageView[]): Turn[] {
-  if (done.length === 0) return turns;
+function restoreFinished(
+  conv: { turns: Turn[]; agentTools: Record<string, ToolItem[]> },
+  done: ToolUsageView[],
+): { turns: Turn[]; agentTools: Record<string, ToolItem[]> } {
+  if (done.length === 0) return conv;
   const byId = new Map(done.map((d) => [d.call_id, d]));
-  return turns.map((t) => {
+  const fill = <T extends Item>(it: T): T => {
+    if (it.kind !== "tool" || it.result !== undefined) return it;
+    const d = byId.get(it.callId);
+    if (!d) return it;
+    return { ...it, result: { ok: d.ok, content: d.result, elapsedMs: d.elapsed_ms } };
+  };
+  const turns = conv.turns.map((t) => {
     if (t.role !== "assistant") return t;
-    let changed = false;
-    const items = t.items.map((it) => {
-      if (it.kind !== "tool" || it.result !== undefined) return it;
-      const d = byId.get(it.callId);
-      if (!d) return it;
-      changed = true;
-      return { ...it, result: { ok: d.ok, content: d.result, elapsedMs: d.elapsed_ms } };
-    });
-    return changed ? { ...t, items } : t;
+    const items = t.items.map(fill);
+    return items.some((it, i) => it !== t.items[i]) ? { ...t, items } : t;
   });
+  const agentTools: Record<string, ToolItem[]> = {};
+  for (const [id, list] of Object.entries(conv.agentTools)) agentTools[id] = list.map(fill);
+  return { turns, agentTools };
 }
 
 // ---------------------------------------------------------------------------
@@ -926,6 +1025,8 @@ const emptyConversation: Conv = {
   compacting: false,
   memorySuggestions: [],
   backgroundShells: [],
+  backgroundAgents: [],
+  agentTools: {},
 };
 
 /** 主对话那部分状态（`Conv` 的字段藏在 store 里，还原出来给 reducer 用）。 */
@@ -947,6 +1048,8 @@ function convOf(s: Conv): Conv {
     compacting: s.compacting,
     memorySuggestions: s.memorySuggestions,
     backgroundShells: s.backgroundShells,
+    backgroundAgents: s.backgroundAgents,
+    agentTools: s.agentTools,
   };
 }
 
@@ -1067,7 +1170,7 @@ export const useStore = create<Store>((set) => ({
       // `startProjectChat`），会话后到，这时再清一次就把刚落地的卡片抹掉了。
       ...(opts?.keepComposer ? {} : { composerContexts: [] }),
       goal: c.goal,
-      turns: restoreFinished(
+      ...restoreFinished(
         withLive(historyToTurns(c.history, c.prompts), c.live ?? []),
         c.finished_tools ?? [],
       ),
@@ -1080,6 +1183,7 @@ export const useStore = create<Store>((set) => ({
       todos: c.todos ?? [],
       // 后台命令同理：接上的这条会话可能还有命令在跑（提醒条要立刻出现）。
       backgroundShells: c.background_shells ?? [],
+      backgroundAgents: c.background_agents ?? [],
       changed: changedRecord(c.changes),
       changesSince: c.changes_since ?? 0,
       times: timesRecord(c.times),

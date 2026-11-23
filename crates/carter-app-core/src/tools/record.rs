@@ -44,18 +44,25 @@ pub enum ToolEvent {
         call_id: String,
         name: String,
         args: Value,
+        /// 哪个子 agent 敲的（carter 的 `current_agent_id`）。主对话为 `None`。
+        agent_id: Option<String>,
     },
     Finished {
         call_id: String,
         ok: bool,
         content: String,
         elapsed_ms: u64,
+        agent_id: Option<String>,
     },
     /// 工具还在跑时产出的一段输出（**增量**，按时间先后拼起来就是到目前为止的输出）。
     ///
     /// 目前只有 `bash` 发：一条跑几分钟的构建，结束前卡片上什么都看不到的话，
     /// 用户分不清它是在干活还是卡死了。结果到达时以 `Finished` 的正文为准。
-    Output { call_id: String, text: String },
+    Output {
+        call_id: String,
+        text: String,
+        agent_id: Option<String>,
+    },
 }
 
 /// 工具事件送到哪去。
@@ -170,15 +177,18 @@ impl Tool for Recorded {
             .unwrap_or_else(|| format!("t{}", self.seq.fetch_add(1, Ordering::Relaxed)));
         let started = Instant::now();
         self.activity.fetch_add(1, Ordering::Relaxed);
+        // 子 agent 的调用标上它的 id：界面靠它把这张卡收进那个子 agent 底下。
+        let agent_id = carter::agent::current_agent_id();
 
         if let Some(live) = &self.live {
-            live.tool_started(&call_id, self.inner.name(), &args);
+            live.tool_started(&call_id, self.inner.name(), &args, agent_id.as_deref());
         }
         // 先发「开始」再执行：长时间跑的命令（构建、测试）应当立刻在界面上出现。
         (self.tx)(ToolEvent::Started {
             call_id: call_id.clone(),
             name: self.inner.name().to_string(),
             args: args.clone(),
+            agent_id: agent_id.clone(),
         });
 
         // 把这次调用的控制句柄放进 task-local，工具（`bash`）执行时才能读到
@@ -189,10 +199,12 @@ impl Tool for Recorded {
                 let output: super::control::OutputSink = {
                     let tx = self.tx.clone();
                     let call_id = call_id.clone();
+                    let agent_id = agent_id.clone();
                     Arc::new(move |text| {
                         tx(ToolEvent::Output {
                             call_id: call_id.clone(),
                             text,
+                            agent_id: agent_id.clone(),
                         })
                     })
                 };
@@ -214,6 +226,7 @@ impl Tool for Recorded {
             ok: res.ok,
             content: cap(&res.content),
             elapsed_ms: started.elapsed().as_millis() as u64,
+            agent_id,
         });
 
         res
@@ -291,6 +304,7 @@ mod tests {
                 call_id,
                 name,
                 args: a,
+                ..
             } => {
                 assert_eq!(name, "grep");
                 assert_eq!(a, args, "参数必须是完整的 JSON，不是预览字符串");

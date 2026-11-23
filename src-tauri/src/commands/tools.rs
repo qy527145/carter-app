@@ -171,7 +171,9 @@ pub(crate) fn list_tools(shell: State<'_, Arc<AppShell>>, cwd: Option<String>) -
         name: "task".into(),
         description:
             "一次派生多个隔离子 agent 并行干活（carter 的 task 工具）。每个子 agent 有独立\
-             上下文与工具池（不含 task 自身，不会再往下派生），并遵守同一份工具开关。"
+             上下文与工具池（不含 task 自身，不会再往下派生），并遵守同一份工具开关。\
+             前台等它们跑完再返回结论；写 run_in_background 则立刻返回，全部结束时以系统\
+             通知送回结论，期间在输入框上方的后台任务条里看进度、可终止。"
                 .into(),
         parameters: serde_json::Value::Null,
         enabled: true,

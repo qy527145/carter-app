@@ -1,4 +1,5 @@
 import type {
+  BackgroundAgentsView,
   BackgroundShellView,
   MemoryCandidate,
   ReportTag,
@@ -87,8 +88,13 @@ export type SessionEvent =
   | { type: "thinking_delta"; text: string }
   | { type: "text_delta"; text: string }
   | { type: "text_end" }
-  /** `args` 是**完整的**参数对象 —— 差异化渲染靠它。 */
-  | { type: "tool_started"; call_id: string; name: string; args: unknown }
+  /**
+   * `args` 是**完整的**参数对象 —— 差异化渲染靠它。
+   *
+   * `agent_id`：这次调用是哪个子 agent 敲的（与 `agent_progress` 里那一行的 `id`
+   * 同一个）。主对话自己的调用没有。界面靠它把子 agent 的卡片收进它那一行底下。
+   */
+  | { type: "tool_started"; call_id: string; name: string; args: unknown; agent_id?: string }
   | {
       type: "tool_finished";
       call_id: string;
@@ -96,14 +102,22 @@ export type SessionEvent =
       /** 工具回灌给模型的那段正文（过长时后端已截断并标注）。 */
       content: string;
       elapsed_ms: number;
+      agent_id?: string;
     }
   /**
    * 工具还在跑时的一段输出（**增量**，目前只有 bash 发）。只给界面看，
    * `tool_finished` 到达后以它的 `content` 为准。
    */
-  | { type: "tool_output"; call_id: string; text: string }
-  /** `agent` 工具里几个子 agent 的进度（整表快照，按 `call_id` 配对那张卡片）。 */
+  | { type: "tool_output"; call_id: string; text: string; agent_id?: string }
+  /** `task` 工具里几个子 agent 的进度（整表快照，按 `call_id` 配对那张卡片）。 */
   | { type: "agent_progress"; call_id: string; agents: AgentRun[] }
+  /**
+   * 后台子 agent 表变了（起一组 / 全部结束 / 被终止）。
+   *
+   * 与 `background_shells` 同一套：整表快照，只含**还在跑的**组。空数组 = 全跑完了。
+   * 一组自己跑完时这条之后还会跟着一轮完成通知（`【子 agent】` 开头的 user 消息）。
+   */
+  | { type: "background_agents"; groups: BackgroundAgentsView[] }
   | { type: "todo_updated"; todos: TodoView[] }
   /**
    * 后台命令表变了（启动 / 从前台转后台 / 自己结束 / 被结束）。
@@ -203,6 +217,8 @@ export type AppEvent =
 
 /** `agent` 工具里一个子 agent 的当前状态。 */
 export type AgentRun = {
+  /** 这个子 agent 的 id。它自己的工具调用在 `tool_started.agent_id` 里带的就是它。 */
+  id: string;
   description: string;
   status: "running" | "done" | "failed" | "cancelled";
   steps: number;
@@ -300,6 +316,8 @@ export type Command =
   | { type: "tool_action"; call_id: string; action: "interrupt" | "background" }
   /** 终止一条后台命令。模型会收到「被用户终止」的通知（与自己跑完区分）。 */
   | { type: "kill_shell"; shell_id: string }
+  /** 终止一组后台子 agent。模型同样会收到「被用户终止」的通知。 */
+  | { type: "kill_agents"; task_id: string }
   | { type: "cancel" }
   /**
    * 重跑某一轮用户输入（回答下面的「重试」）。

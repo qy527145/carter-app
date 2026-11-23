@@ -956,3 +956,101 @@ mod live_turn {
         std::fs::remove_dir_all(&dir).ok();
     }
 }
+
+/// 后台子 agent 表与会话的接法：起一组 → 提醒条看得到 → 跑完发完成通知、提醒条清空、
+/// 通知正文以 `AGENT_DONE_MARK` 开头带结论（runner 空闲时把它当一条消息唤醒新一轮）。
+///
+/// 走**真的** `TaskTool`（一个立刻回话的假 provider），不去戳登记表的私有方法：
+/// 界面接的就是这条公开的路。
+#[cfg(test)]
+mod background_agents {
+    use super::*;
+    use carter::provider::{ChatRequest, EventStream, FinishReason, StreamChunk};
+    use std::time::Duration;
+
+    struct Fixed;
+    #[async_trait::async_trait]
+    impl carter::provider::LlmProvider for Fixed {
+        async fn stream(&self, _req: ChatRequest) -> carter::Result<EventStream> {
+            Ok(Box::pin(futures::stream::iter(vec![
+                Ok(StreamChunk::text("结论甲")),
+                Ok(StreamChunk::Finish {
+                    reason: FinishReason::Stop,
+                }),
+            ])))
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_background_group_shows_on_the_bar_then_wakes_the_session() {
+        let shell = AppShell::new(Config::default());
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        let handle = SessionHandle::new(
+            "bg-agents-test".into(),
+            std::env::temp_dir(),
+            live_turn::model(),
+            None,
+            cmd_tx,
+        );
+        shell.sessions.insert(handle.id.clone(), handle.clone());
+        let mut events = shell.subscribe();
+        super::watch_background(&shell, &handle);
+        let mut done = handle.background_agents.subscribe();
+
+        let factory: carter::agent::ToolFactory = Arc::new(Vec::new);
+        let task = carter::agent::TaskTool::new(
+            Arc::new(Fixed),
+            live_turn::model(),
+            carter::config::AgentConfig::default(),
+            "system".into(),
+            carter::agent::CancelToken::new(),
+            factory,
+            0,
+        )
+        .with_background(handle.background_agents.clone());
+        let res = task
+            .execute(serde_json::json!({
+                "tasks": [{ "description": "查依赖", "prompt": "a" }],
+                "run_in_background": true
+            }))
+            .await;
+        assert!(res.ok, "{}", res.content);
+        let id = res
+            .content
+            .lines()
+            .next()
+            .and_then(|l| l.strip_prefix("task_id="))
+            .expect("第一行是 task_id")
+            .to_string();
+
+        // 起一组：提醒条那条事件带上它，行里有 id 与描述。
+        let ev = live_turn::wait_for(
+            &mut events,
+            "后台子 agent 表",
+            |e| matches!(e, SessionEvent::BackgroundAgents { groups } if !groups.is_empty()),
+        )
+        .await;
+        let SessionEvent::BackgroundAgents { groups } = ev else {
+            unreachable!()
+        };
+        assert_eq!(groups[0].id, id);
+        assert_eq!(groups[0].agents[0].description, "查依赖");
+        assert!(!groups[0].agents[0].id.is_empty());
+
+        // 跑完：完成通知到达，提醒条清空，通知正文带标记与结论。
+        let got = tokio::time::timeout(Duration::from_secs(10), done.recv())
+            .await
+            .unwrap();
+        assert_eq!(got.as_deref(), Some(id.as_str()));
+        live_turn::wait_for(
+            &mut events,
+            "提醒条清空",
+            |e| matches!(e, SessionEvent::BackgroundAgents { groups } if groups.is_empty()),
+        )
+        .await;
+        let text = handle.background_agents.completion(&id).unwrap();
+        assert!(text.starts_with(carter::agent::AGENT_DONE_MARK), "{text}");
+        assert!(text.contains("结论甲"), "{text}");
+        assert!(handle.background_agents.running().is_empty());
+    }
+}
