@@ -107,12 +107,15 @@ pub(crate) async fn apply_update(
         UPDATE_PROGRESS,
         serde_json::json!({ "phase": "restarting" }),
     );
-    // 给前端一点时间把「正在重启」画出来，然后干净地退出 —— 托盘、助理那些
-    // 后台任务都得走一遍关闭逻辑，不能直接 `exit`。
+    // 给前端一点时间把「正在重启」画出来，然后干净地退出。
+    //
+    // **这里不能自己调 `cleanup_before_exit`**：它会销毁托盘图标，而 macOS 的
+    // `NSStatusBar` 只许主线程碰，在 tokio 线程上调就是一次 SIGTRAP ——
+    // 更新照样装上了，但用户会看到「意外退出」。`exit` 只是给事件循环发消息，
+    // 清理由事件循环在主线程上做。
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(350)).await;
-        handle.cleanup_before_exit();
         handle.exit(0);
     });
     Ok(())
@@ -124,13 +127,15 @@ pub(crate) async fn apply_update(
 /// 发现旧进程还在、把参数转过去然后自己退出，紧接着旧进程也退出 —— 界面就没了。
 /// 所以起一段脱离的脚本等本进程死掉，再由它拉起可执行文件。
 ///
-/// 不用 `app.restart()`：本应用关窗只是藏进托盘，`restart` 走的是正常的退出
-/// 流程，托盘、助理那些后台任务得跟着走一遍关闭逻辑。
+/// 不用 `app.restart()`：它在退出流程里自己把新进程拉起来，那一刻旧进程还活着，
+/// 正好撞上上面说的 single-instance。
+///
+/// 清理交给 `exit` 触发的事件循环去做，不在这里手动调 `cleanup_before_exit`
+/// （原因见 `apply_update` 末尾）。
 #[tauri::command]
 pub(crate) fn restart_app(app: tauri::AppHandle) {
     if let Err(e) = carter_app_core::update::relaunch_after_exit() {
         tracing::warn!(error = %e, "重启：拉不起新进程");
     }
-    app.cleanup_before_exit();
     app.exit(0);
 }
