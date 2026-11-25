@@ -375,7 +375,14 @@ type Store = Conv & {
 // 纯函数：turns 的增量更新。全部返回新数组/新对象，保证 zustand 能看出变化。
 // ---------------------------------------------------------------------------
 
-/** 取末尾的助手轮；末尾不是助手轮就新开一个空的。 */
+/**
+ * 取末尾的助手轮；末尾不是助手轮就新开一个空的。
+ *
+ * 新开的那条**沿用前一句提问的轮次号**：走到这里说明 `turn_started` 没赶上 ——
+ * 接回一条正在跑的会话时这一轮还什么都没产出（`withLive` 没东西可画），或一轮中途
+ * 历史被整个换掉。回答属于谁只能从提问上认；不带号的话，界面认不出它就是正在跑的
+ * 那一轮，「正在生成」的圆点、过程行的转圈、完成时刻与报文入口会一起消失。
+ */
 function withAssistant(turns: Turn[], fn: (items: Item[]) => Item[]): Turn[] {
   const last = turns[turns.length - 1];
   if (last && last.role === "assistant") {
@@ -385,7 +392,7 @@ function withAssistant(turns: Turn[], fn: (items: Item[]) => Item[]): Turn[] {
       { role: "assistant", turn: last.turn, auto: last.auto, items: fn(last.items) },
     ];
   }
-  return [...turns, { role: "assistant", items: fn([]) }];
+  return [...turns, { role: "assistant", turn: last?.turn, items: fn([]) }];
 }
 
 /**
