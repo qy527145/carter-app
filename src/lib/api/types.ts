@@ -85,6 +85,11 @@ export type SessionEvent =
       /** 每一轮的起止时刻，按重建后的轮次号。 */
       times?: TurnTime[];
     }
+  /**
+   * 模型请求遇到暂时性错误（限流、5xx、断线、超时），`delay_ms` 之后自动重发 ——
+   * 第 `attempt` 次，共 `max` 次。这一次请求已经流出来的正文 / 思考作废，界面要撤掉。
+   */
+  | { type: "retrying"; attempt: number; max: number; delay_ms: number; error: string }
   | { type: "thinking_delta"; text: string }
   | { type: "text_delta"; text: string }
   | { type: "text_end" }

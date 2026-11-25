@@ -20,6 +20,7 @@ export function MessageList() {
   const stored = useStore((s) => s.turns);
   const times = useStore((s) => s.times);
   const generating = useStore((s) => s.streaming);
+  const retry = useStore((s) => s.retry);
   const awaitingUser = useStore((s) => s.pendingForm !== null);
   // 直发的那条先画成气泡（见 `QueuedPrompt.direct`）。`turn_started` 到了换成真的
   // 那条，两者下标相同，React 就地复用，看不出替换。
@@ -128,6 +129,7 @@ export function MessageList() {
               turns={turns}
               times={times}
               streaming={streaming}
+              retry={retry}
               awaitingUser={awaitingUser}
               cwd={cwd}
               // 重试与分叉都作用在**这条会话**上 —— 侧边聊天那份 TurnList 一概不传。

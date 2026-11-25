@@ -59,6 +59,24 @@ impl UiSink for TxSink {
                 }
                 SessionEvent::Notice { message: msg }
             }
+            UiEvent::Retrying {
+                attempt,
+                max,
+                delay_ms,
+                error,
+            } => {
+                // 没成的那次说到一半的话不进历史：`live` 里也撤掉，否则切走再回来时
+                // 半截正文与重发之后的完整回答会各出现一遍。
+                if let Some(live) = &self.live {
+                    live.retract_text();
+                }
+                SessionEvent::Retrying {
+                    attempt,
+                    max,
+                    delay_ms,
+                    error,
+                }
+            }
             UiEvent::Divider(label) => SessionEvent::Notice { message: label },
             UiEvent::ModelChanged(model) => SessionEvent::Notice {
                 message: format!("模型：{model}"),

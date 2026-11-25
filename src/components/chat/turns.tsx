@@ -10,6 +10,7 @@ import {
   MessagesSquare,
   Radar,
   RotateCcw,
+  RotateCw,
   ScanSearch,
   Target,
   Terminal,
@@ -24,7 +25,7 @@ import { parseContexts, stripContextTags } from "../../lib/promptContext";
 import { ASSISTANT_CHAT_ID, jumpToTurn, openSession } from "../../lib/sessionOps";
 import { TICKET_STATUS_LABEL } from "../../lib/ticketUi";
 import { TOAST_MS } from "../../lib/toast";
-import { type Item, type Turn, useStore } from "../../store";
+import { type Item, type RetryView, type Turn, useStore } from "../../store";
 import { MessageImages } from "../Composer";
 import { ContextChips } from "../ContextChip";
 import { TicketReply } from "../TicketReply";
@@ -37,8 +38,44 @@ import { type AssistantTurnT, ItemView, ProcessGroup, segmentsOf } from "./fragm
 // 轮次
 // ---------------------------------------------------------------------------
 
-/** 「还在跑」的跳动圆点。还什么都没出来时（`label`）多带一句字。 */
-function GeneratingHint({ label = false }: { label?: boolean }) {
+/**
+ * 「请求出错，正在自动重试」。占的是「正在生成」那个位置：用户要知道的是「它没停，
+ * 也没卡死，只是上游出了岔子、过几秒会再发一次」—— 不说的话，半截回答凭空消失、
+ * 圆点又跳了十几秒，看起来就是坏了。
+ */
+function RetryHint({ retry }: { retry: RetryView }) {
+  const left = () => Math.max(0, Math.ceil((retry.at - Date.now()) / 1000));
+  const [secs, setSecs] = useState(left);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `left` 只读 retry.at，换了一次重试才需要重新起表
+  useEffect(() => {
+    setSecs(left());
+    const timer = setInterval(() => setSecs(left()), 250);
+    return () => clearInterval(timer);
+  }, [retry.at]);
+  return (
+    <div role="status" className="flex min-h-5 min-w-0 items-center gap-2 text-sm text-dim">
+      <RotateCw size={13} className="shrink-0 animate-spin text-tone-orange" />
+      <span className="shrink-0 tabular-nums">
+        请求出错，{secs > 0 ? `${secs} 秒后重试` : "正在重试…"}（第 {retry.attempt}/{retry.max} 次）
+      </span>
+      {retry.error && (
+        <span className="min-w-0 truncate text-[11px]" title={retry.error}>
+          {retry.error}
+        </span>
+      )}
+    </div>
+  );
+}
+
+/** 「还在跑」的跳动圆点。还什么都没出来时（`label`）多带一句字。在自动重试就换成重试提示。 */
+function GeneratingHint({
+  label = false,
+  retry = null,
+}: {
+  label?: boolean;
+  retry?: RetryView | null;
+}) {
+  if (retry) return <RetryHint retry={retry} />;
   return (
     <div className="flex h-5 items-center gap-2 text-sm text-dim" aria-label="正在生成">
       <span className="carter-dots">
@@ -113,6 +150,7 @@ function AssistantTurn({
   isLast,
   liveTurn,
   streaming,
+  retry,
   awaitingUser,
   showPayload,
   cwd,
@@ -128,6 +166,8 @@ function AssistantTurn({
    *  也靠它保住末尾的「正在生成」—— 切页面回来时重建的那几轮不再谎报还在跑。 */
   liveTurn: boolean;
   streaming: boolean;
+  /** 模型请求正在自动重试（见 `Conv.retry`）。 */
+  retry?: RetryView | null;
   awaitingUser: boolean;
   showPayload: boolean;
   /** 预览文件时用来解析相对路径。 */
@@ -269,7 +309,7 @@ function AssistantTurn({
       {/* 挂在整轮末尾，不挂在某一段正文后面：思考、跑工具的时候最后一项不是正文，
           挂在正文上这几段就看不出还在跑。等用户回答提问时不算在跑。 */}
       {streaming && isLast && liveTurn && !awaitingUser && (
-        <GeneratingHint label={items.length === 0} />
+        <GeneratingHint label={items.length === 0} retry={retry} />
       )}
       {/* 回答下面那一行小动作。悬停才浮出来，但一直占着位置 —— 否则鼠标移上来
           的一瞬间整段对话会跳一下。一条动作都没有时整行不渲染（纯工具输出的回答
@@ -720,6 +760,7 @@ function TurnView({
   isLast,
   liveTurn,
   streaming,
+  retry,
   awaitingUser,
   showPayload,
   cwd,
@@ -734,6 +775,7 @@ function TurnView({
   /** 会话正在跑的就是这一轮（见 `TurnList` 的 `liveTurn`）。 */
   liveTurn: boolean;
   streaming: boolean;
+  retry?: RetryView | null;
   awaitingUser: boolean;
   showPayload: boolean;
   cwd: string;
@@ -778,6 +820,7 @@ function TurnView({
       isLast={isLast}
       liveTurn={liveTurn}
       streaming={streaming}
+      retry={retry}
       awaitingUser={awaitingUser}
       showPayload={showPayload}
       cwd={cwd}
@@ -796,6 +839,7 @@ export function TurnList({
   turns: raw,
   times,
   streaming,
+  retry = null,
   awaitingUser = false,
   showPayload = true,
   cwd = "",
@@ -806,6 +850,8 @@ export function TurnList({
   /** 每一轮的起止时刻（轮次号 → 时刻）。不传 = 不显示时间（侧边聊天继承来的那段）。 */
   times?: Record<number, TurnTime>;
   streaming: boolean;
+  /** 模型请求出错、正在自动重试：「正在生成」那里换成重试提示。 */
+  retry?: RetryView | null;
   /** 模型停下来等用户回答提问：还算这一轮，但不该再显示「正在生成」。 */
   awaitingUser?: boolean;
   /** 是否给助手轮画「查看报文」入口。侧边聊天传 false（它不抓包）。 */
@@ -856,6 +902,7 @@ export function TurnList({
             isLast={i === turns.length - 1}
             liveTurn={i === turns.length - 1 && turn !== undefined && turn === liveTurn}
             streaming={streaming}
+            retry={retry}
             awaitingUser={awaitingUser}
             showPayload={showPayload}
             cwd={cwd}
@@ -874,7 +921,7 @@ export function TurnList({
       })}
       {/* 消息已发出、助手轮还没开始：和空的助手轮同一个位置，接上时不会跳。 */}
       {streaming && !awaitingUser && turns[turns.length - 1]?.role === "user" && (
-        <GeneratingHint label />
+        <GeneratingHint label retry={retry} />
       )}
     </div>
   );

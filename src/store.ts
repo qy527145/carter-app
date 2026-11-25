@@ -126,6 +126,15 @@ export const LIVE_OUTPUT_MAX = 16 * 1024;
 /** 模型提问，等用户填完一次性提交。 */
 export type PendingForm = { id: number; questions: AskQuestion[] };
 
+/** 一次自动重试：第几次、共几次、什么时候发、上一次为什么没成。 */
+export type RetryView = {
+  attempt: number;
+  max: number;
+  /** 重发的时刻（本机 epoch 毫秒）。界面拿它倒计时；过了就是「正在重试」。 */
+  at: number;
+  error: string;
+};
+
 /**
  * 一条对话的全部状态。
  *
@@ -167,6 +176,8 @@ export type Conv = {
   context: ContextView | null;
   /** 正在压缩上下文（环换成转圈）。 */
   compacting: boolean;
+  /** 模型请求出错、正在自动重试（「正在生成」那里换成重试提示）。`null` = 没在重试。 */
+  retry: RetryView | null;
   /** 等用户确认的候选记忆（输入框上方那一条）。空 = 不显示。 */
   memorySuggestions: MemoryCandidate[];
   /**
@@ -445,6 +456,25 @@ function closeText(items: Item[]): Item[] {
 }
 
 /**
+ * 撤掉最后一条回答末尾的正文 / 思考：它们属于一次没成、马上要重发的请求。
+ *
+ * 一次请求的块顺序是「思考 → 正文 → 工具调用」，工具卡片要等这次请求收完才出现，
+ * 所以末尾连续的正文与思考就是这一次的；再往前的工具卡、插话是之前的请求留下的，不动。
+ */
+function retractPartial(turns: Turn[]): Turn[] {
+  const last = turns[turns.length - 1];
+  if (last?.role !== "assistant") return turns;
+  let end = last.items.length;
+  while (
+    end > 0 &&
+    (last.items[end - 1].kind === "text" || last.items[end - 1].kind === "thinking")
+  )
+    end--;
+  if (end === last.items.length) return turns;
+  return [...turns.slice(0, -1), { ...last, items: last.items.slice(0, end) }];
+}
+
+/**
  * 按 `call_id` 回填工具结果。
  *
  * 不从末尾盲取「最后一个没结果的工具卡片」：并发工具调用时结果可能乱序到达
@@ -563,10 +593,22 @@ export function reduceConv(c: Conv, e: SessionEvent, sessionId?: string): Partia
           { kind: "steer", text: e.prompt },
         ]),
       };
+    case "retrying":
+      return {
+        turns: retractPartial(c.turns),
+        retry: { attempt: e.attempt, max: e.max, at: Date.now() + e.delay_ms, error: e.error },
+      };
+    // 又有东西流出来了 = 重试成了，提示收掉。
     case "text_delta":
-      return { turns: withAssistant(c.turns, (items) => appendText(items, e.text)) };
+      return {
+        turns: withAssistant(c.turns, (items) => appendText(items, e.text)),
+        retry: null,
+      };
     case "thinking_delta":
-      return { turns: withAssistant(c.turns, (items) => appendThinking(items, e.text)) };
+      return {
+        turns: withAssistant(c.turns, (items) => appendThinking(items, e.text)),
+        retry: null,
+      };
     case "text_end":
       return { turns: withAssistant(c.turns, closeText) };
     case "tool_started": {
@@ -583,6 +625,7 @@ export function reduceConv(c: Conv, e: SessionEvent, sessionId?: string): Partia
       }
       return {
         turns: withAssistant(c.turns, (items) => [...closeText(items), item]),
+        retry: null,
       };
     }
     case "tool_finished": {
@@ -689,6 +732,7 @@ export function reduceConv(c: Conv, e: SessionEvent, sessionId?: string): Partia
       // 这一轮答完了：记下完成时刻。**不**收生成态 —— 长任务目标会紧接着推起
       // 下一轮，那时 `turn_started` 又把 `streaming` 打开；真正收口的是 `idle`。
       return {
+        retry: null,
         times: {
           ...c.times,
           [e.turn]: {
@@ -703,7 +747,7 @@ export function reduceConv(c: Conv, e: SessionEvent, sessionId?: string): Partia
       };
     case "idle":
       // 一轮收尾：解除生成态，并清掉可能还悬着的提问（模型已不再等）。
-      return { streaming: false, pendingForm: null, compacting: false };
+      return { streaming: false, pendingForm: null, compacting: false, retry: null };
     case "context": {
       // 压缩收尾时后端总会补发一次占用 —— 摘要没生成出来时没有 `compacted`，
       // 转圈靠这里收。
@@ -747,7 +791,8 @@ export function reduceConv(c: Conv, e: SessionEvent, sessionId?: string): Partia
       // （见 `lib/events.ts`）。这里什么都不用改。
       return {};
     case "error":
-      return { notice: e.message };
+      // 重试用完了还是不行（或者根本不值得重试）：提示收掉，错误交给提示条。
+      return { notice: e.message, retry: null };
     case "ready":
       // 模型与工作目录在 `ready` 里，但它们属于「会话是谁」而不是「对话内容」，
       // 由调用方处理（见 `applyEvent` / `beginSide`）。
@@ -1054,6 +1099,7 @@ const emptyConversation: Conv = {
   times: {},
   context: null,
   compacting: false,
+  retry: null,
   memorySuggestions: [],
   backgroundShells: [],
   backgroundAgents: [],
@@ -1077,6 +1123,7 @@ function convOf(s: Conv): Conv {
     times: s.times,
     context: s.context,
     compacting: s.compacting,
+    retry: s.retry,
     memorySuggestions: s.memorySuggestions,
     backgroundShells: s.backgroundShells,
     backgroundAgents: s.backgroundAgents,

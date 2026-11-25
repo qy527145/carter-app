@@ -336,6 +336,19 @@ pub enum SessionEvent {
         #[serde(default)]
         times: Vec<crate::timeline::TurnTime>,
     },
+    /// 模型请求遇到暂时性错误（限流、5xx、断线、超时），`delay_ms` 之后自动重发 ——
+    /// 第 `attempt` 次，共 `max` 次。重试由 carter 的 `run_turn` 做，这里只是转述。
+    ///
+    /// 收到这条时，**这一次请求**已经流出来的正文 / 思考作废（不进历史，重发后模型
+    /// 从头再说）：界面要把这一轮末尾那几段撤掉，并在「正在生成」的位置说明在重试。
+    /// 之后要么接着来增量（重试成了），要么再来一条 `Retrying`，要么 `Error`（放弃了）。
+    Retrying {
+        attempt: u32,
+        max: u32,
+        delay_ms: u64,
+        /// 这次是为什么没成（单行）。
+        error: String,
+    },
     /// 思考增量。签名分片不会传到这里（对模型有用，对人没意义）。
     ThinkingDelta { text: String },
     /// 正文增量。

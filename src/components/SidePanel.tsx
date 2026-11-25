@@ -133,6 +133,7 @@ export function SidePanel() {
           turns={side.turns}
           times={side.times}
           streaming={side.streaming}
+          retry={side.retry}
           showPayload={false}
           cwd={side.cwd}
         />

@@ -193,9 +193,9 @@ pub async fn generate(
                 // 空标题：多半是思考把 token 吃光了（见模块文档），值得再试一次。
                 Ok(_) => true,
                 // 限流、网络、超时、5xx：值得重试。
-                Err(carter::CarterError::Llm(ref le)) => worth_retrying(le),
-                // 非模型侧的错误（解析配置、IO）重试不会变好。
-                Err(_) => false,
+                // 非模型侧的错误（解析配置、IO）重试不会变好。判据与主对话的自动重试
+                // 是同一个（carter 的 `is_transient`）。
+                Err(ref e) => e.is_transient(),
             };
         if !retry || attempt + 1 == MAX_ATTEMPTS {
             break;
@@ -218,20 +218,6 @@ fn is_rejected(err: &llm_adapt_core::LLMError) -> bool {
         LLMError::Provider { ctx, .. } => matches!(ctx.http_status, Some(400 | 422)),
         _ => false,
     }
-}
-
-/// 这个错误值得原样再发一次吗。
-///
-/// `is_retryable()` 之外还要看**错误类别**：它读的是上游给的
-/// `ErrorContext.retryable`，而流中途出的错（读 SSE 时断线、超时）上那一位未必
-/// 填对。限流、网络、超时这三类按类别直接认。
-fn worth_retrying(err: &llm_adapt_core::LLMError) -> bool {
-    use llm_adapt_core::LLMError;
-    err.is_retryable()
-        || matches!(
-            err,
-            LLMError::RateLimit { .. } | LLMError::Network { .. } | LLMError::Timeout { .. }
-        )
 }
 
 /// 兜底标题：从首句话里截一段给人看的文字。

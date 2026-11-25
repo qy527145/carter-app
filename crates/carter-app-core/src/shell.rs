@@ -265,6 +265,16 @@ impl LiveLog {
         }
     }
 
+    /// 撤掉末尾那几段正文：它们属于一次没成、马上要重发的请求（见
+    /// `SessionEvent::Retrying`）。一次请求的正文都排在它的工具调用之前，所以
+    /// 末尾连续的正文就是这一次的；再往前的工具、插话不动。
+    pub fn retract_text(&self) {
+        let mut live = self.0.lock().unwrap();
+        while matches!(live.last(), Some(LiveItem::Text(_))) {
+            live.pop();
+        }
+    }
+
     /// 记一条插话。之后的正文另起一段，不接在插话前面那段后头。
     pub fn user(&self, text: &str) {
         self.0
@@ -604,6 +614,25 @@ mod tests {
 
     fn shell() -> Arc<AppShell> {
         AppShell::new(Config::default())
+    }
+
+    /// 重试时只撤这次请求说到一半的正文；之前的工具调用与插话是别的请求留下的。
+    #[test]
+    fn retract_text_drops_only_the_trailing_text() {
+        let live = LiveLog::default();
+        live.text("我先看看");
+        live.tool_started("c1", "bash", &serde_json::json!({}), None);
+        live.text("结果");
+        live.text("是");
+        live.text("\n");
+        live.retract_text();
+        let left = live.snapshot();
+        assert_eq!(left.len(), 2, "{left:?}");
+        assert!(matches!(left[0], LiveItem::Text(ref t) if t == "我先看看"));
+        assert!(matches!(left[1], LiveItem::Tool { .. }));
+        // 末尾不是正文时什么都不动。
+        live.retract_text();
+        assert_eq!(live.snapshot().len(), 2);
     }
 
     #[tokio::test]
