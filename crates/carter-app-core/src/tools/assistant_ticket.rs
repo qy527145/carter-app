@@ -36,6 +36,8 @@ pub enum Kind {
     Proposal,
     /// 答复值守层的一条请示（用户拍板后转达成指令）。
     Answer,
+    /// 用户交代的长期事项：记下、改、收尾。
+    Obligation,
 }
 
 pub struct AssistantTicketTool {
@@ -82,6 +84,7 @@ impl Tool for AssistantTicketTool {
             Kind::Act => "assistant_ticket_act",
             Kind::Proposal => "assistant_proposal",
             Kind::Answer => "assistant_answer_escalation",
+            Kind::Obligation => "assistant_obligation",
         }
     }
 
@@ -113,6 +116,11 @@ impl Tool for AssistantTicketTool {
                 "答复值守层的一条请示。用户明确表了态、并且对话里有一条开着的请示时才用。\
                  choice 是选项 id；用户自己说了别的，就只填 text。答复会带着请示号送进工单，\
                  用户说什么就转达什么，不要替用户扩大授权。"
+            }
+            Kind::Obligation => {
+                "记下用户交代的长期事项（「以后一直……」「每周盯……」）。工单会结束，\
+                 这类事不会自己结束：add 记一条，update 改内容，done / abandon 收尾，\
+                 之后的面板与会话会一直看得到。一次性的任务不要记，派工单就行。"
             }
         }
     }
@@ -169,6 +177,20 @@ impl Tool for AssistantTicketTool {
                 },
                 "required": ["id"]
             }),
+            Kind::Obligation => json!({
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["add", "update", "done", "abandon", "pause", "resume"] },
+                    "id": { "type": "string", "description": "update / done 等要改的那条" },
+                    "text": { "type": "string", "description": "add / update 时：用户原话或一句概括" },
+                    "kind": {
+                        "type": "string",
+                        "enum": ["standing", "one_shot", "rule", "preference"],
+                        "description": "add 时：长期盯着 / 一次性 / 规则 / 偏好，默认 standing"
+                    }
+                },
+                "required": ["action"]
+            }),
         }
     }
 
@@ -177,6 +199,7 @@ impl Tool for AssistantTicketTool {
             Kind::Proposal => return self.proposal(args).await,
             Kind::Dispatch => return self.dispatch(args).await,
             Kind::Answer => return self.answer(args).await,
+            Kind::Obligation => return self.obligation(args),
             Kind::Act => {}
         }
         let Some(key) = field(&args, "ticket") else {
@@ -543,6 +566,82 @@ impl AssistantTicketTool {
         match crate::assistant::runtime::answer_escalation(&self.shell, &id, choice, text).await {
             Ok(()) => ToolResult::ok("已把用户的批示送进工单。"),
             Err(e) => ToolResult::err(format!("assistant_answer_escalation: {e}")),
+        }
+    }
+
+    fn obligation(&self, args: Value) -> ToolResult {
+        use crate::assistant::{ObligationKind, ObligationState};
+        let Some(action) = field(&args, "action") else {
+            return ToolResult::err("assistant_obligation: 缺少 action");
+        };
+        let id = field(&args, "id");
+        let text = field(&args, "text");
+        match action.as_str() {
+            "add" => {
+                let Some(text) = text else {
+                    return ToolResult::err("assistant_obligation: add 要给 text");
+                };
+                let kind = match args.get("kind").and_then(Value::as_str) {
+                    None => ObligationKind::Standing,
+                    Some("standing") => ObligationKind::Standing,
+                    Some("one_shot") => ObligationKind::OneShot,
+                    Some("rule") => ObligationKind::Rule,
+                    Some("preference") => ObligationKind::Preference,
+                    Some(other) => {
+                        return ToolResult::err(format!(
+                            "assistant_obligation: kind 只能是 standing / one_shot / rule / preference，收到 `{other}`"
+                        ));
+                    }
+                };
+                match self.shell.assistant.with(|s| s.add_obligation(&text, kind)) {
+                    Ok(id) => ToolResult::ok(format!("已记下这件事（{id}）：{text}")),
+                    Err(e) => ToolResult::err(format!("assistant_obligation: 写盘失败：{e}")),
+                }
+            }
+            "update" => {
+                let Some(id) = id else {
+                    return ToolResult::err("assistant_obligation: update 要给 id");
+                };
+                let Some(text) = text else {
+                    return ToolResult::err("assistant_obligation: update 要给 text");
+                };
+                match self.shell.assistant.with(|s| {
+                    let o = s
+                        .obligation_mut(&id)
+                        .ok_or_else(|| format!("没有这条长期事项：{id}"))?;
+                    o.text = text.clone();
+                    o.updated_at = crate::protocol::now_ms();
+                    Ok(o.id.clone())
+                }) {
+                    Ok(Ok(id)) => ToolResult::ok(format!("已更新（{id}）：{text}")),
+                    Ok(Err(e)) | Err(e) => ToolResult::err(format!("assistant_obligation: {e}")),
+                }
+            }
+            state @ ("done" | "abandon" | "pause" | "resume") => {
+                let Some(id) = id else {
+                    return ToolResult::err("assistant_obligation: 先给 id");
+                };
+                let target = match state {
+                    "done" => ObligationState::Done,
+                    "abandon" => ObligationState::Abandoned,
+                    "pause" => ObligationState::Paused,
+                    _ => ObligationState::Active,
+                };
+                match self.shell.assistant.with(|s| {
+                    let o = s
+                        .obligation_mut(&id)
+                        .ok_or_else(|| format!("没有这条长期事项：{id}"))?;
+                    o.state = target;
+                    o.updated_at = crate::protocol::now_ms();
+                    Ok(())
+                }) {
+                    Ok(Ok(())) => ToolResult::ok("已更新。"),
+                    Ok(Err(e)) | Err(e) => ToolResult::err(format!("assistant_obligation: {e}")),
+                }
+            }
+            other => ToolResult::err(format!(
+                "assistant_obligation: action 只能是 add / update / done / abandon / pause / resume，收到 `{other}`"
+            )),
         }
     }
 

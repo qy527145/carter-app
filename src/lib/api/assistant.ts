@@ -294,6 +294,18 @@ export type AssistantMetrics = {
   self_resolved: number | null;
 };
 
+/** 用户交代的长期事项：工单会结束，这些不会自己结束。 */
+export type AssistantObligation = {
+  id: string;
+  text: string;
+  kind: "standing" | "one_shot" | "rule" | "preference";
+  state: "active" | "paused" | "done" | "abandoned";
+  created_at: number;
+  updated_at: number;
+  review_at?: number | null;
+  tickets: string[];
+};
+
 /**
  * 一张「等回复」的工单在等什么：盯哪个观察源、新行里含哪些关键词算等到、最晚等到几点。
  * 等到了运行时直接把那几行送回工单，不经评估。
@@ -360,6 +372,8 @@ export type AssistantView = {
   report_turns?: Record<string, number>;
   /** 值守指标。 */
   metrics?: AssistantMetrics;
+  /** 用户交代的长期事项。 */
+  obligations?: AssistantObligation[];
 };
 
 export type TicketAction =

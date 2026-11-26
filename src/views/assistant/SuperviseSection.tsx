@@ -28,6 +28,9 @@ import { toastError, toastOk } from "../../lib/toast";
 
 export function SuperviseSection({ a }: { a: AssistantView }) {
   const open = (a.escalations ?? []).filter((e) => e.status === "open");
+  const obligations = (a.obligations ?? []).filter(
+    (o) => o.state === "active" || o.state === "paused",
+  );
   const m = a.metrics;
   return (
     <Section
@@ -86,6 +89,25 @@ export function SuperviseSection({ a }: { a: AssistantView }) {
           {open.map((e) => (
             <EscalationCard key={e.id} e={e} />
           ))}
+        </div>
+      )}
+
+      {obligations.length > 0 && (
+        <div className="mb-3">
+          <div className="mb-1 text-[11px] text-dim">长期事项</div>
+          <div className="space-y-1">
+            {obligations.map((o) => (
+              <div
+                key={o.id}
+                className="flex items-center gap-2 rounded bg-card px-2 py-1 text-[11px]"
+              >
+                <Badge>{o.state === "paused" ? "暂停" : "进行中"}</Badge>
+                <span className="min-w-0 flex-1 truncate" title={o.text}>
+                  {o.text}
+                </span>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 

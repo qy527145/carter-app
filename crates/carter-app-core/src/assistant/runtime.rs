@@ -177,6 +177,7 @@ pub async fn tick(shell: &Arc<AppShell>) {
     run_probes(shell, now).await;
     expire_waiters(shell, now);
     expire_escalations_now(shell, now);
+    detect_stalls(shell);
     launch_queued(shell).await;
     run_supervise(shell).await;
 }
@@ -1593,6 +1594,11 @@ async fn watch(shell: Arc<AppShell>) {
                 SessionEvent::ToolStarted { name, args, .. } => {
                     on_tool_started(&shell, &session_id, &name, &args);
                 }
+                SessionEvent::TurnStarted {
+                    prompt: Some(text), ..
+                } => {
+                    on_user_spoke(&shell, &session_id, &text);
+                }
                 SessionEvent::Idle => on_idle(&shell, &session_id).await,
                 _ => {}
             },
@@ -1602,6 +1608,89 @@ async fn watch(shell: Arc<AppShell>) {
             }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
         }
+    }
+}
+
+/// 用户直接进工单会话说了话：优先级高于值守。记一笔，并让值守知道。
+///
+/// 值守的指令可能是基于「用户还没表态」的情况下的；用户亲口说的话一定要盖过它。
+fn on_user_spoke(shell: &Arc<AppShell>, session_id: &str, text: &str) {
+    let text = text.trim();
+    if text.is_empty() || looks_injected(text) {
+        return;
+    }
+    let Some(t) = shell
+        .assistant
+        .read(|s| s.ticket_by_session(session_id).cloned())
+    else {
+        return;
+    };
+    if t.status.ended() {
+        return;
+    }
+    shell.assistant.ledger.append(
+        &ledger::LedgerEntry::new(ledger::LedgerKind::Interrupt, ledger::Actor::User)
+            .ticket(t.id.clone())
+            .session(session_id.to_string())
+            .data(serde_json::json!({
+                "reason": "user_spoke_directly",
+                "text": clip(text, 500),
+            })),
+    );
+    let _ = shell.assistant.with(|s| {
+        s.enqueue_supervision(supervise::Event::new(&t.id, supervise::Kind::UserDirective))
+    });
+    changed(shell);
+}
+
+/// 这段文字是系统/助理送进去的，不是用户亲手打的。
+fn looks_injected(text: &str) -> bool {
+    text.starts_with(super::REPORT_MARK)
+        || text.starts_with(super::EVENT_MARK)
+        || text.starts_with("【值守指令")
+        || text.starts_with("【用户批示】")
+        || text.starts_with("【验证未通过】")
+        || text.starts_with("用户回复：")
+        || text.starts_with("（上一次执行")
+        || text.starts_with("（应用重启")
+        || text.starts_with("（用户要求从上次停下的地方继续")
+}
+
+/// 长时间没有推进的工单：值守要知道，不能让它一直占着名额。
+const STALL_MS: u64 = 20 * 60 * 1000;
+
+fn detect_stalls(shell: &Arc<AppShell>) {
+    let now = now_ms();
+    let candidates: Vec<(String, Option<String>, u64)> = shell.assistant.read(|s| {
+        s.tickets
+            .iter()
+            .filter(|t| t.status == TicketStatus::Working)
+            .filter(|t| now.saturating_sub(t.updated_at) >= STALL_MS)
+            .map(|t| (t.id.clone(), t.session_id.clone(), t.updated_at))
+            .collect()
+    });
+    for (id, session, updated) in candidates {
+        // 还有后台命令在跑的长构建不算停滞。
+        if session
+            .as_deref()
+            .and_then(|sid| shell.session(sid))
+            .is_some_and(|h| h.background.running_count() > 0)
+        {
+            continue;
+        }
+        let already = shell.assistant.read(|s| {
+            s.pending_supervision
+                .iter()
+                .any(|e| e.ticket == id && e.kind == supervise::Kind::Stall)
+        });
+        if already {
+            continue;
+        }
+        tracing::info!(ticket = %id, idle_minutes = (now - updated) / 60_000, "助理：工单长时间没有推进");
+        let _ = shell
+            .assistant
+            .with(|s| s.enqueue_supervision(supervise::Event::new(&id, supervise::Kind::Stall)));
+        changed(shell);
     }
 }
 

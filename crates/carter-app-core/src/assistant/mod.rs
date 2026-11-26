@@ -609,6 +609,17 @@ impl Obligation {
     }
 }
 
+impl ObligationState {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Active => "进行中",
+            Self::Paused => "暂停",
+            Self::Done => "已完成",
+            Self::Abandoned => "已放弃",
+        }
+    }
+}
+
 /// 一张「等回复」的工单在等什么。由执行会话用 `assistant_report(status = waiting)` 定下，
 /// 运行时拿它去比对观察源的新行（见 [`wait::claim`]）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -695,6 +706,31 @@ impl State {
     /// 某个目录该用哪份授权书（派单时写到工单上）。
     pub fn charter_id_for(&self, cwd: &str) -> Option<String> {
         charter::resolve(&self.charters, cwd, "", now_ms()).map(|c| c.id.clone())
+    }
+
+    /// 记一件用户交代的长期事项。
+    pub fn add_obligation(&mut self, text: &str, kind: ObligationKind) -> String {
+        let o = Obligation::new(text.trim(), kind, now_ms());
+        let id = o.id.clone();
+        self.obligations.push(o);
+        id
+    }
+
+    /// 按 id 或原话找一条长期事项。
+    pub fn obligation_mut(&mut self, key: &str) -> Option<&mut Obligation> {
+        let key = key.trim();
+        let idx = self
+            .obligations
+            .iter()
+            .position(|o| o.id == key)
+            .or_else(|| self.obligations.iter().position(|o| o.text.trim() == key))?;
+        self.obligations.get_mut(idx)
+    }
+
+    pub fn open_obligations(&self) -> impl Iterator<Item = &Obligation> {
+        self.obligations
+            .iter()
+            .filter(|o| matches!(o.state, ObligationState::Active | ObligationState::Paused))
     }
 
     pub fn escalation(&self, id: &str) -> Option<&escalation::Escalation> {
@@ -1446,6 +1482,8 @@ pub fn chat_segment(store: &AssistantStore) -> String {
          汇报标记写进这条对话，正文里有请示编号（`esc_...`）。用户表了态之后，用\
          assistant_answer_escalation（id 就是那个编号）把你的理解转达给工单。\n\
          - 工单也会用 send_message 给你写信，同样以汇报标记开头、只记不叫醒你。\n\
+         - 用户交代的是长期的事（「以后一直……」「每周盯……」）时，用 assistant_obligation 记下来，\
+         再配观察源 / 规则或派工单；工单会结束，长期事项不会自己结束。\n\
          - 没有提问表单：要问用户什么，直接写在回复里，一次只问一个具体问题。\n\
          - 汇报消息以 `",
     );
@@ -1501,6 +1539,15 @@ pub fn status_text(store: &AssistantStore) -> String {
             "用户表了态之后，用 assistant_answer_escalation（id 就是上面括号里那串）转达；\
              用户没明确表态就不要替用户答。\n\n",
         );
+    }
+
+    let open_obs: Vec<&Obligation> = s.open_obligations().collect();
+    if !open_obs.is_empty() {
+        out.push_str("### 长期事项\n\n");
+        for o in open_obs.iter().take(10) {
+            out.push_str(&format!("- {}（{}，{}）\n", o.text, o.id, o.state.label()));
+        }
+        out.push('\n');
     }
 
     out.push_str("### 观察源\n\n");

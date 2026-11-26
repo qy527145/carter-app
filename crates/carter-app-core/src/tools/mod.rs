@@ -347,6 +347,7 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
             TicketKind::Act,
             TicketKind::Proposal,
             TicketKind::Answer,
+            TicketKind::Obligation,
         ] {
             push(
                 Arc::new(AssistantTicketTool::new(shell.clone(), kind)),
