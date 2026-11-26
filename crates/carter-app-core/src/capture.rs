@@ -122,6 +122,13 @@ impl ExchangeRecord {
     }
 }
 
+/// 抓包占用：几个文件、多少字节。也用作「清理掉了多少」的回执。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct CaptureUsage {
+    pub files: usize,
+    pub bytes: u64,
+}
+
 /// 进行中的交换。
 struct Pending {
     rec: ExchangeRecord,
@@ -329,6 +336,61 @@ impl CaptureStore {
         out.extend(active.into_iter().map(|b| (b, true)));
         out.sort_by_key(|(b, _)| (b.ts, b.seq));
         out
+    }
+
+    /// 磁盘上的抓包文件（只认根目录下的 `*.jsonl`，别的东西不是我们写的）。
+    fn files(&self) -> Vec<(PathBuf, u64)> {
+        let Ok(dir) = std::fs::read_dir(&self.root) else {
+            return Vec::new();
+        };
+        dir.filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
+            .filter_map(|e| {
+                let meta = e.metadata().ok()?;
+                meta.is_file().then(|| (e.path(), meta.len()))
+            })
+            .collect()
+    }
+
+    /// 抓包一共占了多少盘。
+    ///
+    /// 抓的是**原始报文**：每次请求都带着完整的上下文，长会话一条就能攒到上 GB，
+    /// 而这份数据只追加、不随会话压缩变小 —— 所以得让用户看得见它有多大。
+    pub fn usage(&self) -> CaptureUsage {
+        let files = self.files();
+        CaptureUsage {
+            files: files.len(),
+            bytes: files.iter().map(|(_, n)| n).sum(),
+        }
+    }
+
+    /// 清空全部抓包，返回清掉了多少。
+    ///
+    /// 只删已落盘的；**进行中的交换不动** —— 它们还在内存里，收尾时照常写进
+    /// （新的）文件，正在跑的那一轮不会因为清理而在报文面板里断档。
+    pub fn clear(&self) -> CaptureUsage {
+        // 全程拿着摘要缓存的锁：`finish` 是「先追加文件、再更新缓存」，锁住缓存
+        // 就保证它要么整个排在清理之前（文件被删、缓存被清），要么排在之后
+        // （写进新文件、缓存里没有这条会话，下次查询从文件重建）——
+        // 不会留下「文件没了、缓存里还有」的幽灵行。
+        let mut cache = self.briefs.lock().unwrap();
+        let mut freed = CaptureUsage::default();
+        for (path, bytes) in self.files() {
+            if std::fs::remove_file(&path).is_ok() {
+                freed.files += 1;
+                freed.bytes += bytes;
+            }
+        }
+        cache.clear();
+        freed
+    }
+
+    /// 会话被删时一并清掉它的抓包。不删的话这个目录会跟着历史会话一直长 ——
+    /// 而且它是所有按会话分文件的目录里最大的那个。
+    pub fn remove(&self, session_id: &str) -> bool {
+        let mut cache = self.briefs.lock().unwrap();
+        cache.remove(session_id);
+        std::fs::remove_file(self.path_for(session_id)).is_ok()
     }
 
     /// 配对键：关联标签 + URL。
@@ -823,6 +885,69 @@ mod tests {
         assert_eq!(recs[1].id, "x0#2", "后出现的重复 id 要补后缀");
         assert_eq!(store.get("s1", "x0").unwrap().request_body, "first");
         assert_eq!(store.get("s1", "x0#2").unwrap().request_body, "second");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn finish_one(hook: &CaptureHook, url: &str, sid: &str) {
+        let r = req(url, Some(sid));
+        hook.before_request(&r);
+        hook.after_raw_response(
+            &r,
+            &RawHttpResponse {
+                status: 200,
+                headers: vec![],
+                body: Bytes::from_static(b"ok"),
+            },
+        );
+    }
+
+    /// 一键清理：文件与摘要缓存一起清，回执里是清掉的量；进行中的不受影响。
+    #[test]
+    fn clear_removes_files_and_cache_but_keeps_in_flight() {
+        let (store, dir) = tmp_store();
+        let hook = CaptureHook::new(store.clone());
+        finish_one(&hook, "https://api.example/a", "s1");
+        finish_one(&hook, "https://api.example/b", "s2");
+        // 先把摘要缓存建起来 —— 清理后它不能还留着旧行。
+        assert_eq!(store.briefs("s1").len(), 1);
+        // 目录里别人的文件不归我们管。
+        std::fs::write(dir.join("note.txt"), "keep").unwrap();
+
+        let running = req("https://api.example/running", Some("s1"));
+        hook.before_request(&running);
+
+        let before = store.usage();
+        assert_eq!(before.files, 2);
+        assert!(before.bytes > 0);
+
+        let freed = store.clear();
+        assert_eq!(freed, before, "回执应等于清理前的占用");
+        assert_eq!(store.usage(), CaptureUsage::default());
+        assert!(store.briefs("s1").is_empty(), "缓存里不能留幽灵行");
+        assert!(dir.join("note.txt").exists());
+
+        // 清理时还在跑的那条：仍然看得见，收尾后照常落盘。
+        assert_eq!(store.active_briefs("s1").len(), 1);
+        hook.on_stream_end(&running);
+        let urls: Vec<_> = store.briefs("s1").into_iter().map(|b| b.url).collect();
+        assert_eq!(urls, ["https://api.example/running"]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 删会话只带走它自己的抓包。
+    #[test]
+    fn remove_drops_only_that_session() {
+        let (store, dir) = tmp_store();
+        let hook = CaptureHook::new(store.clone());
+        finish_one(&hook, "https://api.example/a", "s1");
+        finish_one(&hook, "https://api.example/b", "s2");
+        assert_eq!(store.briefs("s1").len(), 1);
+
+        assert!(store.remove("s1"));
+        assert!(store.briefs("s1").is_empty());
+        assert_eq!(store.load("s2").len(), 1);
+        // 本来就没有：不算错，只是没删到东西。
+        assert!(!store.remove("never"));
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -92,7 +92,9 @@ export function bucketOf(ms: number): TimeBucket {
 export function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  if (n < 1024 ** 3) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  // 抓包目录会长到这个量级；写成「3686.4 MB」得心算一下才知道有多大。
+  return `${(n / 1024 ** 3).toFixed(2)} GB`;
 }
 
 /**

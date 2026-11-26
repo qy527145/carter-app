@@ -340,6 +340,8 @@ pub fn run() {
             list_exchanges,
             get_exchange,
             inspect_exchange,
+            capture_usage,
+            clear_captures,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")

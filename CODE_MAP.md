@@ -27,7 +27,7 @@ carter / llm_adapt_core     底层的 agent 循环、工具、会话、协议编
 | `lib/updater.ts` | 一键更新的前端状态（首页提示条与关于页共用一份） |
 | `lib/sessionOps.ts` | 会话级操作的组合（新建、切换、刷新） |
 | `lib/teamUi.ts` / `ticketUi.ts` | 团队看板 / 工单的纯展示逻辑（有 bun 测试） |
-| `views/settings/` | 设置页各分区；`ScenesPage` 是场景模型；`ConnectorsPage` / `SkillsPage` / `AboutPage` 是连接器、技能、更新 |
+| `views/settings/` | 设置页各分区；`ScenesPage` 是场景模型；`ConnectorsPage` / `SkillsPage` / `AboutPage` 是连接器、技能、更新；`CapturesPage` 是抓包占用与一键清理 |
 | `views/team/` | 团队看板、依赖图、任务抽屉 |
 | `components/` | 输入框、侧栏、更新提示条、工具卡片渲染；`BackgroundTasksBar` 是后台任务条（后台命令 + 后台子 agent 组，含「终止」） |
 | `components/toolcards/ToolCard.tsx` | 按工具名分派的卡片；`AgentCard` / `AgentRows` 是 `task` 的三层呈现（卡 → 子 agent 行 → 它的工具卡），行里的工具卡从 store 的 `agentTools[agent_id]` 取 |
@@ -117,7 +117,7 @@ carter / llm_adapt_core     底层的 agent 循环、工具、会话、协议编
 | 文件 | 职责 |
 | ---- | ---- |
 | `changes.rs` | 观察文件系统得出「这一轮改了哪些文件」 |
-| `capture.rs` / `inspect.rs` / `preview.rs` | 原始报文捕获、语义视图、变更预览 |
+| `capture.rs` / `inspect.rs` / `preview.rs` | 原始报文捕获（含占用统计、清空、随会话删除）、语义视图、变更预览 |
 | `schedules.rs` / `memory_suggest.rs` | 定时任务、记忆建议（长任务目标的状态机在 `carter::goal`） |
 
 ## Tauri 层（`src-tauri/`）

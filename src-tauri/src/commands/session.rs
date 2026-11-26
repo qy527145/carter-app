@@ -306,13 +306,15 @@ pub(crate) async fn delete_session(
     carter_app_core::changes::remove(&session_id);
     carter_app_core::prompts::remove(&session_id);
     carter_app_core::timeline::remove(&session_id);
+    // 抓包是这几样里最大的（长会话一条能上 GB），更不能留。
+    shell.capture.remove(&session_id);
     sessions::delete(&session_id)
 }
 
 /// 删除某个目录（项目）下的**全部**会话。不可恢复 —— 调用方要先确认。
 ///
 /// 只删会话记录，不碰项目目录本身。逐条走与 `delete_session` 相同的收尾：先关掉
-/// 还在跑的（否则它下一轮 append 会把文件写回来），再清目标 / 变更 / 原文记录。
+/// 还在跑的（否则它下一轮 append 会把文件写回来），再清目标 / 变更 / 原文 / 抓包记录。
 /// 返回删掉的条数。
 #[tauri::command]
 pub(crate) async fn delete_project(
@@ -328,6 +330,7 @@ pub(crate) async fn delete_project(
         carter_app_core::changes::remove(id);
         carter_app_core::prompts::remove(id);
         carter_app_core::timeline::remove(id);
+        shell.capture.remove(id);
         sessions::delete(id)?;
     }
     Ok(ids.len())

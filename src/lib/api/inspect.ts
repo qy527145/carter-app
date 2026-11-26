@@ -145,3 +145,20 @@ export function inspectExchange(
 export function getExchange(sessionId: string, exchangeId: string): Promise<ExchangeRecord | null> {
   return invoke<ExchangeRecord | null>("get_exchange", { sessionId, exchangeId });
 }
+
+// --- 抓包的磁盘占用与清理（设置页「报文」） ------------------------------
+
+/** 抓包占用：几个文件、多少字节。清理的回执也是这个形状（= 清掉了多少）。 */
+export type CaptureUsage = {
+  files: number;
+  bytes: number;
+};
+
+export function captureUsage(): Promise<CaptureUsage> {
+  return invoke<CaptureUsage>("capture_usage");
+}
+
+/** 清空全部抓包。不可恢复 —— 调用前先让用户确认。 */
+export function clearCaptures(): Promise<CaptureUsage> {
+  return invoke<CaptureUsage>("clear_captures");
+}

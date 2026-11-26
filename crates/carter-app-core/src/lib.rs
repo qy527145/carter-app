@@ -67,7 +67,7 @@ pub mod upstream_models;
 pub mod view;
 
 pub use app_settings::AppSettings;
-pub use capture::{CaptureHook, CaptureStore, ExchangeBrief, ExchangeRecord};
+pub use capture::{CaptureHook, CaptureStore, CaptureUsage, ExchangeBrief, ExchangeRecord};
 /// 长任务目标的数据类型就是 carter 的那份（状态机、持久化、决策都在 carter）。
 pub use carter::goal::{self, Goal, GoalStatus};
 pub use catalog::{CatalogEntry, CatalogHit, MetaMatch, ModelRow};

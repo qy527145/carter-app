@@ -17,6 +17,7 @@ import {
   MessagesSquare,
   Palette,
   Plug,
+  Radio,
   Route,
   Server,
   Sparkles,
@@ -27,6 +28,7 @@ import { SETTINGS_TAB_KEY } from "../../lib/settingsTab";
 import { useStore } from "../../store";
 import { AboutPage } from "./AboutPage";
 import { AppearancePage } from "./AppearancePage";
+import { CapturesPage } from "./CapturesPage";
 import { ChangesPage } from "./ChangesPage";
 import { ChannelsPage } from "./ChannelsPage";
 import { ConnectorsPage } from "./ConnectorsPage";
@@ -64,6 +66,7 @@ const GROUPS = [
     tabs: [
       { id: "sessions", label: "会话", icon: MessagesSquare },
       { id: "changes", label: "变更", icon: FileDiff },
+      { id: "captures", label: "报文", icon: Radio },
     ],
   },
   {
@@ -195,6 +198,7 @@ export function SettingsPage() {
           {tab === "tools" && <ToolsPage />}
           {tab === "schedules" && <SchedulesPage />}
           {tab === "changes" && <ChangesPage />}
+          {tab === "captures" && <CapturesPage />}
           {tab === "skills" && <SkillsPage />}
           {tab === "mcp" && <McpPage />}
           {tab === "sessions" && <SessionsPage />}

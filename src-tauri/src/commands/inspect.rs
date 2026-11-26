@@ -103,3 +103,23 @@ pub(crate) fn inspect_exchange(
         .get(&session_id, &exchange_id)
         .map(|rec| carter_app_core::inspect::inspect(&rec))
 }
+
+/// 抓包目录占了多少盘（设置页「报文」）。
+///
+/// `async`：要逐个 stat 抓包文件，别占着主线程。
+#[tauri::command]
+pub(crate) async fn capture_usage(
+    shell: State<'_, Arc<AppShell>>,
+) -> Result<carter_app_core::CaptureUsage, String> {
+    Ok(shell.capture.usage())
+}
+
+/// 一键清空全部抓包，返回清掉了多少。不可恢复 —— 调用方要先确认。
+///
+/// 只影响报文面板：会话历史在 `~/.carter/`，不在这里。
+#[tauri::command]
+pub(crate) async fn clear_captures(
+    shell: State<'_, Arc<AppShell>>,
+) -> Result<carter_app_core::CaptureUsage, String> {
+    Ok(shell.capture.clear())
+}
