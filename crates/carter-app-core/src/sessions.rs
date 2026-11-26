@@ -76,6 +76,8 @@ fn row(entry: &SessionEntry) -> SessionRow {
 /// 接着聊之后，它会一直钉在创建时的位置上 —— 而用户找的是「我刚才在弄的那个」。
 pub fn list(cwd: &Path, all: bool) -> Vec<SessionRow> {
     let mut rows: Vec<SessionRow> = carter::session::list(cwd, all).iter().map(row).collect();
+    // 值守会话是内部轮次，不是给用户翻的对话。台账与面板能看，侧栏不列。
+    rows.retain(|r| !crate::assistant::supervise::is_session(&r.id));
     rows.sort_by_key(|r| std::cmp::Reverse(r.updated_at));
     rows
 }

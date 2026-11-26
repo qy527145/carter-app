@@ -34,6 +34,8 @@ pub enum Kind {
     Act,
     /// 观察模式下「本来会接」的提议：批准开工或忽略。
     Proposal,
+    /// 答复值守层的一条请示（用户拍板后转达成指令）。
+    Answer,
 }
 
 pub struct AssistantTicketTool {
@@ -79,6 +81,7 @@ impl Tool for AssistantTicketTool {
             Kind::Dispatch => "assistant_dispatch",
             Kind::Act => "assistant_ticket_act",
             Kind::Proposal => "assistant_proposal",
+            Kind::Answer => "assistant_answer_escalation",
         }
     }
 
@@ -106,6 +109,11 @@ impl Tool for AssistantTicketTool {
                  - dismiss —— 用户说不用，忽略它。\n\
                  id 是汇报里「提议编号」后面那串。用户没表态时不要替用户决定。"
             }
+            Kind::Answer => {
+                "答复值守层的一条请示。用户明确表了态、并且对话里有一条开着的请示时才用。\
+                 choice 是选项 id；用户自己说了别的，就只填 text。答复会带着请示号送进工单，\
+                 用户说什么就转达什么，不要替用户扩大授权。"
+            }
         }
     }
 
@@ -123,9 +131,14 @@ impl Tool for AssistantTicketTool {
                             "properties": {
                                 "title": { "type": "string", "description": "短标题，界面与汇报里显示" },
                                 "task": { "type": "string", "description": "完整的任务说明，自成一体" },
-                                "cwd": { "type": "string", "description": "在哪个目录里做（绝对路径）" }
+                                "cwd": { "type": "string", "description": "在哪个目录里做（绝对路径）" },
+                                "acceptance": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "description": "验收标准，至少一条；做完要能逐条对上"
+                                }
                             },
-                            "required": ["title", "task", "cwd"]
+                            "required": ["title", "task", "cwd", "acceptance"]
                         }
                     }
                 },
@@ -147,6 +160,15 @@ impl Tool for AssistantTicketTool {
                 },
                 "required": ["id", "action"]
             }),
+            Kind::Answer => json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "请示编号（`esc_...`）" },
+                    "choice": { "type": "string", "description": "选项 id；用户自己说的就不填" },
+                    "text": { "type": "string", "description": "用户原话或你的转达" }
+                },
+                "required": ["id"]
+            }),
         }
     }
 
@@ -154,6 +176,7 @@ impl Tool for AssistantTicketTool {
         match self.kind {
             Kind::Proposal => return self.proposal(args).await,
             Kind::Dispatch => return self.dispatch(args).await,
+            Kind::Answer => return self.answer(args).await,
             Kind::Act => {}
         }
         let Some(key) = field(&args, "ticket") else {
@@ -443,14 +466,35 @@ impl AssistantTicketTool {
                     i + 1
                 ));
             }
-            picked.push((title, task, cwd));
+            let acceptance: Vec<String> = t
+                .get("acceptance")
+                .and_then(Value::as_array)
+                .map(|v| {
+                    v.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            if acceptance.is_empty() {
+                return ToolResult::err(format!(
+                    "assistant_dispatch: 第 {} 个 task 缺 acceptance（验收标准）",
+                    i + 1
+                ));
+            }
+            picked.push((title, task, cwd, acceptance));
         }
         // 只开单、只取 id：`push_dispatch` 要读同一份 store，在 `with` 的闭包里
         // 再进去就是同一把锁重入。
         let opened = self.shell.assistant.with(|s| {
             picked
                 .iter()
-                .map(|(title, task, cwd)| s.assign_ticket(cwd, title, task))
+                .map(|(title, task, cwd, acceptance)| {
+                    let charter = s.charter_id_for(cwd);
+                    s.assign_ticket_with(cwd, title, task, acceptance.clone(), charter)
+                })
                 .collect::<Vec<String>>()
         });
         let ids = match opened {
@@ -485,6 +529,21 @@ impl AssistantTicketTool {
         }
         out.push_str("做完或要拍板时会汇报回这里；不要轮询，告诉用户派了什么就结束这一轮。");
         ToolResult::ok(out)
+    }
+
+    async fn answer(&self, args: Value) -> ToolResult {
+        let Some(id) = field(&args, "id") else {
+            return ToolResult::err("assistant_answer_escalation: 缺少 id");
+        };
+        let choice = field(&args, "choice");
+        let text = field(&args, "text");
+        if choice.is_none() && text.is_none() {
+            return ToolResult::err("assistant_answer_escalation: choice 和 text 至少给一个");
+        }
+        match crate::assistant::runtime::answer_escalation(&self.shell, &id, choice, text).await {
+            Ok(()) => ToolResult::ok("已把用户的批示送进工单。"),
+            Err(e) => ToolResult::err(format!("assistant_answer_escalation: {e}")),
+        }
     }
 
     async fn proposal(&self, args: Value) -> ToolResult {
@@ -540,8 +599,8 @@ mod tests {
 
         let bad = tool
             .execute(json!({"tasks": [
-                {"title": "a", "task": "x", "cwd": cwd},
-                {"title": "b", "task": "y", "cwd": "/no/such/dir"}
+                {"title": "a", "task": "x", "cwd": cwd, "acceptance": ["能跑"]},
+                {"title": "b", "task": "y", "cwd": "/no/such/dir", "acceptance": ["能跑"]}
             ]}))
             .await;
         assert!(!bad.ok);
@@ -549,8 +608,8 @@ mod tests {
 
         let ok = tool
             .execute(json!({"tasks": [
-                {"title": "修 bug 1", "task": "x", "cwd": cwd},
-                {"title": "修 bug 2", "task": "y", "cwd": cwd}
+                {"title": "修 bug 1", "task": "x", "cwd": cwd, "acceptance": ["测试过"]},
+                {"title": "修 bug 2", "task": "y", "cwd": cwd, "acceptance": ["测试过"]}
             ]}))
             .await;
         assert!(ok.ok, "{}", ok.content);

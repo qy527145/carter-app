@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use carter::tools::{Tool, ToolResult};
 
 use crate::assistant::wait::{DEFAULT_TIMEOUT_MINUTES, MAX_TIMEOUT_MINUTES};
-use crate::assistant::{AssistantStore, TicketStatus, Wait};
+use crate::assistant::{AssistantStore, TicketStatus, Wait, verify};
 use crate::protocol::now_ms;
 
 pub struct AssistantReportTool {
@@ -38,6 +38,12 @@ struct Report {
     options: Vec<String>,
     /// `waiting` 时：等什么。来源还没解析（工具里才有状态可查），先攒着原始参数。
     wait: Option<WaitArgs>,
+    /// `ready` 的证据：跑过什么检查、改了什么。
+    evidence: verify::Evidence,
+    /// 回应哪一条值守指令。工单有未回执的指令时必须带。
+    in_reply_to: Option<String>,
+    /// 决策请求的话题键（同一话题重复问会被值守识别）。
+    topic: Option<String>,
 }
 
 /// `status = waiting` 的参数。`source` 是观察源的名字（或 id），不给就用开单的那个来源。
@@ -72,20 +78,22 @@ fn parse(args: &Value) -> Result<Report, String> {
         .filter(|s| !s.is_empty())
         .map(str::to_string);
     let status = match status.as_str() {
-        "ready" => TicketStatus::Ready,
-        "needs_user" | "needs-user" => TicketStatus::NeedsUser,
+        "ready" => TicketStatus::Verifying,
+        "needs_decision" | "needs-decision" | "needs_user" | "needs-user" => {
+            TicketStatus::NeedsDecision
+        }
         "blocked" => TicketStatus::Blocked,
         "failed" => TicketStatus::Failed,
         "dropped" => TicketStatus::Dropped,
         "waiting" => TicketStatus::Waiting,
         other => {
             return Err(format!(
-                "status 只能是 ready / needs_user / blocked / failed / dropped / waiting，收到 `{other}`"
+                "status 只能是 ready / needs_decision / blocked / failed / dropped / waiting，收到 `{other}`"
             ));
         }
     };
-    if status == TicketStatus::NeedsUser && question.is_none() {
-        return Err("status = needs_user 时必须用 question 问一个具体问题".into());
+    if status == TicketStatus::NeedsDecision && question.is_none() {
+        return Err("status = needs_decision 时必须用 question 问一个具体问题".into());
     }
     let wait = if status == TicketStatus::Waiting {
         Some(parse_wait(args)?)
@@ -109,8 +117,8 @@ fn parse(args: &Value) -> Result<Report, String> {
             options.push(o.to_string());
         }
     }
-    if !options.is_empty() && status != TicketStatus::NeedsUser {
-        return Err("options 只在 status = needs_user 时给".into());
+    if !options.is_empty() && status != TicketStatus::NeedsDecision {
+        return Err("options 只在 status = needs_decision 时给".into());
     }
     if options.len() == 1 || options.len() > MAX_OPTIONS {
         return Err(format!("options 给 2 到 {MAX_OPTIONS} 个，或者不给"));
@@ -121,7 +129,77 @@ fn parse(args: &Value) -> Result<Report, String> {
         question,
         options,
         wait,
+        evidence: parse_evidence(args),
+        in_reply_to: args
+            .get("in_reply_to")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        topic: args
+            .get("topic")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
     })
+}
+
+/// 汇报里带来的证据。字段宽松：模型可以不写 exit / tail。
+fn parse_evidence(args: &Value) -> verify::Evidence {
+    let mut ev = verify::Evidence::default();
+    if let Some(checks) = args
+        .get("evidence")
+        .and_then(|e| e.get("checks"))
+        .and_then(Value::as_array)
+    {
+        for c in checks {
+            let Some(cmd) = c.get("cmd").and_then(Value::as_str).map(str::trim) else {
+                continue;
+            };
+            if cmd.is_empty() {
+                continue;
+            }
+            let ok = c.get("ok").and_then(Value::as_bool).unwrap_or(false);
+            ev.checks.push(verify::CheckRun {
+                cmd: cmd.to_string(),
+                ok,
+                exit: c
+                    .get("exit")
+                    .and_then(Value::as_i64)
+                    .map(|x| x as i32)
+                    .or(if ok { Some(0) } else { None }),
+                tail: c
+                    .get("tail")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string(),
+                at: now_ms(),
+            });
+        }
+    }
+    if let Some(changes) = args
+        .get("evidence")
+        .and_then(|e| e.get("changes"))
+        .and_then(Value::as_array)
+    {
+        ev.changes = changes
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+    }
+    ev.note = args
+        .get("evidence")
+        .and_then(|e| e.get("note"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    ev
 }
 
 fn parse_wait(args: &Value) -> Result<WaitArgs, String> {
@@ -190,8 +268,10 @@ impl Tool for AssistantReportTool {
 
     fn description(&self) -> &str {
         "向常驻助理汇报这张工单的结局。这一轮结束前必须调用一次。\n\
-         * ready —— 有结果可看了（改好并验证过、查清楚了、草稿写好了）；\n\
-         * needs_user —— 必须用户决定才能往下走，用 question 问**一个**具体问题；有几种明确走法时用 options 列出来，用户点一下就能答；\n\
+         * ready —— 有结果可看了（改好并验证过、查清楚了、草稿写好了）。**必须带 evidence**：\
+           实际跑过的检查命令与结果，或改动的文件，或一句可核对的说明。没有证据的 ready 会被退回；\n\
+         * needs_decision —— 需要判断才能往下走：用 question 问**一个**具体问题，有几种明确走法时用 options \
+           列出来。先交给值守层，它能决定的直接决定，决定不了才转给人。**不要用 needs_user**，工单够不到人；\n\
          * blocked —— 缺权限、缺依赖、外部系统不通，做不下去；\n\
          * failed —— 试过了，做不成；\n\
          * dropped —— 核实后发现不需要做（复现不了、已经有人做了、不是问题）；\n\
@@ -202,8 +282,8 @@ impl Tool for AssistantReportTool {
          运行时每 30 秒替你跑它，输出里新出现的行就直接送回这条会话；报 waiting 那一刻先跑一次建基线，之前的话不算。\
          观察源本来就看得到对方下文的（私聊、PR 评论）才用 match 给几个关键词（对方的名字、单号）靠观察源等。\
          到了 timeout_minutes（默认一天）还没等到也会被叫醒一次。\n\
-         如实汇报：没做完不是 ready。summary 只写结果、实际跑过的检查和剩下的事。\n\
-         除了 dropped 和 waiting，用户都会收到一条系统通知。"
+         如果收到的指令里有编号（【值守指令 · dir_...】），汇报时必须用 in_reply_to 带上它。\n\
+         如实汇报：没做完不是 ready。summary 只写结果、实际跑过的检查和剩下的事。"
     }
 
     fn parameters(&self) -> Value {
@@ -212,20 +292,53 @@ impl Tool for AssistantReportTool {
             "properties": {
                 "status": {
                     "type": "string",
-                    "enum": ["ready", "needs_user", "blocked", "failed", "dropped", "waiting"]
+                    "enum": ["ready", "needs_decision", "blocked", "failed", "dropped", "waiting"]
                 },
                 "summary": {
                     "type": "string",
                     "description": "一两句话：结果是什么、在哪看、验证过什么、还剩什么"
                 },
+                "evidence": {
+                    "type": "object",
+                    "description": "ready 时必填其一：checks / changes / note。汇报里的声明不算证据，实际跑过的才算",
+                    "properties": {
+                        "checks": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "cmd": { "type": "string", "description": "跑过的命令" },
+                                    "ok": { "type": "boolean", "description": "是否成功" },
+                                    "exit": { "type": "integer", "description": "退出码" },
+                                    "tail": { "type": "string", "description": "输出最后几行" }
+                                },
+                                "required": ["cmd", "ok"]
+                            }
+                        },
+                        "changes": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "改动的文件"
+                        },
+                        "note": { "type": "string", "description": "没有命令可跑时，一句可核对的说明" }
+                    }
+                },
+                "in_reply_to": {
+                    "type": "string",
+                    "description": "回应哪一条值守指令（dir_...）。有未回执的指令时必须带"
+                },
+                "topic": {
+                    "type": "string",
+                    "description": "needs_decision 时可选：话题键，用于识别「同一个问题反复问」"
+                },
                 "question": {
                     "type": "string",
-                    "description": "needs_user 时必填：要用户回答的那一个问题"
+                    "description": "needs_decision 时必填：要回答的那一个问题"
                 },
                 "options": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "needs_user 时可选：2 到 4 个候选答案，每个一句话、自成一体（如「用 A：改接口，兼容旧调用」）。用户点哪个就原样送回给你；用户也可以不选、自己写"
+                    "description": "needs_decision 时可选：2 到 4 个候选答案，每个一句话、自成一体"
                 },
                 "wait_for": {
                     "type": "string",
@@ -260,10 +373,19 @@ impl Tool for AssistantReportTool {
             question,
             options,
             wait,
+            evidence,
+            in_reply_to,
+            topic,
         } = match parse(&args) {
             Ok(v) => v,
             Err(e) => return ToolResult::err(format!("assistant_report: {e}")),
         };
+        if status == TicketStatus::Verifying && !evidence.sufficient() {
+            return ToolResult::err(
+                "assistant_report: status = ready 必须带 evidence —— 实际跑过的检查（checks）、\
+                 改动的文件（changes），或一句可核对的说明（note）。只有一句结论不算完成。",
+            );
+        }
         let id = self.ticket_id.clone();
         // 探测命令先跑一次建基线：命令写错现在就能知道，而不是等 30 秒后在后台悄悄失败。
         // 要在拿锁之前跑（跑命令是异步的，`with` 里不能 await）。
@@ -308,11 +430,35 @@ impl Tool for AssistantReportTool {
             if t.status == TicketStatus::Stopped {
                 return Err("这张工单已经被用户叫停，不用再汇报".to_string());
             }
+            // 有未回执的指令时必须对上号：值守靠它知道「照办没有、结果如何」。
+            if let Some(open) = t.open_directive.clone() {
+                match in_reply_to.as_deref() {
+                    Some(r) if r == open => {
+                        t.open_directive = None;
+                    }
+                    Some(r) => {
+                        return Err(format!(
+                            "in_reply_to `{r}` 不是这张工单未回执的指令（当前是 {open}）"
+                        ));
+                    }
+                    None => {
+                        return Err(format!(
+                            "这张工单还有未回执的值守指令 {open}，汇报时用 in_reply_to 带上它"
+                        ));
+                    }
+                }
+            }
             t.status = status;
             t.summary = Some(summary.clone());
             t.question = question.clone();
             t.options = options.clone();
             t.wait = wait;
+            if status == TicketStatus::Verifying || evidence.sufficient() {
+                t.evidence = Some(evidence.clone());
+            }
+            if status == TicketStatus::NeedsDecision {
+                t.judgement.last_topic = topic.clone();
+            }
             t.updated_at = now_ms();
             Ok((t.label(), t.wait.clone()))
         });
@@ -397,21 +543,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn needs_user_requires_a_question() {
-        assert!(parse(&json!({"status": "needs_user", "summary": "x"})).is_err());
+    fn needs_decision_requires_a_question() {
+        assert!(parse(&json!({"status": "needs_decision", "summary": "x"})).is_err());
+        let r = parse(
+            &json!({"status": "needs_decision", "summary": "x", "question": "用 A 还是 B？"}),
+        )
+        .unwrap();
+        assert_eq!(r.status, TicketStatus::NeedsDecision);
+        assert_eq!(r.question.as_deref(), Some("用 A 还是 B？"));
+        assert!(r.options.is_empty());
+        // 旧名字仍然收下，但落到同一档 —— 工单够不到人。
         let r =
             parse(&json!({"status": "needs_user", "summary": "x", "question": "用 A 还是 B？"}))
                 .unwrap();
-        assert_eq!(r.status, TicketStatus::NeedsUser);
-        assert_eq!(r.question.as_deref(), Some("用 A 还是 B？"));
-        assert!(r.options.is_empty());
+        assert_eq!(r.status, TicketStatus::NeedsDecision);
     }
 
     #[test]
-    fn options_are_two_to_four_and_only_with_needs_user() {
+    fn options_are_two_to_four_and_only_with_needs_decision() {
         let ask = |opts: Value| {
             parse(
-                &json!({"status": "needs_user", "summary": "x", "question": "q", "options": opts}),
+                &json!({"status": "needs_decision", "summary": "x", "question": "q", "options": opts}),
             )
         };
         let r = ask(json!(["用 A", " 用 B ", "用 A", ""])).unwrap();
@@ -601,20 +753,33 @@ mod tests {
         let tool = AssistantReportTool::new(store.clone(), id.clone());
 
         let r = tool
-            .execute(json!({"status": "ready", "summary": "改好了"}))
+            .execute(json!({
+                "status": "ready",
+                "summary": "改好了",
+                "evidence": {"checks": [{"cmd": "cargo test", "ok": true, "tail": "ok"}]}
+            }))
             .await;
         assert!(r.ok, "{}", r.content);
         store.read(|s| {
             let t = s.ticket(&id).unwrap();
-            assert_eq!(t.status, TicketStatus::Ready);
+            assert_eq!(
+                t.status,
+                TicketStatus::Verifying,
+                "先核对证据，不直接算完成"
+            );
             assert_eq!(t.summary.as_deref(), Some("改好了"));
+            assert!(t.evidence.as_ref().is_some_and(|e| e.sufficient()));
         });
 
         store
             .with(|s| s.ticket_mut(&id).unwrap().status = TicketStatus::Stopped)
             .unwrap();
         let r = tool
-            .execute(json!({"status": "ready", "summary": "x"}))
+            .execute(json!({
+                "status": "ready",
+                "summary": "x",
+                "evidence": {"note": "查过了"}
+            }))
             .await;
         assert!(!r.ok);
     }

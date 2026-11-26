@@ -91,6 +91,7 @@ import {
 import { toastError, toastOk } from "../../lib/toast";
 import { useStore } from "../../store";
 import { PageIntro } from "../settings/AsyncBody";
+import { SuperviseSection } from "./SuperviseSection";
 
 // ---------------------------------------------------------------------------
 // 词表
@@ -187,6 +188,8 @@ export function AssistantPage() {
           hasSources={a.sources.length > 0}
           hasRules={a.settings.rules.some((r) => r.enabled)}
         />
+
+        <SuperviseSection a={a} />
 
         {!nothingWaits && (
           <Section title="等你处理">

@@ -202,6 +202,11 @@ pub fn assistant_path() -> PathBuf {
     app_home().join("assistant.json")
 }
 
+/// 常驻助理的决策台账（追加写的 JSONL）。见 `assistant/ledger.rs`。
+pub fn assistant_ledger_path() -> PathBuf {
+    app_home().join("ledger.jsonl")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

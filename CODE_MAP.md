@@ -107,11 +107,18 @@ carter / llm_adapt_core     底层的 agent 循环、工具、会话、协议编
 | `team/store.rs` / `model.rs` / `validate.rs` | 一实体一文件、数据模型、校验器 |
 | `team/git.rs` / `events.rs` / `inbox.rs` | git 通道、事件流、收件箱 |
 | `team/skills.rs` | 写进项目的内置技能（carter-team / goal / task / board） |
-| `assistant/` | 常驻助理：观察源 → 评估 → 开工 → 汇报 |
+| `assistant/` | 常驻助理：观察源 → 评估 → 开工 → 值守 → 汇报 |
 | `assistant/runtime.rs` / `eval.rs` / `memory.rs` | 轮询主循环、事件评估、长期记忆 |
+| `assistant/charter.rs` | 授权书：动作类别、风险分级、子工单收窄 |
+| `assistant/ledger.rs` | 决策台账（`ledger.jsonl`，追加写；不作为状态源） |
+| `assistant/escalation.rs` | 请示：四段式、期限、答复状态机 |
+| `assistant/supervise.rs` | 值守轮：事件批次、判断、升级人 |
+| `assistant/verify.rs` | `ready` 的证据核对：检查、git 改动、返工 |
+| `assistant/metrics.rs` | 值守指标（从台账聚合） |
 | `assistant/wait.rs` | 「等回复」：工单声明在等什么，新行先对等待名单、命中直接唤醒，不经评估；探测命令（工单自己给的拉对方后续的命令）也在这里跑 |
 | `assistant/trigger.rs` | 触发命令：一条长驻命令，吐一行就让来源立刻查一次（看护进程、退避重启、状态） |
-| `tools/assistant_*.rs` | 助理对话里的工单、配置、汇报工具 |
+| `tools/assistant_*.rs` | 助理对话里的工单、配置、汇报工具；`assistant_decide.rs` 是值守专用的查看 / 验证 / 判断 / 请示 / 收尾 |
+| `tools/guard.rs` | 外部动作识别（推送、发消息、删除、加依赖……），写台账并叫醒值守 |
 
 ### 其它
 

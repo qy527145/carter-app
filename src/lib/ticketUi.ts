@@ -13,9 +13,12 @@ import type { TicketStatus } from "./api";
 export const TICKET_STATUS_LABEL: Record<TicketStatus, string> = {
   queued: "排队中",
   working: "进行中",
+  verifying: "验证中",
+  rework: "需补证据",
   ready: "待查看",
   blocked: "受阻",
   failed: "失败",
+  needs_decision: "待值守判断",
   needs_user: "等你拍板",
   unreported: "跑完未汇报",
   waiting: "等回复",
@@ -29,9 +32,12 @@ export type TicketTone = "blue" | "green" | "orange" | "violet" | "pink";
 export const TICKET_STATUS_TONE: Record<TicketStatus, TicketTone | undefined> = {
   queued: undefined,
   working: "blue",
+  verifying: "blue",
+  rework: "orange",
   ready: "green",
   blocked: "orange",
   failed: "pink",
+  needs_decision: "violet",
   needs_user: "violet",
   unreported: "orange",
   waiting: undefined,
@@ -50,7 +56,14 @@ export const TICKET_NEEDS_PERSON: TicketStatus[] = [
 ];
 
 /** 还没收尾的（排队中 / 进行中 / 等回复）。等回复的停着是在等对方，不是等用户，算进行中。 */
-export const TICKET_ACTIVE: TicketStatus[] = ["queued", "working", "waiting"];
+export const TICKET_ACTIVE: TicketStatus[] = [
+  "queued",
+  "working",
+  "verifying",
+  "rework",
+  "needs_decision",
+  "waiting",
+];
 
 /** 侧栏与对话头部那枚标记上的一句话。 */
 export function ticketMarkTitle(status: TicketStatus): string {

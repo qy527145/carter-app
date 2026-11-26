@@ -105,8 +105,30 @@ pub struct Memory {
     /// 这条由谁守。见 [`Audience`]。
     #[serde(default)]
     pub audience: Audience,
+    /// 属于哪个项目。`None` = 全局（所有项目都看得到）。
+    ///
+    /// 项目记忆只在该项目的工单/值守里注入，避免 A 项目的规矩污染 B 项目。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    /// 置信度 0–100。用户亲口说的 100，已验证的结果 80，值守推断最多 60。
+    #[serde(default = "full")]
+    pub confidence: u8,
+    /// 依据：台账 id / 工单号。没有依据的推断不能当授权用。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<String>,
     pub created_at: u64,
     pub updated_at: u64,
+}
+
+fn full() -> u8 {
+    100
+}
+
+impl Memory {
+    /// 是否适用于某个项目。全局记忆永远适用。
+    pub fn applies_to(&self, project: &str) -> bool {
+        self.project.as_deref().is_none_or(|p| p == project)
+    }
 }
 
 /// 一期对话的纪要。原始消息在 `episodes/<number>.json`。
@@ -367,6 +389,9 @@ pub fn apply_ops(memories: &mut Vec<Memory>, ops: &[MemoryOp], user: &[String], 
                     text: text.to_string(),
                     source: format!("{} · {}", day_of(now), clip(source, 120)),
                     audience,
+                    project: None,
+                    confidence: 100,
+                    evidence: Vec::new(),
                     created_at: now,
                     updated_at: now,
                 });
@@ -771,6 +796,9 @@ mod tests {
             text: "用户希望回答简短".into(),
             source: "x".into(),
             audience: Audience::Assistant,
+            project: None,
+            confidence: 100,
+            evidence: Vec::new(),
             created_at: 0,
             updated_at: 0,
         }];

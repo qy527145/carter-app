@@ -76,6 +76,48 @@ pub(crate) async fn assistant_ticket_action(
     assistant::ticket_action(shell.inner(), &ticket_id, action).await
 }
 
+/// 用户拍板一条请示。`choice` 是选项 id；也可以只给一句自由回答。
+#[tauri::command]
+pub(crate) async fn answer_assistant_escalation(
+    shell: State<'_, Arc<AppShell>>,
+    id: String,
+    choice: Option<String>,
+    text: Option<String>,
+) -> Result<(), String> {
+    assistant::answer_escalation(shell.inner(), &id, choice, text).await
+}
+
+/// 新增或修改一份授权书。不可逆动作不能进默认授权；用户授予时必须带期限。
+#[tauri::command]
+pub(crate) fn save_assistant_charter(
+    shell: State<'_, Arc<AppShell>>,
+    charter: carter_app_core::assistant::charter::Charter,
+) -> Result<carter_app_core::assistant::charter::Charter, String> {
+    assistant::save_charter(shell.inner(), charter)
+}
+
+#[tauri::command]
+pub(crate) fn delete_assistant_charter(
+    shell: State<'_, Arc<AppShell>>,
+    id: String,
+) -> Result<(), String> {
+    assistant::delete_charter(shell.inner(), &id)
+}
+
+/// 决策台账。`ticket` 给了就只看那一张；`limit` 默认 100。
+#[tauri::command]
+pub(crate) fn get_assistant_ledger(
+    shell: State<'_, Arc<AppShell>>,
+    ticket: Option<String>,
+    limit: Option<usize>,
+) -> Vec<carter_app_core::assistant::ledger::LedgerEntry> {
+    let limit = limit.unwrap_or(100).clamp(1, 500);
+    match ticket {
+        Some(t) if !t.trim().is_empty() => shell.assistant.ledger.for_ticket(t.trim(), limit),
+        _ => shell.assistant.ledger.tail(limit),
+    }
+}
+
 #[tauri::command]
 pub(crate) async fn approve_assistant_decision(
     shell: State<'_, Arc<AppShell>>,

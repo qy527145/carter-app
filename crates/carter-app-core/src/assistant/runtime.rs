@@ -38,7 +38,10 @@ use std::time::Duration;
 use serde::Serialize;
 
 use super::eval::{self, Outcome};
-use super::{Decision, Mode, Settings, Source, State, Ticket, TicketStatus, Verdict, new_id};
+use super::{
+    Decision, Mode, Settings, Source, State, Ticket, TicketStatus, Verdict, charter, escalation,
+    ledger, new_id, supervise, verify,
+};
 use crate::protocol::{AppEvent, Command, SessionEvent, now_ms};
 use crate::session::{SessionOptions, start_session};
 use crate::shell::{AppShell, SessionHandle};
@@ -173,7 +176,9 @@ pub async fn tick(shell: &Arc<AppShell>) {
     }
     run_probes(shell, now).await;
     expire_waiters(shell, now);
+    expire_escalations_now(shell, now);
     launch_queued(shell).await;
+    run_supervise(shell).await;
 }
 
 /// 探测命令连续失败几次就叫醒工单让它修。
@@ -558,6 +563,9 @@ pub enum Wake {
     Automatic,
     /// 用户（回答、重试、继续）。除了叫停的，都唤醒。
     Person,
+    /// 值守层的指令。与 `Person` 一样能唤醒停着的工单，但优先级低于用户直说 ——
+    /// 文本来着模型，不是人；记录里也要分得清。
+    Supervisor,
 }
 
 /// 往工单里送一段话。按工单此刻的状态决定是排队等送、还是唤醒它。
@@ -586,7 +594,9 @@ pub fn deliver(shell: &Arc<AppShell>, ticket_id: &str, text: String, wake: Wake)
             t.ignored = false;
             t.updated_at = now_ms();
             let wakes = match wake {
-                Wake::Person => !matches!(t.status, TicketStatus::Working | TicketStatus::Queued),
+                Wake::Person | Wake::Supervisor => {
+                    !matches!(t.status, TicketStatus::Working | TicketStatus::Queued)
+                }
                 Wake::Automatic => matches!(
                     t.status,
                     TicketStatus::Ready | TicketStatus::Unreported | TicketStatus::Waiting
@@ -636,6 +646,14 @@ pub async fn ticket_action(
             let text = text.trim();
             if text.is_empty() {
                 return Err("回复不能为空".into());
+            }
+            // 这张工单正开着一条请示：在哪个界面答的都算答复，走同一条路 ——
+            // 否则请示会一直挂着，值守以为没人理。
+            let open = shell
+                .assistant
+                .read(|s| s.open_escalation_of(ticket_id).map(|e| e.id.clone()));
+            if let Some(id) = open {
+                return answer_escalation(shell, &id, None, Some(text.to_string())).await;
             }
             if !deliver(shell, ticket_id, format!("用户回复：{text}"), Wake::Person) {
                 return Err("这张工单已经叫停，不再接收消息".into());
@@ -772,6 +790,9 @@ pub fn save_memory(
             source: format!("{} · 在面板上加的", super::memory::day_of(now)),
             // 面板上新增的默认跟着对话走：用户是「现在跟助理说话」才打开这个面板的。
             audience: audience.unwrap_or_default(),
+            project: None,
+            confidence: 100,
+            evidence: Vec::new(),
             created_at: now,
             updated_at: now,
         }),
@@ -842,6 +863,44 @@ pub fn save_source(shell: &Arc<AppShell>, mut source: Source) -> Result<(), Stri
 pub fn delete_source(shell: &Arc<AppShell>, id: &str) -> Result<(), String> {
     shell.assistant.triggers.stop(id);
     shell.assistant.with(|s| s.sources.retain(|x| x.id != id))?;
+    changed(shell);
+    Ok(())
+}
+
+/// 新增或改一份授权书。校验在 `Charter::validate` 里：不可逆动作不能进默认授权，
+/// 用户授予不可逆动作必须带期限。
+pub fn save_charter(
+    shell: &Arc<AppShell>,
+    mut c: charter::Charter,
+) -> Result<charter::Charter, String> {
+    c.name = c.name.trim().to_string();
+    c.note = c.note.trim().to_string();
+    if c.id.trim().is_empty() {
+        c.id = new_id("ch", now_ms());
+    }
+    c.validate()?;
+    shell
+        .assistant
+        .with(|s| match s.charters.iter_mut().find(|x| x.id == c.id) {
+            Some(slot) => *slot = c.clone(),
+            None => s.charters.push(c.clone()),
+        })?;
+    changed(shell);
+    Ok(c)
+}
+
+/// 删一份授权书。删空了会补回默认那份 —— 没有授权书时值守什么都不敢定，
+/// 整个链路的默认行为反而是最难解释的。
+pub fn delete_charter(shell: &Arc<AppShell>, id: &str) -> Result<(), String> {
+    shell.assistant.with(|s| {
+        let before = s.charters.len();
+        s.charters.retain(|c| c.id != id);
+        if before == s.charters.len() {
+            return Err(format!("没有这份授权书：{id}"));
+        }
+        charter::ensure_default(&mut s.charters);
+        Ok(())
+    })??;
     changed(shell);
     Ok(())
 }
@@ -968,9 +1027,22 @@ pub async fn launch_queued(shell: &Arc<AppShell>) {
             let settings = s.settings.clone();
             // 工单会话读不到助理对话的长期记忆，用户说过的「干活时怎么说话」得由这里带过去。
             let rules = super::memory::worker_segment(&s.memories);
+            // 同一目录 / 仓库的工单不能同时跑：两张单同时改一个文件，谁也不知道谁。
+            let mut claimed: Vec<String> = s
+                .tickets
+                .iter()
+                .filter(|t| t.status.running())
+                .flat_map(|t| t.claims.clone())
+                .collect();
             let mut out = Vec::new();
-            for i in queued.into_iter().take(slots) {
+            for i in queued {
+                if out.len() >= slots {
+                    break;
+                }
                 let t = &mut s.tickets[i];
+                if t.claims.iter().any(|c| claimed.contains(c)) {
+                    continue;
+                }
                 let message = compose(&settings, t, &rules);
                 t.status = TicketStatus::Working;
                 t.runs += 1;
@@ -979,6 +1051,7 @@ pub async fn launch_queued(shell: &Arc<AppShell>) {
                 t.options.clear();
                 t.wait = None;
                 t.updated_at = now_ms();
+                claimed.extend(t.claims.clone());
                 out.push(Launch {
                     ticket: t.clone(),
                     message,
@@ -1141,6 +1214,361 @@ fn compose(settings: &Settings, t: &Ticket, user_rules: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// 值守：请示、验证、值守轮
+// ---------------------------------------------------------------------------
+
+/// 建一条请示并把工单推到「等你拍板」。失败只可能是预算用尽或同一话题已经在等。
+pub fn push_escalation(shell: &Arc<AppShell>, mut e: escalation::Escalation) -> Result<(), String> {
+    e.brief.validate()?;
+    let now = now_ms();
+    let (cfg, count, quiet) = shell.assistant.read(|s| {
+        (
+            s.settings.supervisor.clone(),
+            supervise::escalated_today(&s.escalations, now),
+            supervise::quiet(now, s.settings.supervisor.quiet_hours),
+        )
+    });
+    if count >= cfg.daily_escalations {
+        return Err(format!(
+            "今天的请示预算用完了（{} 次）。能自决的就自决；不能的写进台账，明天再说。",
+            cfg.daily_escalations
+        ));
+    }
+    if let Some(tid) = e.ticket.clone()
+        && let Some(id) = shell
+            .assistant
+            .read(|s| s.dedupe_escalation(&tid, &e.topic, now, 10 * 60 * 1000))
+    {
+        return Err(format!("同一话题的请示还开着（{id}），不要重复问"));
+    }
+    e.created_at = now;
+    e.expires_at = now + (e.expires_at.saturating_sub(e.created_at)).max(escalation::MIN_TTL_MS);
+    let id = shell.assistant.with(|s| {
+        let id = s.push_escalation(e.clone());
+        if let Some(tid) = &e.ticket
+            && let Some(t) = s.ticket_mut(tid)
+            && !t.status.ended()
+        {
+            t.status = TicketStatus::NeedsUser;
+            t.question = Some(e.brief.proposal.clone());
+            t.options = e
+                .brief
+                .options
+                .iter()
+                .map(|o| format!("{}：{}", o.id, o.label))
+                .collect();
+            t.judgement.escalation = Some(id.clone());
+            t.updated_at = now;
+        }
+        id
+    })?;
+    shell.assistant.ledger.append(
+        &ledger::LedgerEntry::new(ledger::LedgerKind::Escalation, ledger::Actor::Supervisor)
+            .ticket(e.ticket.clone().unwrap_or_default())
+            .data(&e),
+    );
+    let _ = super::chat::push_escalation(shell, &e);
+    if !quiet {
+        shell.emit(AppEvent::AssistantAlert {
+            ticket_id: e.ticket.clone().unwrap_or_default(),
+            title: format!("等你拍板 · {}", e.ticket_label),
+            body: clip(&e.brief.proposal, 160),
+        });
+    }
+    let _ = id;
+    changed(shell);
+    Ok(())
+}
+
+/// 用户答复一条请示：落状态、写台账、把批示送回工单。
+pub async fn answer_escalation(
+    shell: &Arc<AppShell>,
+    id: &str,
+    choice: Option<String>,
+    text: Option<String>,
+) -> Result<(), String> {
+    let now = now_ms();
+    let answer = escalation::Answer {
+        choice: choice.clone().filter(|s| !s.trim().is_empty()),
+        text: text.clone().filter(|s| !s.trim().is_empty()),
+        at: now,
+    };
+    let esc = shell
+        .assistant
+        .with(|s| -> Result<escalation::Escalation, String> {
+            // 工单已经结束 / 被叫停：答复不再有意义，也不该被它复活。
+            if let Some(status) = s
+                .escalation(id)
+                .and_then(|e| e.ticket.clone())
+                .and_then(|tid| s.ticket(&tid).map(|t| t.status))
+                && (status.ended() || status == TicketStatus::Stopped)
+            {
+                return Err(format!(
+                    "这张工单已经{}，不再接受答复",
+                    if status == TicketStatus::Stopped {
+                        "被叫停"
+                    } else {
+                        "结束"
+                    }
+                ));
+            }
+            let e = s
+                .escalation_mut(id)
+                .ok_or_else(|| format!("没有这条请示：{id}"))?;
+            e.answer(answer.clone())?;
+            let esc = e.clone();
+            if let Some(tid) = &esc.ticket
+                && let Some(t) = s.ticket_mut(tid)
+            {
+                t.status = TicketStatus::Queued;
+                t.question = None;
+                t.options.clear();
+                t.judgement.escalation = None;
+                // 用户选了哪条，就把那条里写明的动作逐次授予这张工单 —— 只到下一轮结束。
+                if let Some(cid) = esc.answer.as_ref().and_then(|a| a.choice.as_ref())
+                    && let Some(ch) = esc.brief.options.iter().find(|o| &o.id == cid)
+                {
+                    t.authorized.extend(ch.actions.iter().copied());
+                    t.authorized.sort_by_key(|a| a.id());
+                    t.authorized.dedup();
+                }
+                t.updated_at = now;
+            }
+            Ok(esc)
+        })??;
+    let rendered = answer.render(&esc);
+    shell.assistant.ledger.append(
+        &ledger::LedgerEntry::new(ledger::LedgerKind::Answer, ledger::Actor::User)
+            .ticket(esc.ticket.clone().unwrap_or_default())
+            .auth(ledger::AuthRef::UserAnswer(id.to_string()))
+            .data(serde_json::json!({
+                "choice": choice,
+                "text": text,
+                "escalation": id,
+                "brief": esc.brief.proposal,
+            })),
+    );
+    if let Some(tid) = &esc.ticket {
+        let directive = new_id("dir", now);
+        let msg = format!(
+            "【用户批示】{rendered}\n\n（对应请示 {id}。按这个执行；有冲突先说明，不要自行改。)"
+        );
+        if deliver(shell, tid, msg, Wake::Person) {
+            let _ = shell.assistant.with(|s| {
+                if let Some(t) = s.ticket_mut(tid) {
+                    t.open_directive = Some(directive.clone());
+                }
+            });
+        }
+        let _ = super::chat::record(
+            shell,
+            super::chat::answered_text(&esc.ticket_label, &rendered),
+            esc.ticket.clone().and_then(|tid| {
+                shell
+                    .assistant
+                    .read(|s| s.ticket(&tid).map(super::chat::tag))
+            }),
+        );
+    }
+    changed(shell);
+    launch_queued(shell).await;
+    Ok(())
+}
+
+/// 到期的请示：标过期、记台账。`Hold` 不会自动执行任何动作。
+fn expire_escalations_now(shell: &Arc<AppShell>, now: u64) {
+    // 没有到期的就别写盘：这个函数每 10 秒跑一次。
+    let due = shell
+        .assistant
+        .read(|s| s.escalations.iter().any(|e| e.expired(now)));
+    if !due {
+        return;
+    }
+    let fired = shell
+        .assistant
+        .with(|s| s.expire_escalations(now))
+        .unwrap_or_default();
+    for e in fired {
+        shell.assistant.ledger.append(
+            &ledger::LedgerEntry::new(ledger::LedgerKind::Interrupt, ledger::Actor::System)
+                .ticket(e.ticket.clone().unwrap_or_default())
+                .data(serde_json::json!({
+                    "reason": "escalation_expired",
+                    "escalation": e.id,
+                    "on_expiry": e.on_expiry,
+                })),
+        );
+        let _ = super::chat::record(
+            shell,
+            super::chat::noted_text(
+                "请示已过期",
+                &e.ticket_label,
+                "没等到答复，已经搁置。工单还停在「等你拍板」。",
+            ),
+            e.ticket.clone().and_then(|tid| {
+                shell
+                    .assistant
+                    .read(|s| s.ticket(&tid).map(super::chat::tag))
+            }),
+        );
+    }
+    changed(shell);
+}
+
+/// `ready` 的核对。证据不足就降成 `Rework`，把缺什么退回去。
+async fn finish_verification(shell: &Arc<AppShell>, ticket_id: &str) {
+    let Some((cwd, mut ev, checks_cfg, level, label)) = shell.assistant.read(|s| {
+        let t = s.ticket(ticket_id)?;
+        let ev = t.evidence.clone().unwrap_or_default();
+        let checks = s
+            .charter_for(t)
+            .map(|c| c.checks.clone())
+            .unwrap_or_default();
+        Some((
+            t.cwd.clone(),
+            ev,
+            checks,
+            s.settings.supervisor.verify,
+            t.label(),
+        ))
+    }) else {
+        return;
+    };
+    if level == verify::Level::Rerun {
+        ev.checks.extend(verify::rerun(&cwd, &checks_cfg).await);
+    }
+    let ev = verify::collect(&cwd, ev.checks, ev.note, level).await;
+    let failed = ev.checks.iter().any(|c| !c.ok);
+    let ok = ev.sufficient() && !failed;
+    let now = now_ms();
+    let _ = shell.assistant.with(|s| {
+        if let Some(t) = s.ticket_mut(ticket_id) {
+            t.evidence = Some(ev.clone());
+            t.status = if ok {
+                TicketStatus::Ready
+            } else {
+                TicketStatus::Rework
+            };
+            t.updated_at = now;
+        }
+    });
+    shell.assistant.ledger.append(
+        &ledger::LedgerEntry::new(ledger::LedgerKind::Verify, ledger::Actor::System)
+            .ticket(ticket_id.to_string())
+            .data(serde_json::json!({
+                "ok": ok,
+                "evidence": ev,
+            })),
+    );
+    if !ok {
+        let missing = if failed {
+            ev.summary()
+        } else {
+            "没有跑过检查、没有改动记录，也没给出可核对的说明".to_string()
+        };
+        tracing::info!(ticket = %ticket_id, %missing, "助理：汇报缺少证据，退回返工");
+        deliver(
+            shell,
+            ticket_id,
+            verify::rework_text(&missing),
+            Wake::Supervisor,
+        );
+    } else {
+        tracing::info!(ticket = %ticket_id, "助理：验证通过");
+        let _ = label;
+    }
+    changed(shell);
+}
+
+fn requeue_batch(shell: &Arc<AppShell>, batch: Vec<supervise::Event>) {
+    let _ = shell.assistant.with(|s| {
+        for e in batch {
+            s.pending_supervision.push(e);
+        }
+    });
+}
+
+fn ensure_supervisor(shell: &Arc<AppShell>) -> Result<(), String> {
+    if shell.session(supervise::SESSION_ID).is_some() {
+        return Ok(());
+    }
+    let model =
+        crate::scene_models::standalone_ref(shell, crate::scene_models::Scene::AssistantChat);
+    let mut opts = supervise::options(model);
+    if let Some(dir) = super::chat::resume_cwd(shell) {
+        opts.cwd = dir;
+    }
+    start_session(shell.clone(), opts)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// 到点就跑一轮值守。失败时把事件放回队列，不丢。
+pub async fn run_supervise(shell: &Arc<AppShell>) {
+    if shell.assistant.is_supervising() {
+        return;
+    }
+    let Some(n) = shell.assistant.read(|s| supervise::due(s, now_ms(), false)) else {
+        return;
+    };
+    if !shell.assistant.claim_supervisor() {
+        return;
+    }
+    let batch = match shell.assistant.with(|s| {
+        let n = n.min(s.pending_supervision.len());
+        s.pending_supervision
+            .drain(..n)
+            .collect::<Vec<supervise::Event>>()
+    }) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(error = %e, "助理：取值守事件写盘失败");
+            shell.assistant.release_supervisor();
+            return;
+        }
+    };
+    if batch.is_empty() {
+        shell.assistant.release_supervisor();
+        return;
+    }
+    *shell.assistant.batch.lock().unwrap() = batch.clone();
+    if let Err(e) = ensure_supervisor(shell) {
+        tracing::warn!(error = %e, "助理：开不出值守会话，事件放回队列");
+        requeue_batch(shell, batch);
+        shell.assistant.batch.lock().unwrap().clear();
+        shell.assistant.release_supervisor();
+        return;
+    }
+    let snap = shell.assistant.snapshot();
+    let text = supervise::digest(&snap, &batch);
+    if !shell.send(
+        supervise::SESSION_ID,
+        Command::SendPrompt {
+            text,
+            id: None,
+            interject: false,
+        },
+    ) {
+        requeue_batch(shell, batch);
+        shell.assistant.batch.lock().unwrap().clear();
+        shell.assistant.release_supervisor();
+    }
+}
+
+async fn on_supervisor_idle(shell: &Arc<AppShell>) {
+    let batch = std::mem::take(&mut *shell.assistant.batch.lock().unwrap());
+    if batch.is_empty() {
+        shell.assistant.release_supervisor();
+        return;
+    }
+    supervise::settle(shell, &batch, true);
+    shell.assistant.release_supervisor();
+    changed(shell);
+    // 队列里还有积压就接着跑下一批（`due` 会再检查节奏）。
+    run_supervise(shell).await;
+}
+
+// ---------------------------------------------------------------------------
 // 收尾
 // ---------------------------------------------------------------------------
 
@@ -1159,6 +1587,12 @@ async fn watch(shell: Arc<AppShell>) {
                     shell.emit(AppEvent::AssistantTurnEnded { session_id });
                     changed(&shell);
                 }
+                SessionEvent::Idle if session_id == supervise::SESSION_ID => {
+                    on_supervisor_idle(&shell).await;
+                }
+                SessionEvent::ToolStarted { name, args, .. } => {
+                    on_tool_started(&shell, &session_id, &name, &args);
+                }
                 SessionEvent::Idle => on_idle(&shell, &session_id).await,
                 _ => {}
             },
@@ -1168,6 +1602,61 @@ async fn watch(shell: Arc<AppShell>) {
             }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
         }
+    }
+}
+
+/// 工单执行了一条可能出仓库的命令：写台账；没有逐次授权就叫醒值守。
+///
+/// 这是「拦截 + 事后检测」里的后者：`bash` 能被脚本绕过，但常见的外部动作能认出来。
+/// 认出来就留下证据，并且不让它悄无声息地发生。
+fn on_tool_started(shell: &Arc<AppShell>, session_id: &str, name: &str, args: &serde_json::Value) {
+    let Some(t) = shell
+        .assistant
+        .read(|s| s.ticket_by_session(session_id).cloned())
+    else {
+        return;
+    };
+    if t.status.ended() {
+        return;
+    }
+    let classes: Vec<charter::ActionClass> = crate::tools::guard::classify_tool(name, args)
+        .into_iter()
+        .filter(|a| a.risk() >= charter::Risk::Costly)
+        .collect();
+    if classes.is_empty() {
+        return;
+    }
+    let authorized = classes.iter().all(|a| t.authorized.contains(a));
+    let command = args
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let mut entry = ledger::LedgerEntry::new(ledger::LedgerKind::Action, ledger::Actor::Worker)
+        .ticket(t.id.clone())
+        .session(session_id.to_string())
+        .data(serde_json::json!({
+            "tool": name,
+            "command": clip(command, 400),
+            "actions": classes.iter().map(|a| a.id()).collect::<Vec<_>>(),
+            "authorized": authorized,
+        }));
+    if authorized {
+        entry = entry.auth(ledger::AuthRef::UserDirective);
+    }
+    shell.assistant.ledger.append(&entry);
+    if !authorized {
+        tracing::warn!(
+            ticket = %t.id,
+            actions = ?classes,
+            "助理：工单执行了未授权的对外动作"
+        );
+        let _ = shell.assistant.with(|s| {
+            s.enqueue_supervision(supervise::Event::new(
+                &t.id,
+                supervise::Kind::UnauthorizedAction,
+            ))
+        });
+        changed(shell);
     }
 }
 
@@ -1221,6 +1710,10 @@ async fn on_idle(shell: &Arc<AppShell>, session_id: &str) {
         .assistant
         .read(|s| s.ticket(&ticket.id).map(|t| t.status))
         .unwrap_or(ticket.status);
+    // 汇报了 `ready`：先核对证据。不足就退回补证据，不当作完成。
+    if status == TicketStatus::Verifying {
+        finish_verification(shell, &ticket.id).await;
+    }
     let running = shell
         .session(session_id)
         .map_or(0, |h| h.background.running_count());
@@ -1238,6 +1731,10 @@ async fn on_idle(shell: &Arc<AppShell>, session_id: &str) {
         .assistant
         .with(|s| {
             let t = s.ticket_mut(&ticket.id)?;
+            t.used.turns = t.used.turns.saturating_add(1);
+            t.used.minutes = (now_ms().saturating_sub(t.created_at) / 60_000) as u32;
+            // 逐次授权只活一轮：用过就收，下一次外部动作重新请示。
+            t.authorized.clear();
             if t.status == TicketStatus::Working {
                 match &error {
                     Some(e) => {
@@ -1249,6 +1746,20 @@ async fn on_idle(shell: &Arc<AppShell>, session_id: &str) {
                         t.summary = Some(UNREPORTED.into());
                     }
                 }
+                t.updated_at = now_ms();
+            }
+            // 预算硬停：轮数或时间用尽就不再往下跑。不靠提示词自律。
+            let max_turns = t.budget.max_turns.max(1);
+            let max_minutes = t.budget.max_minutes.max(1);
+            if !t.status.ended()
+                && (t.used.turns >= max_turns || t.used.minutes >= max_minutes)
+                && !matches!(t.status, TicketStatus::Ready | TicketStatus::NeedsUser)
+            {
+                t.status = TicketStatus::Blocked;
+                t.summary = Some(format!(
+                    "预算用尽（{} 轮 / {} 分钟，上限 {} 轮 / {} 分钟），先停下等安排。",
+                    t.used.turns, t.used.minutes, max_turns, max_minutes
+                ));
                 t.updated_at = now_ms();
             }
             Some(t.clone())
@@ -1274,8 +1785,27 @@ async fn on_idle(shell: &Arc<AppShell>, session_id: &str) {
             // 工单会话的标题在开会话时就定好了（就是工单标题，见 `start`），
             // 这里不再改名：改成一个带编号、带「助理」前缀的名字，会让侧栏里那条
             // 对话与面板上这张工单看起来是两件事，而用户要的是同一条对话。
-            if t.status.needs_person() {
+            let mode = shell.assistant.read(|s| s.settings.supervisor.mode);
+            if t.status.needs_supervisor() && mode != super::SuperviseMode::Off {
+                // 先给值守，不打扰人。值守能自决就自决，不能才发请示。
+                if let Some(ev) = supervise::Event::for_status(&t.id, t.status) {
+                    let _ = shell.assistant.with(|s| s.enqueue_supervision(ev));
+                }
+                changed(shell);
+            } else if t.status.needs_person() {
                 alert(shell, t);
+            } else if t.status == TicketStatus::NeedsDecision {
+                // 值守关着：退回旧行为，让人来答。
+                let t = shell.assistant.with(|s| {
+                    let x = s.ticket_mut(&t.id)?;
+                    if x.status == TicketStatus::NeedsDecision {
+                        x.status = TicketStatus::NeedsUser;
+                    }
+                    Some(x.clone())
+                });
+                if let Ok(Some(t)) = t {
+                    alert(shell, &t);
+                }
             } else if t.status == TicketStatus::Waiting {
                 // 不出声（不是要人处理的），但助理对话里留一笔：用户问「那件事怎么样了」
                 // 时它答得上来「回了，在等对方」。
@@ -1342,7 +1872,9 @@ fn requeue_interrupted(shell: &Arc<AppShell>, ticket_id: &str) {
 /// 否则那几条命令会没人管地一直跑着。`error` 也照旧判失败 —— 错误在 `on_idle`
 /// 已经被 `take_error` 取走，拖到下一轮就丢了，工单会显示成莫名其妙的「未汇报」。
 fn should_settle(status: TicketStatus, error: Option<&str>, running: usize) -> bool {
-    error.is_some() || status != TicketStatus::Working || running == 0
+    error.is_some()
+        || !matches!(status, TicketStatus::Working | TicketStatus::Verifying)
+        || running == 0
 }
 
 // ---------------------------------------------------------------------------
@@ -1411,6 +1943,8 @@ pub struct AssistantView {
     /// 助理对话的卡片上要能「跳到那一轮」；事件不回放，这个映射随面板状态一起带回，
     /// 卡片才不用自己把整段历史翻一遍（它在别的会话里，界面手里没有）。
     pub report_turns: std::collections::HashMap<String, u32>,
+    /// 值守指标（今天的计数与自决率）。
+    pub metrics: crate::assistant::metrics::Metrics,
 }
 
 pub fn view(shell: &AppShell) -> AssistantView {
@@ -1446,6 +1980,11 @@ pub fn view(shell: &AppShell) -> AssistantView {
         .filter(|s| Source::is_awaited(&state, &s.id))
         .map(|s| s.id.clone())
         .collect();
+    let metrics = crate::assistant::metrics::compute(
+        &state,
+        &shell.assistant.ledger,
+        crate::protocol::now_ms(),
+    );
     AssistantView {
         state,
         busy,
@@ -1453,6 +1992,7 @@ pub fn view(shell: &AppShell) -> AssistantView {
         triggers,
         urgent_sources,
         report_turns,
+        metrics,
     }
 }
 
@@ -2323,5 +2863,124 @@ mod live {
         assert_eq!(now_turns, 1, "新的一期只剩这一句");
         let archived = super::super::memory::load_archive(&super::super::memory::archive_dir(), 1);
         assert!(archived.len() > 4, "原话进了往期存档");
+    }
+
+    /// 答复请示：选中项里写明的动作变成工单的逐次授权，批示送进 pending。
+    #[tokio::test]
+    async fn answering_an_escalation_grants_actions_and_delivers() {
+        let dir =
+            std::env::temp_dir().join(format!("carter-answer-{}-{}", std::process::id(), now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = super::super::AssistantStore::open(dir.join("assistant.json"));
+        store.with(|s| s.settings.paused = true).unwrap();
+        let shell = Arc::new(
+            Arc::into_inner(AppShell::new(carter::config::Config::default()))
+                .unwrap()
+                .with_assistant(store.clone()),
+        );
+        let id = store
+            .with(|s| {
+                s.open_ticket(
+                    &crate::assistant::tests::source(),
+                    "r",
+                    "修登录",
+                    "x",
+                    vec![],
+                )
+            })
+            .unwrap();
+        let brief = escalation::Brief {
+            situation: "改完要推送".into(),
+            proposal: "推上去".into(),
+            options: vec![
+                escalation::Choice {
+                    id: "a".into(),
+                    label: "推".into(),
+                    consequence: "不可逆".into(),
+                    risky: true,
+                    actions: vec![charter::ActionClass::Push],
+                },
+                escalation::Choice {
+                    id: "b".into(),
+                    label: "先不推".into(),
+                    consequence: String::new(),
+                    risky: false,
+                    actions: Vec::new(),
+                },
+            ],
+            if_silent: "搁置".into(),
+            refs: vec![],
+        };
+        let e = escalation::Escalation::open(
+            "#1 修登录",
+            Some(id.clone()),
+            brief,
+            escalation::DEFAULT_TTL_MS,
+        );
+        push_escalation(&shell, e.clone()).unwrap();
+        assert_eq!(
+            store.read(|s| s.ticket(&id).unwrap().status),
+            TicketStatus::NeedsUser
+        );
+
+        answer_escalation(&shell, &e.id, Some("a".into()), Some("推吧".into()))
+            .await
+            .unwrap();
+        let t = store.read(|s| s.ticket(&id).cloned().unwrap());
+        assert_eq!(t.status, TicketStatus::Queued);
+        assert!(
+            t.authorized.contains(&charter::ActionClass::Push),
+            "逐次授权"
+        );
+        assert!(
+            t.pending.iter().any(|p| p.contains("用户批示")),
+            "批示要送进工单：{:?}",
+            t.pending
+        );
+        let esc = store.read(|s| s.escalation(&e.id).cloned().unwrap());
+        assert_eq!(esc.status, escalation::Status::Answered);
+    }
+
+    /// 每日请示预算：用完之后只能自决或搁置，不能再问人。
+    #[tokio::test]
+    async fn the_daily_escalation_budget_is_enforced() {
+        let dir =
+            std::env::temp_dir().join(format!("carter-budget-{}-{}", std::process::id(), now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = super::super::AssistantStore::open(dir.join("assistant.json"));
+        store
+            .with(|s| s.settings.supervisor.daily_escalations = 1)
+            .unwrap();
+        let shell = Arc::new(
+            Arc::into_inner(AppShell::new(carter::config::Config::default()))
+                .unwrap()
+                .with_assistant(store.clone()),
+        );
+        let brief = || escalation::Brief {
+            situation: "要决定".into(),
+            proposal: "用 A".into(),
+            options: Vec::new(),
+            if_silent: "搁置".into(),
+            refs: Vec::new(),
+        };
+        push_escalation(
+            &shell,
+            escalation::Escalation::open("#1", None, brief(), escalation::DEFAULT_TTL_MS),
+        )
+        .unwrap();
+        let err = push_escalation(
+            &shell,
+            escalation::Escalation::open("#2", None, brief(), escalation::DEFAULT_TTL_MS),
+        )
+        .unwrap_err();
+        assert!(err.contains("预算"), "{err}");
+    }
+
+    /// 验证中即使还有后台命令在跑，也不能收尾 —— 证据可能还没来得及落完。
+    #[test]
+    fn verification_waits_for_background_work() {
+        assert!(!should_settle(TicketStatus::Verifying, None, 2));
+        assert!(should_settle(TicketStatus::Verifying, None, 0));
+        assert!(should_settle(TicketStatus::Ready, None, 3));
     }
 }

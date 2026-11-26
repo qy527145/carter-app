@@ -7,6 +7,27 @@ import type { MessageView } from "./types";
 
 export type AssistantMode = "observe" | "auto";
 
+/** 值守层的工作方式：关 / 只写建议 / 授权内自决。 */
+export type SuperviseMode = "off" | "observe" | "assist";
+export type VerifyLevel = "recorded" | "rerun" | "off";
+
+export type AssistantBudget = {
+  max_turns: number;
+  max_minutes: number;
+  max_judgements: number;
+};
+
+export type SupervisorSettings = {
+  mode: SuperviseMode;
+  batch_ms: number;
+  max_batch: number;
+  daily_escalations: number;
+  quiet_hours: [number, number] | null;
+  verify: VerifyLevel;
+  max_judgements: number;
+  budget: AssistantBudget;
+};
+
 export type AssistantRule = {
   id: string;
   name: string;
@@ -22,6 +43,7 @@ export type AssistantSettings = {
   eval_model: string | null;
   work_model: string | null;
   paused: boolean;
+  supervisor: SupervisorSettings;
 };
 
 export type AssistantSourceState = {
@@ -79,9 +101,12 @@ export type AssistantDecision = {
 export type TicketStatus =
   | "queued"
   | "working"
+  | "verifying"
+  | "rework"
   | "ready"
   | "blocked"
   | "failed"
+  | "needs_decision"
   | "needs_user"
   | "unreported"
   | "waiting"
@@ -113,6 +138,160 @@ export type AssistantTicket = {
   ignored?: boolean;
   /** `waiting` 时在等什么。唤醒后就没有了。 */
   wait?: AssistantWait;
+  /** 用哪份授权书。 */
+  charter?: string | null;
+  /** 验收标准。 */
+  acceptance?: string[];
+  budget?: AssistantBudget;
+  used?: { turns: number; minutes: number; judgements: number };
+  judgement?: {
+    rounds: number;
+    last_at: number;
+    last_topic: string | null;
+    escalation: string | null;
+  };
+  evidence?: AssistantEvidence | null;
+  /** 已发出、尚未被汇报回应的值守指令。 */
+  open_directive?: string | null;
+};
+
+export type AssistantEvidence = {
+  checks: {
+    cmd: string;
+    ok: boolean;
+    exit: number | null;
+    tail: string;
+    at: number;
+  }[];
+  changes: string[];
+  diff_hash?: string | null;
+  note: string;
+  verified: boolean;
+};
+
+/** 可授予 / 可请示的动作类别。与 `assistant/charter.rs` 一一对应。 */
+export type ActionClass =
+  | "edit_code"
+  | "run_checks"
+  | "retry"
+  | "adjust_plan"
+  | "inspect"
+  | "add_dependency"
+  | "change_public_api"
+  | "config_write"
+  | "push"
+  | "open_pr"
+  | "comment_external"
+  | "send_message"
+  | "delete_files"
+  | "spend_money";
+
+export const ACTION_CLASS_LABEL: Record<ActionClass, string> = {
+  edit_code: "改代码",
+  run_checks: "跑检查",
+  retry: "重试",
+  adjust_plan: "调整方案",
+  inspect: "查看",
+  add_dependency: "加依赖",
+  change_public_api: "改公共接口",
+  config_write: "改配置",
+  push: "推送",
+  open_pr: "开 PR",
+  comment_external: "对外评论",
+  send_message: "对外发消息",
+  delete_files: "删除文件",
+  spend_money: "花钱",
+};
+
+/** 不可逆动作：永远不能默认授予。 */
+export const IRREVERSIBLE_ACTIONS: ActionClass[] = [
+  "push",
+  "open_pr",
+  "comment_external",
+  "send_message",
+  "delete_files",
+  "spend_money",
+];
+
+export type CharterScope =
+  | { kind: "global" }
+  | { kind: "project"; value: string }
+  | { kind: "source"; value: string };
+
+export type Charter = {
+  id: string;
+  name: string;
+  scope: CharterScope;
+  may: ActionClass[];
+  must_ask: ActionClass[];
+  checks: string[];
+  notify: "immediate" | "digest" | "silent";
+  granted: "default" | "user";
+  expires_at: number | null;
+  note: string;
+};
+
+export type EscalationChoice = {
+  id: string;
+  label: string;
+  consequence: string;
+  risky: boolean;
+};
+
+export type Escalation = {
+  id: string;
+  ticket: string | null;
+  ticket_label: string;
+  created_at: number;
+  expires_at: number;
+  on_expiry: "hold" | "execute_default";
+  brief: {
+    situation: string;
+    proposal: string;
+    options: EscalationChoice[];
+    if_silent: string;
+    refs: string[];
+  };
+  status: "open" | "answered" | "expired" | "withdrawn" | "superseded";
+  answer?: {
+    choice?: string;
+    text?: string;
+    at: number;
+  } | null;
+  topic: string;
+};
+
+export type LedgerEntry = {
+  id: string;
+  at: number;
+  kind:
+    | "report"
+    | "verify"
+    | "directive"
+    | "escalation"
+    | "answer"
+    | "action"
+    | "outcome"
+    | "interrupt";
+  actor: "worker" | "supervisor" | "user" | "system";
+  ticket?: string;
+  session?: string;
+  in_reply_to?: string;
+  auth?: unknown;
+  data: unknown;
+};
+
+export type AssistantMetrics = {
+  day: string;
+  escalations_today: number;
+  answered_today: number;
+  expired_today: number;
+  directives_today: number;
+  proposed_today: number;
+  verify_fail_today: number;
+  open_escalations: number;
+  open_tickets: number;
+  self_resolved: number | null;
 };
 
 /**
@@ -164,6 +343,10 @@ export type AssistantView = {
   /** 新的在前。 */
   decisions: AssistantDecision[];
   tickets: AssistantTicket[];
+  /** 新的在前。 */
+  escalations?: Escalation[];
+  /** 授权书。至少有一份全局默认。 */
+  charters?: Charter[];
   next_number: number;
   /** 正在检查的观察源 id。 */
   busy: string[];
@@ -175,6 +358,8 @@ export type AssistantView = {
   urgent_sources?: string[];
   /** 每张工单最近一条汇报在助理对话里的轮次号（工单 id → 轮）。卡片上的「去对话」用它。 */
   report_turns?: Record<string, number>;
+  /** 值守指标。 */
+  metrics?: AssistantMetrics;
 };
 
 export type TicketAction =
@@ -234,6 +419,32 @@ export function testAssistantCommand(command: string, cwd: string): Promise<stri
 
 export function assistantTicketAction(ticketId: string, action: TicketAction): Promise<void> {
   return invoke<void>("assistant_ticket_action", { ticketId, action });
+}
+
+/** 拍板一条请示。`choice` 是选项 id；也可以只给一句自由回答。 */
+export function answerAssistantEscalation(
+  id: string,
+  choice: string | null,
+  text: string | null,
+): Promise<void> {
+  return invoke<void>("answer_assistant_escalation", { id, choice, text });
+}
+
+/** 新增或修改一份授权书。 */
+export function saveAssistantCharter(charter: Charter): Promise<Charter> {
+  return invoke<Charter>("save_assistant_charter", { charter });
+}
+
+export function deleteAssistantCharter(id: string): Promise<void> {
+  return invoke<void>("delete_assistant_charter", { id });
+}
+
+/** 决策台账。`ticket` 给了就只看那一张。 */
+export function getAssistantLedger(ticket?: string | null, limit?: number): Promise<LedgerEntry[]> {
+  return invoke<LedgerEntry[]>("get_assistant_ledger", {
+    ticket: ticket ?? null,
+    limit: limit ?? null,
+  });
 }
 
 export function approveAssistantDecision(decisionId: string): Promise<string> {

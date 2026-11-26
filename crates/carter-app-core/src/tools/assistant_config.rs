@@ -142,6 +142,8 @@ impl Tool for AssistantConfigTool {
                  - max_running：同时最多跑几张工单（1~8）。改大之后排队的那几张会立刻开工；\n\
                  - scope：工作约定，每张工单的执行对话都会读到的一段话（做到什么程度停、怎么交付）；\n\
                  - eval_model / work_model：评估用与执行用的模型：`@main`（主模型）、`@fast`（副模型）或具体的 `渠道/显示名`；空 = 场景默认（评估默认副模型，执行默认主模型）。\n\
+                 - supervisor_mode：值守方式。off = 关了；observe = 只写建议、不执行；assist = 授权内自决。\n\
+                   用户明确说「以后这类事你自己定」「不用每件都问我」时才切 assist，并在回复里说清它现在能自己决定什么。\n\
                  只改用户明确要求的那个字段，没提的不要动。"
             }
         }
@@ -195,6 +197,11 @@ impl Tool for AssistantConfigTool {
                         "description": "同时最多跑几张工单（1 ~ 8）。用户说「一次多干几件」「别同时开那么多」时改它"
                     },
                     "scope": { "type": "string", "description": "工作约定：每张工单的执行对话都会读到的一段话" },
+                    "supervisor_mode": {
+                        "type": "string",
+                        "enum": ["off", "observe", "assist"],
+                        "description": "值守方式：off 关闭；observe 只写建议；assist 授权内自决"
+                    },
                     "eval_model": { "type": "string", "description": "评估用的模型：`@main` / `@fast` / `渠道/显示名`；传空字符串 = 默认（副模型）" },
                     "work_model": { "type": "string", "description": "执行工单用的模型：`@main` / `@fast` / `渠道/显示名`；传空字符串 = 默认（主模型）" }
                 }
@@ -339,10 +346,27 @@ impl Tool for AssistantConfigTool {
                 };
                 let eval_model = model_arg("eval_model");
                 let work_model = model_arg("work_model");
-                if max.is_none() && scope.is_none() && eval_model.is_none() && work_model.is_none()
+                let supervisor_mode = match args.get("supervisor_mode").and_then(Value::as_str) {
+                    None => None,
+                    Some(s) => match s.trim() {
+                        "off" => Some(crate::assistant::SuperviseMode::Off),
+                        "observe" => Some(crate::assistant::SuperviseMode::Observe),
+                        "assist" => Some(crate::assistant::SuperviseMode::Assist),
+                        other => {
+                            return ToolResult::err(format!(
+                                "assistant_settings: supervisor_mode 只能是 off / observe / assist，收到 `{other}`"
+                            ));
+                        }
+                    },
+                };
+                if max.is_none()
+                    && scope.is_none()
+                    && eval_model.is_none()
+                    && work_model.is_none()
+                    && supervisor_mode.is_none()
                 {
                     return ToolResult::err(
-                        "assistant_settings: 至少给一个要改的字段（max_running / scope / eval_model / work_model）",
+                        "assistant_settings: 至少给一个要改的字段（max_running / scope / eval_model / work_model / supervisor_mode）",
                     );
                 }
                 if let Some(n) = max
@@ -362,6 +386,9 @@ impl Tool for AssistantConfigTool {
                     }
                     if let Some(v) = work_model {
                         s.settings.work_model = v;
+                    }
+                    if let Some(v) = supervisor_mode {
+                        s.settings.supervisor.mode = v;
                     }
                 }) {
                     Ok(()) => {

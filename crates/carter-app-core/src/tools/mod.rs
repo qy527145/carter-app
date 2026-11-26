@@ -44,10 +44,12 @@
 //! （[`filter_tools`]）。界面上要写清楚：这一份 carter CLI 读不到。
 
 pub mod assistant_config;
+pub mod assistant_decide;
 pub mod assistant_report;
 pub mod assistant_ticket;
 pub mod control;
 pub mod cwd;
+pub mod guard;
 pub mod multi_skill;
 pub mod peer;
 pub mod record;
@@ -133,6 +135,9 @@ pub struct ToolBuildArgs {
     /// 给的是整个外壳而不是 `AssistantStore`：派单、收尾、给工单写信都要开会话、
     /// 找会话，那些路需要会话注册表。
     pub assistant_chat: Option<Arc<crate::shell::AppShell>>,
+    /// 这条会话是「值守」本身：只挂值守那一套工具（读、验证、判断、请示、收尾）。
+    /// 与 `assistant_chat` 互斥 —— 值守不跟人说话，也不直接改配置。
+    pub supervise: Option<Arc<crate::shell::AppShell>>,
     /// 挂上跨会话的三个工具（`list_sessions` / `send_message` / `read_session`）。
     /// 只有主对话给：子 agent、侧边聊天都不该替这条会话对外说话。
     pub peers: Option<Arc<crate::shell::AppShell>>,
@@ -295,6 +300,7 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
         live,
         assistant,
         assistant_chat,
+        supervise,
         peers,
     } = args;
 
@@ -303,6 +309,18 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
 
     // 直接放进注册表 —— 别在这里套 `Recorded`，理由见本函数的文档。
     let push = |t: Arc<dyn Tool>, tools: &mut ToolRegistry| tools.push(t);
+
+    // 值守是「幕僚」：只读不写。给它查看、验证、判断、请示、收尾这一套，
+    // 不给 bash / 文件 / MCP / 配置 —— 动手仍然是工单的事。
+    if let Some(shell) = supervise {
+        for kind in assistant_decide::Kind::ALL {
+            push(
+                Arc::new(assistant_decide::SupervisorTool::new(shell.clone(), kind)),
+                &mut tools,
+            );
+        }
+        return tools;
+    }
 
     // 助理对话是大脑，不是手：只给配置、派单、收尾、记忆和与工单通信的工具。
     // 没有 bash / 文件 / `agent` / MCP —— 要动手的事派成工单，由独立的执行会话去做
@@ -324,7 +342,12 @@ pub fn build_tools(args: ToolBuildArgs, settings: &AppSettings) -> ToolRegistry 
                 &mut tools,
             );
         }
-        for kind in [TicketKind::Dispatch, TicketKind::Act, TicketKind::Proposal] {
+        for kind in [
+            TicketKind::Dispatch,
+            TicketKind::Act,
+            TicketKind::Proposal,
+            TicketKind::Answer,
+        ] {
             push(
                 Arc::new(AssistantTicketTool::new(shell.clone(), kind)),
                 &mut tools,

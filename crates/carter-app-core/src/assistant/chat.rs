@@ -18,7 +18,7 @@ use crate::session::{SessionOptions, StartedSession, start_session};
 use crate::shell::AppShell;
 use crate::timeline::ReportTag;
 
-use super::{CHAT_SESSION_ID, Decision, REPORT_MARK, Ticket};
+use super::{CHAT_SESSION_ID, Decision, REPORT_MARK, Ticket, escalation};
 
 /// 打开或续接助理对话的参数。盘上有就续接，没有就用固定 id 新建。
 pub fn options(model: Option<String>) -> SessionOptions {
@@ -211,6 +211,26 @@ pub(crate) fn record(shell: &Arc<AppShell>, text: String, report: Option<ReportT
 /// 一张工单要人处理了：记进对话，标成「等着用户回答」。
 pub fn push_report(shell: &Arc<AppShell>, t: &Ticket) -> bool {
     record(shell, report_text(t), Some(ask_tag(t)))
+}
+
+/// 值守层的请示：推进人机对话，标成「等着用户回答」。
+pub fn push_escalation(shell: &Arc<AppShell>, e: &escalation::Escalation) -> bool {
+    let report = e
+        .ticket
+        .as_deref()
+        .and_then(|tid| shell.assistant.read(|s| s.ticket(tid).map(ask_tag)));
+    record(shell, escalation_text(e), report)
+}
+
+/// 请示写进对话的那段话。四段都在正文里，界面即使不认结构化卡片也读得懂。
+pub fn escalation_text(e: &escalation::Escalation) -> String {
+    format!(
+        "{REPORT_MARK}{} · {}\n{}\n\n（请示 {}）",
+        e.status.label(),
+        e.ticket_label,
+        e.text(),
+        e.id
+    )
 }
 
 /// 派出去一张工单：在助理对话里留一条可跳转的记录。

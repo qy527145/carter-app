@@ -136,6 +136,7 @@ impl Runner {
         use crate::memory_suggest as ms;
         if self.fixed_system.is_some()
             || self.ctx.handle.id == crate::assistant::CHAT_SESSION_ID
+            || crate::assistant::supervise::is_session(&self.ctx.handle.id)
             || crate::assistant::runtime::ticket_for_session(&self.ctx.shell, &self.ctx.handle)
                 .is_some()
             || user_text.starts_with(crate::peers::PEER_MARK)
@@ -204,6 +205,13 @@ impl Runner {
                 if self.ctx.handle.id == crate::assistant::CHAT_SESSION_ID {
                     s.push(crate::assistant::chat_segment(&self.ctx.shell.assistant));
                 }
+                if crate::assistant::supervise::is_session(&self.ctx.handle.id) {
+                    let snap = self.ctx.shell.assistant.snapshot();
+                    s.push(crate::assistant::supervise::segment_for(
+                        &self.ctx.shell,
+                        &snap,
+                    ));
+                }
                 // 目标段接在最后：它是最「当下」的指令，而且（将来 carter 打开
                 // cache 断点后）末段正是断点位置 —— 所以它必须是稳定的，
                 // 见 `goal.rs` 模块头。
@@ -218,6 +226,7 @@ impl Runner {
     /// 这一轮的工具表（工具开关、MCP、子 agent 都在这里装配）。
     pub(super) fn turn_tools(&self, system: &[String]) -> carter::tools::ToolRegistry {
         let is_chat = self.ctx.handle.id == crate::assistant::CHAT_SESSION_ID;
+        let is_supervisor = crate::assistant::supervise::is_session(&self.ctx.handle.id);
         // 汇报推起来的那一轮只给一个只读工具：汇报里有外部事件的文字，这一轮只该转述。
         // 不能一个都不给 —— 历史里有 tool_use 时，Anthropic 协议要求请求必须声明 tools。
         let report_turn = crate::assistant::chat::is_report_turn(&self.thread.messages);
@@ -248,28 +257,31 @@ impl Runner {
                 cwd: self.ctx.cwd.clone(),
                 skills_enabled: self.ctx.config.skills.enabled,
                 tool_tx: self.tool_tx.clone().expect("事件通道在 run() 里建好"),
-                ask_tx: if self.ctx.include_task && !unattended && !is_chat {
+                ask_tx: if self.ctx.include_task && !unattended && !is_chat && !is_supervisor {
                     self.ask_tx.clone()
                 } else {
                     // 侧边聊天不挂 ask_user：抽屉里再套一层提问表单，与「临时问一句」
                     // 的定位不符，而且那套回答链路要单独接一遍。
+                    // 值守也不挂：它是后台跑的一轮，没人回答表单。
                     None
                 },
-                include_task: self.ctx.include_task,
+                include_task: self.ctx.include_task && !is_supervisor,
                 goal_signal: self.goal_signal.clone(),
                 schedules: self.ctx.shell.schedules.clone(),
                 activity: self.activity.clone(),
                 live: self.live(),
                 shells: Some(self.ctx.shells.clone()),
                 session_id: self.ctx.handle.id.clone(),
-                // 后台子 agent 只给主对话：侧边不挂 `task`，助理对话不动手。
-                background_agents: (self.ctx.include_task && !is_chat)
+                // 后台子 agent 只给主对话：侧边不挂 `task`，助理对话与值守不动手。
+                background_agents: (self.ctx.include_task && !is_chat && !is_supervisor)
                     .then(|| self.ctx.handle.background_agents.clone()),
                 shell_cwd: Some(self.ctx.shell_cwd.clone()),
                 running: Some(self.ctx.running.clone()),
                 assistant: ticket.map(|(id, _)| (self.ctx.shell.assistant.clone(), id)),
-                assistant_chat: is_chat.then(|| self.ctx.shell.clone()),
-                peers: (self.ctx.include_task && !is_chat).then(|| self.ctx.shell.clone()),
+                assistant_chat: (is_chat && !is_supervisor).then(|| self.ctx.shell.clone()),
+                supervise: is_supervisor.then(|| self.ctx.shell.clone()),
+                peers: (self.ctx.include_task && !is_chat && !is_supervisor)
+                    .then(|| self.ctx.shell.clone()),
             },
             &self.ctx.settings,
         );
