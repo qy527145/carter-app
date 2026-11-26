@@ -25,6 +25,7 @@ carter / llm_adapt_core     底层的 agent 循环、工具、会话、协议编
 | `lib/events.ts` | 事件总线接进 store；按 `session_id` 分流主对话 / 侧边聊天；增量按帧合并 |
 | `store.ts` | zustand 状态根：会话、消息项、界面开关 |
 | `lib/updater.ts` | 一键更新的前端状态（首页提示条与关于页共用一份） |
+| `components/ReleaseNotes.tsx` | 一版的更新说明（Markdown），首页提示条与关于页共用 |
 | `lib/sessionOps.ts` | 会话级操作的组合（新建、切换、刷新） |
 | `lib/teamUi.ts` / `ticketUi.ts` | 团队看板 / 工单的纯展示逻辑（有 bun 测试） |
 | `views/settings/` | 设置页各分区；`ScenesPage` 是场景模型；`ConnectorsPage` / `SkillsPage` / `AboutPage` 是连接器、技能、更新；`CapturesPage` 是抓包占用与一键清理 |
@@ -136,6 +137,7 @@ carter / llm_adapt_core     底层的 agent 循环、工具、会话、协议编
 - `protocol.rs` 的结构体 ↔ `src/lib/api/types.ts` 的类型
 - 事件名常量：`src-tauri/src/lib.rs` / `commands/update.rs` ↔ `api.ts` / `api/update.ts`
 - `update::REPO` ↔ `src-tauri/Cargo.toml` 的 `repository`
+- `update::INSTALLERS_MARK` ↔ `scripts/release-notes.ts` 的 `INSTALLERS_MARK` ↔ `release.yml` 里写进正文的那一行
 
 ## 脚本（`scripts/`）
 
@@ -143,6 +145,7 @@ carter / llm_adapt_core     底层的 agent 循环、工具、会话、协议编
 | ---- | ---- |
 | `init.ts` / `sandbox.ts` / `clean.ts` | 初始化、隔离数据目录跑 dev、清产物 |
 | `build.ts` / `upgrade.ts` | 按平台打包、三处版本号一起改并打 tag |
+| `release-notes.ts` | 由提交标题生成一版的更新说明；发布流水线用它写 Release 正文 |
 | `logs.ts` | 跟踪 `~/.carter-app/app.log` |
 
 ## 大文件的拆法

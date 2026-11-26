@@ -6,6 +6,7 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { ExternalLink, FolderOpen } from "lucide-react";
 import { useState } from "react";
+import { ReleaseNotes } from "../../components/ReleaseNotes";
 import { Button } from "../../components/ui/Button";
 import { Card, Section } from "../../components/ui/Panel";
 import { checkUpdate, type ReleaseInfo, type UpdateCheck } from "../../lib/api";
@@ -126,8 +127,16 @@ function UpdateCard() {
               variant="ghost"
               onClick={() => void openUrl(release.html_url).catch(() => {})}
             >
-              更新说明
+              发布页
             </Button>
+          </div>
+        )}
+
+        {/* 更新内容直接摆出来：进到这一页的人就是来看「新版有什么」的。 */}
+        {release?.asset_name && release.notes.trim() && (
+          <div className="mt-3 rounded-md bg-ink/5 px-3 py-2.5">
+            <div className="mb-1.5 text-[11px] text-dim">{release.version} 更新内容</div>
+            <ReleaseNotes notes={release.notes} />
           </div>
         )}
 

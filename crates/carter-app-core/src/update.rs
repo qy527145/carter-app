@@ -56,10 +56,30 @@ pub struct ReleaseInfo {
     pub version: String,
     /// Release 页面地址，界面上「看更新说明」用它。
     pub html_url: String,
+    /// 这一版的更新说明（Markdown）。没有就是空串，界面退回到只给 Release 链接。
+    pub notes: String,
     /// 这次要下的安装包文件名（如 `Carter_0.1.2_aarch64.dmg`）。
     pub asset_name: String,
     pub asset_url: String,
     pub asset_size: u64,
+}
+
+/// Release 正文里「更新说明」与「安装包文件表」的分界，发布流水线写进去的。
+/// 与 `scripts/release-notes.ts` 的 `INSTALLERS_MARK` 必须一致。
+const INSTALLERS_MARK: &str = "<!-- installers -->";
+
+/// 从 Release 正文里取出给用户看的更新说明。
+///
+/// 正文是发布流水线拼的：前半段是由提交记录生成的更新说明，[`INSTALLERS_MARK`]
+/// 之后是安装包文件表 —— 后者对已经装着应用的人没有用，不展示。
+///
+/// **没有分界标记就当作没有说明**：那是这套约定之前发的版本（正文只有文件表），
+/// 把文件表当「更新内容」摆出来比不摆更糟。
+fn notes_from_body(body: &str) -> String {
+    match body.split_once(INSTALLERS_MARK) {
+        Some((notes, _)) => notes.trim().to_string(),
+        None => String::new(),
+    }
 }
 
 /// 当前版本能不能用 `v<tag>` 里的这一版。
@@ -179,11 +199,13 @@ pub async fn check(current: &str, settings: &AppSettings) -> Result<ReleaseInfo,
     if release.draft || release.prerelease {
         return Err("最新 Release 还是草稿或预发布，暂不提示".into());
     }
+    let notes = notes_from_body(release.body.as_deref().unwrap_or_default());
     if !is_newer(current, &release.tag_name) {
         return Ok(ReleaseInfo {
             tag: release.tag_name.clone(),
             version: release.tag_name.trim_start_matches('v').to_string(),
             html_url: release.html_url,
+            notes,
             asset_name: String::new(),
             asset_url: String::new(),
             asset_size: 0,
@@ -204,6 +226,7 @@ pub async fn check(current: &str, settings: &AppSettings) -> Result<ReleaseInfo,
         tag: release.tag_name.clone(),
         version: release.tag_name.trim_start_matches('v').to_string(),
         html_url: release.html_url,
+        notes,
         asset_name: asset.name,
         asset_url: asset.browser_download_url,
         asset_size: asset.size,
@@ -215,6 +238,9 @@ pub async fn check(current: &str, settings: &AppSettings) -> Result<ReleaseInfo,
 struct GhRelease {
     tag_name: String,
     html_url: String,
+    /// Release 正文。没写正文时 GitHub 给的是 `null`。
+    #[serde(default)]
+    body: Option<String>,
     #[serde(default)]
     draft: bool,
     #[serde(default)]
@@ -591,6 +617,27 @@ mod tests {
         assert!(is_newer("0.1.0", "v0.2.0-beta.1"));
         // 认不出来的版本号不比，免得乱提示。
         assert!(!is_newer("0.1.0", "nightly"));
+    }
+
+    #[test]
+    fn notes_are_the_part_of_the_body_before_the_installer_table() {
+        let body = "### 新增\n\n- 设置页新增「报文」\n\n<!-- installers -->\n## 安装包\n\n| 平台 | 文件 |\n";
+        assert_eq!(notes_from_body(body), "### 新增\n\n- 设置页新增「报文」");
+
+        // 这套约定之前的 Release：正文只有文件表，不能当成更新说明摆出来。
+        let old = "Carter 0.3.6\n\n| 平台 | 文件 |\n| ---- | ---- |\n";
+        assert_eq!(notes_from_body(old), "");
+        assert_eq!(notes_from_body(""), "");
+    }
+
+    #[test]
+    fn release_json_without_a_body_still_parses() {
+        // 没写正文时 GitHub 给 `"body": null`，不能因此查不了更新。
+        let r: GhRelease =
+            serde_json::from_str(r#"{"tag_name":"v1.0.0","html_url":"u","body":null}"#).unwrap();
+        assert_eq!(r.body, None);
+        let r: GhRelease = serde_json::from_str(r#"{"tag_name":"v1.0.0","html_url":"u"}"#).unwrap();
+        assert_eq!(r.body, None);
     }
 
     #[test]

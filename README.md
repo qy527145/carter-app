@@ -93,6 +93,7 @@ bun run dev           # 打开桌面窗口：前端 HMR，Rust 改动自动重�
 | `bun run test:core`          | 只测 `carter-app-core`，最常用                                               |
 | `bun run logs [-f] [-n N]`   | 看 `~/.carter-app/app.log`；`--sandbox` 看沙箱的，`--path` 只打印路径        |
 | `bun run upgrade [patch\|minor\|major\|x.y.z]` | 同步改三处版本号，并提交、打 tag；不带参数只打印当前版本 |
+| `bun run release:notes [tag]` | 预览由提交记录生成的更新说明；不带参数是「上一个 tag 到 HEAD」 |
 | `bun run clean [--web\|--all]` | 清 `dist/` 与 `cargo clean`；`--all` 连 `node_modules/`、`.sandbox/` 一起  |
 | `bun run icon <png>`         | 由一张 1024×1024 PNG 生成全部平台图标                                         |
 
@@ -104,6 +105,10 @@ bun run dev           # 打开桌面窗口：前端 HMR，Rust 改动自动重�
 发布流水线（[.github/workflows/release.yml](.github/workflows/release.yml)）。
 也可以手动触发：Actions → **Release** → Run workflow，`tag` 填要发布的版本
 （如 `v0.1.2`）；默认值 `dry-run` 只构建、不发 Release，适合先验证流水线。
+
+Release 正文里的**更新说明由提交标题自动生成**（`feat` / `fix` / `perf`，见
+`scripts/release-notes.ts`），应用里的「更新内容」读的就是它 —— 所以这三类提交的标题
+要写成用户能看懂的一句话。发版前可以用 `bun run release:notes` 预览。
 
 Release 里**只放三份安装包**，没有压缩包：
 
@@ -124,6 +129,7 @@ Release 里既然就是安装包，应用就按平台把这一份下载下来交
 
 - 启动 8 秒后查一次 GitHub Release（**设置 → 外观 → 网络**里可以关掉），有新版时在
   **设置 → 关于** 挂一个提示；
+- 首页提示条点「更新内容」可展开这一版的更新说明，**设置 → 关于** 里直接列出；
 - 下载前把文件名和大小报出来，下载中可取消；下载完点「安装」——
   Windows 起 NSIS 安装程序，macOS 用 `hdiutil` 挂载、`ditto` 覆盖当前那个 `.app`，
   Linux 在终端里跑 `sudo dpkg -i`；

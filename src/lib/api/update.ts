@@ -22,6 +22,8 @@ export type ReleaseInfo = {
   version: string;
   /** Release 页面，界面上的「更新说明」跳这里。 */
   html_url: string;
+  /** 这一版的更新说明（Markdown）。空串 = 没有，界面只给 Release 链接。 */
+  notes: string;
   /** 安装包文件名，如 `Carter_0.1.2_aarch64.dmg`。 */
   asset_name: string;
   /** 下载地址（后端按仓库名拼出来的，前端只回显，不能改）。 */

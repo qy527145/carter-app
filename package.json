@@ -31,6 +31,7 @@
     "test:core": "cargo test -p carter-app-core",
     "logs": "bun run scripts/logs.ts",
     "upgrade": "bun run scripts/upgrade.ts",
+    "release:notes": "bun run scripts/release-notes.ts",
     "clean": "bun run scripts/clean.ts"
   },
   "dependencies": {
