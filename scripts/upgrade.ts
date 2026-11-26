@@ -62,6 +62,34 @@ function git(args: string[], opts: { quiet?: boolean } = {}): number {
   return proc.exitCode;
 }
 
+// 依赖指到仓库外面的本地目录（开发期临时写的 `path = "../carter"`）时先停：
+// 本机编得过，构建机上没有那个目录，三个平台会一起挂在 `cargo metadata` 上
+// （v0.3.7 第一次发版就是这么失败的）。
+{
+  const meta = Bun.spawnSync({
+    cmd: ["cargo", "metadata", "--format-version", "1", "--offline"],
+    cwd: root,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  if (meta.exitCode !== 0) {
+    console.error(`cargo metadata 失败，没法确认依赖能不能在构建机上解析：\n${meta.stderr}`);
+    process.exit(1);
+  }
+  const { packages } = JSON.parse(meta.stdout.toString()) as {
+    packages: { name: string; source: string | null; manifest_path: string }[];
+  };
+  // `source` 为空 = 本地路径上的包；仓库里的两个 crate 也是，所以再看它在不在仓库内。
+  const outside = packages.filter(
+    (p) => p.source === null && !p.manifest_path.startsWith(`${root}/`),
+  );
+  if (outside.length > 0) {
+    console.error("这些依赖指向仓库外的本地目录，构建机上不存在，先发版并改回版本号：");
+    for (const p of outside) console.error(`  ${p.name}  ${p.manifest_path}`);
+    process.exit(1);
+  }
+}
+
 // tag 已存在时先停：等文件改完、提交完再发现，回滚更麻烦。
 if (git(["rev-parse", "--verify", "--quiet", `refs/tags/${tag}`], { quiet: true }) === 0) {
   console.error(`tag ${tag} 已存在；换个版本号，或先 git tag -d ${tag}`);
